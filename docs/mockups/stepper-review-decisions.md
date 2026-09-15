@@ -41,6 +41,12 @@ will be included in the key. Their cards split requested and extra permissions;
 the final **Key to create** preview lists access beyond the filters. No service
 account is created by this page, and no Agent Key is created before the final CTA.
 
+The final access review has the same layout for both paths. It shows the key,
+effective account permissions, services, expiry, requested access, and access
+beyond the requested filters. Its outcome badge says **Existing key** or
+**New form · creates key**, so the user can tell whether approval reuses a key
+or creates one.
+
 Creation stays disabled while a name, requested API permission or requested
 service is missing, or filters/settings are invalid. Filters are editable
 suggestions; users can explicitly revise them. They never trim an existing

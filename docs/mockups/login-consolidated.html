@@ -2901,7 +2901,7 @@
                     </div>
                     <div class="scope-card" id="grantCard" hidden>
                       <div class="scope-head">
-                        <strong>Review the access you are granting</strong
+                        <strong>Final access review</strong
                         ><span id="grantKind">Awaiting selection</span>
                       </div>
 
@@ -6765,8 +6765,8 @@
             : "Default limits");
         $("#grantKind").textContent = grant
           ? source === "new"
-            ? "New Agent Key"
-            : "Existing Agent Key"
+            ? "New form · creates key"
+            : "Existing key"
           : "Awaiting selection";
         $("#existingNote").hidden = source !== "existing";
         $("#approveRestricted").textContent =

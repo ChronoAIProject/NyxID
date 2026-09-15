@@ -11,9 +11,9 @@ import {
   ApprovalCaution,
 } from "./login-request-preview";
 import { LoginPermissionPicker } from "./login-permission-picker";
-import { AccessEntries, LoginKeyDraft } from "./login-key-draft";
+import { LoginKeyDraft } from "./login-key-draft";
+import { LoginGrantReview } from "./login-grant-review";
 import {
-  AgentKeyPermissions,
   AgentKeyIssuanceNotice,
 } from "./agent-key-permissions";
 import { useAuthStore } from "@/stores/auth-store";
@@ -779,22 +779,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 ? "Organization"
                                 : "Personal"}
                             </p>
-                            <AccessEntries
-                              label="Matched permissions"
-                              entries={comparison.matched}
+                            <LoginGrantReview
+                              apiKey={key}
+                              comparison={comparison}
+                              kind="existing"
                             />
-                            <AccessEntries
-                              label="Also grants — included with this key"
-                              entries={comparison.extras}
-                            />
-                            <details className="text-[11px]">
-                              <summary className="cursor-pointer text-muted-foreground">
-                                All key details
-                              </summary>
-                              <div className="mt-2">
-                                <AgentKeyPermissions apiKey={key} />
-                              </div>
-                            </details>
                           </div>
                         ))}
                       </fieldset>

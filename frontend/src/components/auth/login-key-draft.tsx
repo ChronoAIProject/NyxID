@@ -28,60 +28,10 @@ import {
   draftSummary,
   permissionOptions,
   type LoginInventory,
-  type AccessEntry,
 } from "@/lib/login-permissions";
-import {
-  LoginPermissionPicker,
-  PermissionIcon,
-} from "./login-permission-picker";
-import {
-  AgentKeyPermissions,
-  AgentKeyIssuanceNotice,
-} from "./agent-key-permissions";
-
-export function AccessEntries({
-  label,
-  entries,
-}: {
-  label: string;
-  entries: AccessEntry[];
-}) {
-  const groups = new Map<string, AccessEntry[]>();
-  for (const entry of entries)
-    groups.set(`${entry.group}:${entry.service}`, [
-      ...(groups.get(`${entry.group}:${entry.service}`) ?? []),
-      entry,
-    ]);
-  if (!entries.length) return null;
-  return (
-    <div className="space-y-2 text-[11px]">
-      <h4 className="font-semibold">{label}</h4>
-      {[...groups].map(([id, items]) => (
-        <div key={id} className="space-y-1">
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <PermissionIcon group={items[0]!.group} />
-            {items[0]!.service}
-          </div>
-          <ul className="flex flex-wrap gap-1 pl-6">
-            {items.map((entry, index) => (
-              <li
-                key={`${entry.label}:${index}`}
-                title={
-                  [entry.scope, entry.description]
-                    .filter(Boolean)
-                    .join(" — ") || undefined
-                }
-                className="max-w-full break-all rounded-md border border-border px-2 py-1"
-              >
-                {entry.label}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))}
-    </div>
-  );
-}
+import { LoginPermissionPicker } from "./login-permission-picker";
+import { AgentKeyIssuanceNotice } from "./agent-key-permissions";
+import { LoginGrantReview } from "./login-grant-review";
 
 export function LoginKeyDraft({
   initial,
@@ -325,14 +275,11 @@ export function LoginKeyDraft({
               )}
             </div>
           </details>
-          <div className="space-y-3 rounded-xl border border-border p-3">
-            <h3 className="text-[12px] font-semibold">Key to create</h3>
-            <AgentKeyPermissions apiKey={summary} />
-            <AccessEntries
-              label="Access beyond the requested filters"
-              entries={comparison.extras}
-            />
-          </div>
+          <LoginGrantReview
+            apiKey={summary}
+            comparison={comparison}
+            kind="new"
+          />
           {!comparison.matches && (
             <p role="alert" className="text-[12px] text-warning">
               {comparison.missing.join(". ")}. Choose connections/permissions or

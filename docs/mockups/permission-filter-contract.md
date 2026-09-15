@@ -34,6 +34,11 @@ draft; **Create & continue** creates one Agent Key and approves the requester.
 It does not create external service accounts. The final preview names access
 outside the filters **Access beyond the requested filters**.
 
+Existing-key approval and new-key creation use the same final access-review
+component. The only difference is the outcome badge: **Existing key** means the
+selected key is reused, while **New form · creates key** means one new Agent Key
+will be created when the approval action is submitted.
+
 ## Hints and matching
 
 `permissions` contains supported NyxID API scopes; `services` contains catalog
