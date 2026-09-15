@@ -6263,7 +6263,7 @@
                         : comparison.constrained
                           ? "Missing requested permissions"
                           : item.permissionsReported
-                            ? item.permissions.length + " permissions"
+                            ? item.permissions.length + (item.permissions.length === 1 ? " permission" : " permissions")
                             : "Provider access not reported";
                   return `<div class="permission-option connection-permission-option ${activePermission === index ? "active" : ""}" id="permission-option-${index}" role="option" aria-label="Grant connection ${escapeHtml(item.slug)}" aria-selected="${checked}" aria-disabled="${disabled}" data-permission="${escapeHtml(option.id)}"><span class="option-check" aria-hidden="true">✓</span><span class="permission-option-copy"><strong>Use ${escapeHtml(item.name)}<span class="connection-status">${escapeHtml(status)}</span></strong><small>${escapeHtml(item.slug)} · ${escapeHtml(item.ownerName || owners[item.owner])}</small><span class="access-pills">${item.permissions
                     .slice(0, 3)
@@ -6617,7 +6617,7 @@
                   (comparison.extra.length === 1 ? "" : "s")
                 : comparison.constrained
                   ? "Missing requested permissions"
-                  : item.permissions.length + " permissions";
+                  : item.permissions.length + (item.permissions.length === 1 ? " permission" : " permissions");
         const pills = (items) =>
           items
             .map(

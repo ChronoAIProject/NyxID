@@ -70,7 +70,7 @@ function loginConnectionChoices(
               : "Exact match"
             : constrained
               ? "Missing requested permissions"
-              : `${permissions.length} permissions`;
+              : `${permissions.length} permission${permissions.length === 1 ? "" : "s"}`;
       return [
         {
           service,
