@@ -482,13 +482,16 @@ describe("updateProviderSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("rejects oauth2 update without authorization_url", () => {
+  it("accepts oauth2 update without URLs to preserve configured endpoints", () => {
     const result = updateProviderSchema.safeParse({
       ...baseValid,
       provider_type: "oauth2",
-      token_url: "https://auth.example.com/token",
+      authorization_url: "",
+      token_url: "",
+      client_id: "client-id",
+      client_secret: "client-secret",
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 
   it("accepts device_code update without device_code_url (optional on update)", () => {

@@ -392,6 +392,7 @@ mod tests {
         let service = BillingService::new(db.clone(), std::sync::Arc::new(test_app_config()));
         let billing = ServiceBilling {
             platform_billable: true,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
@@ -508,6 +509,7 @@ mod tests {
         let service = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
         let billable_billing = ServiceBilling {
             platform_billable: true,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             ..Default::default()
         };
@@ -587,6 +589,7 @@ mod tests {
         );
         let billing = ServiceBilling {
             platform_billable: true,
+            platform_charge_nyxid_credentials_only: false,
             ..Default::default()
         };
         let ctx = BillingRouteContext::new(
@@ -655,6 +658,7 @@ mod tests {
         );
         let billing = ServiceBilling {
             platform_billable: true,
+            platform_charge_nyxid_credentials_only: false,
             ..Default::default()
         };
         let ctx = BillingRouteContext::new(
@@ -799,6 +803,7 @@ mod tests {
         let service = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
         let billable_billing = ServiceBilling {
             platform_billable: true,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             ..Default::default()
         };

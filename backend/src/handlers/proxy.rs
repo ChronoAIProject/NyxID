@@ -549,6 +549,7 @@ struct PreResolved {
     user_service_id: Option<String>,
     has_server_credential: bool,
     master_credential: bool,
+    credential_source: Option<String>,
     /// The user_id that owns the resolved UserService. For personal
     /// resolutions this is the actor; for org-routed resolutions this is
     /// the org's user_id. Used to scope NodeServiceBinding fallback
@@ -1023,6 +1024,7 @@ async fn proxy_request_inner(
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
                     master_credential: resolved.master_credential,
+                    credential_source: resolved.credential_source,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
@@ -1088,6 +1090,7 @@ async fn proxy_request_inner(
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
                 master_credential: resolved.master_credential,
+                credential_source: resolved.credential_source,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
@@ -1260,6 +1263,7 @@ async fn proxy_request_by_slug_inner(
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
                     master_credential: resolved.master_credential,
+                    credential_source: resolved.credential_source,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
@@ -1325,6 +1329,7 @@ async fn proxy_request_by_slug_inner(
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
                 master_credential: resolved.master_credential,
+                credential_source: resolved.credential_source,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
@@ -1850,6 +1855,7 @@ async fn execute_proxy_inner(
         resolved_user_service_id,
         node_routing_required,
         catalog_service_slug,
+        credential_source,
     ) = if let Some(mut pre) = pre_resolved {
         effective_owner_for_approval = Some(pre.effective_owner_id.clone());
         is_auto_connected_for_approval = pre.is_auto_connected;
@@ -1991,6 +1997,7 @@ async fn execute_proxy_inner(
             pre.user_service_id,
             required,
             catalog_service_slug,
+            pre.credential_source,
         )
     } else if target_mode == TargetMode::AdminManaged {
         // Server-chosen platform target: resolve the admin row alone, with
@@ -2011,6 +2018,7 @@ async fn execute_proxy_inner(
             None,
             false,
             catalog_service_slug,
+            None,
         )
     } else {
         // Old DownstreamService path -- scoped keys must use configured
@@ -2061,6 +2069,7 @@ async fn execute_proxy_inner(
             resolved_user_service_id,
             node_routing_required,
             catalog_service_slug,
+            None,
         )
     };
 
@@ -2109,6 +2118,7 @@ async fn execute_proxy_inner(
         agent_override_applied,
         has_server_credential,
         master_credential,
+        credential_source.as_deref(),
         &target,
     );
     let is_ws_candidate = is_ws_upgrade_request(&request);
@@ -4142,6 +4152,7 @@ fn final_credential_class(
     agent_override_applied: bool,
     has_server_credential: bool,
     master_credential: bool,
+    credential_source: Option<&str>,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if node_route_active && !has_server_credential {
@@ -4159,6 +4170,8 @@ fn final_credential_class(
         // not by which resolution path matched.
         return if master_credential {
             CredentialClass::NyxidManagedMaster
+        } else if credential_source == Some("platform") {
+            CredentialClass::NyxidPlatformOauthApp
         } else {
             CredentialClass::UserOwned
         };
@@ -6266,6 +6279,7 @@ mod tests {
     fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
         let billing = ServiceBilling {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
@@ -6983,6 +6997,53 @@ mod tests {
     }
 
     #[test]
+    fn oauth_credential_source_classification_preserves_override_and_node_precedence() {
+        let mut target = make_target("https://api.x.com/2");
+        target.auth_method = "bearer".into();
+        target.credential = "test-token".into();
+        for (source, expected) in [
+            (Some("platform"), CredentialClass::NyxidPlatformOauthApp),
+            (Some("byo"), CredentialClass::UserOwned),
+            (None, CredentialClass::UserOwned),
+        ] {
+            assert_eq!(
+                final_credential_class(Some("us"), false, false, true, false, source, &target),
+                expected
+            );
+            assert_eq!(
+                final_credential_class(Some("us"), true, false, true, false, source, &target),
+                expected
+            );
+            assert_eq!(
+                final_credential_class(Some("us"), false, true, true, false, source, &target),
+                CredentialClass::AgentOverrideUserOwned
+            );
+            assert_eq!(
+                final_credential_class(Some("us"), true, true, false, false, source, &target),
+                CredentialClass::NodeManaged
+            );
+            assert_eq!(
+                final_credential_class(Some("us"), false, false, true, true, source, &target),
+                CredentialClass::NyxidManagedMaster
+            );
+        }
+        target.auth_method = "none".into();
+        target.credential.clear();
+        assert_eq!(
+            final_credential_class(
+                Some("us"),
+                false,
+                true,
+                true,
+                false,
+                Some("platform"),
+                &target
+            ),
+            CredentialClass::NoAuth
+        );
+    }
+
+    #[test]
     fn user_service_with_master_credential_classifies_as_master() {
         let mut target = make_target("http://localhost:8080");
         target.auth_method = "bearer".to_string();
@@ -6991,12 +7052,12 @@ mod tests {
         // Auto-provisioned UserService (no user key) injecting the catalog
         // master credential: the platform's key, not the user's.
         assert_eq!(
-            final_credential_class(Some("us-1"), false, false, true, true, &target),
+            final_credential_class(Some("us-1"), false, false, true, true, None, &target),
             CredentialClass::NyxidManagedMaster
         );
         // A UserService backed by the user's own key stays user-owned.
         assert_eq!(
-            final_credential_class(Some("us-1"), false, false, true, false, &target),
+            final_credential_class(Some("us-1"), false, false, true, false, None, &target),
             CredentialClass::UserOwned
         );
     }

@@ -68,6 +68,7 @@ pub(crate) struct McpBillingRouteContextBuilder {
     user_service_id: Option<String>,
     is_user_service: bool,
     credential_class_override: Option<CredentialClass>,
+    credential_source: Option<String>,
 }
 
 impl McpBillingRouteContextBuilder {
@@ -87,6 +88,7 @@ impl McpBillingRouteContextBuilder {
             credential_class_override: resolution
                 .master_credential
                 .then_some(CredentialClass::NyxidManagedMaster),
+            credential_source: resolution.credential_source.clone(),
         }
     }
 
@@ -96,6 +98,7 @@ impl McpBillingRouteContextBuilder {
             user_service_id: None,
             is_user_service: false,
             credential_class_override: None,
+            credential_source: None,
         }
     }
 
@@ -138,6 +141,7 @@ impl McpBillingRouteContextBuilder {
                     self.is_user_service,
                     node_route.is_some(),
                     has_server_credential,
+                    self.credential_source.as_deref(),
                     target,
                 )
             }),
@@ -221,6 +225,7 @@ fn mcp_credential_class(
     is_user_service: bool,
     node_route_active: bool,
     has_server_credential: bool,
+    credential_source: Option<&str>,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if node_route_active && !has_server_credential {
@@ -228,7 +233,11 @@ fn mcp_credential_class(
     } else if target.auth_method == "none" && target.credential.is_empty() {
         CredentialClass::NoAuth
     } else if is_user_service {
-        CredentialClass::UserOwned
+        if credential_source == Some("platform") {
+            CredentialClass::NyxidPlatformOauthApp
+        } else {
+            CredentialClass::UserOwned
+        }
     } else if !target.service.requires_user_credential && !target.credential.is_empty() {
         CredentialClass::NyxidManagedMaster
     } else {
@@ -8682,6 +8691,7 @@ mod tests {
             api_key_id: None,
             credential_epoch: 1,
             master_credential: false,
+            credential_source: None,
             org_routing: org_user_id.map(|org_user_id| proxy_service::OrgRouting {
                 org_user_id: org_user_id.to_string(),
                 member_user_id: actor_user_id.to_string(),
@@ -8689,6 +8699,51 @@ mod tests {
             }),
             pool_selection: None,
             is_auto_connected: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_platform_oauth_source_reaches_billing_context() {
+        let db = crate::test_utils::connect_test_database("mcp_platform_oauth")
+            .await
+            .expect("MongoDB required");
+        let billing = crate::services::billing::BillingService::new(
+            db,
+            std::sync::Arc::new(crate::test_utils::test_app_config()),
+        );
+        for (source, class) in [
+            (Some("platform"), CredentialClass::NyxidPlatformOauthApp),
+            (Some("byo"), CredentialClass::UserOwned),
+            (None, CredentialClass::UserOwned),
+        ] {
+            let mut resolution = mcp_billing_resolution("actor", None);
+            resolution.credential_source = source.map(str::to_string);
+            resolution.target.auth_method = "bearer".into();
+            resolution.target.credential = "test-token".into();
+            resolution.target.service.billing =
+                Some(crate::models::service_billing::ServiceBilling {
+                    platform_billable: true,
+                    platform_charge_nyxid_credentials_only: true,
+                    resale_billable: true,
+                    lago_resale_metric_code: Some("resale_requests".into()),
+                    ..Default::default()
+                });
+            let ctx =
+                McpBillingRouteContextBuilder::from_user_service_resolution("actor", &resolution)
+                    .build(
+                        &billing,
+                        "actor",
+                        "actor",
+                        None,
+                        &resolution.target,
+                        None,
+                        true,
+                    )
+                    .await
+                    .unwrap();
+            assert_eq!(ctx.credential_class, class);
+            assert_eq!(ctx.service_platform_billable, source == Some("platform"));
+            assert!(ctx.resale.is_none());
         }
     }
 
