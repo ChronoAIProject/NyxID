@@ -183,7 +183,9 @@ export function LoginPermissionPicker({
                 setOpen(true);
                 requestAnimationFrame(() =>
                   root.current
-                    ?.querySelector<HTMLButtonElement>('[role="checkbox"]')
+                    ?.querySelector<HTMLButtonElement>(
+                      '[role="checkbox"]:not(:disabled)',
+                    )
                     ?.focus({ preventScroll: true }),
                 );
               }

@@ -169,6 +169,26 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
   const search = page.getByRole("textbox", {
     name: "Search permissions & connections",
   });
+  const settings = page.getByText("Key settings and actual NyxID grant", {
+    exact: true,
+  });
+  await settings.click();
+  const allConnections = page.getByRole("checkbox", {
+    name: "All current and future services",
+    exact: true,
+  });
+  await allConnections.check();
+  await search.fill("GitHub");
+  await expect(
+    page.getByRole("checkbox", { name: "Grant connection GitHub personal" }),
+  ).toBeDisabled();
+  await search.press("ArrowDown");
+  await expect(
+    page.getByRole("checkbox", { name: "GitHub: All 2 permissions" }),
+  ).toBeFocused();
+  await page.keyboard.press("Escape");
+  await allConnections.uncheck();
+  await settings.click();
   await search.fill("GitHub");
   await expect(
     page.getByRole("checkbox", { name: "Grant connection GitHub personal" }),
