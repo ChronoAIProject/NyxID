@@ -32,6 +32,9 @@ pub struct AppConnectLink {
     pub failure_reason: Option<String>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub webhook_event_reserved_at: Option<DateTime<Utc>>,
+    /// Frozen at first reservation; delivery cycles never change occurrence time.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub webhook_event_occurred_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub webhook_event_id: Option<String>,
     #[serde(default)]
@@ -46,7 +49,22 @@ pub struct AppConnectLink {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AppConnectWebhookData {
+#[serde(untagged)]
+pub enum AppConnectWebhookData {
+    Full(AppConnectWebhookFullData),
+    UnredeemedExpiry(AppConnectWebhookExpiryData),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppConnectWebhookExpiryData {
+    pub app_connect_link_id: String,
+    pub origin: AppConnectWebhookOrigin,
+    pub status: AppConnectStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppConnectWebhookFullData {
     pub user_id: String,
     pub app_connect_link_id: String,
     pub origin: AppConnectWebhookOrigin,

@@ -321,6 +321,13 @@ mod tests {
     }
 
     async fn setup_full_router_fixture(prefix: &str) -> FullRouterFixture {
+        setup_full_router_fixture_with_services(prefix, &[TEST_SERVICE_A]).await
+    }
+
+    async fn setup_full_router_fixture_with_services(
+        prefix: &str,
+        service_ids: &[&str],
+    ) -> FullRouterFixture {
         let db = crate::test_utils::connect_transaction_test_database(prefix).await;
         let state = crate::test_utils::test_app_state(db.clone());
         let user_id = Uuid::parse_str(TEST_USER_ID).unwrap();
@@ -332,7 +339,8 @@ mod tests {
             "{} proxy",
             catalog_delegation_service::MCP_CATALOG_READ_SCOPE
         );
-        let requested_service_ids = vec![TEST_SERVICE_A.to_string()];
+        let requested_service_ids: Vec<String> =
+            service_ids.iter().map(|id| (*id).to_string()).collect();
 
         db.collection(crate::models::user::COLLECTION_NAME)
             .insert_one(crate::test_utils::test_user(TEST_USER_ID, UserType::Person))
@@ -2751,12 +2759,33 @@ mod tests {
 
     #[tokio::test]
     async fn full_router_service_node_provider_operation_and_credential_mutations_fail_closed() {
-        let mut fixture = setup_full_router_fixture("exact_router_drift_matrix").await;
+        let mut fixture = setup_full_router_fixture_with_services(
+            "exact_router_drift_matrix",
+            &[TEST_SERVICE_A, TEST_SERVICE_B],
+        )
+        .await;
         let user_services = fixture.db.collection::<UserService>(USER_SERVICES);
         let service_endpoints = fixture.db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS);
+        let endpoints = fixture.db.collection::<UserEndpoint>(USER_ENDPOINTS);
+        let provider_url = endpoints
+            .find_one(mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID })
+            .await
+            .unwrap()
+            .unwrap()
+            .url;
+        endpoints
+            .update_one(
+                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000202" },
+                mongodb::bson::doc! { "$set": { "url": provider_url } },
+            )
+            .await
+            .expect("point the other granted service at the provider spy");
 
         let service_key = "service-deactivated";
         refresh_full_router_delegation(&mut fixture).await;
+        fixture.sent_authorizations.lock().unwrap().clear();
+        let original_token = fixture.delegated_token.clone();
+        let original_grant_id = fixture.grant.id.clone();
         let service_created = create_full_router_request(&fixture, service_key).await;
         let service_request = service_created["request_id"]
             .as_str()
@@ -2772,18 +2801,52 @@ mod tests {
             .expect("deactivate service between approve and redeem");
         let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
         let (status, body) = redeem_full_router_request(&fixture, &service_created).await;
-        assert_error_response(
-            status,
-            &body,
-            StatusCode::UNAUTHORIZED,
-            1001,
-            "Unauthorized: Delegated catalog authority is invalid or inactive",
-        );
-        assert_no_full_router_redemption(&fixture, &service_request).await;
+        assert_eq!(status, StatusCode::OK, "disabled service redeem: {body}");
+        assert_eq!(body["state"], "revoked");
+        assert_eq!(body["failure_code"], "selector_revoked");
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &service_request,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Revoked,
+            "selector_revoked",
+        )
+        .await;
         assert_eq!(
             fixture.provider_calls.load(Ordering::SeqCst),
             calls_before,
             "service deactivation redeem must not reach the provider"
+        );
+        let (status, body) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            "/api/v1/proxy/s/beta/items",
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "other granted service: {body}");
+        assert_eq!(body, serde_json::json!({ "ok": true }));
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            calls_before + 1
+        );
+        assert_full_router_delegated_token_unchanged(
+            &fixture,
+            &original_token,
+            &original_grant_id,
+            "disabled A refused while B still executes",
+        );
+        let live_grant = fixture
+            .db
+            .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .find_one(mongodb::bson::doc! { "_id": &original_grant_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!live_grant.revoked);
+        assert_eq!(
+            live_grant.allowed_service_ids,
+            fixture.requested_service_ids
         );
         user_services
             .update_one(
@@ -3151,8 +3214,8 @@ mod tests {
 
         assert_eq!(
             fixture.provider_calls.load(Ordering::SeqCst),
-            0,
-            "every full-router mutation row must fail before downstream dispatch"
+            1,
+            "only the unaffected service may dispatch; every mutation row must fail first"
         );
     }
 

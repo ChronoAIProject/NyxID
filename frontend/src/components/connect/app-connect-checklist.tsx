@@ -88,9 +88,9 @@ export function AppConnectChecklistItem({
     item.state === "connecting" || item.state === "reauthorizing";
   const disabled =
     pending ||
-    item.readiness === "disabled" ||
     (item.readiness === "unsatisfiable" &&
       item.reason_code !== "slug_shadowed");
+  const executionDisabled = disabled || item.readiness === "disabled";
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between gap-3 pb-3">
@@ -119,6 +119,16 @@ export function AppConnectChecklistItem({
               {readinessCopy[item.readiness]}
             </p>
           )
+        )}
+        {item.readiness === "disabled" && item.user_service_id && (
+          <a
+            href={`/keys/${encodeURIComponent(item.user_service_id)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium underline underline-offset-4"
+          >
+            Manage connection
+          </a>
         )}
         {item.readiness === "needs_reauth" &&
           item.required_scopes.length > 0 && (
@@ -205,7 +215,9 @@ export function AppConnectChecklistItem({
               )}
               {item.user_service_id && (
                 <Button
-                  disabled={disabled || item.reason_code === "slug_shadowed"}
+                  disabled={
+                    executionDisabled || item.reason_code === "slug_shadowed"
+                  }
                   isLoading={pending && item.state === "validating"}
                   onClick={onValidate}
                 >
@@ -215,7 +227,7 @@ export function AppConnectChecklistItem({
               {item.readiness === "needs_reauth" ? (
                 <Button
                   variant="primary"
-                  disabled={disabled || !selectedCatalogSlug}
+                  disabled={executionDisabled || !selectedCatalogSlug}
                   onClick={() =>
                     selectedCatalogSlug && onConnect(selectedCatalogSlug, true)
                   }
@@ -229,7 +241,7 @@ export function AppConnectChecklistItem({
                   item.state === "skipped") && (
                   <Button
                     variant="primary"
-                    disabled={disabled || !slug}
+                    disabled={executionDisabled || !slug}
                     onClick={() =>
                       item.catalog_slugs.length > 1
                         ? setShowChoices(true)

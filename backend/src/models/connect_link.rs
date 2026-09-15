@@ -67,6 +67,9 @@ pub struct ConnectLink {
     pub last_error_at: Option<DateTime<Utc>>,
     #[serde(default, with = "bson_datetime::optional")]
     pub webhook_event_reserved_at: Option<DateTime<Utc>>,
+    /// Frozen at first reservation; delivery cycles never change occurrence time.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub webhook_event_occurred_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub webhook_event_id: Option<String>,
     #[serde(default)]
@@ -175,6 +178,7 @@ mod tests {
             last_error: Some("provider_access_denied".to_string()),
             last_error_at: Some(now),
             webhook_event_reserved_at: None,
+            webhook_event_occurred_at: None,
             webhook_event_id: None,
             webhook_event_status: None,
             webhook_event_attempts: 0,

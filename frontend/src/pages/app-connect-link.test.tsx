@@ -1,5 +1,9 @@
 import { StrictMode } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  focusManager,
+} from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -225,7 +229,7 @@ describe("App Connect Link hosted page", () => {
   it("never enables a disabled connection and includes no-credential services without requests", async () => {
     mocks.get.mockResolvedValue(
       link([
-        item({ readiness: "disabled", state: "unmet" }),
+        item({ readiness: "disabled", state: "unmet", optional: true }),
         item({
           requirement_id: "included",
           label: "Included service",
@@ -240,8 +244,39 @@ describe("App Connect Link hosted page", () => {
     expect(screen.getByText("Included", { exact: true })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Re-check" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Change" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Change" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Skip" })).toBeEnabled();
+    expect(screen.getByRole("link", { name: "Manage connection" })).toHaveAttribute(
+      "href",
+      "/keys/service",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
+    expect(
+      screen.getByRole("combobox", { name: "Choose an account for GitHub" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Connect another account" }),
+    ).toBeEnabled();
     expect(mocks.post).not.toHaveBeenCalled();
+  });
+  it("re-reads disabled connections on focus without probing", async () => {
+    mocks.get.mockResolvedValue(
+      link([item({ readiness: "disabled", state: "unmet" })]),
+    );
+    mount();
+    await screen.findByText("Disabled, enable to use.");
+    expect(mocks.get).toHaveBeenCalledTimes(1);
+    mocks.get.mockResolvedValue(
+      link([item({ readiness: "unknown", state: "unknown" })]),
+    );
+    act(() => focusManager.setFocused(false));
+    act(() => focusManager.setFocused(true));
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.queryByText("Disabled, enable to use.")).not.toBeInTheDocument(),
+    );
+    expect(mocks.post).not.toHaveBeenCalled();
+    act(() => focusManager.setFocused(undefined));
   });
   it("offers a new connection after a failed OAuth child and labels pending replacement Start over", async () => {
     const failed = item({

@@ -1,7 +1,7 @@
 //! App Connect Link terminal events use a bounded durable outbox on the session.
-//! Reservation freezes safe metadata and one event ID. The expiry sweep recovers
-//! both unreserved transitions and stale dispatches. Receivers must deduplicate
-//! IDs: a crash after HTTP acceptance can still redeliver the same event.
+//! Reservation freezes safe metadata, occurrence time and one event ID. The
+//! expiry sweep recovers unreserved transitions and stale dispatches. Receivers
+//! must deduplicate IDs: a crash after HTTP acceptance can redeliver an event.
 
 use std::collections::BTreeMap;
 
@@ -15,7 +15,8 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::app_connect_link::{
     AppConnectLink, AppConnectOrigin, AppConnectStatus, AppConnectWebhookData,
-    AppConnectWebhookItem, AppConnectWebhookOrigin, COLLECTION_NAME as LINKS,
+    AppConnectWebhookExpiryData, AppConnectWebhookFullData, AppConnectWebhookItem,
+    AppConnectWebhookOrigin, COLLECTION_NAME as LINKS,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as CLIENTS, OauthClient};
 use crate::models::user_service::{COLLECTION_NAME as SERVICES, UserService};
@@ -37,6 +38,26 @@ pub fn terminal_event_type(status: AppConnectStatus) -> Option<&'static str> {
 }
 
 async fn payload(state: &AppState, link: &AppConnectLink) -> AppResult<AppConnectWebhookData> {
+    if link.status == AppConnectStatus::Expired
+        && matches!(link.origin, AppConnectOrigin::Authorize { .. })
+        && link.redeemed_at.is_none()
+        && super::consent_service::check_consent(
+            &state.db,
+            &link.user_id,
+            &link.oauth_client_id,
+            "",
+        )
+        .await?
+        .is_none()
+    {
+        return Ok(AppConnectWebhookData::UnredeemedExpiry(
+            AppConnectWebhookExpiryData {
+                app_connect_link_id: link.id.clone(),
+                origin: AppConnectWebhookOrigin::Authorize,
+                status: AppConnectStatus::Expired,
+            },
+        ));
+    }
     let ids: Vec<_> = link
         .items
         .iter()
@@ -51,7 +72,7 @@ async fn payload(state: &AppState, link: &AppConnectLink) -> AppResult<AppConnec
         .try_collect()
         .await?;
     let slugs: BTreeMap<_, _> = services.into_iter().map(|s| (s.id, s.slug)).collect();
-    Ok(AppConnectWebhookData {
+    Ok(AppConnectWebhookData::Full(AppConnectWebhookFullData {
         user_id: link.user_id.clone(),
         app_connect_link_id: link.id.clone(),
         origin: match link.origin {
@@ -76,7 +97,7 @@ async fn payload(state: &AppState, link: &AppConnectLink) -> AppResult<AppConnec
                     .cloned(),
             })
             .collect(),
-    })
+    }))
 }
 
 async fn reserve(state: &AppState, id: &str) -> AppResult<Option<AppConnectLink>> {
@@ -91,6 +112,7 @@ async fn reserve(state: &AppState, id: &str) -> AppResult<Option<AppConnectLink>
     };
     let data = bson::to_bson(&payload(state, &link).await?)
         .map_err(|_| AppError::Internal("Could not encode app connect event".into()))?;
+    let occurred_at = bson::DateTime::now();
     Ok(collection
         .find_one_and_update(
             doc! {
@@ -99,7 +121,8 @@ async fn reserve(state: &AppState, id: &str) -> AppResult<Option<AppConnectLink>
             },
             doc! { "$set": {
                 "webhook_event_id": Uuid::new_v4().to_string(),
-                "webhook_event_reserved_at": bson::DateTime::now(),
+                "webhook_event_reserved_at": occurred_at,
+                "webhook_event_occurred_at": occurred_at,
                 "webhook_event_status": "pending", "webhook_event_attempts": 1_i32,
                 "webhook_event_data": data,
             } },
@@ -223,6 +246,9 @@ fn spawn_delivery(state: AppState, link: AppConnectLink) {
                             &link.oauth_client_id,
                             event_id,
                             event_type,
+                            link.webhook_event_occurred_at
+                                .or(link.completed_at)
+                                .unwrap_or(link.created_at),
                             data,
                         )
                         .await

@@ -196,6 +196,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         last_error: None,
         last_error_at: None,
         webhook_event_reserved_at: None,
+        webhook_event_occurred_at: None,
         webhook_event_id: None,
         webhook_event_status: None,
         webhook_event_attempts: 0,
@@ -988,6 +989,7 @@ pub async fn dispatch_terminal_webhook_if_needed(
             },
             doc! { "$set": {
                 "webhook_event_reserved_at": bson::DateTime::from_chrono(now),
+                "webhook_event_occurred_at": bson::DateTime::from_chrono(now),
                 "webhook_event_id": &event_id,
                 "webhook_event_status": "pending",
                 "webhook_event_attempts": 1_i32,
@@ -1108,6 +1110,9 @@ fn spawn_terminal_webhook_delivery(
                 app_id,
                 event_id,
                 event_type,
+                link.webhook_event_occurred_at
+                    .or(link.completed_at)
+                    .unwrap_or(link.created_at),
                 serde_json::json!({
                     "user_id": &link.user_id,
                     "connect_link_id": &link.id,
@@ -1497,6 +1502,7 @@ pub async fn create_child(
         last_error: None,
         last_error_at: None,
         webhook_event_reserved_at: None,
+        webhook_event_occurred_at: None,
         webhook_event_id: None,
         webhook_event_status: None,
         webhook_event_attempts: 0,
@@ -2060,6 +2066,14 @@ mod tests {
             .expect("redispatch body");
         let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(envelope["event_id"], event_id);
+        // A legacy reserved row has no occurrence field; its durable creation
+        // timestamp supplies a stable fallback rather than the retry clock.
+        let occurred: chrono::DateTime<Utc> =
+            serde_json::from_value(envelope["occurred_at"].clone()).unwrap();
+        assert_eq!(
+            occurred.timestamp_millis(),
+            created.link.created_at.timestamp_millis()
+        );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(
             redispatch_terminal_webhooks(&db, &dispatcher)

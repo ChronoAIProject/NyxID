@@ -323,6 +323,12 @@ async fn app_connect_webhooks_db_stale_cycle_reuses_id_and_frozen_payload() {
     let retry = received(&mut rx).await;
     assert_eq!(retry["event_id"], first["event_id"]);
     assert_eq!(retry["data"], first["data"]);
+    assert_eq!(retry["occurred_at"], first["occurred_at"]);
+    let saved = stored(&f, &link.id).await;
+    assert_eq!(
+        first["occurred_at"],
+        serde_json::to_value(saved.webhook_event_occurred_at).unwrap()
+    );
     assert_eq!(
         settled(&f, &link.id, ConnectLinkWebhookStatus::Delivered)
             .await
@@ -385,4 +391,68 @@ async fn app_connect_webhooks_db_rollout_disabled_suppresses_new_and_reserved_ev
     f.state.set_app_connect_policy_if_fresh(policy);
     app_links::expire_sessions(&f.state).await.unwrap();
     no_event(&mut rx).await;
+}
+
+#[tokio::test]
+async fn app_connect_webhooks_db_unredeemed_expiry_discloses_only_transaction_without_consent() {
+    let Some(f) = fixture("app_outbox_private_expiry").await else {
+        return;
+    };
+    let selected = gated(&f, false, true).await.unwrap();
+    let mut rx = receiver(&f).await;
+    for prior_consent in [false, true] {
+        if prior_consent {
+            consent_service::grant_consent_with_services(
+                &f.state.db,
+                &f.auth.user_id.to_string(),
+                &f.app.id,
+                "openid proxy",
+                Some(vec![selected.clone()]),
+            )
+            .await
+            .unwrap();
+        }
+        let mut p = params(&f);
+        p.nyx_connect = Some("force".into());
+        let response = authorize_response(&f, &p).await;
+        let url = url::Url::parse(&location(&response)).unwrap();
+        let id = url.path_segments().unwrap().next_back().unwrap();
+        let link = stored(&f, id).await;
+        assert!(link.redeemed_at.is_none());
+        assert_eq!(
+            link.items[0].user_service_id.as_deref(),
+            Some(selected.as_str())
+        );
+        f.state
+            .db
+            .collection::<Document>(LINKS)
+            .update_one(
+                doc! { "_id": id },
+                doc! { "$set": { "expires_at": bson::DateTime::from_chrono(
+                Utc::now() - chrono::Duration::seconds(1)) } },
+            )
+            .await
+            .unwrap();
+        app_links::expire_sessions(&f.state).await.unwrap();
+        let event = received(&mut rx).await;
+        assert_eq!(event["event_type"], "app_connect_link.expired");
+        if prior_consent {
+            assert_eq!(event["data"]["user_id"], link.user_id);
+            assert_eq!(event["data"]["items"][0]["slug"], "personal-github");
+        } else {
+            assert_eq!(
+                event["data"],
+                json!({
+                    "app_connect_link_id": id, "origin": "authorize", "status": "expired",
+                })
+            );
+            let saved = settled(&f, id, ConnectLinkWebhookStatus::Delivered).await;
+            assert_eq!(
+                serde_json::to_value(saved.webhook_event_data).unwrap(),
+                event["data"]
+            );
+        }
+        settled(&f, id, ConnectLinkWebhookStatus::Delivered).await;
+        no_event(&mut rx).await;
+    }
 }

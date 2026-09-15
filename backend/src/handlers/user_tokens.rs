@@ -2530,6 +2530,7 @@ mod tests {
                 last_error: None,
                 last_error_at: None,
                 webhook_event_reserved_at: None,
+                webhook_event_occurred_at: None,
                 webhook_event_id: None,
                 webhook_event_status: None,
                 webhook_event_attempts: 0,

@@ -43,7 +43,10 @@ export function useAppConnectLink(
     retry: false,
     staleTime: Infinity,
     refetchOnMount: "always",
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: (query) =>
+      query.state.data?.items.some((item) => item.readiness === "disabled")
+        ? "always"
+        : false,
     refetchOnReconnect: false,
   });
 }

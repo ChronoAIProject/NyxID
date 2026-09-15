@@ -43,6 +43,18 @@ pub struct ConnectionWebhookEnvelope {
     pub data: Value,
 }
 
+/// The only lifecycle payload allowed to omit tenant identity. Keep the shape
+/// exact so this exception cannot carry undisclosed connection metadata.
+fn is_private_authorize_expiry(event_type: &str, data: &Value) -> bool {
+    event_type == "app_connect_link.expired"
+        && data.as_object().is_some_and(|fields| fields.len() == 3)
+        && data["origin"] == "authorize"
+        && data["status"] == "expired"
+        && data["app_connect_link_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+}
+
 impl DeveloperWebhookDispatcher {
     pub fn new(http_client: reqwest::Client, encryption_keys: Arc<EncryptionKeys>) -> Self {
         Self {
@@ -55,9 +67,10 @@ impl DeveloperWebhookDispatcher {
         let dispatcher = self.clone();
         let event_type = event_type.to_string();
         let event_id = Uuid::new_v4().to_string();
+        let occurred_at = Utc::now();
         tokio::spawn(async move {
             if let Err(failure) = dispatcher
-                .deliver_for_app(&db, &app_id, &event_id, &event_type, data)
+                .deliver_for_app(&db, &app_id, &event_id, &event_type, occurred_at, data)
                 .await
             {
                 record_final_failure_for_app(&db, &app_id, &event_id, &event_type, failure).await;
@@ -71,12 +84,14 @@ impl DeveloperWebhookDispatcher {
         app_id: &str,
         event_id: &str,
         event_type: &str,
+        occurred_at: DateTime<Utc>,
         data: Value,
     ) -> Result<(), DeliveryFailure> {
         if data
             .get("user_id")
             .and_then(serde_json::Value::as_str)
             .is_none_or(|value| value.is_empty())
+            && !is_private_authorize_expiry(event_type, &data)
         {
             return Err(DeliveryFailure {
                 attempts: 0,
@@ -189,7 +204,7 @@ impl DeveloperWebhookDispatcher {
         let envelope = ConnectionWebhookEnvelope {
             event_id: event_id.to_string(),
             event_type: event_type.to_string(),
-            occurred_at: Utc::now(),
+            occurred_at,
             data,
         };
         let body = match serde_json::to_vec(&envelope) {
@@ -456,6 +471,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_minimal_unredeemed_authorize_expiry_may_omit_tenant_identity() {
+        let data = serde_json::json!({
+            "app_connect_link_id": "link-id", "origin": "authorize", "status": "expired",
+        });
+        assert!(is_private_authorize_expiry(
+            "app_connect_link.expired",
+            &data
+        ));
+        assert!(!is_private_authorize_expiry("connect_link.expired", &data));
+        assert!(!is_private_authorize_expiry(
+            "app_connect_link.completed",
+            &data
+        ));
+        for (key, value) in [
+            ("items", serde_json::json!([])),
+            ("user_id", serde_json::json!("")),
+            ("origin", serde_json::json!("app")),
+            ("status", serde_json::json!("completed")),
+            ("app_connect_link_id", serde_json::json!("")),
+        ] {
+            let mut altered = data.clone();
+            altered[key] = value;
+            assert!(!is_private_authorize_expiry(
+                "app_connect_link.expired",
+                &altered
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn connection_webhook_body_ceiling_is_enforced_before_send() {
         let Some(db) = connect_test_database("developer_connection_webhook_body_ceiling").await
@@ -482,6 +527,7 @@ mod tests {
                 &client_id,
                 "event-id",
                 "connect_link.completed",
+                Utc::now(),
                 serde_json::json!({
                     "user_id": "user-id",
                     "oversized": "x".repeat(CONNECTION_WEBHOOK_MAX_BODY_BYTES),
@@ -609,6 +655,7 @@ mod tests {
                 &client_id,
                 "event-id",
                 "connect_link.completed",
+                Utc::now(),
                 serde_json::json!({
                     "user_id": &owner,
                     "connect_link_id": "link-id",
@@ -697,6 +744,7 @@ mod tests {
                 &client_id,
                 "event-id",
                 "connect_link.expired",
+                Utc::now(),
                 serde_json::json!({
                     "user_id": &owner,
                     "connect_link_id": "private-event-payload",

@@ -3384,7 +3384,7 @@ Content-Type: application/json
 | `connect_link.expired` | An app-created single-service link expires. |
 | `app_connect_link.completed` | A repair session completes, or an authorize session commits consent and code issuance. |
 | `app_connect_link.cancelled` | Either origin is cancelled, including consent denial. |
-| `app_connect_link.expired` | Either origin expires, including browser abandonment. |
+| `app_connect_link.expired` | Either origin expires, including browser abandonment. Unredeemed authorize sessions without consent use the minimal payload below. |
 | `app_connect_link.failed` | Either origin reaches a terminal failure. |
 | `connection.expired` | A connection expires; recipient comes from the service's `source_app_id`. |
 
@@ -3434,7 +3434,7 @@ valid = hmac.compare_digest(signature.removeprefix("sha256="), expected)
 
 For zero-gap rotation, keep the current and previous secrets in a receiver map keyed by `key_id`, call the rotate endpoint, accept either key, and remove the old slot only after observing deliveries with the new `X-NyxID-Key-Id`.
 
-Connect-link terminal events use the link document as a durable outbox. Each dispatch cycle makes up to three attempts with short timeouts and bounded backoff. A stale undelivered reservation is reclaimed by the expiry sweep after 120 seconds, for at most five dispatch cycles. Delivery is at least once: a process crash after the receiver accepts but before NyxID records success can produce a duplicate with the same event ID. After the cap, the outbox is marked `abandoned` and a metadata-only final-failure audit is emitted.
+Connect-link terminal events use the link document as a durable outbox. Each dispatch cycle makes up to three attempts with short timeouts and bounded backoff. A stale undelivered reservation is reclaimed by the expiry sweep after 120 seconds, for at most five dispatch cycles. Delivery is at least once: a process crash after the receiver accepts but before NyxID records success can produce a duplicate with the same event ID and frozen `occurred_at` (only the signature timestamp changes). After the cap, the outbox is marked `abandoned` and a metadata-only final-failure audit is emitted.
 
 `connection.expired` is best effort because it has no durable outbox: it receives one bounded three-attempt cycle and is not redelivered after process loss or final failure. Integrations should periodically reconcile with authenticated `GET /api/v1/user-services`; its cheap `connection_status` field is `active` or `expired` when credential expiry is knowable.
 
@@ -8228,7 +8228,10 @@ handoff text, and the current Verified chip when applicable, with a fixed
 **Secured by NyxID · destination** footer. Unauthenticated visitors
 continue through `/login?return_to=...`. Initial loading only redeems the page
 capability and reads local readiness; it never starts a provider check. Actions
-share a 750 ms click throttle. Disabled connections remain disabled. Check
+share a 750 ms click throttle. Disabled connections remain disabled: Connect and
+Re-check are unavailable, while Change and optional Skip remain available. A
+Manage connection link opens the service detail page; returning focus re-reads
+local readiness without probing, so enabling the service is reflected. Check
 failures remain visible until an explicit action; provider cooldown responses
 leave the previous item state and evidence intact. Cancelling or expiring a
 parent also cancels its pending child links. Starting over replaces an item's
@@ -8254,9 +8257,19 @@ Gate manifests enforce the authorize flow described above. Both origins emit ter
 }
 ```
 
-`origin` is `app` or `authorize`; callbacks, capabilities, and authorize parameters are never included. Missing selections and unavailable stored slugs are `null`. Items are the terminal session's selections, and payload metadata is frozen at event reservation. Authorize completion emits only after the transaction that issues the code and commits consent; `ReadyForConsent` is non-terminal and emits nothing.
+`origin` is `app` or `authorize`; callbacks, capabilities, and authorize parameters are never included. Missing selections and unavailable stored slugs are `null`. Items are the terminal session's selections, and payload metadata and `occurred_at` are frozen at event reservation. Authorize completion emits only after the transaction that issues the code and commits consent; `ReadyForConsent` is non-terminal and emits nothing.
 
-The existing expiry sweep expires abandoned sessions and recovers terminal transitions whose process stopped before reservation. It redispatches stale reservations after 120 seconds, reusing the event ID and frozen payload, up to five delivery cycles, then abandons them with a metadata-only audit. Each cycle uses the shared per-app rate limit and up to three HTTP attempts. Delivery is bounded and may be duplicated or exhausted: deduplicate `event_id` and reconcile with the app-bound session read. Expiry needs no browser; browser callbacks remain separate. These events are terminal notifications, not readiness subscriptions; `connection.expired` gains no `requirement_id`.
+When an authorize-origin session expires before its page capability was redeemed
+and the person has no existing unexpired consent for that app, its payload is
+limited to the transaction metadata below. It omits `user_id`, requirements,
+items, slugs, failure details, and grant information. Existing consent or a
+redeemed session retains the full terminal payload.
+
+```json
+{"app_connect_link_id":"session-uuid","origin":"authorize","status":"expired"}
+```
+
+The existing expiry sweep expires abandoned sessions and recovers terminal transitions whose process stopped before reservation. It redispatches stale reservations after 120 seconds, reusing the event ID, frozen payload, and `occurred_at`, up to five delivery cycles, then abandons them with a metadata-only audit. Each cycle uses the shared per-app rate limit and up to three HTTP attempts. Delivery is bounded and may be duplicated or exhausted: deduplicate `event_id` and reconcile with the app-bound session read. Expiry needs no browser; browser callbacks remain separate. These events are terminal notifications, not readiness subscriptions; `connection.expired` gains no `requirement_id`.
 
 App owners can update text with
 `PATCH /api/v1/developer/oauth-clients/{client_id}/handoff`, body
