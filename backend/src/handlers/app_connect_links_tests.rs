@@ -208,7 +208,8 @@ async fn app_connect_links_db_org_admin_cannot_act_on_member_session() {
             human(&f),
             Path(created.link.id),
             peer(),
-            HeaderMap::new()
+            HeaderMap::new(),
+            None,
         )
         .await,
         Err(AppError::AppConnectLinkNotFound)
@@ -335,7 +336,8 @@ async fn app_connect_links_db_rollout_disabled_hides_every_route() {
             who,
             Path(link.id),
             peer(),
-            HeaderMap::new()
+            HeaderMap::new(),
+            None,
         )
         .await,
         Err(AppError::AppConnectLinkNotFound)
@@ -364,7 +366,8 @@ async fn app_connect_links_db_hosted_actions_reject_non_session_callers() {
                 auth,
                 Path(link.id.clone()),
                 peer(),
-                HeaderMap::new()
+                HeaderMap::new(),
+                None,
             )
             .await,
             Err(AppError::Forbidden(_))

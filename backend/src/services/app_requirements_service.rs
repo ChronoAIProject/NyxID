@@ -76,6 +76,7 @@ pub struct RequirementStatus {
     pub candidates: Vec<RequirementChoice>,
     pub requirement_id: String,
     pub state: RequirementState,
+    pub reason_code: Option<&'static str>,
     pub user_service_id: Option<String>,
     pub slug: Option<String>,
     pub resource_uri: Option<String>,
@@ -106,6 +107,7 @@ impl RequirementStatus {
             candidates: vec![],
             requirement_id: id.into(),
             state,
+            reason_code: None,
             user_service_id: None,
             slug: None,
             resource_uri: None,
@@ -428,6 +430,7 @@ fn set_selection(
 }
 
 struct CandidateFacts {
+    slug_shadowed: bool,
     key: Option<UserApiKey>,
     no_credential: bool,
     master: bool,
@@ -517,7 +520,11 @@ async fn candidate_facts(
         .await?
         .try_collect()
         .await?;
+    let slug_shadowed =
+        super::oauth_resource_service::selected_service_is_shadowed(&state.db, actor, service)
+            .await?;
     Ok(Some(CandidateFacts {
+        slug_shadowed,
         key,
         no_credential,
         master,
@@ -537,6 +544,7 @@ fn evaluate_candidate(
     caller: &EvaluationCaller<'_>,
 ) -> Option<Candidate> {
     let CandidateFacts {
+        slug_shadowed,
         key,
         no_credential,
         master,
@@ -629,6 +637,13 @@ fn evaluate_candidate(
         } else {
             RequirementState::Met
         };
+    }
+    if *slug_shadowed {
+        status.state = RequirementState::Unsatisfiable;
+        status.reason_code = Some("slug_shadowed");
+        status.validated_at = None;
+        status.valid_until = None;
+        authenticated_at = None;
     }
     Some(Candidate {
         status,

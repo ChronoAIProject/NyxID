@@ -78,7 +78,7 @@ export function RequirementsCard({ clientId }: { readonly clientId: string }) {
 
   function startPublish() {
     form.reset({
-      enforcement: "advise",
+      enforcement: data?.versions[0]?.enforcement ?? "advise",
       requirements: data?.versions[0]?.requirements ?? [],
     });
     setEditing(true);
@@ -169,10 +169,23 @@ export function RequirementsCard({ clientId }: { readonly clientId: string }) {
             <form onSubmit={form.handleSubmit(submit)} className="space-y-4">
               <div className="space-y-2">
                 <Label>Enforcement</Label>
-                <Badge variant="secondary">Advise</Badge>
-                <p className="text-xs text-muted-foreground">
-                  Users can sign in while requirements are unmet. Gate
-                  enforcement is not available yet.
+                <Select
+                  value={form.watch("enforcement")}
+                  onValueChange={(value: "advise" | "gate") =>
+                    form.setValue("enforcement", value)
+                  }
+                >
+                  <SelectTrigger aria-label="Enforcement">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="advise">Advise</SelectItem>
+                    <SelectItem value="gate">Gate</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-[12px] text-muted-foreground">
+                  Advise allows sign-in while requirements are unmet. Gate
+                  requires connections before granting app access.
                 </p>
               </div>
               {fields.map((field, index) => {

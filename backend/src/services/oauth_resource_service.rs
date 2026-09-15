@@ -70,31 +70,6 @@ pub fn validate_resource_uri(resource: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub fn filter_resource_narrowing(
-    config: &AppConfig,
-    requested: &[String],
-    granted_resources: &[String],
-) -> AppResult<Vec<String>> {
-    let mut narrowed = Vec::new();
-    for resource in requested {
-        validate_resource_uri(resource)?;
-        let resource = canonicalize_resource(config, resource);
-        if granted_resources.iter().any(|granted| granted == &resource)
-            && !narrowed.iter().any(|existing| existing == &resource)
-        {
-            narrowed.push(resource.clone());
-        }
-    }
-
-    if narrowed.len() != requested.len() {
-        return Err(AppError::InvalidTarget(
-            "resource cannot expand beyond the previously granted resources".to_string(),
-        ));
-    }
-
-    Ok(narrowed)
-}
-
 pub async fn resolve_requested_resources(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -220,39 +195,23 @@ pub async fn resolve_token_resource_scope(
     grant_allowed_service_ids: &[String],
     grant_allow_all_services: bool,
 ) -> AppResult<OAuthTokenResourceScope> {
-    let Some(resources) = requested_resources.filter(|resources| !resources.is_empty()) else {
-        let allowed_service_ids = if !grant_allow_all_services && !grant_resource_uris.is_empty() {
-            resolve_resource_service_ids_for_user(db, config, actor_user_id, grant_resource_uris)
-                .await?
-        } else {
-            grant_allowed_service_ids.to_vec()
+    let requested = requested_resources.filter(|resources| !resources.is_empty());
+    if grant_allow_all_services && grant_allowed_service_ids.is_empty() {
+        let Some(resources) = requested else {
+            return Ok(OAuthTokenResourceScope {
+                resource_uris: grant_resource_uris.to_vec(),
+                allowed_service_ids: vec![],
+                allow_all_services: true,
+            });
         };
-
-        return Ok(OAuthTokenResourceScope {
-            resource_uris: grant_resource_uris.to_vec(),
-            allowed_service_ids,
-            allow_all_services: grant_allow_all_services,
-        });
-    };
-
-    if grant_allow_all_services {
         let resolved = resolve_requested_resources(db, config, actor_user_id, Some(resources))
             .await?
-            .unwrap_or(ResolvedOAuthResources {
-                resource_uris: Vec::new(),
-                service_ids: Vec::new(),
-                mcp_resource_uri: None,
-            });
-
-        // The MCP endpoint is narrowing-neutral (NyxID#1226): requesting only
-        // `{BASE_URL}/mcp` keeps the grant's allow-all posture, exactly as if
-        // `resource` had been omitted.
+            .ok_or_else(|| AppError::InvalidTarget("Missing resource selection".into()))?;
         let service_restricting = !resolved.service_ids.is_empty();
         let mut resource_uris = resolved.resource_uris;
         if let Some(mcp) = resolved.mcp_resource_uri {
             resource_uris.push(mcp);
         }
-
         return Ok(OAuthTokenResourceScope {
             resource_uris,
             allowed_service_ids: resolved.service_ids,
@@ -260,53 +219,94 @@ pub async fn resolve_token_resource_scope(
         });
     }
 
-    if !grant_resource_uris.is_empty() {
-        let resource_uris = filter_resource_narrowing(config, resources, grant_resource_uris)?;
-        let allowed_service_ids =
-            resolve_resource_service_ids_for_user(db, config, actor_user_id, &resource_uris)
-                .await?;
-
-        return Ok(OAuthTokenResourceScope {
-            resource_uris,
-            allowed_service_ids,
-            allow_all_services: false,
-        });
+    // Once a grant has an explicit id boundary (including the empty set), slugs
+    // cannot mint new authority. URIs are derived from those ids, never vice versa.
+    let mut grant = Vec::new();
+    for id in grant_allowed_service_ids {
+        let service = user_service_service::find_user_service_by_id(db, id)
+            .await?
+            .ok_or_else(|| {
+                AppError::InvalidTarget("A granted service is no longer available".into())
+            })?;
+        if !can_grant_user_service(db, actor_user_id, &service).await? {
+            return Err(AppError::InvalidTarget(
+                "A granted service is no longer accessible".into(),
+            ));
+        }
+        let resource = user_service_resource_uri(config, &service.slug);
+        if selected_service_is_shadowed(db, actor_user_id, &service).await?
+            || resolve_single_resource(db, config, actor_user_id, &resource)
+                .await?
+                .id
+                != *id
+        {
+            return Err(AppError::InvalidTarget(
+                "A granted service name resolves to another connection".into(),
+            ));
+        }
+        grant.push((id.clone(), resource));
     }
-
-    let resolved = resolve_requested_resources(db, config, actor_user_id, Some(resources))
-        .await?
-        .unwrap_or(ResolvedOAuthResources {
-            resource_uris: Vec::new(),
-            service_ids: Vec::new(),
-            mcp_resource_uri: None,
-        });
-    if !resolved.service_ids.iter().all(|service_id| {
-        grant_allowed_service_ids
-            .iter()
-            .any(|granted| granted == service_id)
-    }) {
-        return Err(AppError::InvalidTarget(
-            "resource cannot expand beyond the previously granted services".to_string(),
-        ));
+    let mut narrowed_ids = Vec::new();
+    let mut selected_uris = Vec::new();
+    let mut include_mcp = grant_resource_uris
+        .iter()
+        .any(|r| is_mcp_resource(config, r));
+    if let Some(requested) = requested {
+        include_mcp = false;
+        let mut seen = std::collections::HashSet::new();
+        for requested_uri in requested {
+            validate_resource_uri(requested_uri)?;
+            let uri = canonicalize_resource(config, requested_uri);
+            if !seen.insert(uri.clone()) {
+                return Err(AppError::InvalidTarget("Duplicate resource".into()));
+            }
+            if is_mcp_resource(config, &uri) {
+                include_mcp = true;
+                continue;
+            }
+            let (id, _) = grant
+                .iter()
+                .find(|(_, resource)| resource == &uri)
+                .ok_or_else(|| {
+                    AppError::InvalidTarget(
+                        "resource cannot expand beyond the previously granted services".into(),
+                    )
+                })?;
+            narrowed_ids.push(id.clone());
+            selected_uris.push(uri);
+        }
     }
-
-    // Narrowing-neutral MCP endpoint (NyxID#1226): an mcp-only request keeps
-    // the grant's service allowlist rather than narrowing to zero services.
-    let service_restricting = !resolved.service_ids.is_empty();
-    let mut resource_uris = resolved.resource_uris;
-    if let Some(mcp) = resolved.mcp_resource_uri {
-        resource_uris.push(mcp);
+    // MCP-only requests remain narrowing-neutral; explicit empty grants stay empty.
+    if requested.is_none() || (narrowed_ids.is_empty() && include_mcp) {
+        narrowed_ids = grant_allowed_service_ids.to_vec();
+        selected_uris = grant.into_iter().map(|(_, uri)| uri).collect();
     }
-
+    if include_mcp {
+        selected_uris.push(mcp_resource_uri(config));
+    }
     Ok(OAuthTokenResourceScope {
-        resource_uris,
-        allowed_service_ids: if service_restricting {
-            resolved.service_ids
-        } else {
-            grant_allowed_service_ids.to_vec()
-        },
+        resource_uris: selected_uris,
+        allowed_service_ids: narrowed_ids,
         allow_all_services: false,
     })
+}
+
+/// Use the proxy's metadata-only precedence mirror, including personal legacy
+/// connections and org priority. A slug is unique within each owner, so a
+/// different effective owner means a different selected connection.
+pub async fn selected_service_is_shadowed(
+    db: &mongodb::Database,
+    actor: &str,
+    service: &UserService,
+) -> AppResult<bool> {
+    let owner = crate::services::proxy_service::find_effective_service_owner(
+        db,
+        actor,
+        Some(&service.slug),
+        None,
+    )
+    .await?;
+    Ok(owner.is_some_and(|owner| owner != service.user_id))
 }
 
 async fn resolve_single_resource(
@@ -399,41 +399,6 @@ mod tests {
         assert!(validate_resource_uri("/api/v1/proxy/s/openai").is_err());
         assert!(validate_resource_uri("urn:example:service").is_ok());
         assert!(validate_resource_uri("https://nyx.example/api/v1/proxy/s/openai#part").is_err());
-    }
-
-    #[test]
-    fn narrowing_rejects_expansion() {
-        let granted = vec![
-            "https://nyx.example/api/v1/proxy/s/openai".to_string(),
-            "https://nyx.example/api/v1/proxy/s/anthropic".to_string(),
-        ];
-
-        let config = crate::test_utils::test_app_config();
-        let requested = vec!["https://nyx.example/api/v1/proxy/s/openai".to_string()];
-        assert_eq!(
-            filter_resource_narrowing(&config, &requested, &granted).unwrap(),
-            requested
-        );
-
-        let expanded = vec!["https://nyx.example/api/v1/proxy/s/cohere".to_string()];
-        assert!(matches!(
-            filter_resource_narrowing(&config, &expanded, &granted),
-            Err(AppError::InvalidTarget(_))
-        ));
-    }
-
-    #[test]
-    fn narrowing_canonicalizes_mcp_trailing_slash() {
-        // NyxID#1226: `{BASE_URL}/mcp/` on refresh must match a granted
-        // `{BASE_URL}/mcp` instead of failing invalid_target.
-        let config = crate::test_utils::test_app_config();
-        let mcp = mcp_resource_uri(&config);
-        let granted = vec![mcp.clone()];
-        let requested = vec![format!("{mcp}/")];
-        assert_eq!(
-            filter_resource_narrowing(&config, &requested, &granted).unwrap(),
-            vec![mcp]
-        );
     }
 
     #[tokio::test]

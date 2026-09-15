@@ -28,6 +28,8 @@ const readinessCopy: Partial<Record<AppConnectItem["readiness"], string>> = {
   broken: "This connection needs to be repaired.",
 };
 const reasonCopy: Record<string, string> = {
+  slug_shadowed:
+    "This account shares its name with another of your connections. Rename one of them, or choose the other, to use it here.",
   credential_unavailable:
     "The stored credential could not be used. Reconnect this service.",
   attempt_superseded:
@@ -87,7 +89,8 @@ export function AppConnectChecklistItem({
   const disabled =
     pending ||
     item.readiness === "disabled" ||
-    item.readiness === "unsatisfiable";
+    (item.readiness === "unsatisfiable" &&
+      item.reason_code !== "slug_shadowed");
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between gap-3 pb-3">
@@ -202,7 +205,7 @@ export function AppConnectChecklistItem({
               )}
               {item.user_service_id && (
                 <Button
-                  disabled={disabled}
+                  disabled={disabled || item.reason_code === "slug_shadowed"}
                   isLoading={pending && item.state === "validating"}
                   onClick={onValidate}
                 >

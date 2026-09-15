@@ -112,7 +112,12 @@ describe("OAuth app requirements", () => {
       requirements_version: 1,
       result_id: "result",
       requirements: [
-        { requirement_id: "github", state: "met", granted_to_caller: false },
+        {
+          requirement_id: "github",
+          state: "unsatisfiable",
+          reason_code: "slug_shadowed",
+          granted_to_caller: false,
+        },
       ],
     };
     fetchFn.mockResolvedValueOnce(Response.json(result));

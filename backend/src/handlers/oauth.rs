@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
+use crate::models::app_connect_link::{AppConnectLink, AppConnectOrigin, ValidatedAuthorizeParams};
 use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
+use crate::services::app_connect_authorize_service::{self as app_gate, ConsentBinding};
+use crate::services::{app_connect_link_service as app_links, app_requirements_service};
 // Keep both import surfaces: this handler resolves consent-scoped resources and
 // service-account principals in the OAuth endpoints.
 use crate::models::consent::Consent;
@@ -39,7 +42,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_
 
 // --- Request / Response types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AuthorizeQuery {
     #[serde(default)]
     pub response_type: String,
@@ -61,8 +64,23 @@ pub struct AuthorizeQuery {
     /// OIDC prompt parameter: "none", "login", "consent", or space-separated combo.
     pub prompt: Option<String>,
     pub request_uri: Option<String>,
+    pub nyx_connect: Option<String>,
+    #[serde(skip)]
+    pub app_connect: Option<ConsentBinding>,
+    /// Local gate selections never come from request parameters or URI resolution.
+    #[serde(skip)]
+    pub gate_service_ids: Vec<String>,
     #[serde(default)]
     pub resource: Vec<String>,
+}
+
+impl std::fmt::Debug for AuthorizeQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthorizeQuery")
+            .field("client_id", &self.client_id)
+            .field("parameters", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +298,7 @@ pub struct PushedAuthorizationRequestForm {
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
     pub binding_grant_id: Option<String>,
+    pub nyx_connect: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -303,7 +322,7 @@ const CONSENT_REQUEST_AUDIENCE: &str = "nyxid/oauth-consent";
 const CONSENT_REQUEST_TOKEN_TYPE: &str = "oauth_consent_request";
 const CONSENT_REQUEST_TTL_SECS: i64 = 15 * 60;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct ConsentRequestClaims {
     sub: String,
     iss: String,
@@ -325,6 +344,14 @@ struct ConsentRequestClaims {
     binding_grant_id: Option<String>,
     prompt: Option<String>,
     resource: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nyx_connect: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_connect_result_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_connect_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_connect_consent_nonce: Option<String>,
 }
 
 /// Map internal `AppError` to an RFC 6749 §5.2 JSON error response.
@@ -550,6 +577,9 @@ fn params_from_consent_form(form: &ConsentDecisionForm) -> AuthorizeQuery {
         prompt: form.prompt.clone(),
         resource: form.resource.clone(),
         request_uri: None,
+        nyx_connect: None,
+        app_connect: None,
+        gate_service_ids: Vec::new(),
     }
 }
 
@@ -587,6 +617,10 @@ fn sign_consent_request(
         binding_grant_id: params.binding_grant_id.clone(),
         prompt: params.prompt.clone(),
         resource: params.resource.clone(),
+        nyx_connect: params.app_connect.as_ref().and(params.nyx_connect.clone()),
+        app_connect_result_id: params.app_connect.as_ref().map(|b| b.result_id.clone()),
+        app_connect_session_id: params.app_connect.as_ref().map(|b| b.session_id.clone()),
+        app_connect_consent_nonce: params.app_connect.as_ref().map(|b| b.nonce.clone()),
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -613,6 +647,19 @@ fn verify_consent_request(
         return Err(AppError::BadRequest("Invalid consent request".to_string()));
     }
 
+    let app_connect = match (
+        claims.app_connect_result_id,
+        claims.app_connect_session_id,
+        claims.app_connect_consent_nonce,
+    ) {
+        (None, None, None) => None,
+        (Some(result_id), Some(session_id), Some(nonce)) => Some(ConsentBinding {
+            result_id,
+            session_id,
+            nonce,
+        }),
+        _ => return Err(AppError::AppConnectResultMismatch),
+    };
     Ok(AuthorizeQuery {
         response_type: claims.response_type,
         client_id: claims.client_id,
@@ -629,6 +676,9 @@ fn verify_consent_request(
         prompt: claims.prompt,
         resource: claims.resource,
         request_uri: None,
+        nyx_connect: claims.nyx_connect,
+        app_connect,
+        gate_service_ids: Vec::new(),
     })
 }
 
@@ -778,9 +828,34 @@ pub async fn authorize_decision(
         params.external_subject_external_user_id.as_deref(),
     )?;
 
-    let (_client, validated_scope) = validate_authorize_request(&state, &params).await?;
+    let (client, validated_scope) = validate_authorize_request(&state, &params).await?;
+    let bound = if let Some(binding) = &params.app_connect {
+        super::app_connect_links::require_human(&state, &auth_user).await?;
+        let link = app_gate::bound_session(&state, &user_id_str, &client, binding).await?;
+        let AppConnectOrigin::Authorize {
+            authorize_params, ..
+        } = &link.origin
+        else {
+            return Err(AppError::AppConnectResultMismatch);
+        };
+        if **authorize_params != stored_authorize_params(&params, &validated_scope)? {
+            return Err(AppError::AppConnectResultMismatch);
+        }
+        Some(link)
+    } else {
+        if app_gate::gate_manifest(&state, &client).await?.is_some() {
+            return Err(AppError::AppConnectResultMismatch);
+        }
+        None
+    };
 
     if form.decision == "deny" {
+        if let Some(link) = &bound {
+            let cancelled = app_links::cancel(&state, &link.id, &user_id_str).await?;
+            let redirect = app_links::terminal_callback_url(&cancelled)?
+                .ok_or(AppError::AppConnectResultMismatch)?;
+            return Ok(redirect_302(&redirect));
+        }
         let redirect_url = build_callback_error_url(
             &params,
             "access_denied",
@@ -802,6 +877,26 @@ pub async fn authorize_decision(
         return Err(AppError::InvalidTarget(
             "selected resource was not in the original authorization request".to_string(),
         ));
+    }
+
+    if let Some(link) = &bound {
+        let mut mandatory = link.selected_service_ids.clone();
+        mandatory.extend(
+            oauth_resource_service::resolve_resource_service_ids_for_user(
+                &state.db,
+                &state.config,
+                &user_id_str,
+                &params.resource,
+            )
+            .await?,
+        );
+        if mandatory
+            .iter()
+            .any(|id| !form.allowed_service_ids.contains(id))
+        {
+            return Err(AppError::AppConnectResultMismatch);
+        }
+        app_gate::recheck_authority(&state, link).await?;
     }
 
     let consent_allowed_service_ids = if form.allow_all_services {
@@ -826,14 +921,27 @@ pub async fn authorize_decision(
         validate_allowed_service_ids(&state.db, &user_id_str, &selected_service_ids).await?;
         Some(selected_service_ids)
     };
-    let consent = consent_service::grant_consent_with_services(
-        &state.db,
-        &user_id_str,
-        &params.client_id,
-        &validated_scope,
-        consent_allowed_service_ids,
-    )
-    .await?;
+    let consent = if bound.is_some() {
+        Consent {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id_str.clone(),
+            client_id: params.client_id.clone(),
+            scopes: validated_scope.clone(),
+            allow_all_services: consent_allowed_service_ids.is_none(),
+            allowed_service_ids: Some(consent_allowed_service_ids.unwrap_or_default()),
+            granted_at: Utc::now(),
+            expires_at: None,
+        }
+    } else {
+        consent_service::grant_consent_with_services(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            &validated_scope,
+            consent_allowed_service_ids,
+        )
+        .await?
+    };
 
     let code = issue_authorization_code(
         &state,
@@ -900,6 +1008,178 @@ fn parse_prompt(prompt: Option<&str>) -> std::collections::HashSet<&str> {
         .unwrap_or_default()
 }
 
+fn stored_authorize_params(
+    params: &AuthorizeQuery,
+    scope: &str,
+) -> AppResult<ValidatedAuthorizeParams> {
+    Ok(ValidatedAuthorizeParams {
+        client_id: params.client_id.clone(),
+        redirect_uri: params.redirect_uri.clone(),
+        scope: scope.into(),
+        state: params.state.clone(),
+        nonce: params.nonce.clone(),
+        code_challenge: params.code_challenge.clone(),
+        code_challenge_method: params.code_challenge_method.clone(),
+        resources: params.resource.clone(),
+        prompt: params.prompt.clone(),
+        external_subject: validate_external_subject_params(
+            params.external_subject_platform.as_deref(),
+            params.external_subject_tenant.as_deref(),
+            params.external_subject_external_user_id.as_deref(),
+        )?,
+        binding_grant_id: params.binding_grant_id.clone(),
+        nyx_connect: params.nyx_connect.clone(),
+    })
+}
+
+fn params_from_session(link: &AppConnectLink) -> AppResult<AuthorizeQuery> {
+    let AppConnectOrigin::Authorize {
+        authorize_params: p,
+        consent_nonce,
+    } = &link.origin
+    else {
+        return Err(AppError::AppConnectResultMismatch);
+    };
+    Ok(AuthorizeQuery {
+        response_type: "code".into(),
+        client_id: p.client_id.clone(),
+        redirect_uri: p.redirect_uri.clone(),
+        scope: Some(p.scope.clone()),
+        state: p.state.clone(),
+        nonce: p.nonce.clone(),
+        code_challenge: p.code_challenge.clone(),
+        code_challenge_method: p.code_challenge_method.clone(),
+        resource: p.resources.clone(),
+        prompt: p.prompt.clone(),
+        nyx_connect: p.nyx_connect.clone(),
+        request_uri: None,
+        external_subject_platform: p.external_subject.as_ref().map(|s| s.platform.clone()),
+        external_subject_tenant: p.external_subject.as_ref().and_then(|s| s.tenant.clone()),
+        external_subject_external_user_id: p
+            .external_subject
+            .as_ref()
+            .map(|s| s.external_user_id.clone()),
+        binding_grant_id: p.binding_grant_id.clone(),
+        gate_service_ids: Vec::new(),
+        app_connect: Some(ConsentBinding {
+            result_id: link
+                .result_id
+                .clone()
+                .ok_or(AppError::AppConnectResultMismatch)?,
+            session_id: link.id.clone(),
+            nonce: consent_nonce.clone(),
+        }),
+    })
+}
+
+/// HTTP display hints are derived from the frozen server result; only the signed token binds consent.
+pub(super) async fn app_connect_consent_url(
+    state: &AppState,
+    link: &AppConnectLink,
+) -> AppResult<String> {
+    let params = params_from_session(link)?;
+    let client = app_links::enabled_client(state, &link.oauth_client_id).await?;
+    let mut hints = resolve_app_default_service_hints(state, &client, &link.user_id).await?;
+    hints.required_service_ids = link.selected_service_ids.clone();
+    let resource_ids = oauth_resource_service::resolve_resource_service_ids_for_user(
+        &state.db,
+        &state.config,
+        &link.user_id,
+        &params.resource,
+    )
+    .await?;
+    for id in resource_ids {
+        if !hints.required_service_ids.contains(&id) {
+            hints.required_service_ids.push(id);
+        }
+    }
+    let scope = params
+        .scope
+        .as_deref()
+        .ok_or(AppError::AppConnectResultMismatch)?;
+    let mut url = build_consent_url(
+        &state.config.frontend_url,
+        &params,
+        &client.client_name,
+        scope,
+        Some(&sign_consent_request(state, &link.user_id, &params, scope)?),
+        &hints,
+    );
+    url.push_str(&format!(
+        "&app_connect_link_id={}",
+        urlencoding::encode(&link.id)
+    ));
+    Ok(url)
+}
+
+/// Returns a handoff only for a gated client. Successful silent evaluation adds the
+/// selected resources to the exact issuance boundary without changing the saved request.
+async fn apply_app_gate(
+    state: &AppState,
+    auth: &crate::mw::auth::AuthUser,
+    client: &crate::models::oauth_client::OauthClient,
+    params: &mut AuthorizeQuery,
+    scope: &str,
+    consent: Option<&Consent>,
+    interactive_consent: bool,
+) -> AppResult<Option<Response>> {
+    let Some(manifest) = app_gate::gate_manifest(state, client).await? else {
+        return Ok(None);
+    };
+    super::app_connect_links::require_human(state, auth).await?;
+    for resource in &params.resource {
+        oauth_resource_service::validate_resource_uri(resource)?;
+    }
+    let user_id = auth.user_id.to_string();
+    let prior =
+        app_requirements_service::prior_explicit_selections(&state.db, &user_id, &client.id)
+            .await?;
+    let report = app_requirements_service::evaluate_local(
+        state,
+        &manifest,
+        &user_id,
+        &app_requirements_service::EvaluationCaller {
+            client_id: &client.id,
+            allow_all_services: true,
+            allowed_service_ids: &[],
+            explicit_selections: prior.clone(),
+        },
+    )
+    .await?;
+    let fresh = app_gate::required_fresh(&manifest, &report);
+    let covered = app_gate::consent_covers(consent, &app_gate::selected_ids(&report));
+    if fresh && covered && !interactive_consent && params.nyx_connect.as_deref() != Some("force") {
+        let resources = oauth_resource_service::resolve_requested_resources(
+            &state.db,
+            &state.config,
+            &user_id,
+            non_empty_resources(&params.resource),
+        )
+        .await?;
+        if !consent_requires_prompt(consent, resources.as_ref()) {
+            params.gate_service_ids = app_gate::selected_ids(&report);
+            return Ok(None);
+        }
+    }
+    if parse_prompt(params.prompt.as_deref()).contains("none") {
+        return Ok(Some(redirect_302(&build_callback_error_url(
+            params,
+            "interaction_required",
+            "App connection requirements need interaction",
+        ))));
+    }
+    let created = app_links::start_from_authorize(
+        state,
+        &manifest,
+        &user_id,
+        stored_authorize_params(params, scope)?,
+        report,
+        &prior,
+    )
+    .await?;
+    Ok(Some(redirect_302(&created.connect_url)))
+}
+
 async fn authorize_inner(
     state: &AppState,
     opt_auth: OptionalAuthUser,
@@ -936,7 +1216,11 @@ async fn authorize_inner(
                     return Ok(redirect_302(&redirect_url));
                 }
 
-                let return_to = build_authorize_url(&state.config.frontend_url, params);
+                let mut login_params = params.clone();
+                if app_gate::gate_manifest(state, &client).await?.is_none() {
+                    login_params.nyx_connect = None;
+                }
+                let return_to = build_authorize_url(&state.config.frontend_url, &login_params);
                 let login_url = format!(
                     "{}/login?return_to={}",
                     state.config.frontend_url,
@@ -959,6 +1243,26 @@ async fn authorize_inner(
                 )
                 .await?;
 
+                let binding_grant =
+                    resolve_binding_grant_review(state, params, &user_id_str, external_subject)
+                        .await?;
+
+                let mut gated_params = params.clone();
+                if let Some(response) = apply_app_gate(
+                    state,
+                    &auth_user,
+                    &client,
+                    &mut gated_params,
+                    &validated_scope,
+                    consent.as_ref(),
+                    force_consent || binding_grant.is_some(),
+                )
+                .await?
+                {
+                    return Ok(response);
+                }
+                let params = &gated_params;
+
                 let resolved_resources = oauth_resource_service::resolve_requested_resources(
                     &state.db,
                     &state.config,
@@ -966,9 +1270,6 @@ async fn authorize_inner(
                     non_empty_resources(&params.resource),
                 )
                 .await?;
-                let binding_grant =
-                    resolve_binding_grant_review(state, params, &user_id_str, external_subject)
-                        .await?;
 
                 let needs_consent = binding_grant.is_some()
                     || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
@@ -1042,6 +1343,25 @@ async fn authorize_inner(
         )
         .await?;
 
+        let binding_grant =
+            resolve_binding_grant_review(state, params, &user_id_str, external_subject).await?;
+
+        let mut gated_params = params.clone();
+        if let Some(response) = apply_app_gate(
+            state,
+            &auth_user,
+            &client,
+            &mut gated_params,
+            &validated_scope,
+            consent.as_ref(),
+            force_consent || binding_grant.is_some(),
+        )
+        .await?
+        {
+            return Ok(response);
+        }
+        let params = &gated_params;
+
         let resolved_resources = oauth_resource_service::resolve_requested_resources(
             &state.db,
             &state.config,
@@ -1049,8 +1369,6 @@ async fn authorize_inner(
             non_empty_resources(&params.resource),
         )
         .await?;
-        let binding_grant =
-            resolve_binding_grant_review(state, params, &user_id_str, external_subject).await?;
 
         if binding_grant.is_some()
             || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
@@ -1259,6 +1577,7 @@ fn has_non_par_authorize_params(params: &AuthorizeQuery) -> bool {
         || params.external_subject_external_user_id.is_some()
         || params.binding_grant_id.is_some()
         || params.prompt.is_some()
+        || params.nyx_connect.is_some()
         || !params.resource.is_empty()
 }
 
@@ -1307,6 +1626,9 @@ async fn resolve_pushed_authorize_params(
         prompt: record.prompt,
         resource: record.resources,
         request_uri: None,
+        nyx_connect: record.nyx_connect,
+        app_connect: None,
+        gate_service_ids: Vec::new(),
     })
 }
 
@@ -1385,6 +1707,9 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
         url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
     }
 
+    if let Some(force) = &params.nyx_connect {
+        url.push_str(&format!("&nyx_connect={}", urlencoding::encode(force)));
+    }
     url
 }
 
@@ -1685,6 +2010,20 @@ async fn issue_authorization_code(
     external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
+    let bound = if let Some(binding) = &params.app_connect {
+        let client = app_links::enabled_client(state, &params.client_id).await?;
+        let link = app_gate::bound_session(state, &user_id_str, &client, binding).await?;
+        app_gate::recheck_authority(state, &link).await?;
+        Some(link)
+    } else {
+        None
+    };
+    let gate_ids = bound
+        .as_ref()
+        .map_or(params.gate_service_ids.as_slice(), |link| {
+            link.selected_service_ids.as_slice()
+        });
+
     let resolved_resources = oauth_resource_service::resolve_requested_resources(
         &state.db,
         &state.config,
@@ -1698,6 +2037,41 @@ async fn issue_authorization_code(
     let mcp_resource_uri = resolved_resources
         .as_ref()
         .and_then(|resolved| resolved.mcp_resource_uri.clone());
+    let mut resolved_resources = resolved_resources;
+    if !gate_ids.is_empty() {
+        // The selected IDs are the gate's authority. Derive display URIs from
+        // them and reject shadowing; never resolve a selected URI into a new ID.
+        let selected = oauth_resource_service::resolve_token_resource_scope(
+            &state.db,
+            &state.config,
+            &user_id_str,
+            None,
+            &[],
+            gate_ids,
+            false,
+        )
+        .await?;
+        if !app_gate::consent_covers(Some(consent), gate_ids) {
+            return Err(AppError::AppConnectResultMismatch);
+        }
+        let resolved = resolved_resources.get_or_insert_with(|| {
+            oauth_resource_service::ResolvedOAuthResources {
+                resource_uris: Vec::new(),
+                service_ids: Vec::new(),
+                mcp_resource_uri: None,
+            }
+        });
+        for (id, uri) in selected
+            .allowed_service_ids
+            .into_iter()
+            .zip(selected.resource_uris)
+        {
+            if !resolved.service_ids.contains(&id) {
+                resolved.service_ids.push(id);
+                resolved.resource_uris.push(uri);
+            }
+        }
+    }
     let service_resources = resolved_resources.filter(|resolved| !resolved.service_ids.is_empty());
     let (mut resource_uris, allowed_service_ids, service_restricted) =
         match (service_resources, consent.allowed_service_ids.as_ref()) {
@@ -1727,8 +2101,7 @@ async fn issue_authorization_code(
     if let Some(mcp) = mcp_resource_uri {
         resource_uris.push(mcp);
     }
-    let code = oauth_service::create_authorization_code(
-        &state.db,
+    let (code, code_record) = oauth_service::prepare_authorization_code(
         &params.client_id,
         &user_id_str,
         &params.redirect_uri,
@@ -1743,8 +2116,14 @@ async fn issue_authorization_code(
         // AuthorizationCode stores the allow-all flag, while this path
         // tracks whether the grant is service-restricted.
         !service_restricted,
-    )
-    .await?;
+    );
+
+    if let Some(link) = &bound {
+        app_gate::recheck_authority(state, link).await?;
+        app_gate::complete_with_code(&state.db, link, consent, &code_record).await?;
+    } else {
+        oauth_service::store_authorization_code(&state.db, &code_record).await?;
+    }
 
     let mut event_data = serde_json::json!({
         "client_id": params.client_id,
@@ -1849,6 +2228,7 @@ pub async fn pushed_authorization_request(
         body.code_challenge_method.as_deref(),
         body.nonce.as_deref(),
         body.prompt.as_deref(),
+        body.nyx_connect.as_deref(),
         &body.resource,
         external_subject,
         body.binding_grant_id.as_deref(),
@@ -3619,6 +3999,9 @@ mod tests {
             binding_grant_id: None,
             prompt: None,
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: Vec::new(),
         };
 
@@ -3680,6 +4063,9 @@ mod tests {
             binding_grant_id: None,
             prompt: None,
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: vec![resource_uri("svc-b")],
         };
 
@@ -3750,6 +4136,9 @@ mod tests {
             binding_grant_id: None,
             prompt: None,
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: vec![resource_uri("svc-a")],
         };
 
@@ -3820,6 +4209,9 @@ mod tests {
             binding_grant_id: None,
             prompt: Some("none".to_string()),
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: vec![resource_uri("svc-b")],
         };
 
@@ -3877,6 +4269,9 @@ mod tests {
             binding_grant_id: None,
             prompt: None,
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: Vec::new(),
         };
 
@@ -3934,6 +4329,9 @@ mod tests {
             binding_grant_id: None,
             prompt: Some("none".to_string()),
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: Vec::new(),
         };
 
@@ -3986,6 +4384,9 @@ mod tests {
             binding_grant_id: None,
             prompt: None,
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: Vec::new(),
         };
 
@@ -4040,6 +4441,9 @@ mod tests {
             binding_grant_id: None,
             prompt: None,
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: vec![resource_uri("svc-a")],
         };
 
@@ -4099,6 +4503,9 @@ mod tests {
             binding_grant_id: None,
             prompt: None,
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: Vec::new(),
         };
         let consent_request = sign_consent_request(&state, &user_id, &params, "openid")
@@ -4555,6 +4962,9 @@ mod tests {
             binding_grant_id: None,
             prompt: Some("consent".to_string()),
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: resources.clone(),
         };
 
@@ -5228,6 +5638,9 @@ mod tests {
             binding_grant_id: None,
             prompt: None,
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: vec![requested_resource],
         };
         let consent_request =
@@ -5645,6 +6058,9 @@ mod tests {
             binding_grant_id: None,
             prompt: None,
             request_uri: None,
+            nyx_connect: None,
+            app_connect: None,
+            gate_service_ids: Vec::new(),
             resource: vec![],
         };
         let hints = AppDefaultServiceHints {
@@ -5706,3 +6122,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "oauth_app_connect_tests.rs"]
+mod app_connect_tests;

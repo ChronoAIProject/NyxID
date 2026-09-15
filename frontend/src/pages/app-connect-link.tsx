@@ -170,7 +170,8 @@ function RepairSession({
   async function post(path: string, body?: unknown) {
     const result = await action.mutateAsync({ path, body });
     if (path === "ready" || path === "cancel") {
-      if (result.callback_url) window.location.assign(result.callback_url);
+      if (result.consent_url) window.location.assign(result.consent_url);
+      else if (result.callback_url) window.location.assign(result.callback_url);
     } else if (path.endsWith("/select")) {
       setSetup(null);
       setDevice(null);
@@ -192,6 +193,14 @@ function RepairSession({
   const terminal =
     link.status !== "in_progress" && link.status !== "ready_for_consent";
   const expired = new Date(link.expires_at).getTime() <= now;
+  const unsatisfiable =
+    link.origin === "authorize" &&
+    link.items.some(
+      (item) =>
+        !item.optional &&
+        item.readiness === "unsatisfiable" &&
+        item.reason_code !== "slug_shadowed",
+    );
   return (
     <AppConnectShell
       name={link.client_name}
@@ -199,7 +208,29 @@ function RepairSession({
       destination={link.destination}
     >
       {error && <ErrorBanner message={error} />}
-      {terminal ? (
+      {link.status === "ready_for_consent" ? (
+        <Card>
+          <CardContent className="space-y-3 p-5">
+            <p className="text-[12px]">
+              Your connections are ready. Review the app’s access to continue.
+            </p>
+            <Button
+              variant="primary"
+              disabled={busy || expired}
+              onClick={() => void run(() => post("ready"))}
+            >
+              Review access
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() => void run(() => post("cancel"))}
+            >
+              Not now
+            </Button>
+          </CardContent>
+        </Card>
+      ) : terminal ? (
         <Card>
           <CardContent className="space-y-3 p-5">
             <h2 className="text-[15px] font-semibold">
@@ -212,9 +243,11 @@ function RepairSession({
                     : "Connection setup failed"}
             </h2>
             <p className="text-[12px] text-muted-foreground">
-              {link.grant_update_required
-                ? "The app will ask for your permission to use the new connections when you return."
-                : "Return to the app to continue. Checking connections does not grant the app additional access."}
+              {link.origin === "authorize" && link.status === "expired"
+                ? "Restart sign-in from the app. This expired request cannot issue an authorization code."
+                : link.grant_update_required
+                  ? "The app will ask for your permission to use the new connections when you return."
+                  : "Return to the app to continue. Checking connections does not grant the app additional access."}
             </p>
             {link.callback_url && (
               <Button
@@ -296,6 +329,16 @@ function RepairSession({
             </AppConnectChecklistItem>
           ))}
           <div className="flex justify-end gap-2">
+            {link.can_try_later && (
+              <Button
+                disabled={busy || expired}
+                onClick={() =>
+                  void run(() => post("cancel", { try_later: true }))
+                }
+              >
+                Try later
+              </Button>
+            )}
             <Button
               variant="ghost"
               disabled={busy}
@@ -315,10 +358,14 @@ function RepairSession({
             </Button>
             <Button
               variant="primary"
-              disabled={busy || expired || !requirementsReady(link, now)}
+              disabled={
+                busy ||
+                expired ||
+                (!unsatisfiable && !requirementsReady(link, now))
+              }
               onClick={() => void run(() => post("ready"))}
             >
-              Continue
+              {unsatisfiable ? `Return to ${link.client_name}` : "Continue"}
             </Button>
           </div>
         </>

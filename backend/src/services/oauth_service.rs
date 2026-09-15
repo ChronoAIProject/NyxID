@@ -82,6 +82,7 @@ pub fn resolve_authorize_scope(requested: Option<&str>, allowed: &str) -> AppRes
 
 /// Create an authorization code for the OAuth authorization code flow.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn create_authorization_code(
     db: &mongodb::Database,
     client_id: &str,
@@ -97,6 +98,50 @@ pub async fn create_authorization_code(
     allowed_service_ids: &[String],
     allow_all_services: bool,
 ) -> AppResult<String> {
+    let (code, new_code) = prepare_authorization_code(
+        client_id,
+        user_id,
+        redirect_uri,
+        scope,
+        code_challenge,
+        code_challenge_method,
+        nonce,
+        external_subject,
+        binding_grant_id,
+        resource_uris,
+        allowed_service_ids,
+        allow_all_services,
+    );
+    store_authorization_code(db, &new_code).await?;
+    Ok(code)
+}
+
+pub async fn store_authorization_code(
+    db: &mongodb::Database,
+    code: &AuthorizationCode,
+) -> AppResult<()> {
+    db.collection::<AuthorizationCode>(AUTH_CODES)
+        .insert_one(code)
+        .await?;
+    Ok(())
+}
+
+/// Construct a code without publishing it; gated consent stores it with the session CAS.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_authorization_code(
+    client_id: &str,
+    user_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    code_challenge: Option<&str>,
+    code_challenge_method: Option<&str>,
+    nonce: Option<&str>,
+    external_subject: Option<&ExternalSubjectRef>,
+    binding_grant_id: Option<&str>,
+    resource_uris: &[String],
+    allowed_service_ids: &[String],
+    allow_all_services: bool,
+) -> (String, AuthorizationCode) {
     let code = generate_random_token();
     let code_hash = hash_token(&code);
     let now = Utc::now();
@@ -121,11 +166,7 @@ pub async fn create_authorization_code(
         created_at: now,
     };
 
-    db.collection::<AuthorizationCode>(AUTH_CODES)
-        .insert_one(&new_code)
-        .await?;
-
-    Ok(code)
+    (code, new_code)
 }
 
 /// Authenticate a client by client_id and client_secret.

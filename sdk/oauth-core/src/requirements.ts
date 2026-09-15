@@ -13,6 +13,7 @@ export type AppRequirementState =
 export interface AppRequirementStatus {
   readonly requirement_id: string;
   readonly state: AppRequirementState;
+  readonly reason_code: string | null;
   readonly user_service_id: string | null;
   readonly slug: string | null;
   readonly resource_uri: string | null;

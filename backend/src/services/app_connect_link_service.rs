@@ -13,15 +13,16 @@ use uuid::Uuid;
 
 use super::app_requirements_service::{EvaluationCaller, RequirementState, RequirementsReport};
 use super::{
-    app_connect_rollout, app_requirement_manifest_service, app_requirements_service,
-    connect_link_service, oauth_service, org_service, service_validation_service,
-    validator_profiles,
+    app_connect_authorize_service as authorize_gate, app_connect_rollout,
+    app_requirement_manifest_service, app_requirements_service, connect_link_service,
+    oauth_service, org_service, service_validation_service, validator_profiles,
 };
 use crate::AppState;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::app_connect_link::{
     AppConnectItem, AppConnectLink, AppConnectOrigin, AppConnectStatus, COLLECTION_NAME, ItemState,
+    ValidatedAuthorizeParams,
 };
 use crate::models::app_requirement_manifest::{
     AppRequirementManifest, COLLECTION_NAME as MANIFESTS, ServiceRequirement, ValidatorSelection,
@@ -91,24 +92,69 @@ pub async fn start_from_app(
         },
     )
     .await?;
+    start_session(
+        state,
+        &manifest,
+        user_id,
+        AppConnectOrigin::App {
+            callback_url: callback_url.into(),
+            state: correlation.into(),
+        },
+        report,
+        &prior,
+    )
+    .await
+}
+
+pub async fn start_from_authorize(
+    state: &AppState,
+    manifest: &AppRequirementManifest,
+    user_id: &str,
+    params: ValidatedAuthorizeParams,
+    report: RequirementsReport,
+    prior: &BTreeMap<String, String>,
+) -> AppResult<CreatedSession> {
+    start_session(
+        state,
+        manifest,
+        user_id,
+        AppConnectOrigin::Authorize {
+            authorize_params: Box::new(params),
+            consent_nonce: generate_random_token(),
+        },
+        report,
+        prior,
+    )
+    .await
+}
+
+async fn start_session(
+    state: &AppState,
+    manifest: &AppRequirementManifest,
+    user_id: &str,
+    origin: AppConnectOrigin,
+    report: RequirementsReport,
+    prior: &BTreeMap<String, String>,
+) -> AppResult<CreatedSession> {
     let now = Utc::now();
     let capability = generate_random_token();
     let link = AppConnectLink {
         id: Uuid::new_v4().to_string(),
-        oauth_client_id: client_id.into(),
+        oauth_client_id: manifest.oauth_client_id.clone(),
         user_id: user_id.into(),
         manifest_id: manifest.id.clone(),
         manifest_version: manifest.version,
-        origin: AppConnectOrigin::App {
-            callback_url: callback_url.into(),
-            state: correlation.into(),
-        },
+        origin,
         items: report
             .requirements
             .iter()
             .map(|r| AppConnectItem {
                 requirement_id: r.requirement_id.clone(),
-                state: item_state(r.state),
+                state: if r.reason_code == Some("slug_shadowed") {
+                    ItemState::Unmet
+                } else {
+                    item_state(r.state)
+                },
                 connect_link_id: None,
                 user_service_id: r.user_service_id.clone(),
                 explicit_selection: prior.get(&r.requirement_id) == r.user_service_id.as_ref()
@@ -116,7 +162,7 @@ pub async fn start_from_app(
                 validation_record_id: None,
                 attempt_id: None,
                 attempt_started_at: None,
-                reason_code: Some(r.state.as_str().into()),
+                reason_code: Some(r.reason_code.unwrap_or(r.state.as_str()).into()),
                 extended_ttl: false,
             })
             .collect(),
@@ -126,6 +172,7 @@ pub async fn start_from_app(
         revision: 0,
         result_id: Some(report.result_id),
         grant_update_required: false,
+        selected_service_ids: vec![],
         created_at: now,
         expires_at: now + Duration::minutes(30),
         completed_at: None,
@@ -291,6 +338,7 @@ async fn persist(state: &AppState, link: &AppConnectLink) -> AppResult<bool> {
             "expires_at": { "$gt": bson::DateTime::now() } },
         doc! { "$set": { "items": bson::to_bson(&link.items).map_err(|e| AppError::Internal(e.to_string()))?, "status": bson::to_bson(&link.status).map_err(|e| AppError::Internal(e.to_string()))?,
             "result_id": &link.result_id, "grant_update_required": link.grant_update_required,
+            "selected_service_ids": &link.selected_service_ids,
             "expires_at": bson::DateTime::from_chrono(link.expires_at),
             "completed_at": link.completed_at.map(bson::DateTime::from_chrono), "failure_reason": &link.failure_reason },
             "$inc": { "revision": 1 } },
@@ -309,7 +357,7 @@ pub async fn refresh(
         let manifest = manifest(state, &link).await?;
         let original_items = link.items.clone();
         let original_result = link.result_id.clone();
-        if is_open(link.status) {
+        if link.status == AppConnectStatus::InProgress {
             for item in &mut link.items {
                 if let Some(child_id) = &item.connect_link_id {
                     let child = state.db.collection::<ConnectLink>(CHILDREN).find_one(doc! {
@@ -359,7 +407,7 @@ pub async fn refresh(
             }
         }
         let report = evaluate(state, &link, &manifest).await?;
-        if !is_open(link.status) {
+        if link.status != AppConnectStatus::InProgress {
             return Ok((link, report));
         }
         for status in &report.requirements {
@@ -393,9 +441,13 @@ pub async fn refresh(
             ) {
                 continue;
             }
-            item.state = item_state(status.state);
+            item.state = if status.reason_code == Some("slug_shadowed") {
+                ItemState::Unmet
+            } else {
+                item_state(status.state)
+            };
             item.user_service_id = status.user_service_id.clone();
-            item.reason_code = Some(status.state.as_str().into());
+            item.reason_code = Some(status.reason_code.unwrap_or(status.state.as_str()).into());
             if item.state == ItemState::Met && !item.extended_ttl {
                 item.extended_ttl = true;
                 link.expires_at = (link.expires_at + Duration::minutes(15))
@@ -424,6 +476,9 @@ pub async fn select_item(
     let mut link = load(state, id, subject).await?;
     ensure_redeemed(&link)?;
     ensure_open(&link)?;
+    if link.status != AppConnectStatus::InProgress {
+        return Err(AppError::AppConnectResultMismatch);
+    }
     let manifest = manifest(state, &link).await?;
     let required = requirement(&manifest, requirement_id)?;
     if let Some(service_id) = service_id {
@@ -501,6 +556,9 @@ pub async fn connect_item(
     let mut link = load(state, id, subject).await?;
     ensure_redeemed(&link)?;
     ensure_open(&link)?;
+    if link.status != AppConnectStatus::InProgress {
+        return Err(AppError::AppConnectResultMismatch);
+    }
     let manifest = manifest(state, &link).await?;
     let required = requirement(&manifest, requirement_id)?;
     if !required.any_of_catalog_slugs.iter().any(|s| s == slug) {
@@ -585,6 +643,9 @@ pub async fn validate_item(
     let (mut link, _) = refresh(state, id, subject).await?;
     ensure_redeemed(&link)?;
     ensure_open(&link)?;
+    if link.status != AppConnectStatus::InProgress {
+        return Err(AppError::AppConnectResultMismatch);
+    }
     let manifest = manifest(state, &link).await?;
     let required = requirement(&manifest, requirement_id)?;
     let index = link
@@ -603,6 +664,17 @@ pub async fn validate_item(
         .clone()
         .ok_or(AppError::RequirementNotMet)?;
     eligible_selection(state, &link, &manifest, required, &service_id).await?;
+    let selected = state
+        .db
+        .collection::<UserService>(SERVICES)
+        .find_one(doc! { "_id": &service_id })
+        .await?
+        .ok_or(AppError::RequirementNotMet)?;
+    if super::oauth_resource_service::selected_service_is_shadowed(&state.db, subject, &selected)
+        .await?
+    {
+        return Err(AppError::RequirementNotSatisfiable);
+    }
     let ValidatorSelection::Profile { id: profile_id } = &required.validator else {
         link.items[index].reason_code = None;
         link.items[index].connect_link_id = None;
@@ -708,7 +780,34 @@ pub async fn ready(state: &AppState, id: &str, subject: &str) -> AppResult<AppCo
     let (mut link, report) = refresh(state, id, subject).await?;
     ensure_redeemed(&link)?;
     ensure_open(&link)?;
+    if link.status == AppConnectStatus::ReadyForConsent {
+        return Ok(link);
+    }
     let manifest = manifest(state, &link).await?;
+    let is_authorize = matches!(link.origin, AppConnectOrigin::Authorize { .. });
+    if is_authorize
+        && report.requirements.iter().any(|r| {
+            r.state == RequirementState::Unsatisfiable
+                && r.reason_code != Some("slug_shadowed")
+                && manifest
+                    .requirements
+                    .iter()
+                    .any(|m| m.id == r.requirement_id && !m.optional)
+        })
+    {
+        link.status = AppConnectStatus::Failed;
+        link.failure_reason = Some("requirement_unsatisfiable".into());
+        link.completed_at = Some(Utc::now());
+        if !persist(state, &link).await? {
+            return Err(AppError::AppConnectResultMismatch);
+        }
+        link.revision += 1;
+        cancel_pending_children(&state.db, id, None).await;
+        return Ok(link);
+    }
+    if is_authorize && !authorize_gate::required_fresh(&manifest, &report) {
+        return Err(AppError::RequirementNotMet);
+    }
     for required in &manifest.requirements {
         if required.optional {
             continue;
@@ -728,7 +827,7 @@ pub async fn ready(state: &AppState, id: &str, subject: &str) -> AppResult<AppCo
         {
             return Err(AppError::RequirementNotMet);
         }
-        // Repair uses the phase-0 five-minute window; there is no authorize gate here.
+        // Repair retains the phase-0 window; authorize has the stricter gate above.
         if status.valid_until.is_some_and(|until| until <= Utc::now()) {
             return Err(AppError::RequirementNotMet);
         }
@@ -776,12 +875,119 @@ pub async fn ready(state: &AppState, id: &str, subject: &str) -> AppResult<AppCo
                         .is_some_and(|ids| ids.contains(id))
             })
         });
-    link.status = AppConnectStatus::Completed;
-    link.completed_at = Some(Utc::now());
+    if is_authorize {
+        use crate::models::app_requirement_result::{
+            AppRequirementResult, COLLECTION_NAME as RESULTS, RequirementSelection,
+        };
+        let selections: Vec<_> = link
+            .items
+            .iter()
+            .map(|item| RequirementSelection {
+                requirement_id: item.requirement_id.clone(),
+                user_service_id: (item.state == ItemState::Met)
+                    .then(|| item.user_service_id.clone())
+                    .flatten(),
+                explicit: item.state == ItemState::Met,
+            })
+            .collect();
+        link.selected_service_ids = selections
+            .iter()
+            .filter_map(|s| s.user_service_id.clone())
+            .collect();
+        link.selected_service_ids.sort();
+        link.selected_service_ids.dedup();
+        let result = AppRequirementResult {
+            id: Uuid::new_v4().to_string(),
+            oauth_client_id: link.oauth_client_id.clone(),
+            user_id: subject.into(),
+            manifest_id: link.manifest_id.clone(),
+            manifest_version: link.manifest_version,
+            selections,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + Duration::hours(1),
+        };
+        state
+            .db
+            .collection::<AppRequirementResult>(RESULTS)
+            .insert_one(&result)
+            .await?;
+        link.result_id = Some(result.id);
+        // All selected choices are now pinned; consent never switches to another candidate.
+        for item in &mut link.items {
+            item.explicit_selection = item.user_service_id.is_some();
+        }
+        link.status = AppConnectStatus::ReadyForConsent;
+    } else {
+        link.status = AppConnectStatus::Completed;
+        link.completed_at = Some(Utc::now());
+    }
     if !persist(state, &link).await? {
         return Err(AppError::AppConnectResultMismatch);
     }
     link.revision += 1;
+    Ok(link)
+}
+
+pub async fn can_try_later(state: &AppState, link: &AppConnectLink) -> AppResult<bool> {
+    use crate::models::service_validation_record::{
+        COLLECTION_NAME as RECORDS, ServiceValidationRecord, ValidationOutcome,
+    };
+    if !matches!(link.origin, AppConnectOrigin::Authorize { .. })
+        || link.status != AppConnectStatus::InProgress
+    {
+        return Ok(false);
+    }
+    let manifest = manifest(state, link).await?;
+    for item in &link.items {
+        if item.state != ItemState::Unknown
+            || !manifest
+                .requirements
+                .iter()
+                .any(|r| r.id == item.requirement_id && !r.optional)
+        {
+            continue;
+        }
+        if item.reason_code.as_deref() == Some("validation_unavailable") {
+            return Ok(true);
+        }
+        if let Some(id) = &item.validation_record_id {
+            let record = state
+                .db
+                .collection::<ServiceValidationRecord>(RECORDS)
+                .find_one(doc! { "_id": id, "user_service_id": &item.user_service_id })
+                .await?;
+            if record.is_some_and(|r| {
+                matches!(
+                    r.outcome,
+                    ValidationOutcome::TransportUnknown | ValidationOutcome::RateLimited { .. }
+                )
+            }) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+pub async fn try_later(state: &AppState, id: &str, subject: &str) -> AppResult<AppConnectLink> {
+    let mut link = load(state, id, subject).await?;
+    ensure_redeemed(&link)?;
+    ensure_open(&link)?;
+    if !can_try_later(state, &link).await? {
+        return Err(AppError::RequirementNotMet);
+    }
+    link.status = AppConnectStatus::Failed;
+    link.failure_reason = Some("validation_unavailable".into());
+    link.completed_at = Some(Utc::now());
+    for item in &mut link.items {
+        item.attempt_id = None;
+        item.attempt_started_at = None;
+    }
+    if !persist(state, &link).await? {
+        return Err(AppError::AppConnectResultMismatch);
+    }
+    link.revision += 1;
+    cancel_pending_children(&state.db, id, None).await;
     Ok(link)
 }
 
@@ -852,6 +1058,59 @@ pub async fn expire_sessions(db: &mongodb::Database) -> AppResult<()> {
 }
 
 pub fn terminal_callback_url(link: &AppConnectLink) -> AppResult<Option<String>> {
+    if let AppConnectOrigin::Authorize {
+        authorize_params, ..
+    } = &link.origin
+    {
+        let (error, status) = match link.status {
+            AppConnectStatus::Cancelled => ("access_denied", "cancelled"),
+            AppConnectStatus::Failed
+                if link.failure_reason.as_deref() == Some("validation_unavailable") =>
+            {
+                ("temporarily_unavailable", "unavailable")
+            }
+            AppConnectStatus::Failed => ("access_denied", "failed"),
+            AppConnectStatus::Expired => ("invalid_request", "expired"),
+            _ => return Ok(None),
+        };
+        let mut url = url::Url::parse(&authorize_params.redirect_uri)
+            .map_err(|_| AppError::AppConnectResultMismatch)?;
+        let pairs: Vec<_> = url
+            .query_pairs()
+            .filter(|(k, _)| {
+                ![
+                    "error",
+                    "error_description",
+                    "state",
+                    "code",
+                    "nyx_connect_status",
+                    "nyx_connect_reason",
+                    "app_connect_link_id",
+                ]
+                .contains(&k.as_ref())
+            })
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        url.set_query(None);
+        url.set_fragment(None);
+        url.query_pairs_mut()
+            .extend_pairs(pairs)
+            .append_pair("error", error)
+            .append_pair("nyx_connect_status", status)
+            .append_pair("app_connect_link_id", &link.id);
+        if let Some(state) = &authorize_params.state {
+            url.query_pairs_mut().append_pair("state", state);
+        }
+        if status == "failed" {
+            url.query_pairs_mut().append_pair(
+                "nyx_connect_reason",
+                link.failure_reason
+                    .as_deref()
+                    .unwrap_or("requirement_unsatisfiable"),
+            );
+        }
+        return Ok(Some(url.to_string()));
+    }
     let status = match link.status {
         AppConnectStatus::Completed => "completed",
         AppConnectStatus::Cancelled => "cancelled",

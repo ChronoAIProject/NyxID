@@ -97,6 +97,9 @@ pub struct LinkResponse {
     pub expires_at: String,
     pub items: Vec<ItemResponse>,
     pub callback_url: Option<String>,
+    pub consent_url: Option<String>,
+    pub origin: &'static str,
+    pub can_try_later: bool,
     pub grant_update_required: bool,
 }
 #[derive(Serialize)]
@@ -378,8 +381,25 @@ pub async fn ready(
 ) -> AppResult<Json<LinkResponse>> {
     let subject = hosted(&state, &auth, &id, &headers, addr).await?;
     let link = links::ready(&state, &id, &subject).await?;
-    audit(&state, &auth, "app_connect_link_completed", &link, None);
+    audit(
+        &state,
+        &auth,
+        if link.status == AppConnectStatus::ReadyForConsent {
+            "app_connect_link_ready_for_consent"
+        } else {
+            "app_connect_link_completed"
+        },
+        &link,
+        None,
+    );
     response(&state, &auth, &id).await.map(Json)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CancelRequest {
+    #[serde(default)]
+    pub try_later: bool,
 }
 
 pub async fn cancel(
@@ -388,12 +408,17 @@ pub async fn cancel(
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    body: Option<Json<CancelRequest>>,
 ) -> AppResult<Json<LinkResponse>> {
     let subject = require_human(&state, &auth).await?;
     let link = links::load(&state, &id, &subject).await?;
     links::ensure_redeemed(&link)?;
     limit_ip(&state, &headers, addr).await?;
-    let link = links::cancel(&state, &id, &subject).await?;
+    let link = if body.is_some_and(|Json(body)| body.try_later) {
+        links::try_later(&state, &id, &subject).await?
+    } else {
+        links::cancel(&state, &id, &subject).await?
+    };
     audit(&state, &auth, "app_connect_link_cancelled", &link, None);
     response(&state, &auth, &id).await.map(Json)
 }
@@ -450,24 +475,37 @@ async fn response(state: &AppState, auth: &AuthUser, id: &str) -> AppResult<Link
             reason_code: item.reason_code.clone(),
             claim,
             validated_at: r.validated_at.map(|t| t.to_rfc3339()),
-            valid_until: r.valid_until.map(|t| t.to_rfc3339()),
+            valid_until: r
+                .valid_until
+                .map(|until| {
+                    if matches!(link.origin, AppConnectOrigin::Authorize { .. }) {
+                        r.validated_at.map_or(until, |checked| {
+                            until.min(checked + chrono::Duration::seconds(60))
+                        })
+                    } else {
+                        until
+                    }
+                })
+                .map(|t| t.to_rfc3339()),
             granted_to_caller: granted,
             catalog_slugs: required.any_of_catalog_slugs.clone(),
             required_scopes: required.required_downstream_scopes.clone(),
             choices,
         });
     }
-    let destination = match &link.origin {
-        AppConnectOrigin::App { callback_url, .. } => {
-            let url =
-                url::Url::parse(callback_url).map_err(|_| AppError::AppConnectResultMismatch)?;
-            if matches!(url.scheme(), "http" | "https") {
-                url.host_str().unwrap_or_default().to_string()
-            } else {
-                format!("desktop app registered as {}", client.client_name)
-            }
+    let callback_url = match &link.origin {
+        AppConnectOrigin::App { callback_url, .. } => callback_url,
+        AppConnectOrigin::Authorize {
+            authorize_params, ..
+        } => &authorize_params.redirect_uri,
+    };
+    let destination = {
+        let url = url::Url::parse(callback_url).map_err(|_| AppError::AppConnectResultMismatch)?;
+        if matches!(url.scheme(), "http" | "https") {
+            url.host_str().unwrap_or_default().to_string()
+        } else {
+            format!("desktop app registered as {}", client.client_name)
         }
-        _ => return Err(AppError::AppConnectLinkNotFound),
     };
     Ok(LinkResponse {
         #[cfg(test)]
@@ -481,7 +519,19 @@ async fn response(state: &AppState, auth: &AuthUser, id: &str) -> AppResult<Link
         status: link.status,
         expires_at: link.expires_at.to_rfc3339(),
         items,
+        can_try_later: links::can_try_later(state, &link).await?,
         callback_url: links::terminal_callback_url(&link)?,
+        consent_url: if link.status == AppConnectStatus::ReadyForConsent
+            && auth.auth_method == AuthMethod::Session
+        {
+            Some(super::oauth::app_connect_consent_url(state, &link).await?)
+        } else {
+            None
+        },
+        origin: match link.origin {
+            AppConnectOrigin::App { .. } => "app",
+            AppConnectOrigin::Authorize { .. } => "authorize",
+        },
         grant_update_required: link.grant_update_required,
     })
 }

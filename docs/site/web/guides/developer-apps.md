@@ -172,7 +172,7 @@ A developer app can be owned by an org so all org admins can manage it. When cre
 
 ## Advisory app requirements
 
-For apps enabled by your platform administrator, the developer app detail page includes a **Requirements** card. Publish an immutable version selecting catalog services (or a seeded catalog prefix), ownership policy, credential types, required OAuth scopes, and a validator. Prefix membership is frozen when published. This initial release supports **Advise** only, so sign-in and consent continue normally even when requirements are unmet. The card is hidden when the app is outside the deployment rollout or lacks its admin-granted capability.
+For apps enabled by your platform administrator, the developer app detail page includes a **Requirements** card. Publish an immutable version selecting catalog services (or a seeded catalog prefix), ownership policy, credential types, required OAuth scopes, and a validator. Prefix membership is frozen when published. Choose **Advise** to keep sign-in and consent unchanged while requirements are unmet, or **Gate** to require ready connections before granting access. Gate uses local evidence checked within 60 seconds and opens the hosted checklist when a check or consent is needed. `prompt=none` returns `interaction_required`; `nyx_connect=force` explicitly opens the checklist. Continue binds the selected connections into a fresh signed consent request; required rows cannot be deselected, and code issuance completes the session atomically. The card is hidden when the app is outside the deployment rollout or lacks its admin-granted capability.
 
 Use the OAuth SDK's local status API after sign-in:
 

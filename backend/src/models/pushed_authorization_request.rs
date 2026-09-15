@@ -35,6 +35,8 @@ pub struct PushedAuthorizationRequest {
     pub nonce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nyx_connect: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_subject: Option<ExternalSubjectRef>,

@@ -26,7 +26,14 @@ const { state } = vi.hoisted(() => ({
           };
     }>,
     userServicesLoading: false,
+    appConnect: undefined as
+      | import("@/schemas/app-connect-links").AppConnectLink
+      | undefined,
   },
+}));
+
+vi.mock("@/hooks/use-app-connect-links", () => ({
+  useAppConnectConsent: () => ({ data: state.appConnect, isPending: false }),
 }));
 
 vi.mock("@/hooks/use-user-services", () => ({
@@ -76,6 +83,7 @@ function hiddenInputs(name: string): HTMLInputElement[] {
 }
 
 beforeEach(() => {
+  state.appConnect = undefined;
   window.history.pushState({}, "", "/");
   state.userServices = [
     {
@@ -580,4 +588,69 @@ describe("OAuthConsentPage", () => {
       hiddenInputs("allowed_service_ids").map((input) => input.value),
     ).toEqual(["svc-openai"]);
   });
+});
+
+it("binds required rows to the session display and keeps them selected", async () => {
+  state.appConnect = {
+    id: "bound-session",
+    oauth_client_id: VALID.client_id,
+    client_name: "Verified source app",
+    handoff_blurb: null,
+    destination: "app.example.com",
+    requirements_version: 3,
+    status: "ready_for_consent",
+    expires_at: new Date(Date.now() + 900_000).toISOString(),
+    callback_url: null,
+    consent_url: "/oauth-consent",
+    origin: "authorize",
+    grant_update_required: false,
+    items: [
+      {
+        requirement_id: "llm",
+        label: "LLM",
+        optional: false,
+        state: "met",
+        readiness: "met",
+        user_service_id: "svc-openai",
+        slug: "openai-x2",
+        resource_uri: null,
+        owner_id: "person",
+        connect_link_id: null,
+        reason_code: null,
+        claim: "Lists models",
+        validated_at: new Date(Date.now() - 20_000).toISOString(),
+        valid_until: new Date(Date.now() + 280_000).toISOString(),
+        granted_to_caller: false,
+        catalog_slugs: [],
+        required_scopes: [],
+        choices: [],
+      },
+    ],
+  };
+  setSearch({
+    ...VALID,
+    client_name: "Forged name",
+    app_connect_link_id: "bound-session",
+  });
+  const user = userEvent.setup();
+  render(<OAuthConsentPage />);
+  expect(
+    screen.getByText(/Required by Verified source app - verified 20s ago/),
+  ).toBeInTheDocument();
+  expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toContain(
+    "svc-openai",
+  );
+  expect(hiddenInput("consent_request")?.value).toBe(VALID.consent_request);
+  expect(hiddenInput("app_connect_result_id")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Customize" }));
+  expect(screen.getByRole("checkbox", { name: /My OpenAI/ })).toBeDisabled();
+});
+
+it("refuses to show an Allow action for a cancelled bound session", () => {
+  setSearch({ ...VALID, app_connect_link_id: "cancelled-session" });
+  render(<OAuthConsentPage />);
+  expect(screen.getByText(/no longer ready for consent/)).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Allow" }),
+  ).not.toBeInTheDocument();
 });

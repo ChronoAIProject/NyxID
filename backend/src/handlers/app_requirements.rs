@@ -155,6 +155,7 @@ pub async fn publish_manifest(
 pub struct RequirementStatusResponse {
     pub requirement_id: String,
     pub state: &'static str,
+    pub reason_code: Option<&'static str>,
     pub user_service_id: Option<String>,
     pub slug: Option<String>,
     pub resource_uri: Option<String>,
@@ -206,6 +207,7 @@ pub async fn status(
             .map(|r| RequirementStatusResponse {
                 requirement_id: r.requirement_id,
                 state: r.state.as_str(),
+                reason_code: r.reason_code,
                 user_service_id: r.user_service_id,
                 slug: r.slug,
                 resource_uri: r.resource_uri,

@@ -11,6 +11,7 @@ import {
   scopeRiskBadgeVariant,
   scopeRiskLabel,
 } from "@/lib/constants";
+import { useAppConnectConsent } from "@/hooks/use-app-connect-links";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -97,6 +98,7 @@ function serviceOrgName(service: ConsentServiceDisplay): string | null {
 
 export function OAuthConsentPage() {
   useApplyTheme();
+  const [checkedNow] = useState(Date.now);
   const { data: userServices, isLoading: userServicesLoading } =
     useUserServices();
   // The consent page renders once per authorize redirect; capture every
@@ -109,7 +111,7 @@ export function OAuthConsentPage() {
       resources: search.getAll("resource"),
       preselectServiceIds: search.getAll("preselect_service_ids"),
       unmatchedDefaults: search.getAll("unmatched_defaults"),
-      requiredServiceIds: search.getAll("required_service_ids"),
+      requiredServiceHints: search.getAll("required_service_ids"),
       currentBindingServiceIds: search.getAll("current_binding_service_ids"),
     };
   });
@@ -118,13 +120,46 @@ export function OAuthConsentPage() {
     resources,
     preselectServiceIds,
     unmatchedDefaults,
-    requiredServiceIds,
+    requiredServiceHints,
     currentBindingServiceIds,
   } = authorizeQuery;
 
+  const appConnectId = search.get("app_connect_link_id");
+  const appConnect = useAppConnectConsent(appConnectId);
+  const requiredServiceIds = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...requiredServiceHints,
+          ...(appConnect.data?.items
+            .filter((item) => item.state === "met")
+            .flatMap((item) =>
+              item.user_service_id ? [item.user_service_id] : [],
+            ) ?? []),
+        ]),
+      ),
+    [requiredServiceHints, appConnect.data],
+  );
+  function requiredLabel(id: string) {
+    const item = appConnect.data?.items.find(
+      (item) => item.user_service_id === id,
+    );
+    if (!item) return "Required by app";
+    const age = item.validated_at
+      ? Math.max(
+          0,
+          Math.floor((checkedNow - Date.parse(item.validated_at)) / 1000),
+        )
+      : null;
+    return `Required by ${appConnect.data!.client_name} - ${age === null ? "checked locally" : `verified ${age < 60 ? `${age}s` : `${Math.floor(age / 60)}m`} ago`}`;
+  }
+
   const responseType = readParam(search, "response_type");
   const clientId = readParam(search, "client_id");
-  const clientName = readParam(search, "client_name") || clientId;
+  const clientName =
+    appConnect.data?.client_name ||
+    readParam(search, "client_name") ||
+    clientId;
   const redirectUri = readParam(search, "redirect_uri");
   const scope = readParam(search, "scope");
   const state = search.get("state") ?? "";
@@ -281,6 +316,23 @@ export function OAuthConsentPage() {
     });
   }
 
+  if (
+    appConnectId &&
+    (!appConnect.data ||
+      appConnect.data.status !== "ready_for_consent" ||
+      appConnect.data.oauth_client_id !== clientId)
+  ) {
+    return (
+      <ConsentShell>
+        {appConnect.isPending ? (
+          <p>Loading required connections...</p>
+        ) : (
+          <ErrorBanner message="This connection request is no longer ready for consent. Return to the app and restart sign-in." />
+        )}
+      </ConsentShell>
+    );
+  }
+
   if (missing) {
     return (
       <ConsentShell>
@@ -332,34 +384,34 @@ export function OAuthConsentPage() {
 
           <DetailSection title="Requested access" className={NESTED_SECTION}>
             {scopes.map((item) => {
-                const meta = OAUTH_SCOPE_META[item] ?? {
-                  title: "Custom permission",
-                  description:
-                    "This app is requesting a non-standard permission.",
-                  risk: "medium" as const,
-                };
-                return (
-                  <div key={`meta-${item}`} className="px-4 py-2.5">
-                    <div className="flex items-start justify-between gap-3">
-                      <p className="min-w-0 break-words text-[12px] font-medium text-foreground">
-                        {meta.title}
-                      </p>
-                      <Badge
-                        variant={scopeRiskBadgeVariant(meta.risk)}
-                        className="shrink-0"
-                      >
-                        {scopeRiskLabel(meta.risk)}
-                      </Badge>
-                    </div>
-                    <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-                      {meta.description}
+              const meta = OAUTH_SCOPE_META[item] ?? {
+                title: "Custom permission",
+                description:
+                  "This app is requesting a non-standard permission.",
+                risk: "medium" as const,
+              };
+              return (
+                <div key={`meta-${item}`} className="px-4 py-2.5">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="min-w-0 break-words text-[12px] font-medium text-foreground">
+                      {meta.title}
                     </p>
-                    <p className="mt-1.5 break-all font-mono text-[11px] text-text-tertiary">
-                      {item}
-                    </p>
+                    <Badge
+                      variant={scopeRiskBadgeVariant(meta.risk)}
+                      className="shrink-0"
+                    >
+                      {scopeRiskLabel(meta.risk)}
+                    </Badge>
                   </div>
-                );
-              })}
+                  <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+                    {meta.description}
+                  </p>
+                  <p className="mt-1.5 break-all font-mono text-[11px] text-text-tertiary">
+                    {item}
+                  </p>
+                </div>
+              );
+            })}
           </DetailSection>
 
           <DetailSection
@@ -426,7 +478,7 @@ export function OAuthConsentPage() {
                         )}
                         {item.requiredByApp ? (
                           <Badge variant="secondary" className="text-[10px]">
-                            Required by app
+                            {requiredLabel(item.id)}
                           </Badge>
                         ) : (
                           item.requestedByApp && (
@@ -538,7 +590,7 @@ export function OAuthConsentPage() {
                                     variant="secondary"
                                     className="text-[10px]"
                                   >
-                                    Required by app
+                                    {requiredLabel(service.id)}
                                   </Badge>
                                 )}
                                 {bindingReview &&
@@ -638,15 +690,17 @@ export function OAuthConsentPage() {
               name="allow_all_services"
               value={serviceAccess.allow_all_services ? "true" : "false"}
             />
-            {!serviceAccess.allow_all_services &&
-              serviceAccess.allowed_service_ids.map((serviceId) => (
-                <input
-                  key={serviceId}
-                  type="hidden"
-                  name="allowed_service_ids"
-                  value={serviceId}
-                />
-              ))}
+            {(serviceAccess.allow_all_services
+              ? requiredServiceIds
+              : serviceAccess.allowed_service_ids
+            ).map((serviceId) => (
+              <input
+                key={serviceId}
+                type="hidden"
+                name="allowed_service_ids"
+                value={serviceId}
+              />
+            ))}
             {resources.map((resource) => (
               <input
                 key={resource}

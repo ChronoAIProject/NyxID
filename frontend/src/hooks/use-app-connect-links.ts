@@ -94,3 +94,20 @@ export function useUpdateAppHandoff(clientId: string) {
     },
   });
 }
+
+// Consent reads the subject-bound session for display. The signed consent_request
+// remains the only authority accepted by the decision endpoint.
+export function useAppConnectConsent(id: string | null) {
+  return useQuery({
+    queryKey: ["app-connect-consent", id],
+    queryFn: async () =>
+      appConnectLinkSchema.parse(
+        await api.get(`/app-connect-links/${encodeURIComponent(id!)}`),
+      ),
+    enabled: !!id,
+    retry: false,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}

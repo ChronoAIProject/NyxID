@@ -196,6 +196,14 @@ pub async fn exchange_token_with_authority(
         // in the new token rather than inferred again by its consumer.
         restrictions.allowed_node_ids.get_or_insert_with(Vec::new);
         restrictions.allow_all_nodes.get_or_insert(true);
+        narrow_token_resources(
+            db,
+            config,
+            user_id_str,
+            requested_resources,
+            &mut restrictions,
+        )
+        .await?;
         (restrictions, None)
     };
     let (delegated_token, jti) = if catalog_scope {
@@ -380,8 +388,19 @@ pub async fn refresh_delegation_token(
     let authority = if catalog_scope {
         catalog_delegation_service::ensure_client_can_delegate_catalog(db, acting_client_id)
             .await?;
-        let authority =
+        let mut authority =
             catalog_delegation_service::authority_from_restriction_claims(restrictions)?;
+        let display = oauth_resource_service::resolve_token_resource_scope(
+            db,
+            config,
+            user_id,
+            None,
+            &authority.resources,
+            &authority.allowed_service_ids,
+            authority.allow_all_services,
+        )
+        .await?;
+        authority.resources = display.resource_uris;
         validate_refresh_catalog_authority(
             db,
             config,
@@ -398,6 +417,15 @@ pub async fn refresh_delegation_token(
 
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
+
+    let mut refreshed_restrictions = authority.as_ref().map_or_else(
+        || restrictions.clone(),
+        catalog_delegation_service::CatalogAuthority::restriction_claims,
+    );
+    if !catalog_scope {
+        narrow_token_resources(db, config, user_id, &[], &mut refreshed_restrictions).await?;
+    }
+    let restrictions = &refreshed_restrictions;
 
     let (new_token, jti) = if catalog_scope {
         jwt::generate_delegated_access_token_for_client(
@@ -557,25 +585,50 @@ async fn attenuate_catalog_authority(
     requested_nodes.ensure_within(&source_nodes, "node")?;
 
     reject_duplicates(requested_resources, "resource")?;
-    let source_resources =
-        resolve_catalog_resources(db, config, user_id, &source.resources).await?;
-    if let Some(resource_services) = &source_resources.services {
-        resource_services.ensure_within(&source_services, "source resource service")?;
-    }
-    let requested_resource_scope = if requested_resources.is_empty() {
-        source_resources
-    } else {
-        let requested = resolve_catalog_resources(db, config, user_id, requested_resources).await?;
-        if !source.resources.is_empty()
-            && !resources_are_within_source(&requested.resources, &source_resources.resources)
-        {
-            return Err(AppError::InvalidTarget(
-                "resource cannot expand beyond the source token authority".to_string(),
-            ));
+    let requested_resource_scope = if !source.allow_all_services
+        || !source.allowed_service_ids.is_empty()
+    {
+        let bounded = oauth_resource_service::resolve_token_resource_scope(
+            db,
+            config,
+            user_id,
+            (!requested_resources.is_empty()).then_some(requested_resources),
+            &source.resources,
+            &source.allowed_service_ids,
+            false,
+        )
+        .await?;
+        CatalogResourceScope {
+            resources: bounded.resource_uris,
+            services: Some(AuthorityBound::Restricted(
+                bounded.allowed_service_ids.into_iter().collect(),
+            )),
         }
-        requested
+    } else {
+        let source_resources =
+            resolve_catalog_resources(db, config, user_id, &source.resources).await?;
+        if let Some(resource_services) = &source_resources.services {
+            resource_services.ensure_within(&source_services, "source resource service")?;
+        }
+        if requested_resources.is_empty() {
+            source_resources
+        } else {
+            let requested =
+                resolve_catalog_resources(db, config, user_id, requested_resources).await?;
+            if !source.resources.is_empty()
+                && !resources_are_within_source(&requested.resources, &source_resources.resources)
+            {
+                return Err(AppError::InvalidTarget(
+                    "resource cannot expand beyond the source token authority".to_string(),
+                ));
+            }
+            requested
+        }
     };
     if let Some(resource_services) = &requested_resource_scope.services
+        && requested_resources
+            .iter()
+            .any(|uri| !oauth_resource_service::is_mcp_resource(config, uri))
         && !matches!(resource_services, AuthorityBound::All)
     {
         resource_services.ensure_within(&service_ceiling, "resource service")?;
@@ -591,8 +644,18 @@ async fn attenuate_catalog_authority(
 
     let (allow_all_services, allowed_service_ids) = final_services.into_parts();
     let (allow_all_nodes, allowed_node_ids) = requested_nodes.into_parts();
+    let display = oauth_resource_service::resolve_token_resource_scope(
+        db,
+        config,
+        user_id,
+        None,
+        &requested_resource_scope.resources,
+        &allowed_service_ids,
+        allow_all_services,
+    )
+    .await?;
     Ok(catalog_delegation_service::CatalogAuthority {
-        resources: requested_resource_scope.resources,
+        resources: display.resource_uris,
         allow_all_services,
         allowed_service_ids,
         allow_all_nodes,
@@ -604,6 +667,42 @@ fn resources_are_within_source(requested: &[String], source: &[String]) -> bool 
     requested
         .iter()
         .all(|resource| source.iter().any(|granted| granted == resource))
+}
+
+/// Apply the same stored-ID boundary to ordinary delegation and refresh.
+/// An absent legacy boundary stays absent unless a resource request narrows it.
+async fn narrow_token_resources(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    user_id: &str,
+    requested: &[String],
+    restrictions: &mut jwt::TokenRestrictionClaims,
+) -> AppResult<()> {
+    if requested.is_empty()
+        && restrictions.allowed_service_ids.is_none()
+        && restrictions.allow_all_services != Some(false)
+    {
+        return Ok(());
+    }
+    let bounded = oauth_resource_service::resolve_token_resource_scope(
+        db,
+        config,
+        user_id,
+        (!requested.is_empty()).then_some(requested),
+        restrictions.resources.as_deref().unwrap_or_default(),
+        restrictions
+            .allowed_service_ids
+            .as_deref()
+            .unwrap_or_default(),
+        restrictions
+            .allow_all_services
+            .unwrap_or(restrictions.allowed_service_ids.is_none()),
+    )
+    .await?;
+    restrictions.resources = Some(bounded.resource_uris);
+    restrictions.allowed_service_ids = Some(bounded.allowed_service_ids);
+    restrictions.allow_all_services = Some(bounded.allow_all_services);
+    Ok(())
 }
 
 fn reject_duplicates(values: &[String], field: &str) -> AppResult<()> {
@@ -1016,7 +1115,9 @@ mod tests {
 
         let claims = jwt::verify_token(&state.jwt_keys, &state.config, &exchanged.access_token)
             .expect("verify delegated catalog token");
-        assert_eq!(claims.resources, Some(Vec::new()));
+        let service_resource =
+            oauth_resource_service::user_service_resource_uri(&state.config, "restricted-service");
+        assert_eq!(claims.resources, Some(vec![service_resource.clone()]));
         assert_eq!(claims.allow_all_services, Some(false));
         assert_eq!(claims.allowed_service_ids, Some(service_ids.clone()));
 
@@ -1042,7 +1143,10 @@ mod tests {
         let mcp_claims =
             jwt::verify_token(&state.jwt_keys, &state.config, &exchanged_mcp.access_token)
                 .expect("verify MCP-only delegated catalog token");
-        assert_eq!(mcp_claims.resources, Some(vec![mcp_resource]));
+        assert_eq!(
+            mcp_claims.resources,
+            Some(vec![service_resource, mcp_resource])
+        );
         assert_eq!(mcp_claims.allow_all_services, Some(false));
         assert_eq!(mcp_claims.allowed_service_ids, Some(service_ids));
     }

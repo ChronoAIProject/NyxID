@@ -58,11 +58,6 @@ pub async fn compile(
     db: &mongodb::Database,
     input: &mut PublishManifest,
 ) -> AppResult<CompiledManifest> {
-    if input.enforcement == Enforcement::Gate {
-        return Err(invalid(
-            "Gate enforcement is unavailable until phase 2; publish Advise instead",
-        ));
-    }
     if input.requirements.len() > 25 {
         return Err(invalid("A manifest may contain at most 25 requirements"));
     }

@@ -7906,7 +7906,7 @@ Key verification UI continues to test allowed/denied scope separately.
 
 ## App requirements
 
-App requirements are advisory, immutable versions describing which catalog services a developer app needs. This feature ships disabled. In allowlist mode it requires an active app owned by an allowed organization and a capability granted by a platform admin. Manifest and status routes return HTTP 404 when the effective rollout check fails. Publishing requirements does not change authorize, consent, issued tokens, or execution permissions.
+App requirements are immutable versions describing which catalog services a developer app needs. Advise reports readiness; Gate requires readiness before interactive authorization. This feature ships disabled. In allowlist mode it requires an active app owned by an allowed organization and a capability granted by a platform admin. Manifest and status routes return HTTP 404 when the effective rollout check fails. Advise does not change authorize or consent. Gate affects authorize only while the deployment rollout and client capability are enabled; it never bypasses execution permissions.
 
 `GET /api/v1/developer/oauth-clients/{client_id}/requirements` lists `{ versions, validator_profiles }`. Versions include `id`, `oauth_client_id`, `version`, `enforcement`, `requirements`, `compiled`, `published_by`, and `published_at`. Profile metadata includes the code-owned `id`, `version`, `claim`, and applicable `catalog_slugs`. Existing app read ownership rules apply; publishing requires app write ownership (the personal owner or an owning-org admin).
 
@@ -7931,7 +7931,7 @@ App requirements are advisory, immutable versions describing which catalog servi
 }
 ```
 
-A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_-]{1,32}`. Each resolves to 1–25 active, user-connectable catalog slugs. `any_of_catalog_prefix` (at most 128 characters) expands active seeded, non-provider slugs at publication and freezes that membership; later seeds enter only on republish. Unknown slugs, catalog tags, explicitly listed provider-category or inactive rows, unknown profiles, and profiles applying to none of a requirement's slugs are rejected with `12000 AppRequirementsInvalid` (400). `gate` is rejected until phase 2; the error explains that only `advise` is available. An empty manifest clears the current requirements by publishing a new version.
+A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_-]{1,32}`. Each resolves to 1–25 active, user-connectable catalog slugs. `any_of_catalog_prefix` (at most 128 characters) expands active seeded, non-provider slugs at publication and freezes that membership; later seeds enter only on republish. Unknown slugs, catalog tags, explicitly listed provider-category or inactive rows, unknown profiles, and profiles applying to none of a requirement's slugs are rejected with `12000 AppRequirementsInvalid` (400). `enforcement` accepts `advise` or `gate`. An empty manifest clears the current requirements by publishing a new version.
 
 `owner_policy` is `personal_only` or `personal_or_org_allowed`; org candidates require the person's live proxy permission. Empty `accepted_credential_types` accepts any user credential, while the master/no-credential flags independently allow platform credentials or credential-free services. OAuth scope checks use the stored `token_scopes`. `{"kind":"stored_only"}` uses local credential readiness; a profile uses the connection-validation evidence and proves only that profile's documented claim.
 
@@ -7944,6 +7944,7 @@ A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_
   "requirements": [{
     "requirement_id": "source_code",
     "state": "met",
+    "reason_code": null,
     "user_service_id": "selected-service-uuid",
     "slug": "api-github",
     "resource_uri": "https://id.example/api/v1/proxy/s/api-github",
@@ -7972,6 +7973,75 @@ Only manifest services may be disclosed. Optional selection/evidence fields are 
 The evaluator performs no provider I/O, decryption, or token refresh. It reuses phase-0 freshness checks, including the profile version, credential revision, and execution-authority digest. Transport failures and other zero-window observations are not reusable evidence. No check runs merely because an app reads status. **GET `/api/v1/app-requirements/status` may auto-provision eligible no-credential services** through the existing local auto-provision path. Prior explicit eligible selections win even when broken. Otherwise candidates rank Met/Included, Unknown, NeedsReauth, then Broken, followed by freshest authenticated evidence, most recent use, and service ID for deterministic ties.
 
 Platform admins use `PATCH /api/v1/admin/oauth-clients/{client_id}/app-connect-capability` with `{"enabled":true|false}`. `GET/PATCH /api/v1/admin/settings/app-connect` reads/updates rollout with `{"rollout":"disabled"|"allowlist"|null}`; `null` restores the deployment default. The response reports `effective`, `env_default`, `override_value`, and `allowed_org_ids`. Public mode is a reserved configuration value requiring a separate rollout review and is not offered in the UI. Capability changes emit `app_connect_capability_granted`/`app_connect_capability_revoked`; mode changes emit `app_connect_rollout_changed`.
+
+A selected connection that is shadowed by another owner’s connection with the
+same slug reports `state: "unsatisfiable"`, `reason_code: "slug_shadowed"`.
+The checklist keeps it unmet and asks the user to rename one connection or choose
+the other. Both repair and authorize Continue refuse a shadowed selection.
+The proxy’s personal-first precedence remains authoritative. Owner-aware resource
+URIs are a possible follow-up if renaming proves too cumbersome.
+
+OAuth codes and refresh tokens with explicit service IDs keep those IDs as the
+authority boundary. Resource URIs are derived from the stored IDs. Code exchange,
+refresh, and token exchange resource requests may narrow that boundary; they
+cannot substitute another connection when a slug is reused or shadowed. A URI
+that does not match a stored ID, or whose live slug resolution points to another
+ID, returns `invalid_target`. The MCP resource remains narrowing-neutral.
+
+### Gated authorization and consent
+
+An enabled client with a current `gate` manifest is evaluated locally after login
+and authorize-request validation, before consent. No provider request runs at
+this stage. Required profile evidence must be no more than 60 seconds old, with
+at most 60 seconds between the oldest and newest required checks. Included and
+StoredOnly requirements use current local authority rather than invented probe
+timestamps. When all required items are ready and stored consent covers the
+selected services and requested RFC 8707 resources, the existing silent flow
+issues the authorization code. `nyx_connect=force` opens the checklist even when
+ready. PAR carries this parameter in its consumed record; accompanying browser
+parameters cannot replace it.
+
+When interaction is needed, `prompt=none` returns an OAuth
+`interaction_required` redirect without creating an App Connect Link. An
+interactive request creates an Authorize-origin session containing the validated
+authorize parameters and redirects to `/connect/app/{id}#t=<capability>`.
+The capability follows the fragment/stash/redeem rules below. Clients with no
+Gate manifest, disabled rollout, or no capability retain existing authorize
+behavior, including the ordinary login redirect.
+
+For Authorize-origin sessions, `POST /ready` repeats the 60-second check, freezes
+the selected service IDs and result, and transitions to `ready_for_consent`.
+The response includes `origin: "authorize"` and `consent_url`. Follow that URL to
+review access. Item edits are refused while consent is pending. The URL's
+`required_service_ids` and `app_connect_link_id` are display hints; the fresh
+15-minute `consent_request` JWT binds the result ID, session ID, subject, client,
+and stored authorize parameters. The session lifetime does not stretch the JWT.
+Consent rows from that result cannot be deselected.
+
+The decision endpoint verifies the binding, immutable manifest version, live
+client activation and rollout, and local service authority. Omitting any bound
+service or required RFC 8707 service from `allowed_service_ids` returns
+`12010 AppConnectResultMismatch`, including when `allow_all_services=true`.
+Consent, the authorization code, and session completion commit together with a
+revision comparison; cancelled or already completed sessions cannot issue a
+code. Selected requirement resources are included in the code's grant, and token
+requests may narrow that grant but cannot expand it.
+
+Authorize-origin failure callbacks use only the stored validated `redirect_uri`:
+
+| User-visible outcome | OAuth error | `nyx_connect_status` |
+|---|---|---|
+| Not now or denied consent | `access_denied` | `cancelled` |
+| Required item cannot be satisfied; user returns to app | `access_denied` | `failed`, plus `nyx_connect_reason` |
+| A bounded check was unavailable and user chooses Try later | `temporarily_unavailable` | `unavailable` |
+| User returns after transaction expiry | `invalid_request` | `expired` |
+
+These callbacks include `app_connect_link_id` and the original OAuth `state`.
+Verify state before interpreting errors or extension parameters. Try later uses
+`POST /cancel` with `{ "try_later": true }` and is accepted only after an
+unavailable required check; the read response advertises `can_try_later`.
+Expired sessions show a restart card and issue no code. The expiry sweep sends
+nothing to a browser; it does not deliver callbacks or webhooks.
 
 ### App Connect Links (repair)
 

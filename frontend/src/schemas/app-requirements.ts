@@ -34,7 +34,7 @@ export const serviceRequirementSchema = z
 
 export const publishManifestSchema = z
   .object({
-    enforcement: z.literal("advise"),
+    enforcement: z.enum(["advise", "gate"]),
     requirements: z.array(serviceRequirementSchema).max(25),
   })
   .refine(

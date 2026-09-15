@@ -145,9 +145,9 @@ Already-issued access tokens can keep working until they expire. The UI warns us
 - "Can refresh expand from OpenAI to GitHub?" -> No. Refresh/exchange can narrow only; widening requires a new interactive consent.
 
 
-### Advisory app requirements
+### App requirements and gated consent
 
-An enabled developer app can publish immutable Advise manifests at `/api/v1/developer/oauth-clients/{client_id}/requirements` and read `/api/v1/app-requirements/status` with its ordinary user access token. The rollout is disabled by default and needs both a platform-admin capability and an allowed org owner. Status is local-only, discloses only manifest services, and never probes or changes consent. Treat `state` and `granted_to_caller` separately: ready services outside the token's grant still need interactive consent using RFC 8707 `resource`. Disabled services are never auto-enabled. SDK `client.requirements.status()` exposes this result; OAuth callback error handling must verify the pending `state` before interpreting `error` or app-connect parameters. Gate enforcement and consent-result binding are phase 2.
+An enabled developer app can publish immutable Advise or Gate manifests at `/api/v1/developer/oauth-clients/{client_id}/requirements` and read `/api/v1/app-requirements/status` with its ordinary user access token. The rollout is disabled by default and needs both a platform-admin capability and an allowed org owner. Status is local-only, discloses only manifest services, and never probes or changes consent. Treat `state` and `granted_to_caller` separately: ready services outside the token's grant still need interactive consent using RFC 8707 `resource`. Disabled services are never auto-enabled. SDK `client.requirements.status()` exposes this result; OAuth callback error handling must verify the pending `state` before interpreting `error` or app-connect parameters. Gate uses local profile evidence within 60 seconds and stored consent to retain the silent path. Otherwise it creates an Authorize-origin App Connect Link; `prompt=none` returns `interaction_required` without a session, and `nyx_connect=force` opens the checklist. Continue freezes the selection and mints a fresh 15-minute consent JWT carrying the result/session binding. Required form omissions fail with 12010; consent and code publication commit with session completion. Treat URL service IDs as display hints only.
 
 App Connect Link repair is available only to rollout-enabled developer apps.
 Create through `POST /api/v1/app-connect-links` with the app user's access token,
@@ -159,5 +159,10 @@ page runs provider checks only on explicit clicks. The terminal callback carries
 state before accepting any outcome. Completion satisfies connections and issues
 no code or tokens. A grant update requires normal authorize with `prompt=consent`
 and the desired resource URIs. `@nyxids/oauth-core` exposes
-`client.appConnectLinks.create/get/parseCallback` for this flow. Gate enforcement,
-authorize-origin links, and repair webhooks remain outside this phase.
+`client.appConnectLinks.create/get/parseCallback` for this flow. Authorize-origin links return OAuth errors plus `nyx_connect_status` and the original state for cancellation, failure, unavailability, or expiry. Repair webhooks remain unavailable.
+
+A `slug_shadowed` reason means proxy precedence selects another connection with
+that slug. Rename one connection or select the other; the checklist stays unmet.
+OAuth grants with explicit service IDs derive resource URIs from those IDs and
+reject requested URI substitution or widening with `invalid_target`, including
+on refresh. Resource strings cannot create new granted IDs.

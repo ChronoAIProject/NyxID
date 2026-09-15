@@ -24,10 +24,12 @@ beforeEach(() => {
   mocks.publish.mockResolvedValue({ version: 1 });
 });
 
-it("publishes a catalog requirement with form policies and no gate option", async () => {
+it("publishes a catalog requirement with gate enforcement and form policies", async () => {
   const user = userEvent.setup();
   render(<RequirementsCard clientId="app" />);
   await user.click(screen.getByRole("button", { name: "Publish new version" }));
+  await user.click(screen.getByRole("combobox", { name: "Enforcement" }));
+  await user.click(screen.getByRole("option", { name: "Gate" }));
   await user.click(screen.getByRole("button", { name: "Add requirement" }));
   await user.type(screen.getByLabelText("ID"), "github");
   await user.type(
@@ -40,12 +42,10 @@ it("publishes a catalog requirement with form policies and no gate option", asyn
     screen.getByLabelText("Required downstream OAuth scopes"),
     "repo read:user",
   );
-  await user.click(
-    screen.getByRole("button", { name: "Publish version" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Publish version" }));
   await waitFor(() =>
     expect(mocks.publish).toHaveBeenCalledWith({
-      enforcement: "advise",
+      enforcement: "gate",
       requirements: [
         {
           id: "github",
@@ -63,9 +63,6 @@ it("publishes a catalog requirement with form policies and no gate option", asyn
       ],
     }),
   );
-  expect(
-    screen.queryByRole("option", { name: "Gate" }),
-  ).not.toBeInTheDocument();
 });
 
 it("accepts a frozen-prefix request and prevents invalid requirement publication", async () => {
@@ -73,17 +70,13 @@ it("accepts a frozen-prefix request and prevents invalid requirement publication
   render(<RequirementsCard clientId="app" />);
   await user.click(screen.getByRole("button", { name: "Publish new version" }));
   await user.click(screen.getByRole("button", { name: "Add requirement" }));
-  await user.click(
-    screen.getByRole("button", { name: "Publish version" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Publish version" }));
   expect(mocks.publish).not.toHaveBeenCalled();
   expect(await screen.findByRole("alert")).toHaveTextContent("Cannot save");
   await user.type(screen.getByLabelText("ID"), "llm");
   await user.type(screen.getByLabelText("Label", { exact: true }), "LLM");
   await user.type(screen.getByLabelText("Catalog prefix (optional)"), "llm-");
-  await user.click(
-    screen.getByRole("button", { name: "Publish version" }),
-  );
+  await user.click(screen.getByRole("button", { name: "Publish version" }));
   await waitFor(() =>
     expect(mocks.publish).toHaveBeenCalledWith(
       expect.objectContaining({

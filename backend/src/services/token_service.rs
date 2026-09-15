@@ -877,7 +877,21 @@ mod tests {
         let user_uuid = Uuid::parse_str(&user_id).unwrap();
         let (refresh_jwt, refresh_jti) =
             crate::crypto::jwt::generate_refresh_token(&jwt_keys, &config, &user_uuid).unwrap();
-        let allowed_service_ids = vec!["svc-1".to_string()];
+        let service_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .insert_one(test_user_service(
+            &service_id,
+            &user_id,
+            "scoped-service",
+            "endpoint-scoped",
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+        let allowed_service_ids = vec![service_id.clone()];
         db.collection::<RefreshToken>(REFRESH_TOKENS)
             .insert_one(RefreshToken {
                 id: Uuid::new_v4().to_string(),
@@ -918,7 +932,7 @@ mod tests {
             .unwrap();
         assert_eq!(new_stored.scope.as_deref(), Some("openid proxy"));
         assert!(!new_stored.allow_all_services);
-        assert_eq!(new_stored.allowed_service_ids, vec!["svc-1".to_string()]);
+        assert_eq!(new_stored.allowed_service_ids, vec![service_id]);
     }
 
     #[tokio::test]

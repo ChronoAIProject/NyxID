@@ -400,15 +400,12 @@ async fn app_requirements_db_publish_freezes_prefix_and_versions_are_atomic() {
 }
 
 #[tokio::test]
-async fn app_requirements_db_publish_rejects_invalid_catalog_profiles_and_gate() {
+async fn app_requirements_db_publish_rejects_invalid_catalog_profiles() {
     let Some(f) = fixture("requirements_invalid").await else {
         return;
     };
     let id = catalog(&f, "api-github", "bearer").await;
-    let mut inputs = vec![manifests::PublishManifest {
-        enforcement: Enforcement::Gate,
-        requirements: vec![],
-    }];
+    let mut inputs = vec![];
     for (slug, profile) in [
         ("missing", "github_user_v1"),
         ("api-github", "missing"),
@@ -694,7 +691,7 @@ async fn app_requirements_db_no_key_included_and_disabled_never_enabled() {
     );
 }
 
-async fn evidence(
+pub(crate) async fn evidence(
     f: &Fixture,
     service: &UserService,
     key: &UserApiKey,

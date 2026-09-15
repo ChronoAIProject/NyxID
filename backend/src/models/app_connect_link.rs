@@ -21,6 +21,8 @@ pub struct AppConnectLink {
     pub revision: i64,
     pub result_id: Option<String>,
     pub grant_update_required: bool,
+    #[serde(default)]
+    pub selected_service_ids: Vec<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -37,14 +39,13 @@ pub enum AppConnectOrigin {
         callback_url: String,
         state: String,
     },
-    /// Reserved storage shape. No authorize-origin sessions are created in phase 1.
     Authorize {
-        authorize_params: ValidatedAuthorizeParams,
+        authorize_params: Box<ValidatedAuthorizeParams>,
         consent_nonce: String,
     },
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatedAuthorizeParams {
     pub client_id: String,
     pub redirect_uri: String,
@@ -55,6 +56,12 @@ pub struct ValidatedAuthorizeParams {
     pub code_challenge_method: Option<String>,
     pub resources: Vec<String>,
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub external_subject: Option<crate::models::authorization_code::ExternalSubjectRef>,
+    #[serde(default)]
+    pub binding_grant_id: Option<String>,
+    #[serde(default)]
+    pub nyx_connect: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

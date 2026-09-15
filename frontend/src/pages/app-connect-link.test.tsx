@@ -251,18 +251,16 @@ describe("App Connect Link hosted page", () => {
       connect_link_id: "failed-child",
       reason_code: "provider_authorization_failed",
     });
-    mocks.get
-      .mockResolvedValueOnce(link([failed]))
-      .mockResolvedValue(
-        link([
-          {
-            ...failed,
-            state: "connecting",
-            connect_link_id: "new-child",
-            reason_code: null,
-          },
-        ]),
-      );
+    mocks.get.mockResolvedValueOnce(link([failed])).mockResolvedValue(
+      link([
+        {
+          ...failed,
+          state: "connecting",
+          connect_link_id: "new-child",
+          reason_code: null,
+        },
+      ]),
+    );
     mocks.post.mockResolvedValue({
       id: "new-child",
       token: "new-child-token",
@@ -398,4 +396,85 @@ describe("App Connect Link hosted page", () => {
     await act(async () => view.rerenderSession());
     expect(screen.queryByText("App A")).not.toBeInTheDocument();
   });
+});
+
+it("continues an authorize session to consent and offers no credential edits", async () => {
+  const ready = {
+    ...link([item({ state: "met", readiness: "met" })]),
+    origin: "authorize",
+    status: "ready_for_consent",
+    consent_url: "/oauth-consent?consent_request=signed",
+  };
+  mocks.get.mockResolvedValue(ready);
+  mocks.post.mockResolvedValue(ready);
+  const assign = vi
+    .spyOn(window.location, "assign")
+    .mockImplementation(() => {});
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Review access" }));
+  await waitFor(() => expect(assign).toHaveBeenCalledWith(ready.consent_url));
+  expect(
+    screen.queryByRole("button", { name: "Change" }),
+  ).not.toBeInTheDocument();
+  expect(mocks.post).toHaveBeenCalledWith("/app-connect-links/link/ready", {});
+});
+
+it("shows a restart message for an expired authorize transaction", async () => {
+  mocks.get.mockResolvedValue({
+    ...link(),
+    origin: "authorize",
+    status: "expired",
+    callback_url:
+      "https://app.example/callback?error=invalid_request&nyx_connect_status=expired",
+  });
+  mount();
+  expect(
+    await screen.findByText(/Restart sign-in from the app/),
+  ).toBeInTheDocument();
+  expect(mocks.post).not.toHaveBeenCalled();
+});
+
+it("offers Try later only after the server reports an exhausted check", async () => {
+  mocks.get.mockResolvedValue({
+    ...link(),
+    origin: "authorize",
+    can_try_later: true,
+  });
+  mocks.post.mockResolvedValue({
+    ...link(),
+    status: "failed",
+    callback_url:
+      "https://app.example/callback?error=temporarily_unavailable&nyx_connect_status=unavailable",
+  });
+  vi.spyOn(window.location, "assign").mockImplementation(() => {});
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Try later" }));
+  await waitFor(() =>
+    expect(mocks.post).toHaveBeenCalledWith("/app-connect-links/link/cancel", {
+      try_later: true,
+    }),
+  );
+});
+
+it("keeps a shadowed connection unmet and lets the user choose another account", async () => {
+  mocks.get.mockResolvedValue({
+    ...link([
+      item({
+        state: "unmet",
+        readiness: "unsatisfiable",
+        reason_code: "slug_shadowed",
+      }),
+    ]),
+    origin: "authorize",
+  });
+  mount();
+  expect(
+    await screen.findByText(
+      "This account shares its name with another of your connections. Rename one of them, or choose the other, to use it here.",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Change" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Re-check" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+  expect(mocks.post).not.toHaveBeenCalled();
 });

@@ -64,6 +64,9 @@ export const appConnectLinkSchema = z.object({
   expires_at: z.string(),
   items: z.array(appConnectItemSchema),
   callback_url: z.string().nullable(),
+  consent_url: z.string().nullable().optional(),
+  origin: z.enum(["app", "authorize"]).optional(),
+  can_try_later: z.boolean().optional(),
   grant_update_required: z.boolean(),
 });
 export const appConnectChildSchema = z.object({
