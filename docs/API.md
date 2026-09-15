@@ -7919,6 +7919,34 @@ Key verification UI continues to test allowed/denied scope separately.
 
 App requirements are immutable versions describing which catalog services a developer app needs. Advise reports readiness; Gate requires readiness before interactive authorization. This feature ships disabled. In allowlist mode it requires an active app owned by an allowed organization and a capability granted by a platform admin. Manifest and status routes return HTTP 404 when the effective rollout check fails. Advise does not change authorize or consent. Gate affects authorize only while the deployment rollout and client capability are enabled; it never bypasses execution permissions.
 
+The routes added for App Connect are listed below. Hosted item paths use
+`{requirement}` for the manifest's requirement ID. The existing
+`PATCH /api/v1/developer/oauth-clients/{client_id}` also accepts `homepage_url`;
+existing authorize, PAR, consent-decision, and token routes retain their paths.
+
+| Method | Path | Caller / purpose |
+| --- | --- | --- |
+| POST | `/api/v1/keys/{id}/validate` | Human connection validation; read disclosure plus proxy permission. |
+| GET, POST | `/api/v1/developer/oauth-clients/{client_id}/requirements` | App owner reads versions or publishes a manifest. |
+| PATCH | `/api/v1/developer/oauth-clients/{client_id}/handoff` | App owner updates handoff text. |
+| POST | `/api/v1/developer/oauth-clients/{client_id}/branding/logo` | App owner uploads a logo. |
+| GET, PATCH | `/api/v1/admin/settings/app-connect` | Platform admin reads or updates rollout. |
+| PATCH | `/api/v1/admin/oauth-clients/{client_id}/app-connect-capability` | Platform admin grants or revokes capability. |
+| POST | `/api/v1/admin/oauth-clients/{client_id}/branding/verify` | Platform admin verifies or unverifies a revision. |
+| GET | `/api/v1/branding/assets/{id}` | Public immutable logo asset. |
+| GET | `/oauth/authorize-context` | Public signed context metadata; `ctx` query parameter. |
+| GET | `/oauth/authorize-context/resume` | Human session consumes and resumes context; `ctx` query parameter. |
+| GET | `/api/v1/app-requirements/status` | Developer-app user token reads local status. |
+| POST | `/api/v1/app-connect-links` | Developer-app user token creates a repair session. |
+| GET | `/api/v1/app-connect-links/{id}` | Bound app/person token or redeemed human session reads. |
+| POST | `/api/v1/app-connect-links/{id}/redeem` | Bound human session redeems page capability once. |
+| POST | `/api/v1/app-connect-links/{id}/ready` | Bound human session completes repair or opens consent. |
+| POST | `/api/v1/app-connect-links/{id}/cancel` | Bound human session cancels; also handles Try later. |
+| POST | `/api/v1/app-connect-links/{id}/items/{requirement}/connect` | Bound human session starts a child connection. |
+| POST | `/api/v1/app-connect-links/{id}/items/{requirement}/reauthorize` | Bound human session repairs downstream OAuth scopes. |
+| POST | `/api/v1/app-connect-links/{id}/items/{requirement}/select` | Bound human session chooses a connection. |
+| POST | `/api/v1/app-connect-links/{id}/items/{requirement}/validate` | Bound human session explicitly checks a connection. |
+
 `GET /api/v1/developer/oauth-clients/{client_id}/requirements` lists `{ versions, validator_profiles }`. Versions include `id`, `oauth_client_id`, `version`, `enforcement`, `requirements`, `compiled`, `published_by`, and `published_at`. Profile metadata includes the code-owned `id`, `version`, `claim`, and applicable `catalog_slugs`. Existing app read ownership rules apply; publishing requires app write ownership (the personal owner or an owning-org admin).
 
 `POST /api/v1/developer/oauth-clients/{client_id}/requirements` publishes the next version:
@@ -8062,10 +8090,11 @@ These callbacks include `app_connect_link_id` and the original OAuth `state`.
 Verify state before interpreting errors or extension parameters. Try later uses
 `POST /cancel` with `{ "try_later": true }` and is accepted only after an
 unavailable required check; the read response advertises `can_try_later`.
-Expired sessions show a restart card and issue no code. The expiry sweep sends
-nothing to a browser; it does not deliver callbacks or webhooks.
+Expired sessions show a restart card and issue no code. The expiry sweep
+reserves terminal webhooks for both origins without a browser; it never
+delivers a browser callback.
 
-### App Connect Links (repair)
+### App Connect Links (repair and hosted sessions)
 
 `POST /api/v1/app-connect-links` accepts a developer-app **user access token** and
 `{"callback_url":"https://app.example/callback","state":"application-generated-nonce"}`.
@@ -8083,8 +8112,9 @@ An app token cannot redeem or operate the hosted checklist.
 
 `GET /api/v1/app-connect-links/{id}` accepts either that app's user token (both
 client and subject must match) or the bound human's session after redemption.
-It returns the app's name, plain-text `handoff_blurb`, fixed destination label,
-manifest version, status, expiry, and checklist items. Items include
+It returns the app's name, plain-text `handoff_blurb`, logo URL, verification
+status, fixed destination label, manifest version, status, expiry, and checklist
+items. Items include
 `requirement_id`, `label`, `optional`, `state`, `readiness`, selection/evidence
 fields, `reason_code`, profile `claim`, and `granted_to_caller`. Human reads also
 include eligible connection choices. Disclosure is limited to the frozen
@@ -8116,8 +8146,9 @@ shared platform OAuth scope allowlist. It does not create a replacement key.
 
 Checklist states are `unmet`, `connecting`, `reauthorizing`, `validating`, `met`,
 `unknown`, `failed`, and `skipped`. Sessions start `in_progress`; repair can finish
-`completed`, `cancelled`, `expired`, or `failed`. `ready_for_consent` is reserved
-for the later authorize integration. Each session starts with a 30-minute TTL;
+`completed`, `cancelled`, `expired`, or `failed`. Authorize-origin sessions
+transition through `ready_for_consent` before consent and code issuance can
+complete them. Each session starts with a 30-minute TTL;
 each requirement reaching Met earns one 15-minute extension, capped at two hours
 from creation. Terminal state is retained for a day beyond expiry. Item attempts
 and terminal transitions use MongoDB fences; cancelled work cannot restore an
@@ -8138,8 +8169,9 @@ limiter and phase-0 deployment/provider admission. Every App Connect Link route
 returns a not-found-shaped response when rollout is disabled or the app loses
 its capability/activation. Repair sessions do not change authorize or consent.
 
-The hosted `/connect/app/{id}` page shows the app name and optional handoff text,
-with a fixed **Secured by NyxID · destination** footer. Unauthenticated visitors
+The hosted `/connect/app/{id}` page shows the app name, optional logo and
+handoff text, and the current Verified chip when applicable, with a fixed
+**Secured by NyxID · destination** footer. Unauthenticated visitors
 continue through `/login?return_to=...`. Initial loading only redeems the page
 capability and reads local readiness; it never starts a provider check. Actions
 share a 750 ms click throttle. Disabled connections remain disabled. Check
@@ -8209,7 +8241,7 @@ Optional metadata is `null` when unset. Invalid, expired, or tampered contexts,
 inactive clients, invalidated redirect URIs, and disabled rollout return 404.
 A raw `client_id` does not authorize this lookup. The hosted page embeds the
 existing password, social, device, and MFA login flows. Successful login resumes
-`/oauth/authorize-context/resume?ctx=<token>` on the same origin. That route
+`GET /oauth/authorize-context/resume?ctx=<token>` on the same origin. That route
 requires a human session and continues only the stored parameters. Immediately
 before continuing, it atomically consumes the context. Replays return 404 and
 cannot create another checklist or code. Social-login failure keeps the context

@@ -1,9 +1,42 @@
-# App-Required Services Onboarding (design plan v2, not implemented)
+# App-Required Services Onboarding (design v2, as built)
 
-Status: DRAFT v2, 2026-09-14. Revised after an adversarial review by Astra
-(Codex gpt-6-astra, xhigh): 30 pre-plan attacks, then 6 BLOCKER + 17 MAJOR
-findings against v1. All blockers are addressed below; the v1 -> v2 diff is in
-section 12. Nothing here is built.
+Status: **implemented through phase 3 on branch vivid-forest**.
+
+The 2026-09-14 v2 design followed Astra's adversarial review: 30 pre-plan
+attacks, then 6 BLOCKER and 17 MAJOR findings against v1. Section 12 retains
+that design history. The sections below describe the implementation, with
+these approved changes and implementation details:
+
+- Gated authorize uses `nyx_connect=force`. Checks and Continue require
+  explicit clicks; neither returning-user login nor page load probes or
+  automatically advances consent. API-mode authorize returns the existing
+  `consent_required` shape with the checklist URL.
+- Validation separates read disclosure from the actual caller's proxy
+  permission, never touches last-used, and settles aborts with stable codes.
+  Internal aborts and transport/node failures have zero reuse windows;
+  pre-dispatch aborts release provider cooldown. Explicit streamed gzip
+  decoding is isolated from shared proxy clients.
+- Cohere uses the allow-listed `/v1/models` target without changing its
+  shared `/v2` seed. Its success fixture remains **doc-derived**, as accepted
+  in phase 0; an authenticated capture is still a fixture follow-up. Node
+  checks require the advertised `no_redirect_proxy` capability. Node DNS is
+  the owner's network boundary; hosted egress pins public IPs.
+- Candidate ordering preserves explicit choices, then ranks Met/Included,
+  Unknown, NeedsReauth, and Broken. Prefix expansion omits inactive/provider
+  rows; explicit invalid slugs fail. Identical result selections reuse the
+  newest unexpired row, and status reads are limited to 30/user/minute.
+- Stored grant IDs are authoritative across code exchange, refresh, and
+  token exchange. Inactive/tombstoned IDs stay bound; missing or inaccessible
+  active IDs narrow the grant; accessible active slug substitution fails
+  closed. Shadowed checklist/status selections expose `slug_shadowed`.
+  Owner-aware resource URIs remain a possible follow-up.
+- Login contexts are five-minute, single-use stored snapshots, including
+  consumed PAR parameters. Ready mints a fresh 15-minute consent JWT;
+  consent/code/session completion is one transaction. Logos use GridFS;
+  replacement and client deletion best-effort remove obsolete assets.
+- Phase 3 adds terminal webhooks for both origins and CLI parity. Agent Key
+  client binding/entrance was explicitly excluded from this build. General
+  readiness subscriptions and changes to `connection.expired` remain cut.
 
 ## 0. Rollout gate (decided 2026-09-14: internal-only for rapid prototyping)
 
@@ -34,7 +67,9 @@ APP_CONNECT_ALLOWED_ORG_IDS=            # comma-separated org user ids honored i
   the stored manifest, the app-facing routes are not-found-shaped, and the
   developer UI hides the Requirements and White-labeling cards.
 - **Kill switch**: flipping the DB override to `disabled` stops new links and
-  gating immediately; in-flight links finish or expire but no new probes run.
+  gating immediately; hosted access becomes not-found-shaped and no new
+  probes run. The sweep still expires abandoned rows, but rollout-suppressed
+  webhooks are abandoned.
 - **Audit**: `app_connect_capability_granted` / `_revoked` and
   `app_connect_rollout_changed` metadata-only events, actor = platform admin.
 - **Admin UI**: Admin -> OAuth Clients -> App Connect Rollout Policy (mirrors
@@ -50,7 +85,7 @@ need a guarantee that a user has certain services connected **and working**
 before the app can proceed. Example: CMA needs (a) at least one LLM provider,
 (b) GitHub connected with the user's own GitHub OAuth authorization, (c) ORNN.
 
-What exists today, and why it is not enough:
+Pre-implementation baseline (the code locations below describe that baseline):
 
 - `OauthClient.default_service_catalog_slugs` is a consent-time preselection
   hint. Unmatched slugs render as prose with no connect affordance
@@ -96,8 +131,9 @@ Goals
 
 Non-goals for v1
 
-- Pure Agent Key clients (no browser authorize). The session engine keeps a
-  second entrance for them, but the client-binding contract is a later phase.
+- Pure Agent Key clients (no browser authorize). An Agent Key entrance and
+  its client-binding contract are deferred; the implemented entrances are
+  developer-app repair and browser authorize.
 - Editing an existing consent in place. Widening still needs interactive
   consent.
 - Ongoing readiness webhooks for reused connections. Apps poll status.
@@ -179,9 +215,9 @@ App A --302--> /oauth/authorize?client_id=A&redirect_uri=...&scope=...&state=...
 
 Same link. `authorize_inner` re-runs the **local** evaluator. Positive
 evidence newer than the gate window (60 s) is accepted. Older evidence sends
-the user to the onboarding page, which runs bounded asynchronous checks with
-the user's prior permission on record; if everything passes the page
-continues automatically to consent (already granted -> straight to the code).
+the user to the checklist. Checks run only on explicit actions, and the user
+clicks Continue when ready to review consent. There is no automatic provider
+request or consent advance on page load.
 A dead credential (refresh failed, prior probe rejected) opens the checklist
 with only that item unmet.
 
@@ -199,10 +235,12 @@ onboarding page supplies a callback.
 | authorize transaction expired (user came back after TTL) | `invalid_request` | `expired` |
 | `prompt=none` and gate not locally satisfiable | `interaction_required` | (none) |
 
-`app_connect_link_id` and `state` are always included. Apps must
-correlate `state` before interpreting the vendored parameters. A closed tab
-produces no redirect; the sweep only expires the session and (later phase)
-emits a webhook. Apps that need to know must poll status.
+Session callbacks include `app_connect_link_id` and the original `state`
+when supplied. `prompt=none` creates no session and therefore has no link ID.
+Apps must correlate `state` before interpreting the vendored parameters. A closed tab
+produces no redirect; the sweep expires the session and reserves its terminal
+webhook for either origin. Apps deduplicate event IDs and can reconcile status
+through the app-bound session read.
 
 ### 3.4 App-side status and repair (authenticated app, no login restart)
 
@@ -259,6 +297,7 @@ pub struct CompiledManifest {
     // rejected; category "provider" rejected; inactive rejected. A prefix
     // is expanded here to the active seeded slugs at publish time, so the
     // membership is frozen per version (new llm-* seeds join on republish).
+    // Prefix-derived inactive/provider rows are excluded, not publish errors.
     pub catalog_service_ids: BTreeMap<String, String>,
     pub validator_versions: BTreeMap<String, u32>,   // profile id -> version frozen
 }
@@ -293,6 +332,7 @@ pub struct ValidatorProfile {
     pub catalog_slugs: &'static [&'static str],   // which seeds it applies to
     pub method: Method,               // GET or POST as the provider documents
     pub target: ProbeTarget,          // Relative(path) | AbsoluteAllowlisted(url)
+    pub target_overrides: &'static [(&'static str, ProbeTarget)], // per-slug target
     pub body: Option<&'static str>,   // fixed, no templating
     pub max_body_bytes: usize,        // bounded parse
     pub classify: fn(&ProbeResponse) -> ValidationOutcome,   // reviewed per provider
@@ -331,7 +371,7 @@ Phase-0 amendments accepted on 2026-09-14:
   `https://api.cohere.com/v1/models`; its shared seed base remains `/v2`.
   Other `llm_models_v1` targets remain relative `models`. The Cohere success
   fixture is explicitly doc-derived from the documented `models` array;
-  an authenticated capture is required on the phase-2 fixture checklist.
+  an authenticated capture remains a fixture follow-up after phase 3.
 - Direct validation accepts seeded origins and base paths. Changing a base
   path cannot turn a public endpoint into authentication evidence.
 - Node requests add `follow_redirects`, defaulting to `true`. Validation
@@ -371,7 +411,7 @@ pub struct ServiceValidationRecord {
     pub attempt_id: String,                 // fence; a stale attempt cannot overwrite
     pub outcome: ValidationOutcome,
     pub checked_at: DateTime<Utc>,
-    pub valid_until: DateTime<Utc>,         // 60 s for gates, 5 min for display
+    pub valid_until: DateTime<Utc>,         // reusable provider answer: 5 min; gates add a 60 s age check
     pub caller_context: CallerContext,      // Human { session } | App { client_id }
 }
 ```
@@ -385,9 +425,13 @@ coordinated refresh path retains its own lifecycle policy. Phase 0 records
 also track `completed` for pending attempts, a metadata-only `reason_code`,
 and a digest of encrypted credential material/scopes to invalidate evidence
 when OAuth refresh changes material without incrementing `credential_epoch`.
-The display window is five minutes; TTL retention extends one day beyond
-`valid_until`. Admission and in-flight ownership use MongoDB coordination
-leases and slots.
+Provider-answered observations have a five-minute reuse window; gate consumers
+add a 60-second age bound. TransportUnknown and node/transport Unsupported
+observations use `valid_until == checked_at` and cannot be reused. Completed
+abort observations are returned to the caller with their stable reason code.
+TTL retention extends one day beyond `valid_until`. Admission and in-flight
+ownership use existing MongoDB coordination leases and slots. Validation
+never updates `last_used_at`, including during coordinated refresh.
 
 ### 4.4 App Connect Link: `app_connect_links` (new collection; distinct from single-service `connect_links`)
 
@@ -403,10 +447,10 @@ pub struct AppConnectLink {
     //   App       { callback_url: String, state: String }
     pub items: Vec<AppConnectItem>,
     pub status: AppConnectStatus,   // InProgress | ReadyForConsent | Completed | Cancelled | Expired | Failed
-    pub capability_hash: String,    // one-time page capability, redeemed once, then cookie-bound
+    pub capability_hash: String,    // hash only; redeemed once into a subject-bound association
     pub created_at, expires_at, completed_at,
     pub failure_reason: Option<String>,
-    // terminal outbox fields identical to ConnectLink (later phase)
+    // webhook_event_* durable outbox fields for both origins (phase 3)
 }
 
 pub struct AppConnectItem {
@@ -425,8 +469,9 @@ extended 15 min per item reaching Met, capped at 2 h. Authorize params are
 persisted server-side (the signed consent request TTL of 15 min is not
 stretched); a fresh consent token is minted at `ReadyForConsent`. The page
 capability is redeemed once into a subject-bound association and scrubbed
-from the URL; resume is by authenticated read. Two tabs share one session;
-item attempts are fenced by `attempt_id`. Child link completion is a durable
+from the URL and tab-local storage; resume is by authenticated read. Before
+login it is stashed by link ID, and `return_to` never contains the fragment.
+Two tabs share one session; item attempts are fenced by `attempt_id`. Child link completion is a durable
 observation the parent reconciles on read, not only an in-process callback.
 
 `ConnectLink` gains `parent_session_id` and `requirement_id`; for such
@@ -469,8 +514,10 @@ Per requirement:
    Disabled/tombstoned rows are never auto-enabled; they surface as
    "Disabled, enable to use".
 2. Prior explicit selection for (user, client, requirement_id) wins if still
-   eligible; otherwise the candidate with the freshest `Authenticated`
-   record; otherwise most recently used.
+   eligible, even when Broken. Otherwise rank Met/Included, Unknown,
+   NeedsReauth, then Broken; break ties by freshest authenticated evidence,
+   most recent use, then ID. A selection whose slug resolves through proxy
+   precedence to a different ID is Unsatisfiable with `slug_shadowed`.
 3. State from the latest validation record: fresh `Authenticated` -> Met;
    `StoredOnly` -> Met iff the readiness `ConnectionState` is Connected;
    `CredentialRejected` -> Broken; scale-out to other eligible candidates
@@ -525,39 +572,50 @@ automatic retry inside it; `Retry-After` honored. Billing: a new
   access for ownership of the session. Session access requires the bound
   subject with a human session; API keys, delegated, relay, and
   service-account tokens are rejected before the handler.
-- `ready(session)`: all non-optional items Met within a bounded evidence age
-  spread -> `ReadyForConsent`; mint the consent token embedding
-  `app_connect_result_id` and the selected service ids.
+- `ready(session)`: all non-optional items Met/Included with live authority
+  and a bounded evidence age/spread. App origin completes repair with no
+  token issuance. Authorize origin transitions to `ReadyForConsent` and
+  mints a fresh consent token binding result/session IDs. Repair uses five
+  minutes; authorize uses 60 seconds. StoredOnly/Included rely on current
+  local authority without invented probe timestamps.
 - Terminal transitions are atomic CAS on `status`; a late probe success
   after `Cancelled` is discarded by the attempt fence.
-- Sweep: expires sessions past TTL; authorize-origin sessions have no
-  redirect to deliver; app-origin sessions get `app_connect_link.expired` in a
-  later phase.
+- Sweep: expires sessions past TTL and reserves `app_connect_link.expired`
+  for both origins; there is no browser callback to deliver. All terminal
+  statuses use a durable bounded outbox through `deliver_for_app`, with a
+  frozen safe payload and stable event ID. Missing reservations and stale
+  delivery cycles are recovered; exhausted or rollout-suppressed events are
+  abandoned. `ReadyForConsent` emits nothing; authorize completion dispatches
+  only after the consent/code/completion transaction commits.
 
 ### 5.4 `/oauth/authorize` integration
 
 After `validate_authorize_request` and login, before the consent check:
 
 ```
-if client.current_manifest_version is Some and manifest.enforcement == Gate:
+if rollout_enabled(client) and current_manifest.enforcement == Gate:
     report = evaluate_local(...)
-    if report.all_required_met_fresh:
-        mandatory = report.selected_service_ids ∪ rfc8707_resolved_ids
-        continue to consent_requires_prompt(mandatory)
+    mandatory = report.selected_service_ids ∪ rfc8707_resolved_ids
+    if report.all_required_met_fresh and stored_consent_covers(mandatory)
+       and not interactive_prompt and nyx_connect != force:
+        continue existing silent authorize flow
     else if prompt == none:
-        return interaction_required
+        return interaction_required  // no session created
     else:
         session = start_from_authorize(...)
-        302 -> /connect/app/{link.id}#t=<capability>
+        302 -> /connect/app/{session.id}#t=<capability>
 ```
 
 Consent decision (`authorize_decision`): when the consent token carries
 `app_connect_result_id`, load the result, verify it belongs to this user,
 client, and manifest version, union its service ids with the RFC 8707
 resolution, reject any omission from the form, run
-`validate_grantable_service_ids`, recheck client activation and local
-resource authority, then issue the code. This replaces the v1 idea of
-pushing `required_service_ids` into the consent URL, which is display-only
+`validate_grantable_service_ids`, and recheck activation, rollout, and local
+resource authority. The token must also bind a ReadyForConsent session.
+Consent, code issuance, and session completion commit atomically with a
+revision fence. Stored grant IDs remain the token boundary; requested
+resources only narrow them, never substitute another service ID. This replaces
+the v1 idea of pushing `required_service_ids` into the consent URL, which is display-only
 (`handlers/oauth.rs:807-828` recomputes mandatory ids from resources).
 
 ### 5.5 Routes
@@ -566,15 +624,24 @@ Developer (existing developer-app router):
 
 - `GET /api/v1/developer/oauth-clients/{client_id}/requirements` (list versions)
 - `POST /api/v1/developer/oauth-clients/{client_id}/requirements` (publish new version; validates and compiles)
-- `PATCH /api/v1/developer/oauth-clients/{client_id}` accepts `homepage_url`; `POST .../branding/logo` uploads the asset
-- Admin: `POST /api/v1/admin/oauth-clients/{client_id}/branding/verify`
+- `PATCH /api/v1/developer/oauth-clients/{client_id}/handoff` (bounded handoff text)
+- `POST /api/v1/developer/oauth-clients/{client_id}/branding/logo` (multipart logo)
+- Existing `PATCH /api/v1/developer/oauth-clients/{client_id}` accepts `homepage_url`
+
+Platform admin:
+
+- `GET /api/v1/admin/settings/app-connect` (effective rollout and defaults)
+- `PATCH /api/v1/admin/settings/app-connect` (set mode, or `null` to reset)
+- `PATCH /api/v1/admin/oauth-clients/{client_id}/app-connect-capability`
+- `POST /api/v1/admin/oauth-clients/{client_id}/branding/verify`
 
 Hosted (human-only router, per-IP limits, capability in body after first load):
 
 - `POST /api/v1/app-connect-links/{id}/redeem` (capability -> subject-bound)
 - `GET  /api/v1/app-connect-links/{id}`
-- `POST .../{id}/items/{requirement_id}/{connect|reauthorize|select|validate}`
-- `POST .../{id}/ready`, `POST .../{id}/cancel`
+- `POST /api/v1/app-connect-links/{id}/items/{requirement}/{connect|reauthorize|select|validate}` (four action routes)
+- `POST /api/v1/app-connect-links/{id}/ready`
+- `POST /api/v1/app-connect-links/{id}/cancel` (`try_later: true` for bounded unavailability)
 
 App-facing (developer-app user access token; delegated, relay, service-account rejected):
 
@@ -584,9 +651,15 @@ App-facing (developer-app user access token; delegated, relay, service-account r
 
 Public:
 
-- `GET /oauth/authorize-context?ctx=<short-lived token>` -> `{ client_name, logo_url?, homepage_url?, verified, destination }`;
-  the token is minted by `authorize` when it redirects to login, so the
-  login page never trusts `client_id` from the URL.
+- `GET /oauth/authorize-context?ctx=<short-lived token>` -> `{ client_name, handoff_blurb, logo_url, homepage_url, verified, destination }`;
+  minted only by gated authorize when it redirects to login. The login page
+  never trusts a raw `client_id`. Missing optional metadata is `null`.
+- `GET /api/v1/branding/assets/{id}` (immutable re-encoded PNG)
+
+Human-session login continuation:
+
+- `GET /oauth/authorize-context/resume?ctx=<token>` (atomically consume and
+  resume only the stored authorize snapshot; replay is not-found-shaped)
 
 User-facing:
 
@@ -605,7 +678,7 @@ User-facing:
 
 ## 6. Frontend
 
-- `/connect/app/start/$ctx`: the app-branded shell (`ConnectLinkShell`) rendered
+- `/connect/app/start/$ctx`: the app-branded shell (`AppConnectShell`) rendered
   from `/oauth/authorize-context`: app logo, name, handoff blurb, the
   existing `AuthFlow` (email, social, device login) embedded inside it, and
   a fixed "Secured by NyxID · <destination>" footer. On success it continues
@@ -614,15 +687,16 @@ User-facing:
   from the session read. Checklist with the states in 4.4 and inline
   connect/reauthorize using the
   connect-link page pieces extracted into `components/connect/`
-  (`CredentialForm`, `OAuthSetupForm`, `DeviceCodePanel`, `TerminalPanel`,
-  `ConnectShell` are page-private today). 750 ms click throttle; no
-  request on mount beyond the session read.
+  for credential entry, OAuth setup, and device-code completion. The shared
+  `AppConnectShell` fixes the NyxID/destination footer. 750 ms click throttle; no
+  requests on mount beyond one-time redemption and the local session read.
 - Consent page: rows from the onboarding result are non-deselectable and
   badged "Required by App A - verified <age>".
 - Developer app detail: manifest editor that publishes versions (slug
   picker from the include-all catalog, owner policy, credential types,
   scopes, validator, optional), version history, enforcement switch,
-  branding upload with "verification pending".
+  branding upload/preview, and a Verified chip while the current revision is
+  admin-verified.
 - `/keys`: "Check connection" calls the server validate route and shows the
   profile's `claim` text.
 
@@ -643,11 +717,12 @@ User-facing:
 | 0 | validator profiles + validation transport + `service_validation_records` + `POST /keys/{id}/validate` (observation only) | provider fixtures for all 7 profiles; SSRF egress tests; no `UserApiKey.status` writes |
 | 1 | manifests (publish/compile), local evaluator, `/app-requirements/status`, repair sessions, hosted page, SDK | cross-user/org access tests; scope-repair round trip; no-key ORNN case |
 | 2 | authorize gate + consent result binding + login context + branding upload/verify | forged consent form, `prompt=none`, PAR, token narrowing, stale-probe-after-refresh, cancel-vs-late-probe, app disablement mid-session |
-| 3 | onboarding terminal webhooks, Agent Key client binding, CLI parity | explicit app/requirement/selection relationship model |
+| 3 | terminal webhooks for both origins and CLI parity | frozen payloads, durable reservation/recovery/abandonment, rollout suppression, CLI JSON round trips |
 
-`Advise` is the only enforcement available until phase 2 ships; publishing a
-`Gate` manifest before then is rejected. All phases run under the section 0
-rollout gate in `allowlist` mode for our org only; `public` is out of scope.
+Phase 1 shipped with `Advise` only; phase 2 enabled `Gate` publication and
+consent binding. Both are now implemented. All App Connect phases remain
+behind section 0's deployment-configured org allowlist; `public` is out of
+scope. Pure Agent Key client binding/entrance is deferred.
 
 Vocabulary (aligned with Composio Connect Link so app developers recognize
 it): **Connect Link** = hosted page a user completes; **App Connect Link** =
@@ -660,9 +735,10 @@ and NyxID's existing `status` + `connect_link_id`.
 
 ## 9. Security notes
 
-- Probe targets: profile constants + allow-listed provider origins; DNS
-  pinned per attempt; no redirects; bounded body; custom endpoints excluded
-  from live validation in v1.
+- Probe targets: profile constants + allow-listed provider origins; hosted
+  DNS pinned per attempt; node DNS belongs to the owner's network boundary.
+  No redirects; bounded body; custom endpoints excluded from live validation.
+  Gzip is decoded only by validation, with a streamed decoded-byte limit.
 - Probes never change global credential status; they produce fenced,
   expiring evidence.
 - Probes run only on an explicit user click on the hosted page (never on
@@ -677,8 +753,10 @@ and NyxID's existing `status` + `connect_link_id`.
   callback validator for internal returns.
 - Login branding from a server-minted context token, immutable uploaded
   assets, verification tied to a branding revision.
-- Records, sessions, and audits carry ids, profile ids, outcomes, and
-  reason codes only.
+- Validation records, audits, and terminal webhook payloads contain only
+  bounded metadata: ids, profile ids, outcomes, reason codes, and selected
+  slugs. Sessions retain validated callback/authorize parameters server-side;
+  those parameters and page capabilities never enter audit or webhook bodies.
 
 ## 10. Test matrix (minimum, per Astra finding 23)
 
