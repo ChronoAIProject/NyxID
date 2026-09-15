@@ -7905,6 +7905,10 @@ and a stable `reason_code` (`attempt_superseded`, `credential_unavailable`,
 an abort before dispatch releases the provider cooldown so a check can be retried.
 A foreground request waits at most ten seconds for an observation; an already-started coordinated refresh can settle in the background.
 
+Access tokens also require REST proxy scope (`proxy` or `proxy:*`); an
+`openid profile` token cannot run a check even when its service allowlist matches.
+Session authentication retains the existing proxy permission checks.
+
 All v1 profiles are non-billable in NyxID. **Provider rate limits still apply.**
 Direct probes allow only seeded public provider targets, resolve and pin public
 IP addresses per attempt, disable redirects, and bound the decoded body and
@@ -7934,6 +7938,7 @@ existing authorize, PAR, consent-decision, and token routes retain their paths.
 | PATCH | `/api/v1/admin/oauth-clients/{client_id}/app-connect-capability` | Platform admin grants or revokes capability. |
 | POST | `/api/v1/admin/oauth-clients/{client_id}/branding/verify` | Platform admin verifies or unverifies a revision. |
 | GET | `/api/v1/branding/assets/{id}` | Public immutable logo asset. |
+| GET | `/oauth/consent-presentation` | Subject-bound signed consent display; `consent_request` query parameter. |
 | GET | `/oauth/authorize-context` | Public signed context metadata; `ctx` query parameter. |
 | GET | `/oauth/authorize-context/resume` | Human session consumes and resumes context; `ctx` query parameter. |
 | GET | `/api/v1/app-requirements/status` | Developer-app user token reads local status. |
@@ -8057,7 +8062,12 @@ existing `consent_required` error shape with the checklist URL in `consent_url`.
 Opening that URL still requires the bound person's browser session to redeem
 and act; API keys, delegated, relay, and service-account callers are rejected.
 API-mode `prompt=none` returns the OAuth error callback in `redirect_url` without
-creating a session.
+creating a session. For both gated and non-gated clients, API-mode access-token
+callers must have the same `oauth_client_id` as the requested client, or no
+client ID (first-party); mismatches return 403 before issuing a code or handoff.
+Session callers retain existing behavior. The gate applies the same check to
+its silent and interactive paths. Success and error callbacks preserve registered
+query parameters, replace protocol response fields, and drop fragments.
 
 For Authorize-origin sessions, `POST /ready` repeats the 60-second check, freezes
 the selected service IDs and result, and transitions to `ready_for_consent`.
@@ -8067,6 +8077,17 @@ review access. Item edits are refused while consent is pending. The URL's
 15-minute `consent_request` JWT binds the result ID, session ID, subject, client,
 and stored authorize parameters. The session lifetime does not stretch the JWT.
 Consent rows from that result cannot be deselected.
+
+`GET /oauth/consent-presentation?consent_request=<JWT>` requires the request's
+human subject and verifies the signed consent request. It returns `client_id`,
+`client_name`, `redirect_uri`, `scope`, `resources`, `mandatory_service_ids`,
+`selectable_service_ids`, and the optional bound `app_connect_link_id`, with
+`Cache-Control: no-store`. Mandatory IDs come from the signed RFC 8707 resources
+and session result. The page uses this registered app name and these mandatory
+IDs; URL `client_name` and `required_service_ids` are not trusted authority.
+URL service hints may suggest a selectable service, but the user can deselect it.
+A bound decision rejects IDs outside the mandatory union and current selectable
+services. A result ID or app name in the URL cannot replace the signed binding.
 
 The decision endpoint verifies the binding, immutable manifest version, live
 client activation and rollout, and local service authority. Omitting any bound

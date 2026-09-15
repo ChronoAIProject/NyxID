@@ -1039,6 +1039,10 @@ fn build_router_internal(
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))
         .route(
+            "/consent-presentation",
+            get(handlers::oauth::consent_presentation),
+        )
+        .route(
             "/authorize-context",
             get(handlers::oauth_authorize_context::get),
         )

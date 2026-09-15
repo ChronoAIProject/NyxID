@@ -15,3 +15,15 @@ export const oauthConsentServiceAccessSchema = z
 export type OAuthConsentServiceAccess = z.infer<
   typeof oauthConsentServiceAccessSchema
 >;
+
+export const consentPresentationSchema = z.object({
+  client_id: z.string(),
+  client_name: z.string(),
+  redirect_uri: z.string(),
+  scope: z.string(),
+  resources: z.array(z.string()),
+  mandatory_service_ids: z.array(z.string()),
+  selectable_service_ids: z.array(z.string()),
+  app_connect_link_id: z.string().nullable(),
+});
+export type ConsentPresentation = z.infer<typeof consentPresentationSchema>;

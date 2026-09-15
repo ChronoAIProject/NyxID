@@ -799,6 +799,95 @@ pub async fn authorize(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsentPresentationQuery {
+    pub consent_request: String,
+}
+
+#[derive(Serialize)]
+pub struct ConsentPresentationResponse {
+    pub client_id: String,
+    pub client_name: String,
+    pub redirect_uri: String,
+    pub scope: String,
+    pub resources: Vec<String>,
+    pub mandatory_service_ids: Vec<String>,
+    pub selectable_service_ids: Vec<String>,
+    pub app_connect_link_id: Option<String>,
+}
+
+async fn consent_selection(
+    state: &AppState,
+    user_id: &str,
+    params: &AuthorizeQuery,
+    bound: Option<&AppConnectLink>,
+) -> AppResult<(Vec<String>, Vec<String>)> {
+    let mut mandatory = oauth_resource_service::resolve_resource_service_ids_for_user(
+        &state.db,
+        &state.config,
+        user_id,
+        &params.resource,
+    )
+    .await?;
+    if let Some(link) = bound {
+        mandatory.extend(link.selected_service_ids.clone());
+    }
+    mandatory.sort();
+    mandatory.dedup();
+    let selectable = oauth_resource_service::list_grantable_service_ids(&state.db, user_id).await?;
+    Ok((mandatory, selectable))
+}
+
+/// GET /oauth/consent-presentation. Subject-bound display authority comes only
+/// from the verified consent JWT and its optional persisted App Connect result.
+pub async fn consent_presentation(
+    State(state): State<AppState>,
+    opt_auth: OptionalAuthUser,
+    Query(query): Query<ConsentPresentationQuery>,
+) -> AppResult<Response> {
+    let auth = opt_auth
+        .0
+        .ok_or_else(|| AppError::Unauthorized("Authentication required".into()))?;
+    if !matches!(
+        auth.auth_method,
+        crate::mw::auth::AuthMethod::Session | crate::mw::auth::AuthMethod::AccessToken
+    ) || auth.acting_client_id.is_some()
+        || auth.api_key_id.is_some()
+    {
+        return Err(AppError::Forbidden("A human user is required".into()));
+    }
+    let user_id = auth.user_id.to_string();
+    let params = verify_consent_request(&state, &query.consent_request, &user_id)?;
+    ensure_authorize_token_client(&auth, &params.client_id)?;
+    let (client, scope) = validate_authorize_request(&state, &params).await?;
+    let bound = if let Some(binding) = &params.app_connect {
+        super::app_connect_links::require_human(&state, &auth).await?;
+        Some(app_gate::bound_session(&state, &user_id, &client, binding).await?)
+    } else {
+        None
+    };
+    let (mandatory_service_ids, selectable_service_ids) =
+        consent_selection(&state, &user_id, &params, bound.as_ref()).await?;
+    Ok((
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        Json(ConsentPresentationResponse {
+            client_id: client.id,
+            client_name: client.client_name,
+            redirect_uri: params.redirect_uri,
+            scope,
+            resources: params.resource,
+            mandatory_service_ids,
+            selectable_service_ids,
+            app_connect_link_id: bound.map(|link| link.id),
+        }),
+    )
+        .into_response())
+}
+
 /// POST /oauth/authorize/decision
 ///
 /// Browser consent decision endpoint. Accepts allow/deny from the consent page
@@ -831,6 +920,7 @@ pub async fn authorize_decision(
             .ok_or_else(|| AppError::BadRequest("Missing consent request".to_string()))?,
         &user_id_str,
     )?;
+    ensure_authorize_token_client(&auth_user, &params.client_id)?;
     let external_subject = validate_external_subject_params(
         params.external_subject_platform.as_deref(),
         params.external_subject_tenant.as_deref(),
@@ -869,7 +959,7 @@ pub async fn authorize_decision(
             &params,
             "access_denied",
             "The resource owner denied the request",
-        );
+        )?;
         return Ok(redirect_302(&redirect_url));
     }
 
@@ -889,19 +979,15 @@ pub async fn authorize_decision(
     }
 
     if let Some(link) = &bound {
-        let mut mandatory = link.selected_service_ids.clone();
-        mandatory.extend(
-            oauth_resource_service::resolve_resource_service_ids_for_user(
-                &state.db,
-                &state.config,
-                &user_id_str,
-                &params.resource,
-            )
-            .await?,
-        );
+        let (mandatory, selectable) =
+            consent_selection(&state, &user_id_str, &params, Some(link)).await?;
         if mandatory
             .iter()
             .any(|id| !form.allowed_service_ids.contains(id))
+            || form
+                .allowed_service_ids
+                .iter()
+                .any(|id| !mandatory.contains(id) && !selectable.contains(id))
         {
             return Err(AppError::AppConnectResultMismatch);
         }
@@ -961,7 +1047,7 @@ pub async fn authorize_decision(
         external_subject.as_ref(),
     )
     .await?;
-    let redirect_url = build_callback_url(&params, &code);
+    let redirect_url = build_callback_url(&params, &code)?;
 
     // OAuth consent submits from multiple client types (web consent form,
     // native desktop / mobile via custom scheme, CLI via loopback). The
@@ -1127,6 +1213,24 @@ pub(super) async fn app_connect_consent_url(
     Ok(url)
 }
 
+/// An app's user access token cannot authorize another app on that user's behalf.
+fn ensure_authorize_token_client(
+    auth: &crate::mw::auth::AuthUser,
+    client_id: &str,
+) -> AppResult<()> {
+    if auth.auth_method == crate::mw::auth::AuthMethod::AccessToken
+        && auth
+            .oauth_client_id
+            .as_deref()
+            .is_some_and(|id| id != client_id)
+    {
+        return Err(AppError::Forbidden(
+            "The access token belongs to another OAuth client".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Returns a handoff only for a gated client. Successful silent evaluation adds the
 /// selected resources to the exact issuance boundary without changing the saved request.
 async fn apply_app_gate(
@@ -1141,6 +1245,7 @@ async fn apply_app_gate(
     let Some(manifest) = app_gate::gate_manifest(state, client).await? else {
         return Ok(None);
     };
+    ensure_authorize_token_client(auth, &client.id)?;
     // An ordinary person token may initiate the handoff. Redeem and every
     // hosted action still require that person's authenticated browser session.
     if !matches!(
@@ -1198,7 +1303,7 @@ async fn apply_app_gate(
             params,
             "interaction_required",
             "App connection requirements need interaction",
-        )));
+        )?));
     }
     let created = app_links::start_from_authorize(
         state,
@@ -1220,6 +1325,10 @@ pub(super) async fn authorize_inner(
     external_subject: Option<&ExternalSubjectRef>,
 ) -> Result<Response, AppError> {
     let (client, validated_scope) = validate_authorize_request(state, params).await?;
+    // Changing Accept must not let an app token bypass its client boundary.
+    if let Some(auth) = &opt_auth.0 {
+        ensure_authorize_token_client(auth, &params.client_id)?;
+    }
     let prompts = parse_prompt(params.prompt.as_deref());
 
     // OIDC Core §3.1.2.1: prompt=none is incompatible with login/consent.
@@ -1244,7 +1353,7 @@ pub(super) async fn authorize_inner(
                         params,
                         "login_required",
                         "User is not authenticated",
-                    );
+                    )?;
                     return Ok(redirect_302(&redirect_url));
                 }
 
@@ -1326,7 +1435,7 @@ pub(super) async fn authorize_inner(
                             params,
                             "consent_required",
                             "User consent is required",
-                        );
+                        )?;
                         return Ok(redirect_302(&redirect_url));
                     }
 
@@ -1363,7 +1472,7 @@ pub(super) async fn authorize_inner(
                     external_subject,
                 )
                 .await?;
-                let redirect_url = build_callback_url(params, &code);
+                let redirect_url = build_callback_url(params, &code)?;
 
                 if needs_success_page(&params.redirect_uri) {
                     Ok(oauth_success_page(&redirect_url))
@@ -1459,7 +1568,7 @@ pub(super) async fn authorize_inner(
             external_subject,
         )
         .await?;
-        let redirect_url = build_callback_url(params, &code);
+        let redirect_url = build_callback_url(params, &code)?;
         Ok(Json(AuthorizeResponse { redirect_url }).into_response())
     }
 }
@@ -1765,26 +1874,50 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
     url
 }
 
-/// Build the callback redirect URL with code and optional state.
-fn build_callback_url(params: &AuthorizeQuery, code: &str) -> String {
-    let mut url = format!("{}?code={}", params.redirect_uri, urlencoding::encode(code),);
-    if let Some(ref state_param) = params.state {
-        url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
+/// Preserve registered query pairs while replacing protocol response fields.
+fn callback_base(params: &AuthorizeQuery) -> AppResult<url::Url> {
+    let mut url = url::Url::parse(&params.redirect_uri)
+        .map_err(|_| AppError::BadRequest("Invalid redirect URI".into()))?;
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_ref(),
+                "code" | "state" | "error" | "error_description"
+            )
+        })
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_fragment(None);
+    url.set_query(None);
+    if !pairs.is_empty() {
+        url.query_pairs_mut().extend_pairs(pairs);
     }
-    url
+    Ok(url)
 }
 
-fn build_callback_error_url(params: &AuthorizeQuery, error: &str, description: &str) -> String {
-    let mut url = format!(
-        "{}?error={}&error_description={}",
-        params.redirect_uri,
-        urlencoding::encode(error),
-        urlencoding::encode(description),
-    );
-    if let Some(ref state_param) = params.state {
-        url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
+fn build_callback_url(params: &AuthorizeQuery, code: &str) -> AppResult<String> {
+    let mut url = callback_base(params)?;
+    url.query_pairs_mut().append_pair("code", code);
+    if let Some(state) = &params.state {
+        url.query_pairs_mut().append_pair("state", state);
     }
-    url
+    Ok(url.into())
+}
+
+fn build_callback_error_url(
+    params: &AuthorizeQuery,
+    error: &str,
+    description: &str,
+) -> AppResult<String> {
+    let mut url = callback_base(params)?;
+    url.query_pairs_mut()
+        .append_pair("error", error)
+        .append_pair("error_description", description);
+    if let Some(state) = &params.state {
+        url.query_pairs_mut().append_pair("state", state);
+    }
+    Ok(url.into())
 }
 
 fn build_frontend_authorization_error_url(frontend_url: &str, err: &AppError) -> String {

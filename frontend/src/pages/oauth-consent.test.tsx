@@ -26,10 +26,20 @@ const { state } = vi.hoisted(() => ({
           };
     }>,
     userServicesLoading: false,
+    presentation: undefined as
+      | import("@/schemas/oauth-consent").ConsentPresentation
+      | undefined,
     appConnect: undefined as
       | import("@/schemas/app-connect-links").AppConnectLink
       | undefined,
   },
+}));
+
+vi.mock("@/hooks/use-consent-presentation", () => ({
+  useConsentPresentation: () => ({
+    data: state.presentation,
+    isPending: false,
+  }),
 }));
 
 vi.mock("@/hooks/use-app-connect-links", () => ({
@@ -53,6 +63,31 @@ function setSearch(params: Record<string, string | readonly string[]>) {
     }
   }
   window.history.pushState({}, "", `/oauth/consent?${qs}`);
+  // The fixture models an issued, signed request separately from later URL edits.
+  const resources = qs.getAll("resource");
+  state.presentation = {
+    client_id: String(params.client_id ?? ""),
+    client_name: state.appConnect?.client_name ?? "Registered app",
+    redirect_uri: String(params.redirect_uri ?? ""),
+    scope: String(params.scope ?? ""),
+    resources,
+    mandatory_service_ids:
+      state.appConnect?.items.flatMap((item) =>
+        item.user_service_id ? [item.user_service_id] : [],
+      ) ??
+      state.userServices
+        .filter((service) => resources.includes(service.resource_uri))
+        .map((service) => service.id),
+    selectable_service_ids: state.userServices
+      .filter(
+        (service) =>
+          service.is_active &&
+          (service.credential_source.type === "personal" ||
+            service.credential_source.allowed),
+      )
+      .map((service) => service.id),
+    app_connect_link_id: qs.get("app_connect_link_id"),
+  };
 }
 
 // A complete, valid set of required params so the page renders the consent UI.
@@ -84,6 +119,7 @@ function hiddenInputs(name: string): HTMLInputElement[] {
 
 beforeEach(() => {
   state.appConnect = undefined;
+  state.presentation = undefined;
   window.history.pushState({}, "", "/");
   state.userServices = [
     {
@@ -178,8 +214,8 @@ describe("OAuthConsentPage", () => {
 
     render(<OAuthConsentPage />);
 
-    // clientName falls back to client_id; here it's the explicit client_name.
-    expect(screen.getAllByText("My Cool App").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Registered app").length).toBeGreaterThan(0);
+    expect(screen.queryByText("My Cool App")).not.toBeInTheDocument();
     // parseHost("https://app.example.com/callback") === "app.example.com".
     expect(screen.getByText("app.example.com")).toBeInTheDocument();
     // Full client_id and redirect_uri are shown in their detail blocks.
@@ -189,13 +225,12 @@ describe("OAuthConsentPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("falls back to client_id as the display name when client_name is absent", () => {
+  it("uses the registered presentation name when the URL omits client_name", () => {
     setSearch(VALID);
 
     render(<OAuthConsentPage />);
 
-    // clientName = client_name || clientId => "client-abc" appears as the app name.
-    expect(screen.getAllByText("client-abc").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Registered app").length).toBeGreaterThan(0);
   });
 
   it("maps known scope risk levels and labels unknown scopes as Custom permission/Medium", () => {
@@ -549,6 +584,11 @@ describe("OAuthConsentPage", () => {
       current_binding_service_ids: ["svc-openai"],
       required_service_ids: ["svc-openai", "svc-org", "svc-ornn"],
     });
+    state.presentation!.mandatory_service_ids = [
+      "svc-openai",
+      "svc-org",
+      "svc-ornn",
+    ];
 
     render(<OAuthConsentPage />);
 
@@ -644,9 +684,13 @@ it("binds required rows to the session display and keeps them selected", async (
   );
   expect(hiddenInput("consent_request")?.value).toBe(VALID.consent_request);
   expect(hiddenInput("app_connect_result_id")).toBeNull();
-  expect(screen.getByRole("img", { name: "Verified source app logo" })).toBeInTheDocument();
+  expect(
+    screen.getByRole("img", { name: "Verified source app logo" }),
+  ).toBeInTheDocument();
   expect(screen.getByText("Verified")).toBeInTheDocument();
-  expect(screen.getByText("Secured by NyxID · app.example.com")).toBeInTheDocument();
+  expect(
+    screen.getByText("Secured by NyxID · app.example.com"),
+  ).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Customize" }));
   expect(screen.getByRole("checkbox", { name: /My OpenAI/ })).toBeDisabled();
 });
@@ -658,4 +702,30 @@ it("refuses to show an Allow action for a cancelled bound session", () => {
   expect(
     screen.queryByRole("button", { name: "Allow" }),
   ).not.toBeInTheDocument();
+});
+
+it("never makes a forged required-service hint mandatory or renders a forged app name", async () => {
+  setSearch(VALID);
+  const forged = new URLSearchParams(window.location.search);
+  forged.set("client_name", "Trusted bank impersonation");
+  forged.append("required_service_ids", "svc-org");
+  window.history.replaceState({}, "", `/oauth/consent?${forged}`);
+  const user = userEvent.setup();
+  render(<OAuthConsentPage />);
+  expect(
+    screen.queryByText("Trusted bank impersonation"),
+  ).not.toBeInTheDocument();
+  expect(screen.getAllByText("Registered app").length).toBeGreaterThan(0);
+  expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toContain(
+    "svc-org",
+  );
+  expect(state.presentation!.mandatory_service_ids).toEqual([]);
+  expect(screen.queryByText("Required by app")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Customize" }));
+  const choice = screen.getByRole("checkbox", { name: /Org Service/ });
+  expect(choice).toBeEnabled();
+  await user.click(choice);
+  expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).not.toContain(
+    "svc-org",
+  );
 });

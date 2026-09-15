@@ -168,6 +168,23 @@ async fn membership_can_grant_user_service(
     Ok(owner_access_can_grant_user_service(&access, service))
 }
 
+/// IDs eligible for the human consent selection list. Share this selector with
+/// decision validation so an unpresented resource cannot enter a bound grant.
+pub async fn list_grantable_service_ids(
+    db: &mongodb::Database,
+    actor: &str,
+) -> AppResult<Vec<String>> {
+    let mut ids = Vec::new();
+    for entry in user_service_service::list_user_services_with_sources(db, actor).await? {
+        if can_grant_user_service(db, actor, &entry.service).await? {
+            ids.push(entry.service.id);
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 pub async fn validate_grantable_service_ids(
     db: &mongodb::Database,
     actor_user_id: &str,

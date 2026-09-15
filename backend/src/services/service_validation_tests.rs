@@ -1132,3 +1132,42 @@ async fn validation_db_handler_returns_settled_credential_abort() {
     }
     assert!(f.outbound.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn validation_db_openid_token_cannot_probe_despite_matching_allowlist() {
+    use crate::handlers::keys::{ValidateKeyRequest, validate_key};
+    use crate::services::billing::route_inventory::BillingRoutePolicy;
+    use axum::{
+        Extension, Json,
+        extract::{Path, State},
+    };
+    let Some(mut f) = fixture("validation_token_scope", true).await else {
+        return;
+    };
+    let mut auth = test_auth_user(&f.caller.user_id);
+    auth.auth_method = crate::mw::auth::AuthMethod::AccessToken;
+    auth.scope = "openid profile".into();
+    auth.allow_all_services = false;
+    auth.allowed_service_ids = vec![f.service.id.clone()];
+    assert!(matches!(
+        validate_key(
+            State(f.state.clone()),
+            auth,
+            Path(f.service.id.clone()),
+            Extension(BillingRoutePolicy::Exempt("service_validation")),
+            Json(ValidateKeyRequest::default())
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(f.outbound.try_recv().is_err());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}

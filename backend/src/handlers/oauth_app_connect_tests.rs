@@ -143,6 +143,7 @@ async fn app_connect_authorize_db_prompt_none_unmet_creates_no_session_or_code()
             "interaction_required",
             "App connection requirements need interaction"
         )
+        .unwrap()
     );
     assert_eq!(count(&f, LINKS).await, 0);
     assert_eq!(count(&f, CODES).await, 0);
@@ -630,7 +631,7 @@ async fn app_connect_authorize_db_non_gate_and_rollout_off_keep_existing_silent_
             .unwrap()
             .1
             .into_owned();
-        assert_eq!(location(&response), build_callback_url(p, &code));
+        assert_eq!(location(&response), build_callback_url(p, &code).unwrap());
         assert!(
             axum::body::to_bytes(response.into_body(), 1024)
                 .await
@@ -1333,3 +1334,179 @@ mod branding_tests;
 
 #[path = "oauth_app_connect_webhook_tests.rs"]
 mod webhook_tests;
+
+#[tokio::test]
+async fn app_connect_authorize_db_api_token_cannot_cross_clients_gated_or_ordinary() {
+    for gate in [false, true] {
+        let Some(f) = fixture("authorize_token_client").await else {
+            return;
+        };
+        let ids = if gate {
+            vec![gated(&f, false, true).await.unwrap()]
+        } else {
+            vec![]
+        };
+        consent_service::grant_consent_with_services(
+            &f.state.db,
+            &f.auth.user_id.to_string(),
+            &f.app.id,
+            "openid proxy",
+            Some(ids),
+        )
+        .await
+        .unwrap();
+        let p = params(&f);
+        let mut other_app = f.auth.clone();
+        other_app.auth_method = AuthMethod::AccessToken;
+        other_app.oauth_client_id = Some(uuid::Uuid::new_v4().to_string());
+        for force in [false, true] {
+            let mut requested = p.clone();
+            if force {
+                requested.prompt = Some("consent".into());
+            }
+            assert!(matches!(
+                authorize_inner(
+                    &f.state,
+                    OptionalAuthUser(Some(other_app.clone())),
+                    &requested,
+                    false,
+                    None
+                )
+                .await,
+                Err(AppError::Forbidden(_))
+            ));
+        }
+        assert!(matches!(
+            authorize_inner(&f.state, OptionalAuthUser(Some(other_app)), &p, true, None).await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert_eq!(count(&f, CODES).await, 0);
+        assert_eq!(count(&f, LINKS).await, 0);
+        for auth in [f.auth.clone(), human(&f)] {
+            let response = authorize_inner(&f.state, OptionalAuthUser(Some(auth)), &p, false, None)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
+        let mut first_party = f.auth.clone();
+        first_party.oauth_client_id = None;
+        assert!(
+            authorize_inner(
+                &f.state,
+                OptionalAuthUser(Some(first_party)),
+                &p,
+                false,
+                None
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(count(&f, CODES).await, 3);
+    }
+}
+
+#[tokio::test]
+async fn app_connect_authorize_db_consent_presentation_binds_subject_name_and_services() {
+    let Some(f) = fixture("consent_presentation").await else {
+        return;
+    };
+    let required = gated(&f, false, true).await.unwrap();
+    let cat = catalog(&f, "api-slack", "bearer").await;
+    let (optional, _) = service(&f, &f.auth.user_id.to_string(), &cat, "optional").await;
+    let (link, mut form) = ready(&f, &params(&f)).await;
+    let token = form.consent_request.clone().unwrap();
+    let response = consent_presentation(
+        State(f.state.clone()),
+        OptionalAuthUser(Some(human(&f))),
+        Query(ConsentPresentationQuery {
+            consent_request: token.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["client_name"], f.app.client_name);
+    assert_eq!(body["app_connect_link_id"], link.id);
+    assert_eq!(body["mandatory_service_ids"], serde_json::json!([required]));
+    assert!(
+        body["selectable_service_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(optional.id))
+    );
+    let mut other = human(&f);
+    other.user_id = uuid::Uuid::new_v4();
+    assert!(
+        consent_presentation(
+            State(f.state.clone()),
+            OptionalAuthUser(Some(other)),
+            Query(ConsentPresentationQuery {
+                consent_request: token
+            })
+        )
+        .await
+        .is_err()
+    );
+    form.allowed_service_ids
+        .push(uuid::Uuid::new_v4().to_string());
+    assert!(matches!(
+        decide(&f, form).await,
+        Err(AppError::AppConnectResultMismatch)
+    ));
+    assert_eq!(count(&f, CODES).await, 0);
+}
+
+#[tokio::test]
+async fn app_connect_authorize_db_success_preserves_registered_query() {
+    let Some(f) = fixture("authorize_callback_query").await else {
+        return;
+    };
+    let mut p = params(&f);
+    p.redirect_uri = "https://app.example/callback?flow=x".into();
+    f.state
+        .db
+        .collection::<Document>("oauth_clients")
+        .update_one(
+            doc! { "_id": &f.app.id },
+            doc! { "$set": { "redirect_uris": [&p.redirect_uri] } },
+        )
+        .await
+        .unwrap();
+    consent_service::grant_consent_with_services(
+        &f.state.db,
+        &f.auth.user_id.to_string(),
+        &f.app.id,
+        "openid proxy",
+        Some(vec![]),
+    )
+    .await
+    .unwrap();
+    let response = authorize_response(&f, &p).await;
+    let url = url::Url::parse(&location(&response)).unwrap();
+    let pairs: Vec<_> = url.query_pairs().collect();
+    assert!(pairs.iter().any(|(k, v)| k == "flow" && v == "x"));
+    assert_eq!(pairs.iter().filter(|(k, _)| k == "code").count(), 1);
+    assert_eq!(pairs.iter().filter(|(k, _)| k == "state").count(), 1);
+    assert!(
+        pairs
+            .iter()
+            .any(|(k, v)| k == "state" && v == "original-state")
+    );
+    p.redirect_uri.push_str("&code=old&state=old#discard");
+    let replaced = url::Url::parse(&build_callback_url(&p, "new-code").unwrap()).unwrap();
+    assert!(replaced.fragment().is_none());
+    assert_eq!(
+        replaced.query_pairs().filter(|(k, _)| k == "code").count(),
+        1
+    );
+    assert!(
+        replaced
+            .query_pairs()
+            .any(|(k, v)| k == "code" && v == "new-code")
+    );
+}

@@ -2827,6 +2827,7 @@ pub async fn validate_key(
     }
     let actor = auth_user.user_id.to_string();
     let access = resolve_key_read_owner(&state, &actor, &key_id).await?;
+    auth_user.ensure_rest_proxy_access()?;
     crate::services::billing::route_inventory::enforce_billing_exempt_egress_classification(Some(
         policy,
     ))?;

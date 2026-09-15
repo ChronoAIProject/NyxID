@@ -14,6 +14,7 @@ import {
 import { AppConnectShell } from "@/components/connect/app-connect-shell";
 import type { AppConnectLink } from "@/schemas/app-connect-links";
 import { useAppConnectConsent } from "@/hooks/use-app-connect-links";
+import { useConsentPresentation } from "@/hooks/use-consent-presentation";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -128,7 +129,6 @@ export function OAuthConsentPage() {
     const search = new URLSearchParams(window.location.search);
     return {
       search,
-      resources: search.getAll("resource"),
       preselectServiceIds: search.getAll("preselect_service_ids"),
       unmatchedDefaults: search.getAll("unmatched_defaults"),
       requiredServiceHints: search.getAll("required_service_ids"),
@@ -137,29 +137,21 @@ export function OAuthConsentPage() {
   });
   const {
     search,
-    resources,
     preselectServiceIds,
     unmatchedDefaults,
     requiredServiceHints,
     currentBindingServiceIds,
   } = authorizeQuery;
 
-  const appConnectId = search.get("app_connect_link_id");
+  const consentRequest = search.get("consent_request") ?? "";
+  const presentation = useConsentPresentation(consentRequest);
+  const appConnectId = presentation.data?.app_connect_link_id ?? null;
   const appConnect = useAppConnectConsent(appConnectId);
   const requiredServiceIds = useMemo(
-    () =>
-      Array.from(
-        new Set([
-          ...requiredServiceHints,
-          ...(appConnect.data?.items
-            .filter((item) => item.state === "met")
-            .flatMap((item) =>
-              item.user_service_id ? [item.user_service_id] : [],
-            ) ?? []),
-        ]),
-      ),
-    [requiredServiceHints, appConnect.data],
+    () => presentation.data?.mandatory_service_ids ?? [],
+    [presentation.data],
   );
+  const resources = presentation.data?.resources ?? [];
   function requiredLabel(id: string) {
     const item = appConnect.data?.items.find(
       (item) => item.user_service_id === id,
@@ -175,13 +167,10 @@ export function OAuthConsentPage() {
   }
 
   const responseType = readParam(search, "response_type");
-  const clientId = readParam(search, "client_id");
-  const clientName =
-    appConnect.data?.client_name ||
-    readParam(search, "client_name") ||
-    clientId;
-  const redirectUri = readParam(search, "redirect_uri");
-  const scope = readParam(search, "scope");
+  const clientId = presentation.data?.client_id ?? "";
+  const clientName = presentation.data?.client_name ?? "";
+  const redirectUri = presentation.data?.redirect_uri ?? "";
+  const scope = presentation.data?.scope ?? "";
   const state = search.get("state") ?? "";
   const codeChallenge = readParam(search, "code_challenge");
   const codeChallengeMethod = readParam(search, "code_challenge_method");
@@ -192,8 +181,7 @@ export function OAuthConsentPage() {
   const externalSubjectExternalUserId =
     search.get("external_subject_external_user_id") ?? "";
   const bindingGrantId = search.get("binding_grant_id") ?? "";
-  const consentRequest = search.get("consent_request") ?? "";
-  // Server-resolved hints: the app's declared default services matched to
+  // Display-only defaults and URL hints never determine mandatory rows: the app's declared default services matched to
   // this user (pre-selected), and declared services the user has no match
   // for (informational only).
   const bindingReview =
@@ -212,6 +200,7 @@ export function OAuthConsentPage() {
       new Set([
         ...preselectServiceIds,
         ...currentBindingServiceIds,
+        ...requiredServiceHints,
         ...requiredServiceIds,
       ]),
     ),
@@ -236,6 +225,7 @@ export function OAuthConsentPage() {
       (userServices ?? [])
         .filter(
           (service) =>
+            presentation.data?.selectable_service_ids.includes(service.id) &&
             service.is_active &&
             (service.credential_source.type === "personal" ||
               service.credential_source.allowed),
@@ -249,14 +239,9 @@ export function OAuthConsentPage() {
             },
           ),
         ),
-    [userServices],
+    [userServices, presentation.data],
   );
-  const resourceSelectedServiceIds = useMemo(() => {
-    const requested = new Set(resources);
-    return selectableServices
-      .filter((service) => requested.has(service.resource_uri))
-      .map((service) => service.id);
-  }, [resources, selectableServices]);
+  const resourceSelectedServiceIds = requiredServiceIds;
   const effectiveSelectedServiceIds = useMemo(
     () =>
       Array.from(
@@ -267,13 +252,16 @@ export function OAuthConsentPage() {
         ]),
       ).filter(
         (id) =>
-          requiredServiceIds.includes(id) || !deselectedServiceIds.includes(id),
+          requiredServiceIds.includes(id) ||
+          (selectableServices.some((service) => service.id === id) &&
+            !deselectedServiceIds.includes(id)),
       ),
     [
       deselectedServiceIds,
       requiredServiceIds,
       resourceSelectedServiceIds,
       selectedServiceIds,
+      selectableServices,
     ],
   );
   const serviceAccess = oauthConsentServiceAccessSchema.parse({
@@ -334,6 +322,18 @@ export function OAuthConsentPage() {
       }
       return current.includes(serviceId) ? current : [...current, serviceId];
     });
+  }
+
+  if (consentRequest && !presentation.data) {
+    return (
+      <ConsentShell>
+        {presentation.isPending ? (
+          <p>Loading consent request...</p>
+        ) : (
+          <ErrorBanner message="This consent request is unavailable. Restart sign-in from the app." />
+        )}
+      </ConsentShell>
+    );
   }
 
   if (
