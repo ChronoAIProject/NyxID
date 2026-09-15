@@ -16,6 +16,13 @@ for (const width of [1440, 390]) {
     const starts: unknown[] = [];
     const launches: string[] = [];
     const connects: unknown[] = [];
+    // Keep the external handoff inside the browser harness.
+    await context.route("https://t.me/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: "Telegram creation form",
+      }),
+    );
     async function mockSetup(target: Page) {
       await mockDashboard(target);
       await target.route("**/api/v1/orgs", (route) =>
@@ -30,25 +37,27 @@ for (const width of [1440, 390]) {
       await target.route(
         "**/api/v1/channel-bots/telegram-new**",
         async (route) => {
-          const path = new URL(route.request().url()).pathname;
+          const url = new URL(route.request().url());
+          const path = url.pathname;
           const method = route.request().method();
           if (method === "GET") {
             await route.fulfill({
               json: {
                 available: true,
                 manager_username: "NyxSetupBot",
-                request,
+                request:
+                  request?.status === "connected" &&
+                  url.searchParams.get("request_id") !== request.id
+                    ? null
+                    : request,
               },
             });
           } else if (path.endsWith("/connect")) {
             connects.push(route.request().postDataJSON());
-            const connected = {
-              ...request,
-              status: "connected",
-              channel_bot_id: requestId,
-            };
-            request = null;
-            await route.fulfill({ json: connected });
+            await route.fulfill({
+              status: 500,
+              json: { message: "Automatic setup must not call connect" },
+            });
           } else if (path.endsWith("/launch")) {
             launches.push(path);
             await route.fulfill({
@@ -61,6 +70,7 @@ for (const width of [1440, 390]) {
             const body = route.request().postDataJSON() as {
               label: string;
               target_org_id?: string;
+              auto_connect: boolean;
             };
             starts.push(body);
             request = {
@@ -73,6 +83,8 @@ for (const width of [1440, 390]) {
               telegram_bot_id: null,
               bot_username: null,
               channel_bot_id: null,
+              auto_connect: body.auto_connect,
+              connection_error: null,
             };
             await route.fulfill({
               json: {
@@ -110,20 +122,42 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("combobox", { name: "Connect to" }),
     ).toContainText("Support team");
-    await page.getByRole("button", { name: "Save and continue" }).click();
+    const popupOpened = page.waitForEvent("popup");
+    await page
+      .getByRole("button", { name: "Continue in Telegram", exact: true })
+      .click();
+    const popup = await popupOpened;
+    await expect(popup).toHaveURL(
+      "https://t.me/NyxSetupBot?start=initial-challenge",
+    );
+    await popup.close();
     await expect(
       page.getByRole("link", { name: "Open Telegram" }),
     ).toHaveAttribute(
       "href",
       "https://t.me/NyxSetupBot?start=initial-challenge",
     );
-    expect(starts).toEqual([{ label: "Mobile support", target_org_id: orgId }]);
+    expect(starts).toEqual([
+      { label: "Mobile support", target_org_id: orgId, auto_connect: true },
+    ]);
+    await expect(page).toHaveURL(new RegExp(`request_id=${requestId}`));
+    await expect(
+      page
+        .getByRole("list", { name: "Telegram setup steps" })
+        .getByRole("listitem"),
+    ).toHaveCount(2);
     await expect(page.getByLabel("Bot label in NyxID")).toBeDisabled();
     await expect(
       page.getByRole("combobox", { name: "Connect to" }),
     ).toBeDisabled();
     await page.reload();
-    await page.getByRole("button", { name: "Get Telegram link" }).click();
+    const reopened = page.waitForEvent("popup");
+    await page.getByRole("button", { name: "Reopen Telegram" }).click();
+    const resumedPopup = await reopened;
+    await expect(resumedPopup).toHaveURL(
+      "https://t.me/NyxSetupBot?start=renewed-challenge",
+    );
+    await resumedPopup.close();
     await expect(
       page.getByRole("link", { name: "Open Telegram" }),
     ).toHaveAttribute(
@@ -146,7 +180,7 @@ for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 2100 });
     await page
       .getByRole("region", { name: "Telegram bot setup" })
-      .screenshot({ path: `/tmp/nyx-telegram-setup-${width}.png` });
+      .screenshot({ path: `/tmp/nyxbot-creation-setup-${width}.png` });
 
     await page.close();
     const returned = await context.newPage();
@@ -163,36 +197,39 @@ for (const width of [1440, 390]) {
     await expect(
       returned.getByRole("combobox", { name: "Connect to" }),
     ).toContainText("Support team");
-    request = { ...request!, status: "waiting_consent", revision: 3 };
+    request = {
+      ...request!,
+      status: "ready",
+      revision: 3,
+      telegram_bot_id: "900",
+      bot_username: "MobileSupportBot",
+    };
     await returned
       .getByRole("button", { name: "Check progress", exact: true })
       .click();
     await expect(
-      returned.getByText(
-        "Your bot has been created. Open the setup chat and tap Approve this bot.",
-      ),
+      returned.getByText("Connecting @MobileSupportBot…"),
     ).toBeVisible();
+    await expect(
+      returned.getByRole("button", { name: "Connect bot", exact: true }),
+    ).toHaveCount(0);
+    expect(connects).toEqual([]);
+    const savedUrl = returned.url();
+    await returned.close();
+    // The server completes the request with no browser open.
     request = {
       ...request,
-      status: "ready",
+      status: "connected",
       revision: 6,
-      telegram_bot_id: "900",
-      bot_username: "MobileSupportBot",
+      channel_bot_id: requestId,
     };
-    await returned.goto("/channel-bots?connect=telegram-new");
-    await expect(returned.getByLabel("Bot label in NyxID")).toHaveValue(
-      "Mobile support",
+    const completed = await context.newPage();
+    await mockSetup(completed);
+    await completed.goto(savedUrl);
+    await expect(completed).toHaveURL(
+      new RegExp(`/channel-bots/${requestId}$`),
     );
-    await expect(
-      returned.getByText(
-        "You approved @MobileSupportBot in Telegram. Tap Connect bot to finish.",
-      ),
-    ).toBeVisible();
-    await returned
-      .getByRole("button", { name: "Connect bot", exact: true })
-      .click();
-    await expect(returned).toHaveURL(new RegExp(`/channel-bots/${requestId}$`));
-    expect(connects).toEqual([{ telegram_bot_id: "900", revision: 6 }]);
+    expect(connects).toEqual([]);
     expect(starts).toHaveLength(1);
   });
 }

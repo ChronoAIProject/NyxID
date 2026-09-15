@@ -101,6 +101,12 @@ fn account_details_html(request: &TelegramBotRequest) -> String {
 }
 
 fn creation_message(request: &TelegramBotRequest) -> String {
+    if request.auto_connect {
+        return format!(
+            "<b>Create your Telegram bot</b>\n\n{}\n\nTap <b>Create bot</b>, choose its name and username, and finish Telegram's form. Creating the bot connects it to this NyxID account automatically.\n\nOnly create a bot here if you started this setup and recognize the account above.",
+            destination_html(request),
+        );
+    }
     format!(
         "<b>Let's create your Telegram bot.</b>\n\nThis chat helps you create a new bot for the NyxID account below.\n\n{}\n\n1. Tap <b>Create bot</b> below.\n2. Choose a name and a username ending in <b>bot</b>.\n3. Finish the form, then return to this chat to approve the connection.\n\nYou will finish setup on the NyxID page after approving here. Only continue if you started this setup in NyxID and recognize the account and website above.\n\n{}",
         destination_html(request),
@@ -205,6 +211,10 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error
         ),
         (
             doc! {"manager_bot_id": 1, "telegram_bot_id": 1},
+            IndexOptions::default(),
+        ),
+        (
+            doc! {"auto_connect": 1, "active": 1, "next_connection_attempt_at": 1},
             IndexOptions::default(),
         ),
         (
@@ -337,11 +347,12 @@ impl TelegramNewService<'_> {
         actor: &str,
         owner: &str,
         label: &str,
+        auto_connect: bool,
     ) -> AppResult<(TelegramBotRequest, String)> {
         with_operation(
             self.db,
             "telegram-new-manager-configuration",
-            self.begin_inner(actor, owner, label),
+            self.begin_inner(actor, owner, label, auto_connect),
         )
         .await
     }
@@ -351,6 +362,7 @@ impl TelegramNewService<'_> {
         actor: &str,
         owner: &str,
         label: &str,
+        auto_connect: bool,
     ) -> AppResult<(TelegramBotRequest, String)> {
         self.check_owner(actor, owner).await?;
         let label = label.trim();
@@ -407,6 +419,11 @@ impl TelegramNewService<'_> {
             bot_username: None,
             consent_hash: None,
             manager_revision: None,
+            auto_connect,
+            start_update_id: None,
+            connection_attempts: 0,
+            next_connection_attempt_at: None,
+            connection_error: None,
             created_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(15),
             purge_after: None,
@@ -546,6 +563,9 @@ impl TelegramNewService<'_> {
         let Some(user_id) = private_sender(message) else {
             return Ok(());
         };
+        let Some(update_id) = update["update_id"].as_i64().filter(|id| *id >= 0) else {
+            return Err(AppError::BadRequest("Invalid Telegram update ID".into()));
+        };
         if let Some(challenge) = message["text"]
             .as_str()
             .and_then(|t| t.strip_prefix("/start "))
@@ -555,7 +575,11 @@ impl TelegramNewService<'_> {
             }
             let request = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
                 doc! {"manager_bot_id": manager_id, "challenge_hash": hash(challenge), "active": true, "expires_at": {"$gt": bson::DateTime::now()}, "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent"]}, "$or": [{"telegram_user_id": null}, {"telegram_user_id": user_id}]},
-                doc! {"$set": {"telegram_user_id": user_id}, "$inc": {"revision": 1}},
+                vec![doc! {"$set": {
+                    "telegram_user_id": user_id,
+                    "start_update_id": {"$ifNull": ["$start_update_id", update_id]},
+                    "revision": {"$add": ["$revision", 1_i64]},
+                }}],
             ).return_document(ReturnDocument::After).await;
             let request = match request {
                 Ok(request) => request,
@@ -587,6 +611,7 @@ impl TelegramNewService<'_> {
         let creation = message
             .get("managed_bot_created")
             .and_then(|v| bot_identity(&v["bot"]));
+        let is_creation = creation.is_some();
         let observation_id = values
             .get("observation_id")
             .ok_or_else(|| conflict("Manager observation is unavailable"))?;
@@ -627,15 +652,51 @@ impl TelegramNewService<'_> {
         } else {
             return Ok(());
         };
-        let request = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
+        let pending = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(
             doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id, "active": true, "status": "waiting_bot", "expires_at": {"$gt": bson::DateTime::now()}},
+        ).await?;
+        if let Some(pending) = pending.filter(|request| request.auto_connect) {
+            // The initial action authorizes one fresh creation through this private handoff.
+            // Recovery and an earlier Telegram update cannot consume that authorization.
+            if !is_creation {
+                self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": "This setup connects a newly created bot. Tap Create bot to continue, or connect your existing bot from NyxID using the Telegram bot token option."})).await?;
+                return Ok(());
+            }
+            if pending
+                .start_update_id
+                .is_none_or(|start| update_id <= start)
+                || message["date"]
+                    .as_i64()
+                    .is_none_or(|date| date < pending.created_at.timestamp())
+                || !self.owner_still_authorized(&pending).await?
+            {
+                return Ok(());
+            }
+            let result = self.db.collection::<TelegramBotRequest>(REQUESTS).update_one(
+                doc! {"_id": &pending.id, "revision": pending.revision, "status": "waiting_bot", "active": true},
+                doc! {"$set": {"telegram_bot_id": bot_id, "bot_username": &username, "status": "ready", "manager_revision": 1_i64}, "$inc": {"revision": 1}},
+            ).await?;
+            if result.modified_count != 1 {
+                return Err(conflict(
+                    "The creation request changed while recording the bot",
+                ));
+            }
+            return Ok(());
+        }
+        if self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(
+            doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id, "telegram_bot_id": bot_id, "auto_connect": true, "status": {"$in": ["ready", "provisioning", "connected"]}},
+        ).await?.is_some() {
+            return Ok(());
+        }
+        let request = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
+            doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id, "auto_connect": {"$ne": true}, "active": true, "status": "waiting_bot", "expires_at": {"$gt": bson::DateTime::now()}},
             doc! {"$set": {"telegram_bot_id": bot_id, "bot_username": &username, "status": "waiting_consent"}, "$inc": {"revision": 1}},
         ).return_document(ReturnDocument::After).await?;
         if let Some(request) = request { self.send_consent(token, &request).await?; }
         else if let Some(request) = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id, "telegram_bot_id": bot_id, "active": true, "status": "waiting_consent"}).await? {
             self.send_consent(token, &request).await?;
         } else {
-            self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": format!("@{username} exists in Telegram but this event has no waiting creation request. Return to NyxID → Add Channel Bot → Telegram, start a request, then send /recover @{username} here. No bot was connected by this message."), "reply_markup": {"remove_keyboard": true}})).await?;
+            self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": format!("@{username} exists in Telegram but this event has no waiting creation request. Return to NyxID → Add Channel Bot to create a new bot, or use Telegram bot token to connect this existing bot. No bot was connected by this message."), "reply_markup": {"remove_keyboard": true}})).await?;
         }
         Ok(())
     }

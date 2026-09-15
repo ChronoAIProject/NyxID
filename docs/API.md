@@ -7824,17 +7824,19 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 Telegram New is the separate `telegram-new` channel option. The existing `telegram` registration API and token-based setup remain available. See [Telegram New](TELEGRAM_NEW.md#api-and-storage) for request/response fields, status transitions, recovery rules, and administrator setup.
 
-Routes below are relative to `/api/v1`. Creation routes require an authenticated person; API keys, service accounts, relay tokens, and delegated access are rejected. Requests are bound to the initiating person and destination. Connecting requires current destination write access plus the exact bot ID and revision approved in Telegram.
+Routes below are relative to `/api/v1`. Creation routes require an authenticated person; API keys, service accounts, relay tokens, and delegated access are rejected. Requests are bound to the initiating person and destination. New website requests use `auto_connect: true`: the initial authenticated action authorizes connection of one fresh bot through the private Telegram handoff, and the verified creation event queues server completion with live destination-access checks. Omitting the flag preserves the legacy exact-bot approval and browser confirmation flow.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| GET | `/channel-bots/telegram-new` | Read availability and the current creation request |
-| POST | `/channel-bots/telegram-new` | Prepare a request with `{label, target_org_id?}` |
+| GET | `/channel-bots/telegram-new` | Read availability and the current creation request; optional `?request_id={uuid}` reads an actor-owned request including completed setup |
+| POST | `/channel-bots/telegram-new` | Prepare a request with `{label, target_org_id?, auto_connect?}`; the website sends `auto_connect: true` |
 | GET | `/channel-bots/telegram-new/requests/{id}` | Read the saved request |
 | POST | `/channel-bots/telegram-new/requests/{id}/launch` | Issue a fresh Telegram launch link |
 | DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning begins |
-| POST | `/channel-bots/telegram-new/requests/{id}/connect` | Confirm `{telegram_bot_id, revision}` and connect or retry |
+| POST | `/channel-bots/telegram-new/requests/{id}/connect` | Legacy completion: confirm `{telegram_bot_id, revision}` and connect or retry |
 | POST | `/webhooks/channel/telegram-new/manager` | Receive updates authenticated by the configured manager webhook secret |
+
+Request responses expose `auto_connect` (false for legacy requests) and nullable `connection_error` with safe automatic-retry text. Automatic connection continues while the browser is closed; clients poll the saved request rather than POSTing `/connect`.
 
 The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
 

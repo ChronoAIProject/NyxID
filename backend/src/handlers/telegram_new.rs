@@ -1,7 +1,7 @@
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
 };
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,8 @@ pub struct RequestResponse {
     pub telegram_bot_id: Option<String>,
     pub bot_username: Option<String>,
     pub channel_bot_id: Option<String>,
+    pub auto_connect: bool,
+    pub connection_error: Option<String>,
 }
 
 impl From<TelegramBotRequest> for RequestResponse {
@@ -80,6 +82,8 @@ impl From<TelegramBotRequest> for RequestResponse {
             Status::Ready | Status::Provisioning | Status::Connected | Status::Suspended
         );
         Self {
+            auto_connect: request.auto_connect,
+            connection_error: request.connection_error,
             channel_bot_id: matches!(
                 request.status,
                 Status::Provisioning | Status::Connected | Status::Suspended
@@ -112,6 +116,13 @@ pub struct ConfigurationResponse {
 pub struct BeginRequest {
     pub label: String,
     pub target_org_id: Option<String>,
+    #[serde(default)]
+    pub auto_connect: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ConfigurationQuery {
+    pub request_id: Option<uuid::Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -130,6 +141,7 @@ pub struct LaunchResponse {
 pub async fn configuration(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(query): Query<ConfigurationQuery>,
 ) -> AppResult<(HeaderMap, Json<ConfigurationResponse>)> {
     let actor = human(&auth)?;
     let row = crate::services::platform_credential_service::load(
@@ -141,7 +153,10 @@ pub async fn configuration(
         row.fields.get("webhook_ready").is_some_and(|v| v == "true")
             && row.secrets.contains_key("manager_bot_token")
     });
-    let request = service(&state).current(&actor).await?;
+    let request = match query.request_id {
+        Some(id) => Some(service(&state).get(&actor, &id.to_string()).await?),
+        None => service(&state).current(&actor).await?,
+    };
     Ok((
         private_headers(),
         Json(ConfigurationResponse {
@@ -162,7 +177,9 @@ pub async fn begin(
     let owner =
         super::channel_bots::resolve_create_owner(&state, &actor, body.target_org_id.as_deref())
             .await?;
-    let (request, launch_url) = service(&state).begin(&actor, &owner, &body.label).await?;
+    let (request, launch_url) = service(&state)
+        .begin(&actor, &owner, &body.label, body.auto_connect)
+        .await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth,
@@ -233,18 +250,18 @@ pub async fn connect(
     let bot = service(&state)
         .connect(&actor, &id, bot_id, body.revision)
         .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "channel_bot_created",
-        Some(
-            serde_json::json!({"bot_id": bot.id, "platform": bot.platform, "owner_user_id": bot.user_id}),
-        ),
-    );
-    Ok((
-        private_headers(),
-        Json(service(&state).get(&actor, &id).await?.into()),
-    ))
+    let request = service(&state).get(&actor, &id).await?;
+    if !request.auto_connect {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth,
+            "channel_bot_created",
+            Some(
+                serde_json::json!({"bot_id": bot.id, "platform": bot.platform, "owner_user_id": bot.user_id}),
+            ),
+        );
+    }
+    Ok((private_headers(), Json(request.into())))
 }
 
 pub async fn webhook(

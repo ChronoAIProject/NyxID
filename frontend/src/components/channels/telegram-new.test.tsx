@@ -1,21 +1,22 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { TelegramNew } from "./telegram-new";
 import type { TelegramNewRequest } from "@/schemas/telegram-new";
 
-const { mockGet, mockPost, mockDelete } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockDelete, mockActor } = vi.hoisted(() => ({
   mockGet: vi.fn(),
   mockPost: vi.fn(),
   mockDelete: vi.fn(),
+  mockActor: { id: "actor-1" },
 }));
 vi.mock("@/lib/api-client", () => ({
   api: { get: mockGet, post: mockPost, delete: mockDelete },
 }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (selector: (state: { user: { id: string } }) => unknown) =>
-    selector({ user: { id: "actor-1" } }),
+    selector({ user: mockActor }),
 }));
 
 const request: TelegramNewRequest = {
@@ -24,10 +25,11 @@ const request: TelegramNewRequest = {
   revision: 1,
   owner_user_id: "actor-1",
   label: "Support",
-  expires_at: "2026-09-11T10:00:00Z",
+  expires_at: "2026-09-15T10:00:00Z",
   telegram_bot_id: null,
   bot_username: null,
   channel_bot_id: null,
+  auto_connect: true,
 };
 const ready: TelegramNewRequest = {
   ...request,
@@ -41,59 +43,265 @@ const configuration = (value: TelegramNewRequest | null) => ({
   manager_username: "NyxSetupBot",
   request: value,
 });
+const replace = vi.fn();
+const close = vi.fn();
 
-function setup() {
+function setup(requestId?: string) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   const onConnected = vi.fn();
+  const onStarted = vi.fn();
+  const onCancelled = vi.fn();
   const view = render(
     <QueryClientProvider client={client}>
-      <TelegramNew label="Support" orgId={null} onConnected={onConnected} />
+      <TelegramNew
+        label="Support"
+        orgId={null}
+        requestId={requestId}
+        onStarted={onStarted}
+        onCancelled={onCancelled}
+        onConnected={onConnected}
+      />
     </QueryClientProvider>,
   );
-  return { ...view, client, onConnected };
+  return { ...view, client, onConnected, onStarted, onCancelled };
 }
 
-beforeEach(() => vi.resetAllMocks());
+beforeEach(() => {
+  vi.resetAllMocks();
+  mockActor.id = "actor-1";
+  vi.spyOn(window, "open").mockReturnValue({
+    opener: null,
+    closed: false,
+    location: { replace },
+    close,
+  } as unknown as Window);
+});
 
-it("prepares a saved request before exposing a separate native launch link, then confirms the approved bot", async () => {
+it("saves and opens Telegram with one click, then completes from server status without a Connect request", async () => {
   const user = userEvent.setup();
   mockGet.mockResolvedValue(configuration(null));
-  mockPost.mockImplementation(async (url: string) => {
-    if (url.endsWith("/connect")) {
-      const result = {
-        ...ready,
-        status: "connected",
-        channel_bot_id: request.id,
-      };
-      mockGet.mockResolvedValue(configuration(null));
-      return result;
-    }
+  mockPost.mockImplementation(async () => {
     mockGet.mockResolvedValue(configuration(request));
     return { request, launch_url: "https://t.me/NyxSetupBot?start=challenge" };
   });
   const view = setup();
-  expect(
-    screen.queryByRole("link", { name: "Open Telegram" }),
-  ).not.toBeInTheDocument();
   await user.click(
-    await screen.findByRole("button", { name: "Save and continue" }),
+    await screen.findByRole("button", { name: "Continue in Telegram" }),
   );
+  await waitFor(() =>
+    expect(replace).toHaveBeenCalledWith(
+      "https://t.me/NyxSetupBot?start=challenge",
+    ),
+  );
+  expect(mockPost).toHaveBeenCalledExactlyOnceWith(
+    "/channel-bots/telegram-new",
+    { label: "Support", auto_connect: true },
+  );
+  expect(view.onStarted).toHaveBeenCalledWith(request.id);
   expect(
-    await screen.findByRole("link", { name: "Open Telegram" }),
-  ).toHaveAttribute("href", "https://t.me/NyxSetupBot?start=challenge");
-  expect(mockPost).toHaveBeenCalledWith("/channel-bots/telegram-new", {
-    label: "Support",
-  });
+    within(
+      screen.getByRole("list", { name: "Telegram setup steps" }),
+    ).getAllByRole("listitem"),
+  ).toHaveLength(2);
   expect(
     screen.queryByRole("button", { name: "Connect bot" }),
   ).not.toBeInTheDocument();
-  mockGet.mockResolvedValue(configuration(ready));
+  mockGet.mockResolvedValue(
+    configuration({
+      ...ready,
+      status: "connected",
+      channel_bot_id: request.id,
+    }),
+  );
   await act(() =>
     view.client.invalidateQueries({ queryKey: ["telegram-new"] }),
   );
-  await user.click(await screen.findByRole("button", { name: "Connect bot" }));
+  await waitFor(() =>
+    expect(view.onConnected).toHaveBeenCalledExactlyOnceWith(request.id),
+  );
+  expect(mockPost).toHaveBeenCalledTimes(1);
+});
+
+it("shows a fallback link when a browser blocks the Telegram tab", async () => {
+  vi.mocked(window.open).mockReturnValue(null);
+  mockGet.mockResolvedValue(configuration(null));
+  mockPost.mockImplementation(async () => {
+    mockGet.mockResolvedValue(configuration(request));
+    return { request, launch_url: "https://t.me/NyxSetupBot?start=challenge" };
+  });
+  setup();
+  await userEvent
+    .setup()
+    .click(await screen.findByRole("button", { name: "Continue in Telegram" }));
+  expect(
+    await screen.findByRole("link", { name: "Open Telegram" }),
+  ).toHaveAttribute("href", "https://t.me/NyxSetupBot?start=challenge");
+});
+
+it("reads the saved request after reload even when it is already completed", async () => {
+  mockGet.mockResolvedValue(
+    configuration({
+      ...ready,
+      status: "connected",
+      channel_bot_id: request.id,
+    }),
+  );
+  const view = setup(request.id);
+  await waitFor(() =>
+    expect(view.onConnected).toHaveBeenCalledWith(request.id),
+  );
+  expect(mockGet).toHaveBeenCalledWith(
+    `/channel-bots/telegram-new?request_id=${request.id}`,
+  );
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it("leaves interrupted provisioning to server retries without asking for another connection click", async () => {
+  mockGet.mockResolvedValue(
+    configuration({
+      ...ready,
+      status: "provisioning",
+      channel_bot_id: request.id,
+      connection_error:
+        "Telegram setup is taking longer than usual. We are retrying automatically.",
+    }),
+  );
+  setup();
+  expect(
+    await screen.findByText("Connecting @SupportBot…"),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/retrying automatically/)).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", {
+      name: /Connect bot|Retry connection|Finish saved/,
+    }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Cancel setup" }),
+  ).not.toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it("reopens the existing handoff without starting a second creation", async () => {
+  mockGet.mockResolvedValue(configuration(request));
+  mockPost.mockResolvedValue({
+    request,
+    launch_url: "https://t.me/NyxSetupBot?start=fresh",
+  });
+  setup();
+  await userEvent
+    .setup()
+    .click(await screen.findByRole("button", { name: "Reopen Telegram" }));
+  await waitFor(() =>
+    expect(replace).toHaveBeenCalledWith(
+      "https://t.me/NyxSetupBot?start=fresh",
+    ),
+  );
+  expect(mockPost).toHaveBeenCalledExactlyOnceWith(
+    `/channel-bots/telegram-new/requests/${request.id}/launch`,
+  );
+});
+
+it("closes the blank tab on a failed start and shows the error", async () => {
+  mockGet.mockResolvedValue(configuration(null));
+  mockPost.mockRejectedValue(new Error("Setup unavailable"));
+  setup();
+  await userEvent
+    .setup()
+    .click(await screen.findByRole("button", { name: "Continue in Telegram" }));
+  expect(await screen.findByText("Setup unavailable")).toBeInTheDocument();
+  expect(close).toHaveBeenCalledOnce();
+  expect(replace).not.toHaveBeenCalled();
+});
+
+it("does not launch a completed response after the setup page was closed", async () => {
+  mockGet.mockResolvedValue(configuration(null));
+  let resolveStart: (value: unknown) => void = () => {};
+  mockPost.mockReturnValue(
+    new Promise((resolve) => {
+      resolveStart = resolve;
+    }),
+  );
+  const view = setup();
+  await userEvent
+    .setup()
+    .click(await screen.findByRole("button", { name: "Continue in Telegram" }));
+  view.unmount();
+  await act(async () =>
+    resolveStart({
+      request,
+      launch_url: "https://t.me/NyxSetupBot?start=challenge",
+    }),
+  );
+  expect(replace).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it("discards an outstanding handoff when the signed-in account changes", async () => {
+  mockGet.mockResolvedValue(configuration(null));
+  let resolveStart: (value: unknown) => void = () => {};
+  mockPost.mockReturnValue(
+    new Promise((resolve) => {
+      resolveStart = resolve;
+    }),
+  );
+  const view = setup();
+  await userEvent
+    .setup()
+    .click(await screen.findByRole("button", { name: "Continue in Telegram" }));
+  mockActor.id = "actor-2";
+  view.rerender(
+    <QueryClientProvider client={view.client}>
+      <TelegramNew
+        label="Support"
+        orgId={null}
+        onStarted={view.onStarted}
+        onConnected={view.onConnected}
+      />
+    </QueryClientProvider>,
+  );
+  await act(async () =>
+    resolveStart({
+      request,
+      launch_url: "https://t.me/NyxSetupBot?start=challenge",
+    }),
+  );
+  expect(replace).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+  expect(view.onStarted).not.toHaveBeenCalled();
+});
+
+it("cancels an unprovisioned request and clears its saved page reference", async () => {
+  mockGet.mockResolvedValue(configuration(request));
+  mockDelete.mockImplementation(async () => {
+    mockGet.mockResolvedValue(configuration(null));
+  });
+  const view = setup();
+  await userEvent
+    .setup()
+    .click(await screen.findByRole("button", { name: "Cancel setup" }));
+  await waitFor(() => expect(view.onCancelled).toHaveBeenCalledOnce());
+  expect(mockDelete).toHaveBeenCalledWith(
+    `/channel-bots/telegram-new/requests/${request.id}`,
+  );
+});
+
+it("can finish a request created by the previous explicit approval flow", async () => {
+  mockGet.mockResolvedValue(configuration({ ...ready, auto_connect: false }));
+  mockPost.mockResolvedValue({
+    ...ready,
+    auto_connect: false,
+    status: "connected",
+    channel_bot_id: request.id,
+  });
+  const view = setup();
+  await userEvent
+    .setup()
+    .click(
+      await screen.findByRole("button", { name: "Finish saved connection" }),
+    );
   await waitFor(() =>
     expect(view.onConnected).toHaveBeenCalledWith(request.id),
   );
@@ -103,53 +311,7 @@ it("prepares a saved request before exposing a separate native launch link, then
   );
 });
 
-it("resumes a pending bot after reopening, keeps the saved destination and offers retry", async () => {
-  const user = userEvent.setup();
-  mockGet.mockResolvedValue(
-    configuration({
-      ...ready,
-      status: "provisioning",
-      owner_user_id: "original-org",
-      channel_bot_id: request.id,
-    }),
-  );
-  mockPost.mockRejectedValue(new Error("Temporary Telegram failure"));
-  setup();
-  expect(
-    await screen.findByText("NyxID account ID: original-org"),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText(/This setup uses the account you selected earlier/),
-  ).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Retry connection" }));
-  expect(
-    await screen.findByText("Temporary Telegram failure"),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByRole("button", { name: "Retry connection" }),
-  ).toBeEnabled();
-  expect(
-    screen.queryByRole("button", { name: "Cancel setup" }),
-  ).not.toBeInTheDocument();
-});
-
-it("cancels an existing creation and lets the user start again", async () => {
-  const user = userEvent.setup();
-  mockGet.mockResolvedValue(configuration(request));
-  mockDelete.mockImplementation(async () => {
-    mockGet.mockResolvedValue(configuration(null));
-  });
-  setup();
-  await user.click(await screen.findByRole("button", { name: "Cancel setup" }));
-  expect(
-    await screen.findByRole("button", { name: "Save and continue" }),
-  ).toBeEnabled();
-  expect(mockDelete).toHaveBeenCalledWith(
-    `/channel-bots/telegram-new/requests/${request.id}`,
-  );
-});
-
-it("explains the administrator setup when no manager is configured", async () => {
+it("does not offer creation until a manager is configured", async () => {
   mockGet.mockResolvedValue({
     ...configuration(null),
     available: false,
@@ -160,84 +322,6 @@ it("explains the administrator setup when no manager is configured", async () =>
     await screen.findByText(/administrator needs to configure a manager/),
   ).toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: "Save and continue" }),
+    screen.queryByRole("button", { name: "Continue in Telegram" }),
   ).not.toBeInTheDocument();
-});
-
-it("shows the current Telegram action and lets the user check progress after returning", async () => {
-  const user = userEvent.setup();
-  mockGet.mockResolvedValue(
-    configuration({ ...request, status: "waiting_bot" }),
-  );
-  setup();
-  expect(
-    await screen.findByText(
-      "You have started the setup chat. Tap Create bot there to make your bot.",
-    ),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByRole("list", { name: "Telegram setup steps" }),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText(
-      /This is the setup chat that helps you create your own bot/,
-    ),
-  ).toBeInTheDocument();
-  mockGet.mockResolvedValue(
-    configuration({ ...request, status: "waiting_consent" }),
-  );
-  await user.click(screen.getByRole("button", { name: "Check progress" }));
-  expect(
-    await screen.findByText(
-      "Your bot has been created. Open the setup chat and tap Approve this bot.",
-    ),
-  ).toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "Connect bot" }),
-  ).not.toBeInTheDocument();
-});
-
-it("regenerates a launch link for the saved request after a full remount", async () => {
-  const user = userEvent.setup();
-  mockGet.mockResolvedValue(configuration(request));
-  mockPost.mockResolvedValue({
-    request,
-    launch_url: "https://t.me/NyxSetupBot?start=fresh-challenge",
-  });
-  const first = setup();
-  await screen.findByRole("button", { name: "Get Telegram link" });
-  first.unmount();
-  first.client.clear();
-  setup();
-  expect(
-    screen.queryByRole("link", { name: "Open Telegram" }),
-  ).not.toBeInTheDocument();
-  await user.click(
-    await screen.findByRole("button", { name: "Get Telegram link" }),
-  );
-  expect(
-    await screen.findByRole("link", { name: "Open Telegram" }),
-  ).toHaveAttribute("href", "https://t.me/NyxSetupBot?start=fresh-challenge");
-  expect(mockPost).toHaveBeenCalledExactlyOnceWith(
-    `/channel-bots/telegram-new/requests/${request.id}/launch`,
-  );
-  expect(
-    screen.queryByText(
-      "Save your details first. You will create the bot in Telegram in the next step.",
-    ),
-  ).not.toBeInTheDocument();
-});
-
-it("explains a request disappearing instead of silently starting over", async () => {
-  mockGet.mockResolvedValue(configuration(request));
-  const view = setup();
-  await screen.findByRole("button", { name: "Get Telegram link" });
-  mockGet.mockResolvedValue(configuration(null));
-  await act(() =>
-    view.client.invalidateQueries({ queryKey: ["telegram-new"] }),
-  );
-  expect(
-    await screen.findByText(/This setup is no longer active/),
-  ).toBeInTheDocument();
-  expect(mockPost).not.toHaveBeenCalled();
 });

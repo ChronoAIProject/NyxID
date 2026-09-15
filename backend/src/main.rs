@@ -1133,6 +1133,26 @@ async fn main() {
         });
     }
 
+    {
+        let creation_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let service = services::telegram_new_service::TelegramNewService {
+                    db: &creation_state.db,
+                    keys: &creation_state.encryption_keys,
+                    config: &creation_state.config,
+                    api: services::telegram_new_api::TelegramApi::new(&creation_state.http_client),
+                };
+                if service.complete_pending_creations().await.is_err() {
+                    tracing::warn!("Telegram creation sweep failed; retrying on the next tick");
+                }
+            }
+        });
+    }
+
     // Telegram integration: webhook mode (production) or polling mode (development)
     if let (Some(bot_token), Some(webhook_url), Some(webhook_secret)) = (
         &config.telegram_bot_token,

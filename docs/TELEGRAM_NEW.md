@@ -1,20 +1,21 @@
 # Telegram bot creation
 
-`telegram-new` adds Telegram's native bot creation to **Channel Bots → Add Channel Bot**. The customer creates a bot in Telegram and approves its connection to a named NyxID destination. NyxID retrieves and encrypts the child bot token on the server. The display labels are **Telegram** for `telegram-new` (create a bot) and **Telegram bot token** for `telegram` (connect an existing bot). The platform identifiers, API routes, CLI arguments, and existing saved connections are unchanged.
+`telegram-new` adds Telegram's native bot creation to **Channel Bots → Add Channel Bot**. The customer starts setup in NyxID and creates a bot in Telegram. Telegram’s verified creation event then completes the connection to the saved NyxID destination automatically. NyxID retrieves and encrypts the child bot token on the server. The display labels are **Telegram** for `telegram-new` (create a bot) and **Telegram bot token** for `telegram` (connect an existing bot). The platform identifiers, API routes, CLI arguments, and existing saved connections are unchanged.
 
 This is a channel configuration capability. The wider onboarding wizard, onboarding drafts, Mini Apps, and Meta login flows are outside this change.
 
 ## What the customer sees
 
-1. Open **Channel Bots → Add Channel Bot** and choose **Telegram**. This opens a dedicated setup page at `/channel-bots?connect=telegram-new`. Select the personal or organization destination and enter a label. A vertical line connects four numbered steps, with current progress and **In NyxID** / **In Telegram** labels. Completed steps replace their number with a white tick in a primary-colored circle. Each step can be expanded, and the current step opens automatically. The instructions explain that the manager is the setup chat that helps create the customer's own bot.
-2. Click **Save and continue**, then **Open Telegram**. Saving prepares the request before the external link becomes available. On returning to a saved request, click **Get Telegram link**, then **Open Telegram**.
-3. In the platform's manager chat, tap **Start** if Telegram asks. The chat shows the NyxID website and a readable account summary: the email for a personal account, or the organization name, handle, and initiating person's email. Stable account references remain in an expandable blockquote. Previously saved destination text still renders, with its ID lines moved into the references.
-4. Tap **Create bot**. Telegram opens its native form with a suggested name and username derived from the NyxID label. Both remain editable; Telegram checks username availability. For example, `nyx_test_123456` suggests the username `nyx_test_123456_bot`. Username suggestions use ASCII letters, digits, and underscores, fit within 32 characters, and end in `bot`.
-5. In the manager chat, review the bot username, account, and website. The message explains that approval lets NyxID receive the bot's messages and send replies, and that the customer must still return to NyxID to finish. Tap **Approve this bot**. The numeric bot ID is available with the account references. Dynamic text is escaped for Telegram HTML, and website link previews are disabled to keep the instructions visible.
-6. Use **Return to NyxID**, or reopen the existing browser page. Choose **Connect bot**. NyxID fetches the token, saves the connection, and registers the bot's message webhook.
-7. Assign an agent using the existing channel-bot configuration and send a test message to the new bot.
+The setup page has two steps:
 
-The normal customer path does not use BotFather or require copying a token. The platform administrator still needs BotFather for the manager setup below.
+1. **Continue in Telegram.** Choose a personal or organization destination and enter a label on `/channel-bots?connect=telegram-new`. One click saves the authenticated creation request with `auto_connect: true` and opens the manager chat. This action authorizes NyxID to connect one fresh bot created through that private handoff.
+2. **Create your bot.** The manager chat names the destination and website and explains that creating the bot connects it automatically. Tap **Start** if Telegram asks, then **Create bot** and finish Telegram’s native name/username form. Suggestions come from the saved label and remain editable. The verified creation webhook records the bot; a server worker retrieves and encrypts the token and installs the message webhook. No separate **Approve this bot** or **Connect bot** action is required for new website requests.
+
+The page updates automatically and opens the connected bot’s settings. The manager also sends a best-effort completion message with a settings link. Connection continues if the user closes the browser. Choosing an AI agent for replies remains part of the existing bot settings; connecting the channel alone does not configure an agent.
+
+These are two application steps, not a guarantee of two physical taps. Telegram controls its Start prompt and creation form. The direct `t.me/newbot/...` form link cannot carry an arbitrary setup identifier, and `ManagedBotCreated` does not echo the keyboard’s `request_id`. The private `/start` handoff is retained to correlate the Telegram sender with the saved NyxID request. It does not establish a verified Telegram login identity for the NyxID account.
+
+The normal customer path does not use BotFather or require copying a token. The platform administrator still needs BotFather for the manager setup below. Requests saved with the previous flow retain its Telegram consent and browser completion; cancel and restart to use automatic connection.
 
 ## Administrator setup
 
@@ -46,21 +47,15 @@ This clears NyxID's saved configuration. If the public Telegram profile shows th
 
 ## Returning and recovering
 
-An unfinished request is saved on the server for 15 minutes, bound to the signed-in NyxID actor and its original destination. **Channel Bots** displays **Resume Telegram setup** while a request is active. The dedicated setup page also survives a reload, and Telegram's **Return to NyxID** link opens it directly. If the browser session was lost, sign in to the same account first. Users on mobile can leave the NyxID page, use a single Telegram setup chat, and return or reopen the page without creating a second request.
+An unfinished request is saved on the server for 15 minutes, bound to the signed-in NyxID actor and its original destination. **Channel Bots** displays **Resume Telegram setup** while a request is active. If the browser session was lost, sign in to the same account first.
 
-The selected flow, draft label, and draft destination are retained in the page URL. Once a request exists, its server-saved label and destination take precedence and the corresponding fields are locked until cancellation. The page polls active requests while visible, refreshes when the page becomes visible again, and offers **Check progress**. Reopening before consent uses **Get Telegram link** to generate a fresh launch link for the same request. Launch challenges and bot tokens are not stored in browser storage or the NyxID page URL. The Telegram return link contains no sign-in token.
+The selected flow, draft label, and draft destination are retained in the page URL. Once a request exists, its server-saved label and destination take precedence and the fields are locked until cancellation. The nonsecret `request_id` is also retained so that reloading the setup page can find an already completed request. Reading it still requires the initiating actor and current destination access. Launch challenges and bot tokens are never stored in browser storage or the NyxID page URL.
 
-The page shows the saved request's expiry time. Recovery instructions are available under **Need help or returning to an unfinished setup?**, including the existing 60-minute recovery window. A request disappearing during setup is explained before another request can be prepared; requests are never created automatically on return.
+The page polls active requests every two seconds while visible, refreshes on focus, and offers **Check progress**. **Reopen Telegram** issues a fresh launch link for the same saved request. A blocked popup has an **Open Telegram** fallback link. Neither returning nor polling creates a new request.
 
-Once connection provisioning starts, the saved pending bot survives request expiry. **Retry connection** reuses its bot ID, encrypted token, and webhook secret. It cannot create a second saved bot or reactivate a deleted/suspended bot. Cancelling before provisioning releases the request. Cancellation or expiry does not delete a bot already created inside Telegram.
+After a fresh creation event, a database-backed worker completes the connection independently of the browser. Every backend replica scans due requests; atomic scheduling claims and the existing per-bot renewable lease coordinate attempts. Connection work is deferred from the webhook response so Telegram can acknowledge the creation delivery before the worker checks for pending updates. Temporary failures retry with backoff. Setup retains its 15-minute expiry until a pending channel bot is saved; provisioning then survives expiry and reuses the saved bot ID, encrypted token, and webhook secret. It cannot reactivate a deleted/suspended bot. Cancellation before provisioning releases the request, but does not delete a bot already created inside Telegram.
 
-For up to 60 minutes after creation, to recover an unconnected bot whose creation NyxID recorded, start a new request, open the manager chat, and send:
-
-```text
-/recover @YourBotUsername
-```
-
-Recovery requires fresh consent naming that bot and destination. It does not enumerate or automatically attach the user's other bots. A creation event that cannot be matched to a waiting request produces this recovery instruction.
+New automatic requests accept only a fresh `managed_bot_created` event from the private sender bound by their start challenge. They reject recovery commands and creation updates preceding that handoff. An expired or cancelled request must be restarted to create a new bot; an existing bot can be connected through **Telegram bot token**. Legacy manual requests retain `/recover @YourBotUsername` for recorded unconnected creations up to 60 minutes old, followed by fresh named-bot consent and browser confirmation.
 
 A subsequent Telegram management event conservatively suspends a connected bot. The event's user field identifies its creator and is not treated as proof of current ownership. Messages and replies stop; the bot continues reserving its remote identity until deleted. Neither Verify nor Retry can reactivate it. Suspension takes effect when NyxID observes the management event; a child token can remain valid after a transfer until Telegram resets it. To retain the bot, delete its NyxID connection and use the Telegram bot token option with its current token. Deletion also disables its NyxID conversation routes; recreate agent assignments afterward. Alternatively, create a different bot through the Telegram option. A bot with recorded management changes is ineligible for `/recover`. Once any NyxID connection has started provisioning for the bot, it cannot be claimed by a new creation request, including after deletion; retry uses the original saved connection.
 
@@ -70,13 +65,15 @@ All request routes require a person session or ordinary person access token; API
 
 | Method | Route, relative to `/api/v1` | Result |
 | --- | --- | --- |
-| GET | `/channel-bots/telegram-new` | Availability and the actor's current request |
-| POST | `/channel-bots/telegram-new` | Save `{label, target_org_id?}` and return a Telegram launch URL |
+| GET | `/channel-bots/telegram-new` | Availability and the actor’s current request; optional `?request_id={uuid}` reads a specific request, including a completed one |
+| POST | `/channel-bots/telegram-new` | Save `{label, target_org_id?, auto_connect?}` and return a Telegram launch URL; the website sends `auto_connect: true` |
 | GET | `/channel-bots/telegram-new/requests/{id}` | Read an actor-owned request with destination access |
 | POST | `/channel-bots/telegram-new/requests/{id}/launch` | Replace the start challenge and return a fresh link |
 | DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning |
-| POST | `/channel-bots/telegram-new/requests/{id}/connect` | Confirm `{telegram_bot_id, revision}` and finish/retry provisioning |
+| POST | `/channel-bots/telegram-new/requests/{id}/connect` | Legacy browser completion: confirm `{telegram_bot_id, revision}` and finish/retry provisioning |
 | POST | `/webhooks/channel/telegram-new/manager` | Authenticate manager updates with Telegram's secret header |
+
+`auto_connect` defaults to false for existing API clients and older stored rows. Request responses include `auto_connect` and nullable `connection_error` (safe retry text). Automatic status progression is `waiting_telegram → waiting_bot → ready → provisioning → connected`; legacy requests include `waiting_consent` before `ready`.
 
 `telegram_bot_id` is a decimal string in JSON requests and responses, and `revision` is an integer. For example, the connect body is `{"telegram_bot_id":"900","revision":6}`.
 
@@ -86,15 +83,15 @@ CLI browser handoff:
 nyxid channel-bot register --platform telegram-new --managed
 ```
 
-`telegram_bot_requests` stores request status, actor/destination IDs, bot setup identity, hashed challenge/consent values, revision, and expiry. Only terminal requests that never started provisioning receive a TTL. Connected/deleted request provenance remains available for lifecycle handling. `telegram_managed_bot_events` stores the original provider creation time, bot setup provenance, the manager observation identifier, and management revisions. Provenance cannot be overwritten by a late creation event. No ordinary chat bodies or raw updates are stored.
+`telegram_bot_requests` stores request status, actor/destination IDs, bot setup identity, hashed challenge/consent values, revision, and expiry. Automatic requests additionally store the bound start update ID, attempt count, next retry time, and safe retry message. Only terminal requests that never started provisioning receive a TTL. Connected/deleted request provenance remains available for lifecycle handling. `telegram_managed_bot_events` stores the original provider creation time, bot setup provenance, the manager observation identifier, and management revisions. Provenance cannot be overwritten by a late creation event. No ordinary chat bodies or raw updates are stored.
 
-Telegram private-message identity, exact named-bot consent, and browser confirmation are separate gates. Candidate identity is hidden from the browser until consent. Telegram API errors exclude raw responses and credential-bearing URLs. The bot token and webhook secret use the existing envelope encryption.
+For automatic requests, the initiating authenticated action authorizes creation and connection together. The private start URL is a bearer handoff: its first private Telegram sender binds the request, and later senders cannot replace that identity. Completing creation after the named destination is shown accepts that connection. This is an intentional authorization change from the legacy flow and does not prove that the NyxID actor and Telegram sender share a preverified login identity. A creation must follow the bound start update, occur no earlier than request creation, and pass the same immutable creation-provenance and management checks as before. The worker rechecks the initiating person’s live destination access. Legacy rows retain separate private-sender, exact named-bot consent, and browser-confirmation gates; candidate identity remains hidden until ready. Telegram API errors exclude raw responses and credential-bearing URLs. The bot token and webhook secret use the existing envelope encryption.
 
-Registration atomically checks active identity and owner quota before inserting. Both Telegram platform IDs share the same remote identity check. Pending bot insertion and the request's provisioning transition happen in one MongoDB transaction. The transaction also checks the management revision approved in Telegram and permanently marks that creation as claimed. Before acquiring a token, NyxID verifies the creation is at most 60 minutes old, belongs to the current manager observation period, and has no pending manager updates or Telegram-reported delivery error since creation. The observation start is saved only after the manager webhook is verified. Clearing and reconfiguring the manager starts a new observation period, so old provenance does not become eligible again. Pending manager updates cause a retryable refusal. A Telegram delivery error after creation disqualifies that creation for automatic connection, even after delivery recovers; create a new bot or use the current token through the Telegram bot token option. An update received after an error does not prove that every earlier management event was delivered. Per-child renewable leases serialize setup and deletion. A separate identity lease coordinates manager configuration with channel registration without blocking unrelated manual Telegram bots.
+Registration atomically checks active identity and owner quota before inserting. Both Telegram platform IDs share the same remote identity check. Pending bot insertion and the request's provisioning transition happen in one MongoDB transaction. The transaction also checks the expected initial management revision (or the revision approved in Telegram for a legacy request) and permanently marks that creation as claimed. Before acquiring a token, NyxID verifies the creation is at most 60 minutes old, belongs to the current manager observation period, and has no pending manager updates or Telegram-reported delivery error since creation. The observation start is saved only after the manager webhook is verified. Clearing and reconfiguring the manager starts a new observation period, so old provenance does not become eligible again. Pending manager updates cause a retryable refusal. A Telegram delivery error after creation disqualifies that creation for automatic connection, even after delivery recovers; create a new bot or use the current token through the Telegram bot token option. An update received after an error does not prove that every earlier management event was delivered. Per-child renewable leases serialize setup and deletion. A separate identity lease coordinates manager configuration with channel registration without blocking unrelated manual Telegram bots.
 
 ## Deployment and staging validation
 
-Use the repository's existing transaction-capable MongoDB topology. Deploy all backend replicas with this version and drain old writers before configuring Telegram bot creation: older replicas do not participate in the new registration transaction fence. Startup installs the request and event indexes; MongoDB TTL alone does not release active requests. Reads and new initiation perform logical expiry cleanup.
+Use the repository's existing transaction-capable MongoDB topology. Deploy all backend replicas with this version and drain old writers before configuring Telegram bot creation: older replicas do not participate in the new registration transaction fence. Startup installs the request and event indexes; MongoDB TTL alone does not release active requests. Reads, new initiation, and the automatic worker perform logical expiry cleanup. Upgrade backend replicas before releasing the new frontend: older backends reject the new request flag and cannot run the automatic worker. No migration upgrades old requests into automatic authorization.
 
 Official API documentation was checked during implementation:
 
@@ -105,9 +102,9 @@ Official API documentation was checked during implementation:
 Local verification uses real MongoDB transactions and a simulated Telegram API. It does not establish Telegram client compatibility or actual ownership-event semantics. Before customer use, the operator must check:
 
 - Manager capability and successful webhook delivery with a dedicated staging bot.
-- Native creation, exact approval, return, browser confirmation, inbound message, and agent reply on supported Telegram iOS, Android, and desktop clients.
+- Native creation, automatic connection without approval/Connect buttons, browser return, inbound message, and agent reply on supported Telegram iOS, Android, and desktop clients.
 - Whether creation emits exactly one initial management event and whether obtaining a token or configuring the child webhook emits another event. Additional events intentionally stop this first implementation.
-- Confirm that the creation service message carries the original provider `date`, including on redelivery. Missing/old timestamps fail closed. Check creation-event timing and identity through a dropped browser session, cancelled/expired request, delayed webhook, and `/recover`.
+- Confirm that the creation service message carries the original provider `date`, including on redelivery. Missing/old timestamps fail closed. Check creation-event timing and identity through a dropped browser session, cancelled/expired request, delayed webhook, duplicate event, and old-form completion after a new handoff. Verify legacy `/recover` separately.
 - Token regeneration, management removal, and ownership transfer: observed changes must stop incoming messages and replies, including replies using old NyxID reply tokens.
 - Interrupted manager save and interrupted child webhook setup; repeat saves/connection attempts must recover without a different bot or webhook secret.
 - Existing webhook ownership checks, deletion, and recovery through the Telegram bot token option.
@@ -115,6 +112,15 @@ Local verification uses real MongoDB transactions and a simulated Telegram API. 
 No real manager token was configured, no live Telegram bot was created, and no production deployment was performed as part of local implementation.
 
 ## Local verification record
+
+Automatic connection validation on 2026-09-15:
+
+- All 30 Telegram-focused backend tests passed against an isolated MongoDB replica set and WireMock; none were skipped. The run covers webhook-driven connection without consent/browser completion, concurrent workers, duplicate events, delayed management delivery, retry with the same saved credentials after expiry, revoked destination access, earlier/unbound creation events, legacy authorization, and suspended provisioning.
+- All 104 channel-related frontend tests passed, including automatic status completion, popup fallback, saved-request reload, and discarding an outstanding handoff when the account changes.
+- Browser checks passed at 390px and 1440px. They cover the single website action, two displayed steps, destination locking, launch renewal, closing/reopening the page, and server completion while the page is closed. The test rejects any browser `/connect` call in the new flow. Both layouts were visually inspected.
+- TypeScript, the frontend production build, targeted ESLint, Rust formatting, and `git diff --check` passed.
+
+These checks used simulated Telegram responses. No live Telegram bot was created and no deployment was performed. Earlier records below refer to the previous approval flow and do not certify the new authorization contract.
 
 Copy and connected-step validation on 2026-09-14: all 23 Telegram-focused backend tests passed against an isolated MongoDB replica set and WireMock, including readable personal/org identity, HTML escaping, consent, and the return action. All 100 channel-related frontend tests passed. Telegram browser checks passed at 390px and 1440px in light and dark mode, including reload and reopening; the connected steps were visually reviewed. TypeScript, targeted ESLint, Rust formatting, and the frontend production build passed. These checks did not send messages to a live Telegram chat.
 

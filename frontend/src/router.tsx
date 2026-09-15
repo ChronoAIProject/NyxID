@@ -738,7 +738,12 @@ const apiKeyDetailRoute = createRoute({
 
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
-  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string } => ({ connect: managedConnectPlatform(search.connect), label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined, target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined }),
+  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string; request_id?: string } => ({
+    connect: managedConnectPlatform(search.connect),
+    label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined,
+    target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined,
+    request_id: typeof search.request_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.request_id) ? search.request_id : undefined,
+  }),
   getParentRoute: () => dashboardLayout,
   component: ChannelBotsPage,
 });
