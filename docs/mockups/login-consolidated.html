@@ -2283,8 +2283,35 @@
         display: grid;
         gap: 16px;
       }
-      .authorization-card > .text-button {
+      .authorization-back {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         justify-self: start;
+        gap: 6px;
+        height: 28px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        font: 500 12px Manrope, sans-serif;
+        cursor: pointer;
+        transition: background 200ms, color 200ms;
+      }
+      .authorization-back:hover {
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+      }
+      .authorization-back:focus-visible {
+        outline: 2px solid var(--purple);
+        outline-offset: 2px;
+      }
+      .authorization-back svg {
+        width: 12px;
+        height: 12px;
+        flex-shrink: 0;
+        pointer-events: none;
       }
       .authorization-heading {
         display: flex;
@@ -2917,8 +2944,23 @@
                       aria-label="Authorize access"
                       hidden=""
                     >
-                      <button class="text-button" id="backToKeys" type="button">
-                        ← Change key
+                      <button
+                        class="authorization-back"
+                        id="backToKeys"
+                        type="button"
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="m12 19-7-7 7-7M5 12h14" />
+                        </svg>
+                        Change key
                       </button>
                       <header class="authorization-heading">
                         <span class="authorization-icon" aria-hidden="true"

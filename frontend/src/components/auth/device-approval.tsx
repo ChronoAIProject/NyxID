@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "@tanstack/react-router";
-import { Check, KeyRound, ShieldCheck, ShieldX } from "lucide-react";
+import { ArrowLeft, Check, KeyRound, ShieldCheck, ShieldX } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -832,10 +832,12 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                       {chosen && (
                         <>
                           <Button
-                            variant="link"
+                            variant="ghost"
+                            size="sm"
                             disabled={blocked}
                             onClick={changeKey}
                           >
+                            <ArrowLeft aria-hidden="true" />
                             Change key
                           </Button>
                           <LoginGrantReview
@@ -911,10 +913,12 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                     draft && (
                       <>
                         <Button
-                          variant="link"
+                          variant="ghost"
+                          size="sm"
                           disabled={blocked}
                           onClick={changeKey}
                         >
+                          <ArrowLeft aria-hidden="true" />
                           Back to matching keys
                         </Button>
                         <LoginKeyDraft
