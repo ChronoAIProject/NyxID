@@ -39,6 +39,15 @@ in force until sync succeeds. Resale may add its independent charge to platform-
 traffic. Usage continues grouping by service/model/agent/layer; lane charges retain
 these dimensions and use the existing wallet/allowance/grant funding display.
 
+The admin service setting **Charge only NyxID-provided credentials**
+(`platform_charge_nyxid_credentials_only`, default off) restricts enabled platform
+billing to NyxID master keys and shared OAuth apps, including X. BYO and legacy
+untagged OAuth connections, agent overrides, node-managed credentials and no-auth
+traffic still produce observability meters but no platform wallet charge. This is
+independent of resale, which continues to require a NyxID master key. The restriction
+also applies when pricing lanes are configured; shared OAuth tokens retain their
+previous user-token price lane.
+
 ---
 
 ## 1. Page header and period selector

@@ -22,6 +22,7 @@ use crate::services::{
 fn llm_credential_class(
     resolved_via_user_service: bool,
     master_credential: bool,
+    credential_source: Option<&str>,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if target.auth_method == "none" && target.credential.is_empty() {
@@ -31,6 +32,8 @@ fn llm_credential_class(
         // catalog master credential; classify by whose key was used.
         if master_credential {
             CredentialClass::NyxidManagedMaster
+        } else if credential_source == Some("platform") {
+            CredentialClass::NyxidPlatformOauthApp
         } else {
             CredentialClass::UserOwned
         }
@@ -289,6 +292,7 @@ pub async fn llm_proxy_request(
     // with the "Provider ... connection required" error, even though the
     // user has a perfectly valid UserService linked by catalog_service_id.
     let mut is_auto_connected_for_approval = false;
+    let mut credential_source = None;
     let (target, resolved_via_user_service, master_credential, owner_for_approval) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
@@ -305,6 +309,7 @@ pub async fn llm_proxy_request(
         .await?
         {
             Some(resolution) => {
+                credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
                 let effective_owner = resolution
                     .org_routing
@@ -380,7 +385,12 @@ pub async fn llm_proxy_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(resolved_via_user_service, master_credential, &target),
+        llm_credential_class(
+            resolved_via_user_service,
+            master_credential,
+            credential_source.as_deref(),
+            &target,
+        ),
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
@@ -660,6 +670,7 @@ pub async fn gateway_request(
     // See `llm_proxy_request` for why we pass `None` as the slug here
     // instead of `provider_slug` -- the URL's provider slug does not
     // match UserService.slug, which is user-chosen at provision time.
+    let mut credential_source = None;
     let (target, resolved_via_user_service, master_credential) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
@@ -676,6 +687,7 @@ pub async fn gateway_request(
         .await?
         {
             Some(resolution) => {
+                credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
                 effective_owner_for_approval = Some(
                     resolution
@@ -804,7 +816,12 @@ pub async fn gateway_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(resolved_via_user_service, master_credential, &target),
+        llm_credential_class(
+            resolved_via_user_service,
+            master_credential,
+            credential_source.as_deref(),
+            &target,
+        ),
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
@@ -1910,6 +1927,43 @@ mod tests {
             result,
             Err(AppError::RequestBodyTooLarge { max_bytes: 4, .. })
         ));
+    }
+
+    #[test]
+    fn shared_oauth_app_is_classified_for_platform_charging() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.requires_user_credential = true;
+        let target = crate::services::proxy_service::ProxyTarget {
+            base_url: service.base_url.clone(),
+            auth_method: "bearer".into(),
+            auth_key_name: "Authorization".into(),
+            credential: "test-token".into(),
+            service,
+            catalog_default_headers: Vec::new(),
+            user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
+            connection_id: None,
+        };
+        for (source, expected) in [
+            (
+                Some("platform"),
+                crate::models::usage_meter::CredentialClass::NyxidPlatformOauthApp,
+            ),
+            (
+                Some("byo"),
+                crate::models::usage_meter::CredentialClass::UserOwned,
+            ),
+            (None, crate::models::usage_meter::CredentialClass::UserOwned),
+        ] {
+            assert_eq!(
+                super::llm_credential_class(true, false, source, &target),
+                expected
+            );
+            assert_eq!(
+                super::llm_credential_class(true, true, source, &target),
+                crate::models::usage_meter::CredentialClass::NyxidManagedMaster
+            );
+        }
     }
 
     #[test]

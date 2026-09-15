@@ -37,6 +37,7 @@ pub enum UsageStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CredentialClass {
     NyxidManagedMaster,
+    NyxidPlatformOauthApp,
     UserOwned,
     AgentOverrideUserOwned,
     NodeManaged,

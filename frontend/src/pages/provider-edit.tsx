@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import type { ProviderConfig } from "@/types/api";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -43,65 +43,62 @@ export function ProviderEditPage() {
   const { providerId } = useParams({ strict: false }) as {
     providerId: string;
   };
-  const navigate = useNavigate();
   const { data: provider, isLoading, error, refetch } = useProvider(providerId);
-  const updateMutation = useUpdateProvider(providerId);
 
+  if (isLoading) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-10 w-64" />
+        <Skeleton className="h-96 w-full" />
+      </div>
+    );
+  }
+
+  if (error || !provider) {
+    return (
+      <div className="space-y-8">
+        <PageHeader title="Provider Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The provider you are trying to edit does not exist or has been deleted."}
+          onRetry={refetch}
+        />
+      </div>
+    );
+  }
+
+  return <ProviderEditForm provider={provider} />;
+}
+
+function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
+  const providerId = provider.id;
+  const navigate = useNavigate();
+  const updateMutation = useUpdateProvider(providerId);
   const form = useAppForm<UpdateProviderFormData>({
     resolver: zodResolver(updateProviderSchema),
-    defaultValues: {
-      name: "",
-      slug: "",
-      description: "",
-      provider_type: "oauth2",
-      credential_mode: "admin" as const,
+    values: {
+      name: provider.name,
+      slug: provider.slug,
+      description: provider.description ?? "",
+      provider_type: provider.provider_type,
+      credential_mode: provider.credential_mode || "admin",
       authorization_url: "",
       token_url: "",
       revocation_url: "",
-      default_scopes: "",
-      is_active: true,
+      default_scopes: provider.default_scopes?.join(", ") ?? "",
+      is_active: provider.is_active,
       client_id: "",
       client_secret: "",
-      client_id_param_name: "",
-      supports_pkce: true,
+      client_id_param_name: provider.client_id_param_name ?? "",
+      supports_pkce: provider.supports_pkce,
       device_code_url: "",
       device_token_url: "",
-      hosted_callback_url: "",
-      api_key_instructions: "",
-      api_key_url: "",
-      icon_url: "",
-      documentation_url: "",
+      hosted_callback_url: provider.hosted_callback_url ?? "",
+      api_key_instructions: provider.api_key_instructions ?? "",
+      api_key_url: provider.api_key_url ?? "",
+      icon_url: provider.icon_url ?? "",
+      documentation_url: provider.documentation_url ?? "",
     },
   });
-
-  useEffect(() => {
-    if (provider) {
-      form.reset({
-        name: provider.name,
-        slug: provider.slug,
-        description: provider.description ?? "",
-        provider_type: provider.provider_type,
-        credential_mode: provider.credential_mode ?? "admin",
-        authorization_url: "",
-        token_url: "",
-        revocation_url: "",
-        default_scopes: provider.default_scopes?.join(", ") ?? "",
-        is_active: provider.is_active,
-        client_id: "",
-        client_secret: "",
-        client_id_param_name: provider.client_id_param_name ?? "",
-        supports_pkce: provider.supports_pkce,
-        device_code_url: "",
-        device_token_url: "",
-        hosted_callback_url: provider.hosted_callback_url ?? "",
-        api_key_instructions: provider.api_key_instructions ?? "",
-        api_key_url: provider.api_key_url ?? "",
-        icon_url: provider.icon_url ?? "",
-        documentation_url: provider.documentation_url ?? "",
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider]);
 
   const watchedProviderType = useWatch({
     control: form.control,
@@ -109,7 +106,6 @@ export function ProviderEditPage() {
   });
 
   async function onSubmit(data: UpdateProviderFormData) {
-    if (!provider) return;
     try {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { slug: _, provider_type: _providerType, ...updateFields } = data;
@@ -140,27 +136,6 @@ export function ProviderEditPage() {
         toast.error("Failed to update provider");
       }
     }
-  }
-
-  if (isLoading) {
-    return (
-      <div className="space-y-6">
-        <Skeleton className="h-10 w-64" />
-        <Skeleton className="h-96 w-full" />
-      </div>
-    );
-  }
-
-  if (error || !provider) {
-    return (
-      <div className="space-y-8">
-        <PageHeader title="Provider Not Found" />
-        <ErrorBanner
-          message={error instanceof ApiError ? error.message : "The provider you are trying to edit does not exist or has been deleted."}
-          onRetry={refetch}
-        />
-      </div>
-    );
   }
 
   const isOAuth = watchedProviderType === "oauth2";
@@ -264,12 +239,12 @@ export function ProviderEditPage() {
                   <FormItem>
                     <FormLabel>Credential Mode</FormLabel>
                     <Select
-                      value={field.value ?? "admin"}
+                      value={field.value || "admin"}
                       onValueChange={field.onChange}
                     >
                       <FormControl>
                         <SelectTrigger>
-                          <SelectValue />
+                          <SelectValue placeholder="Admin Only" />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>

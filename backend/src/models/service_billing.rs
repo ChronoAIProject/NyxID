@@ -65,6 +65,10 @@ pub struct ServiceBilling {
     /// platform-operated services that should bill wallet credits.
     #[serde(default)]
     pub platform_billable: bool,
+    /// Restrict platform charges to NyxID master credentials and shared OAuth
+    /// apps. User-owned, agent-override, node-managed and no-auth traffic stays free.
+    #[serde(default)]
+    pub platform_charge_nyxid_credentials_only: bool,
     /// Admin-selected platform metering unit. Unset falls back to the
     /// heuristic (WS/SSH meter bytes, `llm-` slugs meter tokens,
     /// everything else meters requests).
@@ -100,6 +104,7 @@ impl Default for ServiceBilling {
     fn default() -> Self {
         Self {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
@@ -217,6 +222,35 @@ mod tests {
     use super::{BillingMetric, ServiceBilling};
 
     #[test]
+    fn credential_charge_restriction_defaults_off_and_round_trips() {
+        let legacy: ServiceBilling = bson::from_document(bson::doc! {
+            "platform_billable": true,
+        })
+        .unwrap();
+        assert!(!legacy.platform_charge_nyxid_credentials_only);
+        assert!(!ServiceBilling::default().platform_charge_nyxid_credentials_only);
+        let restricted = ServiceBilling {
+            platform_charge_nyxid_credentials_only: true,
+            ..legacy
+        };
+        let document = bson::to_document(&restricted).unwrap();
+        assert!(
+            document
+                .get_bool("platform_charge_nyxid_credentials_only")
+                .unwrap()
+        );
+        assert_eq!(
+            bson::from_document::<ServiceBilling>(document).unwrap(),
+            restricted
+        );
+        let json = serde_json::to_string(&restricted).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ServiceBilling>(&json).unwrap(),
+            restricted
+        );
+    }
+
+    #[test]
     fn service_billing_defaults_to_not_resale_billable() {
         let billing = ServiceBilling::default();
 
@@ -230,6 +264,7 @@ mod tests {
     fn active_resale_spec_requires_metric_code() {
         let mut billing = ServiceBilling {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,

@@ -26,6 +26,8 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 // `credential_mode: "both"` (platform OAuth app with BYO override, see
 // docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md), and this startup migration would
 // otherwise revert an ops-provisioned "both" back to "user" on every restart.
+// `twitter` is also excluded: its seed stays BYO-only, but an ops-provisioned
+// shared app ("both" or "admin") must survive this migration on restart.
 const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "facebook",
     "discord",
@@ -37,6 +39,16 @@ const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "twitch",
     "reddit",
     "lark",
+];
+
+const TWITTER_DEFAULT_SCOPES: &[&str] = &[
+    "tweet.read",
+    "tweet.write",
+    "media.write",
+    "users.read",
+    "offline.access",
+    "dm.read",
+    "dm.write",
 ];
 
 /// Seed default AI provider configurations at startup (idempotent).
@@ -674,13 +686,12 @@ pub async fn seed_default_providers(
             // attach images/video to posts via `POST /2/media/upload`; without it that
             // endpoint returns 403 and there is currently no scope input in the CLI pair
             // wizard to add it after the fact.
-            default_scopes: Some(vec![
-                "tweet.read".to_string(),
-                "tweet.write".to_string(),
-                "media.write".to_string(),
-                "users.read".to_string(),
-                "offline.access".to_string(),
-            ]),
+            default_scopes: Some(
+                TWITTER_DEFAULT_SCOPES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            ),
             client_id_encrypted: None,
             client_secret_encrypted: None,
             supports_pkce: true,
@@ -713,20 +724,18 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // Migration: set credential_mode and token_endpoint_auth_method on existing Twitter providers.
+    // Migration: backfill Twitter token authentication without changing the admin-selected mode.
     // The $ne filter means this is a no-op after migration completes.
     if let Some(existing_twitter) = collection
-        .find_one(doc! { "slug": "twitter", "$or": [
-            { "credential_mode": { "$ne": "user" } },
-            { "token_endpoint_auth_method": { "$ne": "client_secret_basic" } },
-        ]})
+        .find_one(doc! { "slug": "twitter",
+            "token_endpoint_auth_method": { "$ne": "client_secret_basic" },
+        })
         .await?
     {
         collection
             .update_one(
                 doc! { "_id": &existing_twitter.id },
                 doc! { "$set": {
-                    "credential_mode": "user",
                     "token_endpoint_auth_method": "client_secret_basic",
                     "updated_at": bson::DateTime::from_chrono(Utc::now()),
                 }},
@@ -734,7 +743,7 @@ pub async fn seed_default_providers(
             .await?;
         tracing::info!(
             slug = "twitter",
-            "Migrated existing Twitter provider to credential_mode=user, token_endpoint_auth_method=client_secret_basic"
+            "Migrated existing Twitter provider token_endpoint_auth_method to client_secret_basic"
         );
     }
 
@@ -757,6 +766,27 @@ pub async fn seed_default_providers(
         tracing::info!(
             slug = "twitter",
             "Migrated existing Twitter provider default_scopes to include media.write"
+        );
+    }
+
+    // DM operations require dm.read/dm.write (X returns 403 without them).
+    // Add missing defaults without overwriting admin scopes or duplicating entries.
+    let twitter_dm_migration = collection
+        .update_one(
+            doc! { "slug": "twitter", "$or": [
+                { "default_scopes": { "$ne": "dm.read" } },
+                { "default_scopes": { "$ne": "dm.write" } },
+            ] },
+            doc! {
+                "$addToSet": { "default_scopes": { "$each": ["dm.read", "dm.write"] } },
+                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            },
+        )
+        .await?;
+    if twitter_dm_migration.modified_count > 0 {
+        tracing::info!(
+            slug = "twitter",
+            "Migrated Twitter default_scopes to include DM scopes"
         );
     }
 
@@ -9184,10 +9214,9 @@ mod tests {
 
     #[tokio::test]
     async fn seed_does_not_revert_ops_patched_both() {
-        let Some(db) = connect_test_database("prov_svc_ops_patch").await else {
-            eprintln!("skipping: no MongoDB");
-            return;
-        };
+        let db = connect_test_database("prov_svc_ops_patch")
+            .await
+            .expect("MongoDB required");
         let enc = test_encryption_keys();
         let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
         super::seed_default_providers(&db, &enc).await.unwrap();
@@ -9196,14 +9225,14 @@ mod tests {
         // "user"; ops then PATCHes them to "both" to enable the platform app.
         collection
             .update_many(
-                doc! { "slug": { "$in": ["google", "github"] } },
+                doc! { "slug": { "$in": ["google", "github", "twitter"] } },
                 doc! { "$set": { "credential_mode": "user" } },
             )
             .await
             .unwrap();
         collection
             .update_many(
-                doc! { "slug": { "$in": ["google", "github"] } },
+                doc! { "slug": { "$in": ["google", "github", "twitter"] } },
                 doc! { "$set": { "credential_mode": "both" } },
             )
             .await
@@ -9211,7 +9240,7 @@ mod tests {
 
         // Restart: the social_user_mode_migration must leave them alone...
         super::seed_default_providers(&db, &enc).await.unwrap();
-        for slug in ["google", "github"] {
+        for slug in ["google", "github", "twitter"] {
             let p = collection
                 .find_one(doc! { "slug": slug })
                 .await
@@ -9242,6 +9271,83 @@ mod tests {
             discord.credential_mode, "user",
             "listed social slugs must still be migrated back to user"
         );
+    }
+
+    #[test]
+    fn twitter_default_scopes_are_allowed_on_platform_app() {
+        let allowed = crate::services::scope_catalog::platform_scope_allowlist("twitter")
+            .expect("Twitter shared app must have an allowlist");
+        for scope in super::TWITTER_DEFAULT_SCOPES {
+            assert!(
+                allowed.contains(scope),
+                "default scope {scope} must be allowlisted"
+            );
+        }
+        assert!(!super::SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS.contains(&"twitter"));
+    }
+
+    #[tokio::test]
+    async fn twitter_backfills_preserve_admin_mode_and_existing_scopes() {
+        let db = connect_test_database("twitter_backfills")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let fresh = collection
+            .find_one(doc! { "slug": "twitter" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.credential_mode, "user");
+        collection
+            .update_one(
+                doc! { "slug": "twitter" },
+                doc! { "$set": {
+                    "credential_mode": "admin",
+                    "token_endpoint_auth_method": "client_secret_post",
+                    "default_scopes": ["tweet.read", "dm.read", "custom.scope"],
+                }},
+            )
+            .await
+            .unwrap();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let migrated = collection
+            .find_one(doc! { "slug": "twitter" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated.credential_mode, "admin");
+        assert_eq!(migrated.token_endpoint_auth_method, "client_secret_basic");
+        let scopes = migrated.default_scopes.as_ref().unwrap();
+        // Adapter backfills also merge required scopes via $setUnion, whose
+        // ordering is unspecified. Check preservation and additions as a set.
+        let scope_set: std::collections::BTreeSet<_> = scopes.iter().collect();
+        assert_eq!(scope_set.len(), scopes.len(), "scopes must remain unique");
+        for scope in [
+            "tweet.read",
+            "dm.read",
+            "custom.scope",
+            "media.write",
+            "dm.write",
+        ] {
+            assert!(scopes.iter().any(|s| s == scope), "missing scope {scope}");
+        }
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let again = collection
+            .find_one(doc! { "slug": "twitter" })
+            .await
+            .unwrap()
+            .unwrap();
+        let again_scopes = again.default_scopes.as_ref().unwrap();
+        assert_eq!(again_scopes.len(), scopes.len());
+        assert_eq!(
+            again_scopes
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            scope_set
+        );
+        assert_eq!(again.updated_at, migrated.updated_at);
     }
 
     // ── platform-credential hygiene (spec B5) ──────────────────────

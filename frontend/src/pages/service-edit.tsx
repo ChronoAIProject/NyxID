@@ -80,6 +80,7 @@ export function ServiceEditPage() {
       forward_access_token: false,
       inject_delegation_token: false,
       platform_billable: false,
+      platform_charge_nyxid_credentials_only: false,
       platform_metric: "auto" as const,
       platform_price: "",
       delegation_token_scope: "",
@@ -135,6 +136,8 @@ export function ServiceEditPage() {
         forward_access_token: service.forward_access_token ?? false,
         inject_delegation_token: service.inject_delegation_token ?? false,
         platform_billable: service.billing?.platform_billable ?? false,
+        platform_charge_nyxid_credentials_only:
+          service.billing?.platform_charge_nyxid_credentials_only ?? false,
         platform_metric:
           (service.billing?.platform_metric as UpdateServiceFormData["platform_metric"]) ??
           "auto",
@@ -271,6 +274,8 @@ export function ServiceEditPage() {
                   ...(service?.billing ?? {}),
                   ...(user?.is_admin ? { byok_pricing: data.byok_pricing, platform_key_pricing: data.platform_key_pricing } : {}),
                   platform_billable: data.platform_billable ?? false,
+                  platform_charge_nyxid_credentials_only:
+                    data.platform_charge_nyxid_credentials_only ?? false,
                   platform_metric:
                     data.platform_metric && data.platform_metric !== "auto"
                       ? data.platform_metric
@@ -990,6 +995,29 @@ export function ServiceEditPage() {
                           checked={form.watch("platform_billable") ?? false}
                           onCheckedChange={(v) =>
                             form.setValue("platform_billable", v)
+                          }
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-3">
+                        <div className="space-y-1">
+                          <Label
+                            htmlFor="platform-charge-nyxid-credentials-only"
+                            className="text-[12px] font-normal"
+                          >
+                            Charge only NyxID-provided credentials
+                          </Label>
+                          <p className="text-xs text-muted-foreground">
+                            Charge NyxID master keys and shared OAuth apps. Users
+                            bringing their own credentials are metered for
+                            observability without platform charges.
+                          </p>
+                        </div>
+                        <Switch
+                          id="platform-charge-nyxid-credentials-only"
+                          checked={form.watch("platform_charge_nyxid_credentials_only") ?? false}
+                          onCheckedChange={(v) =>
+                            form.setValue("platform_charge_nyxid_credentials_only", v)
                           }
                         />
                       </div>

@@ -315,6 +315,7 @@ async fn run_billing_route_coverage_smoke() {
     direct_catalog.streaming_supported = true;
     direct_catalog.billing = Some(ServiceBilling {
         platform_billable: true,
+        platform_charge_nyxid_credentials_only: false,
         platform_metric: Some(BillingMetric::Tokens),
         ..Default::default()
     });
@@ -1229,6 +1230,7 @@ async fn buffered_route_preserves_success_when_settlement_failure_is_replayed() 
     recovery_catalog.base_url = downstream_url.clone();
     recovery_catalog.billing = Some(crate::models::service_billing::ServiceBilling {
         platform_billable: true,
+        platform_charge_nyxid_credentials_only: false,
         ..Default::default()
     });
     db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -2401,6 +2403,7 @@ fn route_context(case: &CoverageCase, request_id: &str, owner_id: &str) -> Billi
     // opt-in per service.
     let billing = crate::models::service_billing::ServiceBilling {
         platform_billable: true,
+        platform_charge_nyxid_credentials_only: false,
         ..Default::default()
     };
     BillingRouteContext::new(

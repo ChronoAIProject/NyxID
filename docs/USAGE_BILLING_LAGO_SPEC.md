@@ -93,6 +93,7 @@ pub enum UsageStatus { Reserved, Forwarded, Finalized, Failed, Abandoned, DeadLe
 #[serde(rename_all = "snake_case")]
 pub enum CredentialClass {
     NyxidManagedMaster,        // catalog master credential NyxID owns/pays for → resale-eligible
+    NyxidPlatformOauthApp,     // shared OAuth app, user-authorized token  → platform only
     UserOwned,                 // user-stored BYO key (UserApiKey)        → platform only
     AgentOverrideUserOwned,    // per-agent binding swapped in a user key  → platform only
     NodeManaged,               // credential lives on the node            → platform only
@@ -125,7 +126,7 @@ credential; pricing never stores a secret.
 
 | Final credential class | Selected lane |
 | --- | --- |
-| `UserOwned`, `AgentOverrideUserOwned`, `NodeManaged` | `byok_pricing` |
+| `UserOwned`, `NyxidPlatformOauthApp`, `AgentOverrideUserOwned`, `NodeManaged` | `byok_pricing` |
 | `NyxidManagedMaster` | `platform_key_pricing` |
 | `NoAuth` | None; meter only |
 
@@ -173,6 +174,16 @@ endpoint when `resale_billable` (in `admin_anonymous_endpoints.rs`) — extend
 `validate_*_anonymous_compatibility` (`anonymous_endpoint_service.rs:104/113`). Returns 11304 (HTTP
 400) at write time. Public/anonymous proxy (`public_proxy.rs`, no `AuthUser`) can therefore never be
 billing-active.
+
+For shared OAuth apps (including X), admins can opt into
+`ServiceBilling.platform_charge_nyxid_credentials_only` alongside `platform_billable`
+and a per-request `platform_pricing`. The flag defaults to false, preserving existing
+platform billing. When true, only `NyxidManagedMaster` and `NyxidPlatformOauthApp`
+(`UserApiKey.credential_source = "platform"`) qualify for platform charges; BYO and
+legacy untagged keys, agent overrides, node-managed credentials and no-auth requests
+remain metered without platform charges. Apply the restriction after lane selection,
+so a configured BYOK lane cannot bypass it. Shared-app OAuth retains its prior
+user-token price lane for compatibility. Resale still requires `NyxidManagedMaster`.
 
 ### 3.2 `usage_meter` — durable ledger + reservation lifecycle
 

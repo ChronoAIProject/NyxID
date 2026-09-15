@@ -1380,6 +1380,8 @@ pub struct UserServiceResolution {
     /// credential (auto-provisioned UserService with no user key), not a
     /// key the user supplied. Drives resale credential classification.
     pub master_credential: bool,
+    /// OAuth app provenance of the resolved UserApiKey, for platform charging.
+    pub credential_source: Option<String>,
     /// Set when the resolved UserService was reached via org membership
     /// (the actor has no personal copy). `None` means personal credentials.
     pub org_routing: Option<OrgRouting>,
@@ -2635,6 +2637,7 @@ async fn finish_resolution(
             api_key_id: None,
             credential_epoch: 1,
             master_credential: true,
+            credential_source: None,
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2677,6 +2680,7 @@ async fn finish_resolution(
             api_key_id: None,
             credential_epoch: 1,
             master_credential: false,
+            credential_source: None,
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2770,6 +2774,7 @@ async fn finish_resolution(
             api_key_id: Some(api_key.id.clone()),
             credential_epoch: api_key.credential_epoch,
             master_credential: false,
+            credential_source: api_key.credential_source.clone(),
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2832,6 +2837,7 @@ async fn finish_resolution(
         api_key_id: Some(api_key.id.clone()),
         credential_epoch: api_key.credential_epoch,
         master_credential: false,
+        credential_source: api_key.credential_source.clone(),
         org_routing,
         pool_selection,
         is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
