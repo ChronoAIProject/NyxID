@@ -590,12 +590,14 @@ async function assertPublicTarget(rawUrl) {
 // Ported from the proven userscript extractors: KaTeX/MathJax → LaTeX, the
 // Pro-reasoning "still generating" probe, latest-answer + full-transcript
 // extraction. Installed on window.__nyx and re-installed after navigation.
+const DOM_CORE_VERSION = 4;
 const DOM_CORE = `
 window.__nyx = (function () {
   const artifactFileId = ${artifactFileId.toString()};
   const isTrustedArtifactUrl = ${isTrustedArtifactUrl.toString()};
   const sanitizeArtifactName = ${sanitizeArtifactName.toString()};
   const classifyArtifactLink = ${classifyArtifactLink.toString()};
+  const compactModelLabel = ${compactModelLabel.toString()};
 
   function extractTextWithMath(el) {
     if (!el) return "";
@@ -884,8 +886,8 @@ window.__nyx = (function () {
     return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
   }
 
-  return { version: 3, discoverControls, structuralProbe, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
-    beginModelPicker, finishNestedModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem };
+  return { version: ${DOM_CORE_VERSION}, discoverControls, structuralProbe, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+    beginModelPicker, finishNestedModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem, compactModelLabel };
 })();
 `;
 
@@ -897,9 +899,9 @@ export async function installDomCore(page) {
   }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      if (await page.evaluate(() => window.__nyx?.version === 3)) return;
+      if (await page.evaluate(version => window.__nyx?.version === version, DOM_CORE_VERSION)) return;
       await page.evaluate(DOM_CORE);
-      if (await page.evaluate(() => window.__nyx?.version === 3)) return;
+      if (await page.evaluate(version => window.__nyx?.version === version, DOM_CORE_VERSION)) return;
     } catch (error) {
       if (['page_crashed', 'cdp_disconnected'].includes(stableErrorCode(error))) throw error;
     }
@@ -1309,7 +1311,7 @@ const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
 export const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
-const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible';
+const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible:not([data-nyx-switcher])';
 const COMPOSER_REGION_XPATH = "xpath=ancestor::*[.//button[@data-testid='send-button' or @aria-label='Send prompt' or @aria-label='发送提示']][1]";
 
 const MODEL_LEVELS = [
@@ -1399,8 +1401,16 @@ export function switcherMatches(text, requested, familyOnly = false) {
     (familyOnly || wanted[3] === observed[3]));
 }
 
+// Compact labels establish family/tier only, never reasoning effort or a
+// bare family submenu. Require the entire label to contain known tokens.
+export function compactModelLabel(text) {
+  const label = String(text || '').trim().replace(/\s+/g, ' ');
+  const match = /^([0-9]{1,3}(?:\.[0-9]{1,3})?) (pro|专业|auto|instant|thinking|medium|high|extra[ -]high|自动|极速|思考|均衡|高级|超高)$/i.exec(label);
+  return match ? `GPT ${match[1]} ${match[2]}` : null;
+}
+
 export function chooseSwitcherEntry(items, requested, familyContext = null) {
-  const candidates = items.map((item, index) => ({ ...item, index }))
+  const candidates = items.map((item, index) => ({ ...item, text: compactModelLabel(item.text) || item.text, index }))
     .filter(item => switcherMatches(item.text, requested));
   const exact = candidates.find(item => normalizeMenuText(item.text).replace(/^chatgpt/, 'gpt') === normalizeMenuText(requested).replace(/^chatgpt/, 'gpt'));
   if (candidates.length) return (exact || candidates[0]).index;
@@ -1436,10 +1446,9 @@ export async function readModelSwitcher(page, budget = interactionBudget(1000)) 
       .filter(el => visible(el) && /^(chatgpt|gpt)[\s_-]*[0-9]{1,3}(?:[._][0-9]{1,3})?(?=$|[\s_-])/i.test((el.innerText || '').trim()));
     let candidates = exact.length ? exact : fallback;
     let source = 'header';
-    // The compact composer trigger exposes its family and tier on separate
-    // lines. Adapt only this whole-label shape inside the discovered form;
-    // numeric labels elsewhere and ambiguous header controls stay untrusted.
-    const compactLabel = el => /^([0-9]{1,3}(?:\.[0-9]{1,3})?)\s+Pro$/i.exec((el.innerText || '').trim());
+    // Only the discovered form can supply a compact trigger; ambiguous
+    // header controls must never fall through to composer discovery.
+    const compactLabel = el => window.__nyx?.compactModelLabel(el.innerText);
     if (!candidates.length) {
       const form = window.__nyx?.discoverControls().input?.closest('form');
       candidates = [...(form?.querySelectorAll('button[aria-haspopup="menu"]') || [])]
@@ -1449,7 +1458,7 @@ export async function readModelSwitcher(page, budget = interactionBudget(1000)) 
     const trigger = candidates.length === 1 ? candidates[0] : null;
     if (trigger) trigger.setAttribute('data-nyx-switcher', '');
     const rawText = trigger ? (trigger.innerText || trigger.getAttribute('aria-label') || '').trim() : null;
-    return { text: trigger && source === 'composer' ? `GPT ${compactLabel(trigger)[1]} Pro` : rawText,
+    return { text: trigger && source === 'composer' ? compactLabel(trigger) : rawText,
       rawText, source,
       found: !!trigger, open: (window.__nyx?.modelPickerMenus(pickerId).length || 0) > 0,
       items: (window.__nyx?.modelPickerItems(pickerId) || []).map(el => ({ text: (el.innerText || el.textContent || '').trim() })) };
@@ -1661,7 +1670,7 @@ export async function retryPresendModelRead(read) {
 // restricted to the structural pill or the textarea's own composer region.
 // Raw labels are logged only with the explicit picker-label diagnostic opt-in,
 // and are never written to acknowledgement metadata.
-async function pickerSnapshot(page, budget) {
+export async function pickerSnapshot(page, budget = interactionBudget(1000)) {
   const snapshot = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, sendSelector, deadline, pickerId }) => {
     if (Date.now() >= deadline) return null;
     const visible = (el) => {
@@ -1675,8 +1684,9 @@ async function pickerSnapshot(page, budget) {
     let region = form || input?.parentElement;
     if (!form) while (region && !region.querySelector(sendSelector)) region = region.parentElement;
     if (region === body || region === document.documentElement) region = null;
-    const pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]')].filter(visible);
-    const candidates = pills.length ? pills : [...(region?.querySelectorAll('button[aria-haspopup="menu"]') || [])].filter(visible);
+    // Model tiers are not effort evidence, even when the trigger looks like a pill.
+    const pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]:not([data-nyx-switcher])')].filter(visible);
+    const candidates = pills.length ? pills : [...(region?.querySelectorAll('button[aria-haspopup="menu"]:not([data-nyx-switcher])') || [])].filter(visible);
     const menus = window.__nyx?.modelPickerMenus(pickerId) || [];
     const items = (window.__nyx?.modelPickerItems(pickerId) || []).map((el) => ({
       text: (el.innerText || el.textContent || "").trim(),
@@ -1728,7 +1738,7 @@ async function beginModelPicker(page, budget, nested = false) {
 function pickerLocator(page, pill) {
   if (pill.structural) return page.locator(PILL_SELECTOR).nth(pill.index);
   const region = page.locator(COMPOSER_SELECTOR).first().locator(pill.form ? "xpath=ancestor::form[1]" : COMPOSER_REGION_XPATH);
-  return region.locator('button[aria-haspopup="menu"]:visible').nth(pill.index);
+  return region.locator('button[aria-haspopup="menu"]:visible:not([data-nyx-switcher])').nth(pill.index);
 }
 
 async function clickPickerElement(page, budget, entry) {
@@ -2386,15 +2396,15 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       }
     }
     await installDomCore(page);
-    const [generating, count, text, images, files, errorCode, helperReady] = await page.evaluate(() => [
+    const [generating, count, text, images, files, errorCode, helperReady] = await page.evaluate(version => [
       window.__nyx?.isStillGenerating(),
       window.__nyx?.assistantCount(),
       window.__nyx?.extractResponse(),
       window.__nyx?.extractImages(),
       window.__nyx?.extractFiles(),
       window.__nyx?.errorCode(),
-      window.__nyx?.version === 3,
-    ]);
+      window.__nyx?.version === version,
+    ], DOM_CORE_VERSION);
     if (!helperReady) continue;
     if (errorCode) return recoverContentFailure(runtime, page, task, beforeCount, errorCode);
     const hasText = !!(text && text.length > 0);

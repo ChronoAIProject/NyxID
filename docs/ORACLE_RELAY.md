@@ -341,10 +341,15 @@ the model switcher and verifies **GPT-6 + Pro**, selecting a recognized
 entry when necessary. The header test ID and semantic header candidates take
 priority. Only when both yield no candidates, the worker accepts a unique
 visible menu button inside the discovered composer's nearest form whose whole
-label is a numeric major/optional minor version followed by `Pro`, such as
-`6` and `Pro` on separate lines. It excludes the attachment button and rejects
-ambiguity and trailing prose. The compact adapter preserves the raw label for
-click revalidation and supplies family/tier evidence only. It then selects the composer effort level. Plain `-pro`
+label is a numeric major/optional minor version plus one tier: Pro/专业,
+Auto/自动, Instant/极速, Thinking/思考, Medium/均衡, High/高级, or Extra High/超高.
+Whitespace may separate family and tier (e.g. `6` and `Thinking` on separate
+lines). Attachment buttons, ambiguous candidates, bare numbers/tiers, and
+trailing prose are rejected. The same whole-label adapter recognizes compact
+items in the opened model picker, using the usual family/tier matching and
+exact-entry preference. Raw trigger and item labels are retained for click
+revalidation. Compact labels supply family/tier evidence only; Pro is never
+proof of Pro Extended effort. The worker then selects the composer effort level. Plain `-pro`
 and explicit `extended`/`扩展` prefer **Pro Extended** when Pro is split;
 `standard`/`标准` explicitly requests **Pro Standard**. The existing Extra High,
 High, Medium, and Instant effort aliases remain available. Unknown model
@@ -353,6 +358,11 @@ major and optional minor version, yielding `gpt_<major>[_<minor>][_pro]`.
 Majors must match; minors must match only when both request and observation
 expose one (e.g. GPT-6 accepts GPT-6.1, but GPT-6.1 rejects GPT-6.2).
 GPT-60 never matches GPT-6, and prose such as “Try GPT-6 Pro” is unrecognized.
+
+The verified model switcher trigger is never an effort-pill candidate, so
+effort exposed only inside the compact model menu is neither selected nor
+verified and the task sends with the page's current effort (use
+`NYXID_ORACLE_LOG_PICKER_LABELS=1` to collect labels if that UI appears).
 
 `require_model_match` defaults to `true` on pools, including legacy pool rows.
 A submit may override it; the effective value is frozen on the task and sent

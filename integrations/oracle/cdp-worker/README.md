@@ -233,16 +233,25 @@ element handle; hidden hints in an item's text content do not affect matching.
 The worker verifies the model family/tier before effort selection and again
 before Send. When no header switcher candidate exists, it accepts one visible
 menu button in the composer's nearest form whose entire label is a numeric
-major/optional minor version followed by `Pro` (including `6` and `Pro` on
-separate lines). Attachment buttons are excluded; multiple candidates fail
-verification. This compact label establishes family/tier only, without
-claiming Pro Extended effort. Families parse generic major/optional minor versions; tier-only
+major/optional minor version plus one tier: Pro/专业, Auto/自动, Instant/极速,
+Thinking/思考, Medium/均衡, High/高级, or Extra High/超高. Family and tier may
+appear on separate lines, such as `6` and `Thinking`. Attachment buttons,
+multiple candidates, bare numbers/tiers, and trailing prose are rejected.
+Compact items in the opened model picker use the same adapter and family/tier
+matching, with exact entries preferred; raw labels are revalidated before
+clicking. Effort verification stays separate: a compact Pro tier establishes
+no Pro Extended effort. Families parse generic major/optional minor versions; tier-only
 Pro entries require matching family context, with at most one exact-family
 submenu. `require_model_match` defaults true. Unrecognized Tools/attach controls
 provide no negative effort evidence; recognized mismatches or an exposed level
 picker that cannot verify fail as `model_unavailable`. Results retain the
 requested model and canonical `observed_model_switcher`/`observed_model_effort`,
 including on failures. See [model selection](../../../docs/ORACLE_RELAY.md#model-family-tier-and-reasoning-effort).
+
+The verified model switcher trigger is never an effort-pill candidate, so
+effort exposed only inside the compact model menu is neither selected nor
+verified and the task sends with the page's current effort (use
+`NYXID_ORACLE_LOG_PICKER_LABELS=1` to collect labels if that UI appears).
 
 Each selection has a 25-second cooperative deadline (shortenable with
 `NYXID_MODEL_SELECT_TIMEOUT_MS`). Every step checks the remaining budget.

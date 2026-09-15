@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
-import { decryptSessionEnvelope, effortMetadata, installDomCore, readModelSwitcher, selectModelSwitcher, switcherMatches, replaceCrashedPage } from "./worker.mjs";
+import { decryptSessionEnvelope, effortMetadata, installDomCore, pickerSnapshot, readModelSwitcher, selectModelSwitcher, switcherMatches, replaceCrashedPage } from "./worker.mjs";
 
 const chromeExecutable = process.env.NYXID_TEST_CHROME_EXECUTABLE
   || (process.env.NYXID_TEST_BROWSER === "1" ? chromium.executablePath() : undefined);
@@ -676,7 +676,7 @@ function reasoningPage(config) {
             }
             document.body.append(nested);
           } else {
-            if (!config.headerUnverified) document.querySelector('#header-model').textContent = config.headerFamily ? config.headerFamily + ' ' + label : label;
+            if (!config.headerUnverified) document.querySelector('#header-model').textContent = config.headerFamily ? config.headerFamily + (config.compactSwitcher ? '\\n' : ' ') + label : label;
             closeMenu();
           }
         };
@@ -785,7 +785,7 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
       trigger.type = 'button';
       trigger.textContent = label;
       trigger.style.whiteSpace = 'pre-line';
-      form.insertBefore(trigger, document.querySelector('[data-testid="send-button"]'));
+      form.insertBefore(trigger, document.querySelector('#pill') || document.querySelector('[data-testid="send-button"]'));
       document.querySelector('header').innerHTML = '<button role="radio">聊天</button><button role="radio">工作</button><button>临时聊天</button>';
       form.insertAdjacentHTML('afterbegin', '<button type="button">展开</button><button type="button" data-testid="composer-plus-btn" aria-haspopup="menu" aria-label="添加文件等">+</button>');
       trigger.insertAdjacentHTML('afterend', '<button type="button" aria-label="开始听写">开始听写</button>');
@@ -1162,6 +1162,11 @@ test('compact model switcher: whole-label form discovery preserves scope, unique
   const cases = [
     { name: 'five composer buttons', model: compact(), expected: 'gpt_6_pro' },
     { name: 'minor version and wrong family', model: compact('5.5<br>Pro'), expected: 'gpt_5_5_pro' },
+    { name: 'Thinking tier', model: compact('6<br>Thinking'), expected: 'gpt_6' },
+    { name: 'localized Pro tier', model: compact('6<br>专业'), expected: 'gpt_6_pro' },
+    { name: 'localized Thinking tier', model: compact('6<br>思考'), expected: 'gpt_6' },
+    { name: 'Extended is effort only', model: compact('6<br>Pro Extended') },
+    { name: 'unknown compact tier', model: compact('6<br>Tools') },
     { name: 'bare Pro', model: compact('Pro') },
     { name: 'Tools', model: compact('Tools') },
     { name: 'numeric family only', model: compact('6') },
@@ -1173,6 +1178,7 @@ test('compact model switcher: whole-label form discovery preserves scope, unique
     { name: 'different form', outside: `<form>${compact()}</form>` },
     { name: 'no composer form', model: compact(), region: 'section' },
     { name: 'two visible compact candidates', model: compact() + compact('5.5 Pro') },
+    { name: 'different tiers remain ambiguous', model: compact() + compact('6<br>Thinking') },
     { name: 'one hidden candidate', model: compact('5.5 Pro', 'style="display:none"') + compact(), expected: 'gpt_6_pro' },
     { name: 'hidden visibility', model: compact('5.5 Pro', 'style="visibility:hidden"') + compact(), expected: 'gpt_6_pro' },
     { name: 'ambiguous semantic headers', header: `<header>${compact('GPT-6 Pro')}${compact('GPT-5.5 Pro')}</header>`, model: compact() },
@@ -1189,6 +1195,12 @@ test('compact model switcher: whole-label form discovery preserves scope, unique
       <button type="button" data-testid="send-button" aria-label="发送提示词">发送提示词</button>
       </${region}></main>`);
     await installDomCore(fixture.page);
+    if (entry.name === 'five composer buttons') {
+      // Reconnecting to an older injected core must install the new adapter.
+      await fixture.page.evaluate(() => { window.__nyx.version = 3; delete window.__nyx.compactModelLabel; });
+      await installDomCore(fixture.page);
+      assert.equal(await fixture.page.evaluate(() => window.__nyx.version), 4);
+    }
     const observed = await readModelSwitcher(fixture.page);
     assert.equal(observed.metadata, entry.expected || 'absent', entry.name);
     assert.equal(switcherMatches(observed.text, 'chatgpt-6-pro'), entry.expected === 'gpt_6_pro', entry.name);
@@ -1200,24 +1212,60 @@ test('compact model switcher: whole-label form discovery preserves scope, unique
   }
 });
 
-test('compact model switcher: selection clicks the raw compact trigger and verifies its changed family', options, async t => {
+test('compact model switcher: effort discovery excludes the marked trigger and retains unmarked siblings', options, async t => {
   const fixture = await browserFixture(t);
-  await fixture.page.setContent('<main><form><textarea id="prompt-textarea"></textarea><button id="compact" type="button" aria-haspopup="menu">5.5<br>Pro</button></form></main>');
-  await fixture.page.evaluate(() => {
-    window.clickLog = [];
-    document.querySelector('#compact').onclick = () => {
-      window.clickLog.push('compact');
-      const menu = document.createElement('div'); menu.setAttribute('role', 'menu');
-      const item = document.createElement('button'); item.setAttribute('role', 'menuitemradio'); item.textContent = 'GPT-6 Pro';
-      item.onclick = () => { window.clickLog.push('target'); document.querySelector('#compact').innerHTML = '6<br>Pro'; menu.remove(); };
-      menu.append(item); document.body.append(menu);
-    };
-  });
-  const selected = await selectModelSwitcher(fixture.page, 'chatgpt-6-pro');
-  assert.equal(selected.verified, true);
-  assert.equal(selected.metadata, 'gpt_6_pro');
-  assert.deepEqual(await fixture.page.evaluate(() => window.clickLog), ['compact', 'target']);
+  for (const source of ['header', 'composer']) {
+    for (const structural of [false, true]) {
+      const pillClass = structural ? 'class="__composer-pill"' : '';
+      const trigger = `<button id="model" type="button" aria-haspopup="menu" ${pillClass}>${source === 'header' ? 'GPT-6 Pro' : '6<br>Pro'}</button>`;
+      await fixture.page.setContent(`${source === 'header' ? `<header>${trigger}</header>` : ''}<main><form>
+        <textarea id="prompt-textarea"></textarea>${source === 'composer' ? trigger : ''}
+        <button type="button" aria-haspopup="menu" ${pillClass}>Tools</button>
+        </form></main>`);
+      await installDomCore(fixture.page);
+      assert.equal((await readModelSwitcher(fixture.page)).metadata, 'gpt_6_pro');
+      assert.equal(await fixture.page.locator('#model').getAttribute('data-nyx-switcher'), '');
+      const snapshot = await pickerSnapshot(fixture.page);
+      assert.deepEqual(snapshot.candidates, ['Tools'], `${source}, structural=${structural}`);
+      assert.equal(snapshot.structural, structural);
+      assert.equal(snapshot.pill.index, 0);
+    }
+  }
 });
+
+for (const entry of [
+  { name: 'changed family', trigger: '5.5<br>Pro', items: ['GPT-6 Pro'], target: 0 },
+  { name: 'bare Pro tier', trigger: '6<br>Thinking', items: ['Auto', 'Instant', 'Thinking', 'Pro'], target: 3 },
+  { name: 'bare localized Pro tier', trigger: '6<br>思考', items: ['自动', '极速', '思考', '专业'], target: 3, selected: '6<br>专业' },
+  { name: 'compact picker family', trigger: '5.5<br>Pro', items: ['5.5<br>Pro', '6<br>Pro'], target: 1 },
+]) {
+  test(`compact model switcher: selection clicks the raw trigger and verifies ${entry.name}`, options, async t => {
+    const fixture = await browserFixture(t);
+    await fixture.page.setContent(`<main><form><textarea id="prompt-textarea"></textarea><button id="compact" type="button" aria-haspopup="menu">${entry.trigger}</button></form></main>`);
+    await fixture.page.evaluate(entry => {
+      window.clickLog = [];
+      document.querySelector('#compact').onclick = () => {
+        window.clickLog.push('compact');
+        const menu = document.createElement('div'); menu.setAttribute('role', 'menu');
+        entry.items.forEach((label, index) => {
+          const item = document.createElement('button'); item.setAttribute('role', 'menuitemradio'); item.innerHTML = label;
+          item.onclick = () => {
+            window.clickLog.push(index === entry.target ? 'target' : 'wrong');
+            document.querySelector('#compact').innerHTML = index === entry.target ? entry.selected || '6<br>Pro' : label;
+            menu.remove();
+          };
+          menu.append(item);
+        });
+        document.body.append(menu);
+      };
+    }, entry);
+    const selected = await selectModelSwitcher(fixture.page, 'chatgpt-6-pro');
+    assert.equal(selected.verified, true);
+    assert.equal(selected.metadata, 'gpt_6_pro');
+    assert.deepEqual(await fixture.page.evaluate(() => window.clickLog), ['compact', 'target']);
+    assert.equal((await readModelSwitcher(fixture.page)).rawText, entry.selected ? '6\n专业' : '6\nPro');
+  });
+}
 
 for (const change of ['label', 'node', 'ambiguous']) {
   test(`compact model switcher: ${change} changed during lock cleanup prevents a stale click`, options, async t => {
@@ -1257,7 +1305,7 @@ test('compact model switcher: strict worker delivery reads the five-button compo
 });
 
 test('compact model switcher: a different family fails strict worker delivery before typing', options, async t => {
-  const fixture = await reasoningFixture(t, { compactSwitcher: true, headerLabel: '5.5\nPro', strict: true, noPill: true, headerItems: compactMenuItems });
+  const fixture = await reasoningFixture(t, { compactSwitcher: true, headerLabel: '5.5\nPro', strict: true, noPill: true, headerItems: compactMenuItems.slice(1) });
   await waitUntil(() => fixture.results.length, 12000);
   assert.equal(fixture.results[0].response, 'ERROR: model_unavailable', fixture.process.output());
   assert.equal(fixture.results[0].observed_model_switcher, 'gpt_5_5_pro');
@@ -1265,6 +1313,60 @@ test('compact model switcher: a different family fails strict worker delivery be
   assert.equal(events.includes('typed'), false);
   assert.equal(events.includes('send'), false);
   assert.equal(events.some(e => e.startsWith('header:')), false);
+});
+
+test('compact model switcher: strict worker delivery selects Pro from Thinking without inferring effort', options, async t => {
+  const fixture = await reasoningFixture(t, { compactSwitcher: true, headerLabel: '6\nThinking', headerFamily: '6',
+    strict: true, noPill: true, headerItems: ['Auto', 'Instant', 'Thinking', 'Pro'] });
+  await waitUntil(() => fixture.results.length, 12000);
+  assert.equal(fixture.results[0].response, 'Synthetic reasoning response', fixture.process.output());
+  assert.equal(fixture.results[0].observed_model_switcher, 'gpt_6_pro');
+  // The attachment's "+" remains the sole unrecognized effort candidate; the
+  // marked model trigger is never reopened as an effort pill.
+  assert.equal(fixture.results[0].observed_model_effort, 'unrecognized');
+  assert.deepEqual((await pickerSnapshot(fixture.page)).candidates, ['+']);
+  assert.equal(await fixture.page.locator('#header-model').innerText(), '6\nPro');
+  assert.equal(fixture.acknowledgements.filter(a => a.phase === 'sent').length, 1);
+  const events = await fixture.page.evaluate(() => window.clickLog.map(e => e.event));
+  assert.deepEqual(events.filter(e => e === 'header' || e.startsWith('header:')), ['header', 'header:Pro']);
+  assert.equal(events.filter(e => e === 'typed').length, 1);
+  assert.equal(events.filter(e => e === 'send').length, 1);
+  assert.ok(events.indexOf('header:Pro') < events.indexOf('typed'));
+  assert.equal(fixture.process.output().includes('picker_labels'), false);
+  assert.equal(fixture.process.output().includes('6\nThinking'), false);
+});
+
+for (const fallback of [false, true]) {
+  test(`compact model switcher: selects Pro from Thinking and verifies a real ${fallback ? 'fallback' : 'structural'} effort pill`, options, async t => {
+    const fixture = await reasoningFixture(t, { compactSwitcher: true, headerLabel: '6\nThinking', headerFamily: '6',
+      strict: true, proTiers: true, fallback, initial: 'High', headerItems: ['Auto', 'Instant', 'Thinking', 'Pro'] });
+    await waitUntil(() => fixture.results.length, 12000);
+    assert.equal(fixture.results[0].response, 'Synthetic reasoning response', fixture.process.output());
+    assert.equal(fixture.results[0].observed_model_switcher, 'gpt_6_pro');
+    assert.equal(fixture.results[0].observed_model_effort, 'pro_extended');
+    const events = await fixture.page.evaluate(() => window.clickLog.map(e => e.event));
+    assert.deepEqual(events.filter(e => e === 'header' || e.startsWith('header:')), ['header', 'header:Pro']);
+    assert.deepEqual(events.filter(e => e === 'picker' || e.startsWith('level:')), ['picker', 'level:Pro Extended']);
+    assert.ok(events.indexOf('header:Pro') < events.indexOf('picker'));
+    assert.equal(events.filter(e => e === 'typed').length, 1);
+    assert.equal(events.filter(e => e === 'send').length, 1);
+  });
+}
+
+test('compact model switcher: Thinking with no recognized model entry fails strictly before typing', options, async t => {
+  const fixture = await reasoningFixture(t, { compactSwitcher: true, headerLabel: '6\nThinking', strict: true,
+    noPill: true, headerItems: ['Tools', 'Upgrade to Pro', '6 Pro plan', '6\nPro\nFor complex work'] });
+  await waitUntil(() => fixture.results.length, 12000);
+  assert.equal(fixture.results[0].response, 'ERROR: model_unavailable', fixture.process.output());
+  assert.equal(fixture.results[0].observed_model_switcher, 'gpt_6');
+  const events = await fixture.page.evaluate(() => window.clickLog.map(e => e.event));
+  assert.deepEqual(events.filter(e => e === 'header' || e.startsWith('header:')), ['header']);
+  assert.equal(events.includes('typed'), false);
+  assert.equal(events.includes('send'), false);
+  assert.equal(await fixture.page.locator('#prompt-textarea').inputValue(), '');
+  assert.equal(fixture.acknowledgements.some(a => a.phase === 'sent'), false);
+  assert.equal(fixture.process.output().includes('picker_labels'), false);
+  assert.equal(fixture.process.output().includes('For complex work'), false);
 });
 
 for (const compactDrift of ['family', 'absent']) {
@@ -1348,7 +1450,7 @@ test('DOM core reinstalls after navigation or helper deletion and ignores persis
   await fixture.page.goto('https://chatgpt.com/');
   await installDomCore(fixture.page);
   await fixture.page.goto('https://chatgpt.com/c/aaaaaa-bbbbbb');
-  assert.equal(await fixture.page.evaluate(() => window.__nyx?.version), 3);
+  assert.equal(await fixture.page.evaluate(() => window.__nyx?.version), 4);
   await fixture.page.evaluate(() => { delete window.__nyx; });
   await installDomCore(fixture.page);
   assert.deepEqual(await fixture.page.evaluate(() => {
@@ -1373,7 +1475,7 @@ test('an actual crashed Chromium page is replaced and the helper installed in th
   assert.notEqual(replacement, fixture.page);
   assert.equal(fixture.page.isClosed(), true);
   assert.equal(runtime.pageCrashed, false);
-  assert.equal(await replacement.evaluate(() => window.__nyx.version), 3);
+  assert.equal(await replacement.evaluate(() => window.__nyx.version), 4);
   assert.equal(fixture.context.pages().length, 1);
 });
 
@@ -1544,7 +1646,7 @@ test('DOM core upgrades a helper installed by an older worker bundle', options, 
   const fixture = await browserFixture(t);
   await fixture.page.evaluate(() => { window.__nyx = {version:2}; });
   await installDomCore(fixture.page);
-  assert.equal(await fixture.page.evaluate(() => window.__nyx.version), 3);
+  assert.equal(await fixture.page.evaluate(() => window.__nyx.version), 4);
   assert.equal(await fixture.page.evaluate(() => typeof window.__nyx.finishNestedModelPicker), 'function');
   for (const [label, loggedIn] of [['GPT-7 Pro', true], ['GPT-6.1 Pro', true], ['Try GPT-7 Pro', false]]) {
     await fixture.page.setContent(`<header><button aria-haspopup="menu">${label}</button></header>`);
