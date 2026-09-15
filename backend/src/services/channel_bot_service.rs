@@ -1111,6 +1111,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PlatformAdapter for RecordingAdapter {
+        fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+            crate::services::channel_platform::OutboundCapabilities::NONE
+        }
         fn registration(&self) -> RegistrationDescriptor {
             crate::services::channel_adapters::lark::lark_registration()
         }
@@ -1411,6 +1414,11 @@ mod tests {
 
         #[async_trait::async_trait]
         impl PlatformAdapter for TelegramAdapter {
+            fn outbound_capabilities(
+                &self,
+            ) -> crate::services::channel_platform::OutboundCapabilities {
+                crate::services::channel_platform::OutboundCapabilities::NONE
+            }
             fn platform_id(&self) -> &str {
                 "telegram"
             }

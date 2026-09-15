@@ -28,6 +28,9 @@ pub struct ChannelConversation {
     /// Whether this is the default agent for new conversations from this bot
     #[serde(default)]
     pub default_agent: bool,
+    /// Human-set opt-in allowing the assigned agent to message the chat unprompted.
+    #[serde(default)]
+    pub allow_agent_initiated: bool,
     pub is_active: bool,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_message_at: Option<DateTime<Utc>>,
@@ -57,6 +60,7 @@ mod tests {
             platform_sender_id: None,
             agent_api_key_id: uuid::Uuid::new_v4().to_string(),
             default_agent: false,
+            allow_agent_initiated: false,
             is_active: true,
             last_message_at: None,
             created_at: Utc::now(),
@@ -119,6 +123,14 @@ mod tests {
         assert_eq!(restored.platform_sender_id, None);
         assert!(!restored.default_agent);
         assert_eq!(restored.last_message_at, None);
+    }
+
+    #[test]
+    fn bson_backward_compat_missing_allow_agent_initiated() {
+        let mut doc = bson::to_document(&make_conversation()).expect("serialize");
+        doc.remove("allow_agent_initiated");
+        let restored: ChannelConversation = bson::from_document(doc).expect("deserialize");
+        assert!(!restored.allow_agent_initiated);
     }
 
     #[test]

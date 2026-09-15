@@ -172,6 +172,9 @@ pub struct WorkerFileDto {
 
 #[derive(Deserialize)]
 pub struct WorkerResultRequest {
+    pub failure_detail: Option<String>,
+    pub observed_model_switcher: Option<String>,
+    pub observed_model_effort: Option<String>,
     pub task_id: String,
     pub worker: String,
     pub response: String,
@@ -240,6 +243,9 @@ pub async fn submit_result(
         &body.worker,
         &body.task_id,
         oracle_task_service::WorkerResultInput {
+            failure_detail: body.failure_detail.as_deref(),
+            observed_model_switcher: body.observed_model_switcher.as_deref(),
+            observed_model_effort: body.observed_model_effort.as_deref(),
             authorized_worker: worker_auth.installation.as_ref(),
             response: &body.response,
             images,
@@ -411,6 +417,7 @@ pub struct WorkerHeartbeatRequest {
     pub chrome_alive: Option<bool>,
     #[serde(default)]
     pub last_error: Option<String>,
+    pub cooldown_remaining_secs: Option<u32>,
     #[serde(default)]
     pub command_reports: Vec<WorkerCommandReportDto>,
 }
@@ -473,6 +480,7 @@ pub async fn heartbeat(
             logged_in: body.logged_in,
             chrome_alive: body.chrome_alive,
             last_error: body.last_error,
+            cooldown_remaining_secs: body.cooldown_remaining_secs,
         },
         worker_auth.installation.as_ref(),
     )
@@ -582,6 +590,8 @@ mod tests {
 
         let task = PollTaskResponse::Task {
             task: oracle_task_service::WorkerTaskPayload {
+                require_model_match: true,
+                reroute_count: 0,
                 task_id: "t1".to_string(),
                 attempts: 1,
                 retry_count: 0,

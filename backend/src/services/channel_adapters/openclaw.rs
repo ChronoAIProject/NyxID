@@ -31,6 +31,15 @@ impl Default for OpenClawAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for OpenClawAdapter {
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: false,
+            reply_to: false,
+            thread: false,
+            edit: false,
+        }
+    }
+
     fn platform_id(&self) -> &str {
         "openclaw"
     }
@@ -98,9 +107,7 @@ impl PlatformAdapter for OpenClawAdapter {
     }
 
     /// OpenClaw channel replies go through the existing webhook response or a
-    /// separate callback mechanism. For now, this is a no-op -- the relay
-    /// system will forward to the agent's callback URL which handles the reply
-    /// externally.
+    /// separate callback mechanism. Explicitly report that no dispatch occurred.
     async fn send_reply(
         &self,
         _http: &reqwest::Client,
@@ -109,7 +116,7 @@ impl PlatformAdapter for OpenClawAdapter {
         _reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
         let _bot_token = credentials.token;
-        Ok(None)
+        Err(crate::errors::AppError::ChannelPlatformSendUnsupported)
     }
 
     /// OpenClaw webhooks are configured at the per-mapping level, not via a
@@ -250,7 +257,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_reply_returns_none() {
+    async fn send_reply_explicitly_refuses_dispatch() {
         let adapter = OpenClawAdapter;
         let http = reqwest::Client::new();
         let reply = OutboundReply {
@@ -261,8 +268,10 @@ mod tests {
         let result = adapter
             .send_reply(&http, &"".into(), "conv_id", &reply)
             .await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(matches!(
+            result,
+            Err(crate::errors::AppError::ChannelPlatformSendUnsupported)
+        ));
     }
 
     #[tokio::test]
@@ -320,5 +329,26 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+    #[tokio::test]
+    async fn unsupported_send_makes_no_http_request() {
+        let server = wiremock::MockServer::start().await;
+        let reply = OutboundReply {
+            text: Some("hello".into()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        assert!(matches!(
+            OpenClawAdapter
+                .send_reply(
+                    &reqwest::Client::new(),
+                    &server.uri().as_str().into(),
+                    &server.uri(),
+                    &reply
+                )
+                .await,
+            Err(crate::errors::AppError::ChannelPlatformSendUnsupported)
+        ));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

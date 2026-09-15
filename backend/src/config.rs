@@ -514,6 +514,11 @@ pub struct AppConfig {
     /// Burst capacity for per-message edit rate limiting (default: 20).
     pub channel_relay_edit_rate_limit_burst: u32,
 
+    /// Per-conversation unsolicited message rate (default: 1/s).
+    pub channel_relay_initiate_rate_limit_per_second: u32,
+    /// Unsolicited message burst capacity (default: 5).
+    pub channel_relay_initiate_rate_limit_burst: u32,
+
     // HTTP Event Gateway (NyxID#221 / ADR-013)
     /// Per-channel event rate limit (events per second, default 100).
     pub channel_event_rate_limit_per_second: u32,
@@ -877,6 +882,14 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "channel_relay_edit_rate_limit_burst",
                 &self.channel_relay_edit_rate_limit_burst,
+            )
+            .field(
+                "channel_relay_initiate_rate_limit_per_second",
+                &self.channel_relay_initiate_rate_limit_per_second,
+            )
+            .field(
+                "channel_relay_initiate_rate_limit_burst",
+                &self.channel_relay_initiate_rate_limit_burst,
             )
             .field(
                 "channel_event_rate_limit_per_second",
@@ -1404,6 +1417,16 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(20),
+            channel_relay_initiate_rate_limit_per_second: env::var(
+                "CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+            channel_relay_initiate_rate_limit_burst: env::var("CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
             channel_event_rate_limit_per_second: env::var("CHANNEL_EVENT_RATE_LIMIT_PER_SECOND")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1980,6 +2003,8 @@ mod tests {
             channel_relay_message_ttl_days: 30,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
+            channel_relay_initiate_rate_limit_per_second: 1,
+            channel_relay_initiate_rate_limit_burst: 5,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_ttl_secs: 300,

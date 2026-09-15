@@ -29,6 +29,8 @@
 //! | `platform_bot_id`           | Bot user id from `auth.test`          |
 //! | `platform_bot_username`     | Bot handle from `auth.test`           |
 
+const UNREACHABLE_TARGET_MARKERS: &[&str] = &["channel_not_found", "not_in_channel", "is_archived"];
+
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -257,8 +259,55 @@ fn parse_event(event: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
 // PlatformAdapter implementation
 // ---------------------------------------------------------------------------
 
+fn build_post_message_body(reply: &OutboundReply, conversation_id: &str) -> serde_json::Value {
+    let text = reply.text.as_deref().unwrap_or("");
+
+    let mut body = serde_json::json!({
+        "channel": conversation_id,
+        "text": text,
+    });
+
+    // Thread the reply correctly. Slack expects `thread_ts` to be the
+    // ROOT message's `ts`. The relay layer surfaces the inbound event's
+    // root in `metadata.thread_ts`, so prefer that. Fall back to
+    // `reply_to_platform_message_id` only when the agent is explicitly
+    // replying to a specific message (Slack will auto-resolve to the
+    // parent thread, but the explicit root anchor is more reliable).
+    let thread_ts = reply
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("thread_ts"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| reply.reply_to_platform_message_id.clone());
+    if let Some(ts) = thread_ts {
+        body["thread_ts"] = serde_json::json!(ts);
+    }
+
+    // Optional Block Kit passthrough — agents that want richer payloads
+    // can set `metadata.blocks`. The array is forwarded as-is; Slack
+    // validates server-side.
+    if let Some(metadata) = reply.metadata.as_ref()
+        && let Some(blocks) = metadata.get("blocks")
+    {
+        body["blocks"] = blocks.clone();
+    }
+
+    body
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for SlackAdapter {
+    /// Thread metadata: thread_ts.
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: true,
+            reply_to: true,
+            thread: true,
+            edit: false,
+        }
+    }
+
     fn platform_id(&self) -> &str {
         "slack"
     }
@@ -416,38 +465,7 @@ impl PlatformAdapter for SlackAdapter {
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
         let bot_token = credentials.token;
-        let text = reply.text.as_deref().unwrap_or("");
-
-        let mut body = serde_json::json!({
-            "channel": conversation_id,
-            "text": text,
-        });
-
-        // Thread the reply correctly. Slack expects `thread_ts` to be the
-        // ROOT message's `ts`. The relay layer surfaces the inbound event's
-        // root in `metadata.thread_ts`, so prefer that. Fall back to
-        // `reply_to_platform_message_id` only when the agent is explicitly
-        // replying to a specific message (Slack will auto-resolve to the
-        // parent thread, but the explicit root anchor is more reliable).
-        let thread_ts = reply
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("thread_ts"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| reply.reply_to_platform_message_id.clone());
-        if let Some(ts) = thread_ts {
-            body["thread_ts"] = serde_json::json!(ts);
-        }
-
-        // Optional Block Kit passthrough — agents that want richer payloads
-        // can set `metadata.blocks`. The array is forwarded as-is; Slack
-        // validates server-side.
-        if let Some(metadata) = reply.metadata.as_ref()
-            && let Some(blocks) = metadata.get("blocks")
-        {
-            body["blocks"] = blocks.clone();
-        }
+        let body = build_post_message_body(reply, conversation_id);
 
         let url = format!("{SLACK_API_BASE}/chat.postMessage");
         let response = http
@@ -458,7 +476,8 @@ impl PlatformAdapter for SlackAdapter {
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!(
-                    "Slack chat.postMessage request failed: {e}"
+                    "Slack chat.postMessage request failed: {}",
+                    e.without_url()
                 ))
             })?;
 
@@ -471,7 +490,8 @@ impl PlatformAdapter for SlackAdapter {
 
         let resp: serde_json::Value = response.json().await.map_err(|e| {
             AppError::ChannelPlatformError(format!(
-                "Slack chat.postMessage response parse failed: {e}"
+                "Slack chat.postMessage response parse failed: {}",
+                e.without_url()
             ))
         })?;
 
@@ -488,9 +508,13 @@ impl PlatformAdapter for SlackAdapter {
                 return Err(slack_rate_limited(error, None));
             }
 
-            return Err(AppError::ChannelPlatformError(format!(
-                "Slack chat.postMessage failed: {error}"
-            )));
+            return Err(
+                crate::services::channel_platform::classify_upstream_refusal(
+                    "Slack",
+                    error,
+                    UNREACHABLE_TARGET_MARKERS,
+                ),
+            );
         }
 
         let message_id = resp.get("ts").and_then(|v| v.as_str()).map(String::from);
@@ -1105,33 +1129,7 @@ mod tests {
     // `metadata.thread_ts`, so it must win over `reply_to_platform_message_id`
     // (which can carry a child reply's `ts`, not the thread root).
 
-    /// Build the same JSON body that `send_reply` sends to chat.postMessage,
-    /// without going over the network. Mirrors the priority logic exactly so
-    /// regressions in the helper show up here.
-    fn build_post_message_body(reply: &OutboundReply, channel: &str) -> serde_json::Value {
-        let text = reply.text.as_deref().unwrap_or("");
-        let mut body = serde_json::json!({ "channel": channel, "text": text });
-
-        let thread_ts = reply
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get("thread_ts"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| reply.reply_to_platform_message_id.clone());
-        if let Some(ts) = thread_ts {
-            body["thread_ts"] = serde_json::json!(ts);
-        }
-
-        if let Some(metadata) = reply.metadata.as_ref()
-            && let Some(blocks) = metadata.get("blocks")
-        {
-            body["blocks"] = blocks.clone();
-        }
-
-        body
-    }
-
+    // Exercise the production payload builder without a network request.
     #[test]
     fn send_reply_prefers_metadata_thread_ts_over_message_id() {
         // Inbound was a reply *inside* a thread: the relay sets
@@ -1239,6 +1237,32 @@ mod tests {
                 assert!(msg.contains("ratelimited"));
             }
             other => panic!("expected ChannelPlatformError, got {other:?}"),
+        }
+    }
+    #[test]
+    fn upstream_target_refusals_are_classified_and_other_diagnostics_are_bounded() {
+        for marker in UNREACHABLE_TARGET_MARKERS {
+            let description = format!("{marker}: private message content");
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "slack",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            assert!(matches!(
+                error,
+                AppError::ChannelConversationNotReachable(_)
+            ));
+            assert!(!error.to_string().contains("private message content"));
+        }
+        for description in ["invalid_blocks".to_string(), "界".repeat(201)] {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "slack",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            let expected: String = description.chars().take(200).collect();
+            assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                if detail == format!("slack send failed: {expected}")));
         }
     }
 }

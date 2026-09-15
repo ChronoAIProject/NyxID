@@ -32,6 +32,7 @@ pub struct CreateOraclePoolRequest {
     #[serde(default)]
     pub default_model_label: Option<String>,
     #[serde(default)]
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     #[serde(default)]
     pub max_workers: Option<u32>,
@@ -59,6 +60,7 @@ pub struct UpdateOraclePoolRequest {
     #[serde(default)]
     pub default_model_label: Option<String>,
     #[serde(default)]
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     #[serde(default)]
     pub max_workers: Option<u32>,
@@ -88,6 +90,7 @@ pub struct OraclePoolInfo {
     pub chatgpt_project_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model_label: Option<String>,
+    pub require_model_match: bool,
     pub allow_extract: bool,
     pub max_workers: u32,
     /// Workers whose heartbeat is within the pool-status recency window.
@@ -149,6 +152,7 @@ fn pool_info(
         can_enroll,
         chatgpt_project_url: pool.chatgpt_project_url.clone(),
         default_model_label: pool.default_model_label.clone(),
+        require_model_match: pool.require_model_match,
         allow_extract: pool.allow_extract,
         max_workers: pool.max_workers,
         online_workers,
@@ -201,6 +205,7 @@ pub async fn create_pool(
             visibility,
             chatgpt_project_url: body.chatgpt_project_url,
             default_model_label: body.default_model_label,
+            require_model_match: body.require_model_match,
             allow_extract: body.allow_extract,
             max_workers: body.max_workers,
             max_queue_length: body.max_queue_length,
@@ -307,6 +312,7 @@ pub async fn update_pool(
             visibility,
             chatgpt_project_url: body.chatgpt_project_url,
             default_model_label: body.default_model_label,
+            require_model_match: body.require_model_match,
             allow_extract: body.allow_extract,
             max_workers: body.max_workers,
             max_queue_length: body.max_queue_length,
@@ -394,6 +400,7 @@ mod tests {
         // rotate response.
         let now = chrono::Utc::now();
         let pool = OraclePool {
+            require_model_match: true,
             id: "p1".to_string(),
             user_id: "u1".to_string(),
             slug: "s".to_string(),

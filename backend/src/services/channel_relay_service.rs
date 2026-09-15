@@ -185,13 +185,14 @@ pub async fn store_outbound_message(
     agent_api_key_id: &str,
     reply_to_message_id: Option<&str>,
     platform_message_id: Option<&str>,
+    platform_conversation_id: Option<&str>,
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: Some(channel_bot_id.to_string()),
         conversation_id: conversation_id.to_string(),
-        platform_conversation_id: None,
+        platform_conversation_id: platform_conversation_id.map(String::from),
         user_id: user_id.to_string(),
         direction: "outbound".to_string(),
         platform: platform.to_string(),
@@ -750,6 +751,7 @@ mod tests {
             platform_sender_id: None,
             agent_api_key_id: agent_api_key_id.clone(),
             default_agent: false,
+            allow_agent_initiated: false,
             is_active: true,
             last_message_at: None,
             created_at: now,
@@ -772,6 +774,7 @@ mod tests {
             &agent_api_key_id,
             None,
             Some(platform_message_id),
+            Some(&conversation.platform_conversation_id),
         )
         .await
         .expect("insert outbound message");
@@ -817,6 +820,7 @@ mod tests {
             platform_sender_id: None,
             agent_api_key_id: agent_api_key_id.clone(),
             default_agent: false,
+            allow_agent_initiated: false,
             is_active: true,
             last_message_at: None,
             created_at: now,
@@ -839,6 +843,7 @@ mod tests {
             &agent_api_key_id,
             None,
             Some(platform_message_id),
+            Some(&conversation.platform_conversation_id),
         )
         .await
         .expect("insert first outbound message");
@@ -854,6 +859,7 @@ mod tests {
             &agent_api_key_id,
             None,
             Some(platform_message_id),
+            Some(&conversation.platform_conversation_id),
         )
         .await
         .expect("insert duplicate outbound message");
@@ -1021,6 +1027,7 @@ mod tests {
             platform_sender_id: None,
             agent_api_key_id: "key-1".to_string(),
             default_agent: false,
+            allow_agent_initiated: false,
             is_active: true,
             last_message_at: None,
             created_at: now,
@@ -1219,6 +1226,8 @@ mod tests {
             channel_relay_message_ttl_days: 30,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
+            channel_relay_initiate_rate_limit_per_second: 1,
+            channel_relay_initiate_rate_limit_burst: 5,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_ttl_secs: 300,

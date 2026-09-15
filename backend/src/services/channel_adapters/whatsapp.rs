@@ -1,6 +1,11 @@
 //! WhatsApp Business Platform, directly through Meta's Cloud API.
 //! Consumer/Business App automation and Twilio's separate API are not supported.
 
+const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
+    "outside the 24-hour customer service window; an approved template message is required",
+    "message undeliverable",
+];
+
 use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
@@ -214,7 +219,9 @@ fn reply_bodies(recipient: &str, reply: &OutboundReply) -> AppResult<Vec<Value>>
 fn graph_error(status: StatusCode, body: &Value, retry_after: Option<&str>) -> AppError {
     let code = body["error"]["code"].as_i64().unwrap_or_default();
     let reason = match code {
-        131047 => "outside the 24-hour customer service window; send an approved template",
+        131047 => {
+            "outside the 24-hour customer service window; an approved template message is required"
+        }
         131026 => "message undeliverable; check the recipient and their WhatsApp availability",
         131051 => "unsupported message type",
         131053 => "media upload failed; check media format and size",
@@ -230,6 +237,13 @@ fn graph_error(status: StatusCode, body: &Value, retry_after: Option<&str>) -> A
             Some(seconds) => format!("WhatsApp rate limited; retry after {seconds}s"),
             None => "WhatsApp rate limited; retry later".to_string(),
         });
+    }
+    if matches!(code, 131047 | 131026) {
+        return crate::services::channel_platform::classify_upstream_refusal(
+            "WhatsApp",
+            reason,
+            UNREACHABLE_TARGET_MARKERS,
+        );
     }
     // Graph's free-form error.message can echo request material. Only emit
     // locally-authored causes and numeric codes, never that message or tokens.
@@ -265,6 +279,15 @@ pub(super) async fn graph_response(response: reqwest::Response) -> AppResult<Val
 
 #[async_trait::async_trait]
 impl PlatformAdapter for WhatsAppAdapter {
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: true,
+            reply_to: true,
+            thread: false,
+            edit: false,
+        }
+    }
+
     fn platform_id(&self) -> &str {
         "whatsapp"
     }
@@ -1117,7 +1140,7 @@ mod tests {
         }
         for (code, cause) in [
             (131047, "24-hour"),
-            (131026, "undeliverable"),
+            (131026, "not reachable"),
             (131051, "unsupported message"),
             (131053, "media upload"),
             (190, "invalid or expired"),
@@ -1155,5 +1178,35 @@ mod tests {
                 .await,
             Err(AppError::ChannelPlatformEditUnsupported)
         ));
+    }
+    #[test]
+    fn initiated_request_has_no_reply_or_thread_context() {
+        let outbound = OutboundReply {
+            text: Some("hello".into()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        assert_eq!(
+            reply_bodies("123456", &outbound).unwrap(),
+            vec![
+                json!({ "messaging_product": "whatsapp", "recipient_type": "individual", "to": "123456", "type": "text", "text": { "preview_url": false, "body": "hello" } })
+            ]
+        );
+        for code in [131047, 131026] {
+            assert!(matches!(
+                graph_error(
+                    StatusCode::BAD_REQUEST,
+                    &json!({ "error": { "code": code, "message": "private content" } }),
+                    None
+                ),
+                AppError::ChannelConversationNotReachable(_)
+            ));
+        }
+        let error = graph_error(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": { "code": 131047 } }),
+            None,
+        );
+        assert!(error.to_string().contains("template message is required"));
     }
 }
