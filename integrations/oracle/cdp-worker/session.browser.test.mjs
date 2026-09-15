@@ -611,7 +611,8 @@ function reasoningPage(config) {
   ${config.sidebar ? '<nav id="sidebar" role="listbox"><button role="option" id="sidebar-pro">Pro</button></nav>' : ''}
   <main><div id="turns"></div><${region}>
   ${config.contenteditable ? '<div id="prompt-textarea" contenteditable="true"></div>' : '<textarea id="prompt-textarea"></textarea>'}
-  ${config.twoPills ? '<button type="button" id="tools-pill" class="__composer-pill" aria-haspopup="menu">GPT tools</button>' : ''}
+  ${config.twoPills ? '<button type="button" id="tools-pill" class="__composer-pill" aria-haspopup="menu">Tools</button>' : ''}
+  ${config.attach ? '<button type="button" id="attach" aria-haspopup="menu">+</button>' : ''}
   ${config.noPill ? "" : `<button type="button" id="pill" class="${config.fallback ? "" : "__composer-pill"}" aria-haspopup="menu">${config.initial || "自动"}</button>`}
   <button type="button" data-testid="send-button">Send</button>
   </${region}></main><script>
@@ -661,7 +662,23 @@ function reasoningPage(config) {
       const menu = document.createElement('div'); menu.setAttribute('role', 'menu'); menu.setAttribute('data-picker-menu', '');
       for (const label of config.headerItems || ['GPT-5 Pro', 'GPT-6', 'GPT-6 Pro']) {
         const item = document.createElement('button'); item.textContent = label; item.setAttribute('role', 'menuitemradio');
-        item.onclick = () => { record('header:' + label); if (!config.headerUnverified) document.querySelector('#header-model').textContent = label; closeMenu(); };
+        item.onclick = () => {
+          record('header:' + label);
+          if (config.headerSubmenu === label) {
+            // Keep the parent visible: only the newly appeared menu is selectable.
+            const nested = document.createElement('div'); nested.setAttribute('role','menu'); nested.setAttribute('data-picker-menu','');
+            nested.style.left = '300px';
+            for (const tier of config.submenuItems || ['Pro']) {
+              const child = document.createElement('button'); child.textContent = tier; child.setAttribute('role','menuitem');
+              child.onclick = () => { record('nested:' + tier); document.querySelector('#header-model').textContent = label + ' ' + tier; closeMenu(); };
+              nested.append(child);
+            }
+            document.body.append(nested);
+          } else {
+            if (!config.headerUnverified) document.querySelector('#header-model').textContent = config.headerFamily ? config.headerFamily + ' ' + label : label;
+            closeMenu();
+          }
+        };
         menu.append(item);
       }
       document.body.append(menu);
@@ -675,7 +692,17 @@ function reasoningPage(config) {
       document.body.append(blocker);
     }
     document.querySelector('#sidebar-pro')?.addEventListener('click', () => record('sidebar:Pro'));
-    document.querySelector('#tools-pill')?.addEventListener('click', () => record('tools-picker'));
+    document.querySelector('#tools-pill')?.addEventListener('click', () => {
+      record('tools-picker');
+      if (config.toolsMenu) {
+        const menu = document.createElement('div'); menu.setAttribute('role','menu'); menu.setAttribute('data-picker-menu','');
+        for (const label of ['Upload files','Search']) {
+          const item = document.createElement('button'); item.setAttribute('role','menuitem'); item.textContent = label;
+          item.onclick = () => record('tools:' + label); menu.append(item);
+        }
+        document.body.append(menu);
+      }
+    });
     if (pill) pill.onclick = () => {
       record('picker');
       if (config.neverOpens) return;
@@ -712,6 +739,17 @@ function reasoningPage(config) {
       }
     });
     if (config.startWithOpenPicker) renderMenu();
+    if (config.preSendBanner) {
+      const banner = document.createElement('div'); banner.setAttribute('role','alert'); banner.textContent = config.preSendBanner; main.append(banner);
+    }
+    if (config.resumedDelayed) {
+      const user = document.createElement('div'); user.setAttribute('data-message-author-role','user'); user.textContent = 'Synthetic private prompt marker';
+      document.querySelector('#turns').append(user);
+      setTimeout(() => {
+        const answer = document.createElement('div'); answer.setAttribute('data-message-author-role','assistant'); answer.innerHTML = '<div class="markdown">Synthetic reasoning response</div>';
+        document.querySelector('#turns').append(answer);
+      }, 2000);
+    }
     document.querySelector('[data-testid=send-button]').onclick = () => {
       record('send');
       const user = document.createElement('div');
@@ -732,12 +770,17 @@ function reasoningPage(config) {
 
 async function reasoningFixture(t, config = {}, cancelPhase) {
   const fixture = await browserFixture(t);
-  await fixture.context.route('https://chatgpt.com/', route => route.fulfill({ contentType: 'text/html', body: reasoningPage(config) }));
+  let pageLoads = 0;
+  await fixture.context.route('https://chatgpt.com/', route => {
+    pageLoads += 1;
+    return route.fulfill({ contentType: 'text/html', body: reasoningPage({ ...config,
+      preSendBanner: config.clearPreSendBanner && pageLoads > 1 ? null : config.preSendBanner }) });
+  });
   await fixture.page.goto('https://chatgpt.com/');
   let reloads = 0;
   await fixture.context.route('https://chatgpt.com/c/aaaaaa-bbbbbb', route => {
     reloads += 1;
-    return route.fulfill({contentType: 'text/html', body: reasoningPage(config)});
+    return route.fulfill({contentType: 'text/html', body: reasoningPage({...config, resumedDelayed: config.delayedAfterReload})});
   });
   const acknowledgements = [];
   const results = [];
@@ -813,10 +856,11 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
     // time for the real browser actions and intentional failure waits.
     NYXID_MAX_WAIT_MS: '8000',
     NYXID_STABLE_INTERVAL_MS: '500',
-    NYXID_NO_OUTPUT_IDLE_MS: '700',
+    NYXID_NO_OUTPUT_IDLE_MS: config.delayedAfterReload ? '3500' : '700',
+    ...(config.cooldownValue !== undefined ? {NYXID_ORACLE_USAGE_COOLDOWN_SECS: config.cooldownValue} : {}),
     ...(config.logPickerLabels ? { NYXID_ORACLE_LOG_PICKER_LABELS: '1' } : {}),
   });
-  return { ...fixture, process, acknowledgements, results, task, heartbeats, reloads: () => reloads, polls: () => polls };
+  return { ...fixture, process, acknowledgements, results, task, heartbeats, reloads: () => reloads, pageLoads: () => pageLoads, polls: () => polls };
 }
 
 async function assertReasoningDelivered(fixture, { model = 'GPT-6 Pro', detail = 'selected=Pro' } = {}) {
@@ -1082,7 +1126,7 @@ for (const config of [
   { headerLabel: 'GPT-5 Pro', headerUnverified: true },
   { missingLevel: true },
   { unverified: true },
-  { initial: 'GPT-6 Pro', neverOpens: true },
+  { initial: 'High', neverOpens: true },
 ]) {
   test(`strict model selection fails before Send: ${JSON.stringify(config)}`, options, async t => {
     const fixture = await reasoningFixture(t, { ...config, strict: true });
@@ -1128,7 +1172,7 @@ test('DOM core reinstalls after navigation or helper deletion and ignores persis
   await fixture.page.goto('https://chatgpt.com/');
   await installDomCore(fixture.page);
   await fixture.page.goto('https://chatgpt.com/c/aaaaaa-bbbbbb');
-  assert.equal(await fixture.page.evaluate(() => window.__nyx?.version), 2);
+  assert.equal(await fixture.page.evaluate(() => window.__nyx?.version), 3);
   await fixture.page.evaluate(() => { delete window.__nyx; });
   await installDomCore(fixture.page);
   assert.deepEqual(await fixture.page.evaluate(() => {
@@ -1153,7 +1197,7 @@ test('an actual crashed Chromium page is replaced and the helper installed in th
   assert.notEqual(replacement, fixture.page);
   assert.equal(fixture.page.isClosed(), true);
   assert.equal(runtime.pageCrashed, false);
-  assert.equal(await replacement.evaluate(() => window.__nyx.version), 2);
+  assert.equal(await replacement.evaluate(() => window.__nyx.version), 3);
   assert.equal(fixture.context.pages().length, 1);
 });
 
@@ -1161,7 +1205,10 @@ test('a model that changes while composing fails the final read-back before Send
   const fixture = await reasoningFixture(t, { strict: true, switchAfterFill: true });
   await waitUntil(() => fixture.results.length, 12000);
   assert.equal(fixture.results[0].response, 'ERROR: model_unavailable');
-  assert.equal(fixture.results[0].failure_detail, 'model_unavailable@ready_to_send');
+  assert.equal(fixture.results[0].failure_detail, 'model_unavailable@selecting_model');
+  assert.equal(fixture.results[0].observed_model_switcher, 'gpt_5_pro');
+  assert.equal(fixture.results[0].observed_model_effort, 'pro');
+  assert.equal(fixture.acknowledgements.at(-1).phase_detail, 'switcher=gpt_5_pro effort=pro reason=presend_unverified');
   assert.equal(fixture.acknowledgements.some(a => a.phase === 'sent'), false);
 });
 
@@ -1228,3 +1275,122 @@ test('error probes scope banners to current UI and ignore error words in normal 
   await fixture.page.locator('[role=status]').evaluate(el => el.remove());
   assert.equal(await fixture.page.evaluate(() => window.__nyx.errorCode()), null);
 });
+
+
+for (const headerLabel of ['GPT-6 Pro', 'GPT-5 Pro']) {
+  test(`strict selection ignores Tools and attach when no effort levels exist: ${headerLabel}`, options, async t => {
+    const fixture = await reasoningFixture(t, { strict:true, headerLabel, headerItems:['GPT-5 Pro'], twoPills:true, toolsMenu:true, attach:true, noPill:true, selectionTimeout:'1500' });
+    await waitUntil(() => fixture.results.length, 12000);
+    assert.equal(fixture.results[0].response, headerLabel === 'GPT-6 Pro' ? 'Synthetic reasoning response' : 'ERROR: model_unavailable', fixture.process.output());
+    assert.equal(fixture.results[0].observed_model_effort, 'unrecognized');
+    const events = await fixture.page.evaluate(() => window.clickLog.map(e => e.event));
+    assert.equal(events.includes('send'), headerLabel === 'GPT-6 Pro');
+    assert.equal(events.some(e => e.startsWith('tools:')), false);
+  });
+}
+
+test('strict selection accepts a matching recognized pill when a picker exposes no levels', options, async t => {
+  const fixture = await reasoningFixture(t, { strict:true, initial:'Pro', neverOpens:true });
+  await assertReasoningDelivered(fixture, {model:'Pro', detail:'timeout'});
+});
+
+for (const config of [
+  {headerLabel:'GPT-6', headerItems:['Auto','Instant','Thinking','Pro'], headerFamily:'GPT-6', expectedClick:'header:Pro'},
+  {headerLabel:'GPT-5 Pro', headerItems:['GPT-5 Pro','GPT-6'], headerSubmenu:'GPT-6', expectedClick:'nested:Pro'},
+  {headerLabel:'GPT-6', headerItems:['专业'], headerFamily:'GPT-6', expectedClick:'header:专业'},
+]) {
+  test(`switcher recognizes tier-only Pro and one family submenu: ${config.expectedClick}`, options, async t => {
+    const fixture = await reasoningFixture(t, {...config, strict:true, proTiers:true});
+    await waitUntil(() => fixture.results.length, 12000);
+    assert.equal(fixture.results[0].response, 'Synthetic reasoning response', fixture.process.output());
+    assert.equal(fixture.results[0].observed_model_switcher, 'gpt_6_pro');
+    const events = await fixture.page.evaluate(() => window.clickLog.map(e => e.event));
+    assert.equal(events.filter(e => e === config.expectedClick).length, 1);
+    assert.equal(events.filter(e => e === 'send').length, 1);
+  });
+}
+
+test('switcher never clicks Upgrade to Pro and failure diagnostics retain canonical observations', options, async t => {
+  const fixture = await reasoningFixture(t, {strict:true, headerLabel:'GPT-6 Instant', headerItems:['Instant','Upgrade to Pro'], initial:'High'});
+  await waitUntil(() => fixture.results.length, 12000);
+  assert.equal(fixture.results[0].response, 'ERROR: model_unavailable');
+  assert.equal(fixture.results[0].observed_model_switcher, 'gpt_6');
+  assert.equal(fixture.results[0].observed_model_effort, 'high');
+  assert.equal(fixture.results[0].failure_detail, 'model_unavailable@selecting_model');
+  assert.equal(fixture.acknowledgements.at(-1).phase, 'selecting_model');
+  assert.equal(fixture.acknowledgements.at(-1).phase_detail, 'switcher=gpt_6 effort=high reason=switcher_unverified');
+  const events = await fixture.page.evaluate(() => window.clickLog.map(e => e.event));
+  assert.deepEqual(events.filter(e => e.startsWith('header:') || e === 'send'), []);
+  assert.equal(JSON.stringify(fixture.acknowledgements).includes('Upgrade to Pro'), false);
+});
+
+for (const [headerLabel, model] of [['GPT-6.1 Pro','chatgpt-6-pro'], ['ChatGPT 7 Pro','chatgpt-7-pro'], ['GPT-5.5 Pro','chatgpt-5.5-pro']]) {
+  test(`generic family strict header read-back: ${headerLabel}`, options, async t => {
+    const fixture = await reasoningFixture(t, {strict:true, headerLabel, model, noPill:true});
+    await waitUntil(() => fixture.results.length, 12000);
+    assert.equal(fixture.results[0].response, 'Synthetic reasoning response', fixture.process.output());
+  });
+}
+
+for (const clearPreSendBanner of [true, false]) {
+  test(`pre-send error banner reloads once and uses infrastructure failure if persistent: ${clearPreSendBanner}`, options, async t => {
+    const fixture = await reasoningFixture(t, {strict:true, preSendBanner:'Something went wrong', clearPreSendBanner});
+    await waitUntil(() => fixture.results.length, 12000);
+    assert.equal(fixture.pageLoads(), 2);
+    assert.equal(fixture.results[0].response, clearPreSendBanner ? 'Synthetic reasoning response' : 'ERROR: browser_recovery_exhausted', fixture.process.output());
+    if (!clearPreSendBanner) {
+      assert.equal(fixture.results[0].failure_detail, 'chatgpt_error_response@page_ready');
+      assert.equal(fixture.acknowledgements.some(a => a.phase === 'sent'), false);
+      assert.match(fixture.process.output(), /browser failure 1\/1/);
+    }
+  });
+}
+
+test('content reload waits for a queued Pro answer appearing two seconds later without replay', options, async t => {
+  const fixture = await reasoningFixture(t, {strict:true, noOutput:true, delayedAfterReload:true});
+  await waitUntil(() => fixture.results.length, 15000);
+  assert.equal(fixture.results[0].response, 'Synthetic reasoning response', fixture.process.output());
+  assert.equal(fixture.reloads(), 1);
+  assert.equal(fixture.acknowledgements.filter(a => a.phase === 'sent').length, 1);
+  assert.equal((await fixture.page.evaluate(() => window.clickLog)).some(e => e.event === 'send'), false);
+});
+
+test('invalid cooldown emits exactly one startup warning without its raw value', options, async t => {
+  const fixture = await reasoningFixture(t, {cooldownValue:'invalid-private-config-marker'});
+  await waitUntil(() => fixture.results.length, 12000);
+  const output = fixture.process.output();
+  assert.equal(output.split('usage_cooldown_invalid default_seconds=900').length - 1, 1);
+  assert.equal(output.includes('invalid-private-config-marker'), false);
+});
+
+
+test('DOM core upgrades a helper installed by an older worker bundle', options, async t => {
+  const fixture = await browserFixture(t);
+  await fixture.page.evaluate(() => { window.__nyx = {version:2}; });
+  await installDomCore(fixture.page);
+  assert.equal(await fixture.page.evaluate(() => window.__nyx.version), 3);
+  assert.equal(await fixture.page.evaluate(() => typeof window.__nyx.finishNestedModelPicker), 'function');
+  for (const [label, loggedIn] of [['GPT-7 Pro', true], ['GPT-6.1 Pro', true], ['Try GPT-7 Pro', false]]) {
+    await fixture.page.setContent(`<header><button aria-haspopup="menu">${label}</button></header>`);
+    await installDomCore(fixture.page);
+    assert.equal(await fixture.page.evaluate(() => window.__nyx.structuralProbe().logged_in), loggedIn, label);
+  }
+});
+
+
+for (const [preSendBanner, code] of [["You've reached the limit for Pro", 'usage_limit_reached'], ['Model not available', 'model_unavailable']]) {
+  test(`pre-send capacity banner settles without reload or infrastructure recovery: ${code}`, options, async t => {
+    const fixture = await reasoningFixture(t, {strict:true, preSendBanner, initial:'High'});
+    await waitUntil(() => fixture.results.length, 12000);
+    assert.equal(fixture.results[0].response, `ERROR: ${code}`, fixture.process.output());
+    assert.equal(fixture.pageLoads(), 1);
+    assert.equal(fixture.acknowledgements.some(a => a.phase === 'sent'), false);
+    assert.equal(fixture.process.output().includes('browser failure'), false);
+    if (code === 'model_unavailable') {
+      assert.equal(fixture.results[0].failure_detail, 'model_unavailable@selecting_model');
+      assert.equal(fixture.results[0].observed_model_switcher, 'gpt_6_pro');
+      assert.equal(fixture.results[0].observed_model_effort, 'high');
+      assert.equal(fixture.acknowledgements.at(-1).phase_detail, 'switcher=gpt_6_pro effort=high reason=model_unavailable');
+    }
+  });
+}

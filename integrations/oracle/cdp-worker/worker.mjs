@@ -85,8 +85,14 @@ const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000);
 // instead of spinning to MAX_WAIT_MS. Mirrors the userscript's
 // NO_OUTPUT_IDLE_TIMEOUT (420s).
 const NO_OUTPUT_IDLE_MS = Number(process.env.NYXID_NO_OUTPUT_IDLE_MS || 7 * 60 * 1000);
-const USAGE_COOLDOWN_MS = Math.max(1000, Math.min(86400000,
-  Number(process.env.NYXID_ORACLE_USAGE_COOLDOWN_SECS || 900) * 1000 || 900000));
+export function usageCooldownConfig(value) {
+  if (value === undefined) return { milliseconds: 900000, invalid: false };
+  const seconds = Number(value);
+  const invalid = !Number.isFinite(seconds) || seconds < 1;
+  return { milliseconds: invalid ? 900000 : Math.min(86400, seconds) * 1000, invalid };
+}
+const USAGE_COOLDOWN = usageCooldownConfig(process.env.NYXID_ORACLE_USAGE_COOLDOWN_SECS);
+const USAGE_COOLDOWN_MS = USAGE_COOLDOWN.milliseconds;
 const HEARTBEAT_MS = 60000;
 const PRESENCE_MS = Number(process.env.NYXID_PRESENCE_MS || 20000);
 const HTTP_TIMEOUT_MS = Number(process.env.NYXID_HTTP_TIMEOUT_MS || 30000);
@@ -687,7 +693,7 @@ window.__nyx = (function () {
     const role = roles.at(-1)?.getAttribute('data-message-author-role');
     const login = [...document.querySelectorAll('a,button')].some(el => /^(log in|sign up|登录|注册)$/i.test((el.textContent || '').trim()));
     const account = document.querySelector('[data-testid="profile-button"], [data-testid="model-switcher-dropdown-button"]') ||
-      [...document.querySelectorAll('header button[aria-haspopup]')].find(el => pickerElementVisible(el) && /^(chatgpt|gpt)[ -]*[56]/i.test((el.innerText || '').trim()));
+      [...document.querySelectorAll('header button[aria-haspopup]')].find(el => pickerElementVisible(el) && /^(chatgpt|gpt)[\\s_-]*[0-9]{1,3}(?:[._][0-9]{1,3})?(?=$|[\\s_-])/i.test((el.innerText || '').trim()));
     return { composer_found: !!input, send_found: !!send, pill_found: !!document.querySelector('button.__composer-pill'),
       helper_installed: !!window.__nyx, logged_in: !login && !!(input || account),
       url_host: ['chatgpt.com', 'chat.openai.com'].includes(location.hostname) ? location.hostname : 'other',
@@ -839,6 +845,7 @@ window.__nyx = (function () {
   // a picker can reuse a previously hidden menu node without changing counts.
   let modelPickerId = null;
   let preexistingModelMenus = new WeakSet();
+  let parentModelMenus = null;
   function pickerElementVisible(el) {
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
@@ -847,9 +854,15 @@ window.__nyx = (function () {
   function visibleModelMenus() {
     return [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(pickerElementVisible);
   }
-  function beginModelPicker(id) {
+  function beginModelPicker(id, nested = false) {
+    parentModelMenus = nested && id === modelPickerId ? preexistingModelMenus : null;
     modelPickerId = id;
     preexistingModelMenus = new WeakSet(visibleModelMenus());
+    return true;
+  }
+  function finishNestedModelPicker(id) {
+    if (id === modelPickerId && parentModelMenus) preexistingModelMenus = parentModelMenus;
+    parentModelMenus = null;
     return true;
   }
   function modelPickerMenus(id) {
@@ -871,8 +884,8 @@ window.__nyx = (function () {
     return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
   }
 
-  return { version: 2, discoverControls, structuralProbe, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
-    beginModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem };
+  return { version: 3, discoverControls, structuralProbe, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+    beginModelPicker, finishNestedModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem };
 })();
 `;
 
@@ -884,9 +897,9 @@ export async function installDomCore(page) {
   }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      if (await page.evaluate(() => window.__nyx?.version === 2)) return;
+      if (await page.evaluate(() => window.__nyx?.version === 3)) return;
       await page.evaluate(DOM_CORE);
-      if (await page.evaluate(() => window.__nyx?.version === 2)) return;
+      if (await page.evaluate(() => window.__nyx?.version === 3)) return;
     } catch (error) {
       if (['page_crashed', 'cdp_disconnected'].includes(stableErrorCode(error))) throw error;
     }
@@ -1263,7 +1276,7 @@ export function modelLevelTargets(label) {
   // the alias order decides which entry the exact pass prefers.
   if (/standard|标准/.test(lower)) return ["Pro", "Pro Standard", "Pro 标准", "标准"];
   if (/扩展|extended/.test(lower)) return ["Pro", "Pro Extended", "Pro 扩展", "扩展"];
-  if (/\bpro\b|pro$/.test(lower) || compact.endsWith("pro")) {
+  if (/\bpro\b|pro$|专业/.test(lower) || compact.endsWith("pro")) {
     return ["Pro", "Pro Extended", "Pro 扩展", "扩展"];
   }
   if (/extra\s*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
@@ -1274,7 +1287,7 @@ export function modelLevelTargets(label) {
 }
 
 function normalizeMenuText(value) {
-  return String(value || "").toLowerCase().replace(/[\s._-]+/g, "");
+  return String(value || "").toLowerCase().replace(/[\s·:()|/—._-]+/g, "");
 }
 
 // Exact pass first so "High" never selects "Extra High"; fuzzy pass second.
@@ -1312,9 +1325,18 @@ const MODEL_LEVELS = [
 export function detectPillLevel(text) {
   const label = String(text || '').trim().split(/\r?\n/)[0]
     .replace(/^(?:(?:chatgpt|gpt)[\s._-]*)?\d+(?:\.\d+)*[\s._-]*/i, '')
-    .toLowerCase().replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim();
-  if (/^(?:pro(?: (?:standard|extended|扩展|标准))?|扩展|标准)$/.test(label)) return 'Pro';
+    .toLowerCase().replace(/[·:()|/—._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // Accept only a vocabulary of level tokens, never prose containing "Pro".
+  if (/^(?:thinking|pro|专业|extended|standard|扩展|标准)(?: (?:thinking|pro|专业|extended|standard|扩展|标准))*$/.test(label) &&
+      /(?:^| )(?:pro|专业|extended|standard|扩展|标准)(?: |$)/.test(label)) return 'Pro';
   return MODEL_LEVELS.find(aliases => aliases.some(alias => alias.toLowerCase() === label))?.[0] || null;
+}
+
+// Unrecognized composer controls can be explored but are not negative evidence.
+export function effortSelectionMismatch({ observed, verified, recognizedLevels = false, recognizedObservation = false }, requested) {
+  return (recognizedObservation && detectPillLevel(observed) === null) ||
+    (detectPillLevel(observed) !== null && !pillShowsLevel(observed, modelLevelTargets(requested))) ||
+    (recognizedLevels && !verified);
 }
 
 export function pillShowsLevel(pillText, targets) {
@@ -1337,6 +1359,12 @@ export function pillShowsLevel(pillText, targets) {
 // item, even if checked. A submenu may contain account actions, not levels.
 export function chooseNestedLevelEntry(items, targets, allowChecked = true) {
   const recognized = (item) => detectPillLevel(item.text) !== null;
+  // Canonical split-tier recognition also covers localized separator labels.
+  if (targets?.[0] === 'Pro') {
+    const expected = targets.includes('Pro Standard') ? 'pro_standard' : 'pro_extended';
+    const tiers = items.map((item, index) => ({ ...item, index })).filter(item => effortMetadata(item.text) === expected);
+    if (tiers.length) return (tiers.find(item => targets.some(target => modelItemMatches(item.text, [target], true))) || tiers[0]).index;
+  }
   // Split tiers outrank generic Pro. Never fall back to a checked lower tier.
   const priority = targets?.[0] === 'Pro' ? [...targets.slice(1), targets[0]] : targets;
   for (const target of priority || []) {
@@ -1352,24 +1380,39 @@ export function chooseNestedLevelEntry(items, targets, allowChecked = true) {
 export function switcherMetadata(text) {
   const label = String(text || '').trim().split(/\r?\n/)[0];
   if (!label) return 'absent';
-  const match = /^(?:chatgpt|gpt)[\s-]*([56])(?![\d.])(?:[\s-]+(pro|专业)(?=$|[\s-]))?/i.exec(label);
+  const match = /^(?:chatgpt|gpt)[\s_-]*([0-9]{1,3})(?:[._]([0-9]{1,3}))?(?:[\s_-]+(.+))?$/i.exec(label);
   if (!match) return 'unrecognized';
-  return `gpt_${match[1]}${match[2] ? '_pro' : ''}`;
+  const tier = match[3]?.trim();
+  const pro = detectPillLevel(tier) === 'Pro';
+  if (tier && !pro && !/^(?:auto|instant|thinking|medium|high|extra[ -]high|自动|极速|思考|均衡|高级|超高)$/i.test(tier)) return 'unrecognized';
+  return `gpt_${Number(match[1])}${match[2] ? `_${Number(match[2])}` : ''}${pro ? '_pro' : ''}`;
 }
 
-export function switcherMatches(text, requested) {
+export function switcherMatches(text, requested, familyOnly = false) {
   const request = String(requested || '').replace(/^openai-/, 'gpt-');
   let target = switcherMetadata(request);
-  // Locale/effort-only Pro aliases refer to the default latest family.
   if (target === 'unrecognized' && !/\d/.test(request) && modelLevelTargets(request)[0] === 'Pro') target = 'gpt_6_pro';
-  return !['absent', 'unrecognized'].includes(target) && switcherMetadata(text) === target;
+  const parse = meta => /^gpt_(\d+)(?:_(\d+))?(_pro)?$/.exec(meta);
+  const wanted = parse(target), observed = parse(switcherMetadata(text));
+  return !!(wanted && observed && wanted[1] === observed[1] &&
+    (!wanted[2] || !observed[2] || wanted[2] === observed[2]) &&
+    (familyOnly || wanted[3] === observed[3]));
 }
 
-export function chooseSwitcherEntry(items, requested) {
+export function chooseSwitcherEntry(items, requested, familyContext = null) {
   const candidates = items.map((item, index) => ({ ...item, index }))
     .filter(item => switcherMatches(item.text, requested));
   const exact = candidates.find(item => normalizeMenuText(item.text).replace(/^chatgpt/, 'gpt') === normalizeMenuText(requested).replace(/^chatgpt/, 'gpt'));
-  return (exact || candidates[0])?.index ?? -1;
+  if (candidates.length) return (exact || candidates[0]).index;
+  if (switcherMatches(familyContext, requested, true) && modelLevelTargets(requested)[0] === 'Pro') {
+    return items.findIndex(item => /^(?:pro|专业)$/i.test(String(item.text || '').trim().split(/\r?\n/)[0].trim()));
+  }
+  return -1;
+}
+
+export function chooseSwitcherFamilyEntry(items, requested) {
+  return items.findIndex(item => /^(?:chatgpt|gpt)[\s_-]*[0-9]{1,3}(?:[._][0-9]{1,3})?$/i.test(
+    String(item.text || '').trim().split(/\r?\n/)[0]) && switcherMatches(item.text, requested, true));
 }
 
 export function effortMetadata(text) {
@@ -1390,7 +1433,7 @@ async function readModelSwitcher(page, budget = interactionBudget(1000)) {
     body.querySelectorAll('[data-nyx-switcher]').forEach(el => el.removeAttribute('data-nyx-switcher'));
     const exact = [...body.querySelectorAll('button[data-testid="model-switcher-dropdown-button"]')].filter(visible);
     const fallback = [...body.querySelectorAll('header button[aria-haspopup="menu"], header button[aria-haspopup="listbox"], [role="banner"] button[aria-haspopup]')]
-      .filter(el => visible(el) && /^(chatgpt|gpt)[\s-]*[56](?![\d.])/i.test((el.innerText || '').trim()));
+      .filter(el => visible(el) && /^(chatgpt|gpt)[\s_-]*[0-9]{1,3}(?:[._][0-9]{1,3})?(?=$|[\s_-])/i.test((el.innerText || '').trim()));
     const candidates = exact.length ? exact : fallback;
     const trigger = candidates.length === 1 ? candidates[0] : null;
     if (trigger) trigger.setAttribute('data-nyx-switcher', '');
@@ -1405,9 +1448,10 @@ export async function selectModelSwitcher(page, requested) {
   await installDomCore(page);
   const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID() });
   const timer = setTimeout(() => budget.controller.abort(), MODEL_SELECT_TIMEOUT_MS);
-  let result = { verified: false, metadata: 'absent' };
+  let result = { verified: false, metadata: 'absent', reason: 'switcher_unverified' };
   try {
     let snapshot = await readModelSwitcher(page, budget);
+    result.metadata = snapshot.metadata;
     if (!switcherMatches(snapshot.text, requested) && snapshot.found) {
       await clearRadixLock(page, budget);
       await beginModelPicker(page, budget);
@@ -1417,7 +1461,22 @@ export async function selectModelSwitcher(page, requested) {
         await budgetPause(budget, 100);
         snapshot = await readModelSwitcher(page, budget);
       } while (!snapshot.open && Date.now() < menuDeadline);
-      const index = chooseSwitcherEntry(snapshot.items, requested);
+      let index = chooseSwitcherEntry(snapshot.items, requested, snapshot.text);
+      if (index < 0) {
+        const familyIndex = chooseSwitcherFamilyEntry(snapshot.items, requested);
+        if (familyIndex >= 0) {
+          const family = snapshot.items[familyIndex].text;
+          // Resolve the original menu's element before resetting discovery.
+          // The click starts a new identity scope, excluding all existing menus.
+          await clickPickerElement(page, budget, { index: familyIndex, text: family, beginNested: true });
+          const nestedDeadline = Math.min(budget.deadline, Date.now() + 1500);
+          do {
+            await budgetPause(budget, 100);
+            snapshot = await readModelSwitcher(page, budget);
+          } while (!snapshot.open && Date.now() < nestedDeadline);
+          index = chooseSwitcherEntry(snapshot.items, requested, family);
+        }
+      }
       if (index >= 0) await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
       const verifyDeadline = Math.min(budget.deadline, Date.now() + 1000);
       do {
@@ -1426,7 +1485,8 @@ export async function selectModelSwitcher(page, requested) {
       } while (!switcherMatches(snapshot.text, requested) && Date.now() < verifyDeadline);
       if (LOG_PICKER_LABELS && !switcherMatches(snapshot.text, requested)) log(formatPickerLabels({ observed: snapshot.text, items: snapshot.items }));
     }
-    result = { verified: switcherMatches(snapshot.text, requested), metadata: snapshot.metadata };
+    result = { verified: switcherMatches(snapshot.text, requested), metadata: snapshot.metadata,
+      reason: switcherMatches(snapshot.text, requested) ? 'selected' : 'switcher_unverified' };
   } catch (error) {
     if (stableErrorCode(error) === 'page_crashed') throw error;
   } finally {
@@ -1435,6 +1495,10 @@ export async function selectModelSwitcher(page, requested) {
     const cleanup = interactionBudget(2000, budget.picker);
     const cleanupTimer = setTimeout(() => cleanup.controller.abort(), 2000);
     try {
+      await boundedRead(cleanup, timeout => page.locator('body').evaluate((_, { id, deadline }) => {
+        if (Date.now() >= deadline) return null;
+        return window.__nyx?.finishNestedModelPicker(id);
+      }, { id: budget.picker.id, deadline: Date.now() + timeout }, interactionOptions(cleanup)));
       for (let i = 0; i < 3 && (await readModelSwitcher(page, cleanup)).open; i += 1) {
         await page.locator('body').press('Escape', interactionOptions(cleanup));
         await budgetPause(cleanup, 100);
@@ -1577,6 +1641,8 @@ async function pickerSnapshot(page, budget) {
   if (budget.picker) {
     // Preserve the last open picker's items after Escape for diagnostics.
     // Default logging projects canonical metadata; raw labels require opt-in.
+    budget.picker.recognizedObservation ||= snapshot.candidates.some(text => detectPillLevel(text) !== null);
+    budget.picker.recognizedLevels ||= snapshot.items.some(item => detectPillLevel(item.text) !== null);
     const lastItems = budget.picker.snapshot?.items || [];
     budget.picker.snapshot = { ...snapshot, items: snapshot.open ? snapshot.items : lastItems };
   }
@@ -1597,11 +1663,11 @@ async function clearRadixLock(page, budget) {
   }
 }
 
-async function beginModelPicker(page, budget) {
-  await boundedRead(budget, (timeout) => page.locator("body").evaluate((_, { id, deadline }) => {
+async function beginModelPicker(page, budget, nested = false) {
+  await boundedRead(budget, (timeout) => page.locator("body").evaluate((_, { id, deadline, nested }) => {
     if (Date.now() >= deadline) return null;
-    return window.__nyx?.beginModelPicker(id);
-  }, { id: budget.picker.id, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+    return window.__nyx?.beginModelPicker(id, nested);
+  }, { id: budget.picker.id, deadline: Date.now() + timeout, nested }, interactionOptions(budget, 1000)));
 }
 
 function pickerLocator(page, pill) {
@@ -1636,6 +1702,7 @@ async function clickPickerElement(page, budget, entry) {
       if (value === "deadline") throw interactionDeadlineError();
       throw Object.assign(new Error("picker_changed"), { code: "picker_changed" });
     }
+    if (entry.beginNested) await beginModelPicker(page, budget, true);
     await element.click(interactionOptions(budget));
   } finally {
     acceptingHandle = false;
@@ -1717,7 +1784,7 @@ async function selectModel(page, modelLabel) {
   if (LOG_PICKER_LABELS && ["level_unavailable", "unverified", "menu_not_opened", "picker_unavailable"].includes(result.reason)) {
     log(formatPickerLabels(budget.picker.snapshot));
   }
-  return { ...result };
+  return { ...result, recognizedLevels: !!budget.picker.recognizedLevels, recognizedObservation: !!budget.picker.recognizedObservation };
 }
 
 async function selectModelInner(page, targets, budget, result) {
@@ -2011,6 +2078,14 @@ async function submitPromptResult(
   );
 }
 
+async function failModelSelection(runtime, task, switcher, effort, reason) {
+  updateTaskState(runtime.state, { observed_model_switcher: switcher, observed_model_effort: effort });
+  if (await ack(runtime, task, 'selecting_model', `switcher=${switcher} effort=${effort} reason=${reason}`)) {
+    throw new TaskFailure('cancelled');
+  }
+  throw new TaskFailure('model_unavailable');
+}
+
 async function handlePrompt(runtime, page, task, recovering) {
   const { task_id } = task;
   task.model ||= "chatgpt-6-pro";
@@ -2098,26 +2173,43 @@ async function handlePrompt(runtime, page, task, recovering) {
   }
 
   await installDomCore(page);
-  const readyProbe = await failureProbe(page);
-  if (readyProbe.error_banner) {
-    const code = await page.evaluate(() => window.__nyx?.errorCode());
-    if (code) throw new TaskFailure(code);
+  let readyError = await page.evaluate(() => window.__nyx?.errorCode());
+  if (readyError === 'chatgpt_error_response' && !runtime.state.current_task?.pre_send_reload_attempted) {
+    updateTaskState(runtime.state, { pre_send_reload_attempted: true });
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    await installDomCore(page);
+    await sleep(STABLE_INTERVAL_MS);
+    readyError = await page.evaluate(() => window.__nyx?.errorCode());
   }
+  if (readyError === 'chatgpt_error_response') {
+    // No send has happened: this is a page-shape failure, not task content.
+    throw Object.assign(new Error(readyError), { code: readyError });
+  }
+  if (readyError === 'model_unavailable') {
+    const header = await readModelSwitcher(page);
+    const pill = await pickerSnapshot(page, interactionBudget(PRE_SEND_ACTION_MS));
+    await failModelSelection(runtime, task, header.metadata, effortMetadata(pill.observed), 'model_unavailable');
+  }
+  if (readyError) throw new TaskFailure(readyError);
   if (task.model && task.model !== "unknown") {
     if (await ack(runtime, task, "selecting_model")) throw new TaskFailure("cancelled");
     const headerSelection = await selectModelSwitcher(page, task.model);
-    if (task.require_model_match !== false && !headerSelection.verified) throw new TaskFailure("model_unavailable");
+    if (task.require_model_match !== false && !headerSelection.verified) {
+      const pill = await pickerSnapshot(page, interactionBudget(PRE_SEND_ACTION_MS));
+      await failModelSelection(runtime, task, headerSelection.metadata, effortMetadata(pill.observed), headerSelection.reason);
+    }
     const selected = await selectModel(page, task.model);
     const observedSwitcher = await readModelSwitcher(page).catch(error => {
       if (stableErrorCode(error) === "page_crashed") throw error;
       return { text: null, metadata: "absent" };
     });
     updateTaskState(runtime.state, { observed_model_switcher: observedSwitcher.metadata,
-      observed_model_effort: effortMetadata(selected.observed) });
+      observed_model_effort: effortMetadata(selected.observed), effort_levels_exposed: selected.recognizedLevels });
     // Re-read BOTH controls after selecting effort, since either may change the other.
     if (task.require_model_match !== false && (!switcherMatches(observedSwitcher.text, task.model) ||
-        (selected.observed !== null && !selected.verified) || (selected.observed === null && selected.reason !== 'picker_unavailable'))) {
-      throw new TaskFailure('model_unavailable');
+        effortSelectionMismatch(selected, task.model))) {
+      await failModelSelection(runtime, task, observedSwitcher.metadata, effortMetadata(selected.observed),
+        !switcherMatches(observedSwitcher.text, task.model) ? 'switcher_unverified' : selected.reason);
     }
     if (await ack(runtime, task, "selecting_model", modelSelectionDetail(selected))) {
       throw new TaskFailure("cancelled");
@@ -2186,13 +2278,15 @@ async function handlePrompt(runtime, page, task, recovering) {
     const pill = await pickerSnapshot(page, interactionBudget(PRE_SEND_ACTION_MS));
     const observedEffort = effortMetadata(pill.observed);
     const previousEffort = runtime.state.current_task?.observed_model_effort;
-    if (task.require_model_match !== false && (!switcherMatches(header.text, task.model) ||
-      (pill.pill && !pillShowsLevel(pill.observed, modelLevelTargets(task.model))) ||
-      (previousEffort !== 'absent' && observedEffort === 'absent') ||
-      (['pro_extended', 'pro_standard'].includes(previousEffort) && previousEffort !== observedEffort))) {
-      throw new TaskFailure('model_unavailable');
-    }
+    const recognizedBefore = previousEffort && !['absent', 'unrecognized'].includes(previousEffort);
+    const verifiedEffort = pillShowsLevel(pill.observed, modelLevelTargets(task.model)) &&
+      (!['pro_extended', 'pro_standard'].includes(previousEffort) || previousEffort === observedEffort);
     updateTaskState(runtime.state, { observed_model_switcher: header.metadata, observed_model_effort: observedEffort });
+    if (task.require_model_match !== false && (!switcherMatches(header.text, task.model) ||
+      effortSelectionMismatch({ observed: pill.observed, verified: verifiedEffort,
+        recognizedLevels: runtime.state.current_task?.effort_levels_exposed || recognizedBefore }, task.model))) {
+      await failModelSelection(runtime, task, header.metadata, observedEffort, 'presend_unverified');
+    }
   }
   updateTaskState(runtime.state, { phase: "send_attempted", baseline_turn_count: baseline });
   await sendBtn.click({ timeout: PRE_SEND_ACTION_MS });
@@ -2241,7 +2335,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       window.__nyx?.extractImages(),
       window.__nyx?.extractFiles(),
       window.__nyx?.errorCode(),
-      window.__nyx?.version === 2,
+      window.__nyx?.version === 3,
     ]);
     if (!helperReady) continue;
     if (errorCode) return recoverContentFailure(runtime, page, task, beforeCount, errorCode);
@@ -2306,7 +2400,7 @@ async function recoverContentFailure(runtime, page, task, beforeCount, code) {
     baselineTurnCount: runtime.state.current_task?.baseline_turn_count || 0 });
   if (snapshot.errorCode) throw new TaskFailure(snapshot.errorCode);
   if (decision.action === 'complete') return { text: decision.response, images: snapshot.images, files: snapshot.files };
-  if (decision.action === 'wait' && snapshot.generating) return waitForResponse(runtime, page, task, beforeCount);
+  if (decision.action === 'wait') return waitForResponse(runtime, page, task, beforeCount);
   throw new TaskFailure(code);
 }
 
@@ -3200,6 +3294,8 @@ async function settleTaskFailure(runtime, task, code) {
     taskIdentity(runtime, task, {
       response: `ERROR: ${code}`,
       failure_detail: detail,
+      observed_model_switcher: runtime.state.current_task?.observed_model_switcher,
+      observed_model_effort: runtime.state.current_task?.observed_model_effort,
       chatgpt_url: runtime.page?.url(),
       model: task.model,
     })
@@ -3240,7 +3336,7 @@ async function executeTask(runtime, task, recovering) {
       const failureCount = (runtime.state.current_task?.recovery_failures || 0) + 1;
       const cause = runtime.pageCrashed ? "page_crashed" : stableErrorCode(error);
       const detail = failureDetail(cause, runtime.state.current_task?.last_phase || runtime.state.current_task?.phase);
-      const shapeFailure = ['composer_not_found', 'send_button_not_found', 'composer_readback_failed', 'composer_unobstructed_failed'].includes(cause)
+      const shapeFailure = ['composer_not_found', 'send_button_not_found', 'composer_readback_failed', 'composer_unobstructed_failed', 'chatgpt_error_response'].includes(cause)
         && (await failureProbe(runtime.page)).logged_in;
       const shapeFailures = (runtime.state.current_task?.shape_failures || 0) + Number(shapeFailure);
       updateTaskState(runtime.state, { recovery_failures: failureCount, failure_detail: detail, shape_failures: shapeFailures });
@@ -3572,6 +3668,7 @@ async function main() {
     health: { http: 0, cdp: 0, tab: 0 },
   };
   log(`starting worker=${LABEL} version=${SCRIPT_VERSION}`);
+  if (USAGE_COOLDOWN.invalid) log("usage_cooldown_invalid default_seconds=900");
   await recoverChrome(runtime);
 
   for (;;) {

@@ -68,6 +68,24 @@ pub struct UpdatePoolInput {
     pub is_active: Option<bool>,
 }
 
+/// Retire only the former seeded default; preserve every custom pool label.
+pub async fn migrate_legacy_default_model_label(
+    db: &mongodb::Database,
+) -> Result<u64, mongodb::error::Error> {
+    let result = db
+        .collection::<OraclePool>(ORACLE_POOLS)
+        .update_many(
+            doc! { "default_model_label": "chatgpt-5.5-pro" },
+            doc! { "$set": { "default_model_label": "chatgpt-6-pro" } },
+        )
+        .await?;
+    tracing::info!(
+        pool_count = result.modified_count,
+        "Migrated legacy Oracle default model labels"
+    );
+    Ok(result.modified_count)
+}
+
 fn validate_slug(slug: &str) -> AppResult<()> {
     let ok = !slug.is_empty()
         && slug.len() <= 64
@@ -591,6 +609,46 @@ mod tests {
             visibility: Some(OraclePoolVisibility::Platform),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn oracle_legacy_default_migration_is_exact_and_idempotent() {
+        let Some(db) = connect_test_database("oracle_default_migration").await else {
+            return;
+        };
+        let pools = db.collection::<mongodb::bson::Document>(ORACLE_POOLS);
+        for label in [
+            "chatgpt-5.5-pro",
+            "chatgpt-6-pro",
+            "chatgpt-5.5-pro-standard",
+            "GPT-5.5 Pro",
+        ] {
+            pools
+                .insert_one(
+                    doc! {"_id": uuid::Uuid::new_v4().to_string(), "default_model_label": label},
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(migrate_legacy_default_model_label(&db).await.unwrap(), 1);
+        assert_eq!(migrate_legacy_default_model_label(&db).await.unwrap(), 0);
+        assert_eq!(
+            pools
+                .count_documents(doc! {"default_model_label":"chatgpt-6-pro"})
+                .await
+                .unwrap(),
+            2
+        );
+        for label in ["chatgpt-5.5-pro-standard", "GPT-5.5 Pro"] {
+            assert_eq!(
+                pools
+                    .count_documents(doc! {"default_model_label":label})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

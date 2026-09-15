@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  usageCooldownConfig,
+  effortSelectionMismatch,
+  chooseSwitcherFamilyEntry,
   accountFingerprint,
   artifactBudgetDecision,
   artifactFileId,
@@ -775,9 +778,11 @@ test('UI error classification returns fixed content or capacity codes only', () 
 test('header target selection verifies family and tier, preferring exact known entries', () => {
   assert.equal(switcherMetadata('GPT-6 Pro'), 'gpt_6_pro');
   assert.equal(switcherMetadata('GPT-6 专业'), 'gpt_6_pro');
+  assert.equal(modelLevelTargets('专业')[0], 'Pro');
+  assert.equal(switcherMatches('GPT-6 专业', '专业'), true);
   assert.equal(switcherMetadata('GPT-5 Pro'), 'gpt_5_pro');
   assert.equal(switcherMetadata('GPT-6'), 'gpt_6');
-  for (const label of ['GPT-60 Pro', 'GPT-6.1 Pro', 'Try GPT-6 Pro', 'Profile', 'private label']) assert.equal(switcherMetadata(label), 'unrecognized');
+  for (const label of ['Try GPT-6 Pro', 'Profile', 'private label']) assert.equal(switcherMetadata(label), 'unrecognized');
   assert.equal(switcherMetadata(null), 'absent');
   assert.equal(switcherMatches('GPT-5 Pro', 'chatgpt-6-pro'), false);
   assert.equal(switcherMatches('GPT-6', 'chatgpt-6-pro'), false);
@@ -824,4 +829,65 @@ test('split Pro preference ignores descriptions and refuses the lighter-only fal
   const target = modelLevelTargets('chatgpt-6-pro');
   assert.equal(chooseNestedLevelEntry([{text:'Pro Standard'}, {text:'Pro Extended\nFor complex work'}, {text:'Pro'}], target), 1);
   assert.equal(chooseNestedLevelEntry([{text:'Pro Standard', checked:true}], target), -1);
+});
+
+
+test('strict effort decisions require recognized evidence', () => {
+  const target = 'chatgpt-6-pro';
+  for (const observed of [null, 'Tools', '+', 'Pro']) {
+    assert.equal(effortSelectionMismatch({observed, verified:false}, target), false);
+  }
+  assert.equal(effortSelectionMismatch({observed:'High', verified:false}, target), true);
+  assert.equal(effortSelectionMismatch({observed:'Tools', verified:false, recognizedObservation:true}, target), true);
+  assert.equal(effortSelectionMismatch({observed:'Pro', verified:false, recognizedObservation:true}, target), false);
+  assert.equal(effortSelectionMismatch({observed:'Tools', verified:false, recognizedLevels:true}, target), true);
+  assert.equal(effortSelectionMismatch({observed:'Pro Extended', verified:true, recognizedLevels:true}, target), false);
+});
+
+test('generic GPT families compare a minor version only when both sides expose one', () => {
+  for (const [label, metadata] of [['GPT-6.1 Pro','gpt_6_1_pro'], ['ChatGPT 7 Pro','gpt_7_pro'], ['chatgpt-5.5-pro','gpt_5_5_pro']]) {
+    assert.equal(switcherMetadata(label), metadata);
+    assert.equal(switcherMatches(label, label), true);
+  }
+  assert.equal(switcherMatches('GPT-6.1 Pro','chatgpt-6-pro'), true);
+  assert.equal(switcherMatches('GPT-6 Pro','chatgpt-6.1-pro'), true);
+  assert.equal(switcherMatches('GPT-6.2 Pro','chatgpt-6.1-pro'), false);
+  assert.equal(switcherMatches('GPT-60 Pro','chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('Try GPT-6 Pro','chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('GPT-6 Instant','chatgpt-6-pro', true), true);
+  assert.equal(switcherMetadata('GPT-1000 Pro'), 'unrecognized');
+});
+
+test('tier-only and family submenu entries require recognized family context and exact first lines', () => {
+  const items = ['Auto', 'Instant', 'Thinking', 'Pro\nFor complex work'].map(text => ({text}));
+  assert.equal(chooseSwitcherEntry(items, 'chatgpt-6-pro', 'GPT-6'), 3);
+  assert.equal(chooseSwitcherEntry(items, 'chatgpt-6-pro', 'GPT-5 Pro'), -1);
+  assert.equal(chooseSwitcherEntry([{text:'专业'}], 'chatgpt-6-pro', 'GPT-6'), 0);
+  assert.equal(chooseSwitcherEntry([{text:'Upgrade to Pro'}], 'chatgpt-6-pro', 'GPT-6 Instant'), -1);
+  const families = ['Legacy models','Try GPT-6','GPT-60','GPT-6\nMore choices'].map(text => ({text}));
+  assert.equal(chooseSwitcherFamilyEntry(families, 'chatgpt-6-pro'), 3);
+  assert.equal(chooseSwitcherFamilyEntry([{text:'GPT-6 Pro'}], 'chatgpt-6-pro'), -1);
+});
+
+test('effort tokens recognize separators without accepting prose', () => {
+  for (const label of ['Pro · Extended', 'Thinking: Pro', 'Pro (Extended)', '专业 · 扩展', 'Pro — Extended', 'Pro|Extended', 'Pro/Extended', 'Pro-Extended']) {
+    assert.equal(detectPillLevel(label), 'Pro', label);
+    assert.equal(effortMetadata(label), label === 'Thinking: Pro' ? 'pro' : 'pro_extended', label);
+    assert.equal(chooseNestedLevelEntry([{text:'Pro Standard'}, {text:label}], modelLevelTargets('chatgpt-6-pro')), 1, label);
+    if (label !== 'Thinking: Pro') assert.equal(chooseNestedLevelEntry([{text:'Pro'}, {text:label}], modelLevelTargets('chatgpt-6-pro')), 1, label);
+  }
+  for (const label of ['Upgrade to Pro', 'Pro capabilities', 'Pro plan', 'Profile', 'propro']) {
+    assert.equal(detectPillLevel(label), null, label);
+    assert.equal(effortMetadata(label), 'unrecognized', label);
+  }
+});
+
+test('cooldown parsing defaults explicitly for invalid and below-minimum values', () => {
+  assert.deepEqual(usageCooldownConfig(undefined), {milliseconds:900000, invalid:false});
+  for (const value of ['0', '-1', '', 'invalid', 'NaN', 'Infinity', '0.5']) {
+    assert.deepEqual(usageCooldownConfig(value), {milliseconds:900000, invalid:true});
+  }
+  assert.deepEqual(usageCooldownConfig('1'), {milliseconds:1000, invalid:false});
+  assert.deepEqual(usageCooldownConfig('60'), {milliseconds:60000, invalid:false});
+  assert.deepEqual(usageCooldownConfig('100000'), {milliseconds:86400000, invalid:false});
 });

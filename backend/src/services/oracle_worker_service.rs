@@ -123,7 +123,6 @@ pub(super) fn provisioned_worker(
 ) -> OracleWorker {
     OracleWorker {
         cooldown_until: None,
-        last_polled_at: None,
         id: worker_doc_id(&pool.id, label),
         pool_id: pool.id.clone(),
         worker_label: label.to_string(),
@@ -346,6 +345,7 @@ pub async fn report_presence_for_worker(
             filter,
             doc! {
                 "$set": set,
+                "$unset": { "page_url": "" },
                 "$setOnInsert": {
                     "first_seen_at": bson::DateTime::from_chrono(now),
                     "generation": uuid::Uuid::new_v4().to_string(),

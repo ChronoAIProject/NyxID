@@ -829,7 +829,7 @@ async fn upsert_worker_presence(
     worker_label: &str,
     current_task_id: Option<&str>,
     script_version: Option<&str>,
-    page_url: Option<&str>,
+    _page_url: Option<&str>,
     authorized_worker: Option<&OracleWorker>,
 ) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
@@ -845,9 +845,6 @@ async fn upsert_worker_presence(
     if let Some(v) = script_version {
         set.insert("script_version", truncate_chars(v, 64));
     }
-    if let Some(u) = page_url {
-        set.insert("page_url", truncate_chars(u, MAX_URL_LEN));
-    }
     let filter = authorized_worker
         .map(super::oracle_worker_enrollment_service::worker_filter)
         .unwrap_or_else(|| doc! { "_id": worker_doc_id(&pool.id, worker_label) });
@@ -856,6 +853,7 @@ async fn upsert_worker_presence(
             filter,
             doc! {
                 "$set": set,
+                "$unset": { "page_url": "" },
                 "$setOnInsert": { "first_seen_at": now, "desired_state": "active", "generation": uuid::Uuid::new_v4().to_string() },
             },
         )
@@ -1147,19 +1145,6 @@ pub async fn claim_task_with_retention(
         authorized_worker,
     )
     .await?;
-    let presence_filter = authorized_worker
-        .map(super::oracle_worker_enrollment_service::worker_filter)
-        .unwrap_or_else(|| doc! { "_id": worker_doc_id(&pool.id, worker_label) });
-    let polled = db
-        .collection::<Document>(ORACLE_WORKERS)
-        .update_one(
-            presence_filter,
-            doc! { "$set": { "last_polled_at": bson::DateTime::from_chrono(now) } },
-        )
-        .await?;
-    if authorized_worker.is_some() && polled.matched_count == 0 {
-        return Err(AppError::OracleWorkerTokenInvalid);
-    }
     settle_unroutable_capacity_tasks(db, &pool.id, retention_days).await?;
     if !super::oracle_worker_service::accepts_new_tasks(db, &pool.id, worker_label).await? {
         return Ok(None);
@@ -1498,6 +1483,13 @@ pub(crate) fn valid_failure_detail(value: &str) -> bool {
         && parts.next().is_none()
 }
 
+fn valid_switcher_metadata(value: &str) -> bool {
+    static SHAPE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^(gpt_[0-9]{1,3}(_[0-9]{1,3})?(_pro)?|unrecognized|absent)$").unwrap()
+    });
+    SHAPE.is_match(value)
+}
+
 fn validate_result_metadata(input: &WorkerResultInput<'_>) -> AppResult<()> {
     if input
         .failure_detail
@@ -1507,25 +1499,24 @@ fn validate_result_metadata(input: &WorkerResultInput<'_>) -> AppResult<()> {
             "invalid failure_detail".to_string(),
         ));
     }
-    if input.observed_model_switcher.is_some_and(|v| {
-        !matches!(
-            v,
-            "gpt_6_pro" | "gpt_6" | "gpt_5_pro" | "gpt_5" | "unrecognized" | "absent"
-        )
-    }) || input.observed_model_effort.is_some_and(|v| {
-        !matches!(
-            v,
-            "pro"
-                | "pro_extended"
-                | "pro_standard"
-                | "extra_high"
-                | "high"
-                | "medium"
-                | "instant"
-                | "unrecognized"
-                | "absent"
-        )
-    }) {
+    if input
+        .observed_model_switcher
+        .is_some_and(|v| !valid_switcher_metadata(v))
+        || input.observed_model_effort.is_some_and(|v| {
+            !matches!(
+                v,
+                "pro"
+                    | "pro_extended"
+                    | "pro_standard"
+                    | "extra_high"
+                    | "high"
+                    | "medium"
+                    | "instant"
+                    | "unrecognized"
+                    | "absent"
+            )
+        })
+    {
         return Err(AppError::ValidationError(
             "invalid observed model metadata".to_string(),
         ));
@@ -1559,7 +1550,7 @@ async fn has_capacity_alternative(
     let now = Utc::now();
     Ok(db.collection::<Document>(ORACLE_WORKERS).find_one(doc! {
         "pool_id": pool_id, "worker_label": { "$nin": excluded },
-        "last_polled_at": { "$gte": bson::DateTime::from_chrono(now - Duration::seconds(WORKER_RECENT_SECS)) },
+        "last_seen_at": { "$gte": bson::DateTime::from_chrono(now - Duration::seconds(WORKER_RECENT_SECS)) },
         "desired_state": { "$ne": "draining" }, "logged_in": { "$ne": false }, "chrome_alive": { "$ne": false },
         "$or": [{ "cooldown_until": null }, { "cooldown_until": { "$lte": bson::DateTime::from_chrono(now) } }],
     }).await?.is_some())
@@ -1645,7 +1636,9 @@ pub async fn worker_submit_result_fenced(
         if eligible {
             // CAS uses the same lease/attempt fences as every result path.
             let result = tasks.update_one(live_dispatch.clone(), doc! {
-                "$set": { "status": "queued", "phase": "requeued_after_capacity_failure", "failure_detail": input.failure_detail, "failure_reason": worker_error,
+                "$set": { "status": "queued", "phase": "requeued_after_capacity_failure", "failure_detail": input.failure_detail,
+                        "observed_model_switcher": input.observed_model_switcher,
+                        "observed_model_effort": input.observed_model_effort, "failure_reason": worker_error,
                     "excluded_worker_ids": &excluded, "updated_at": bson::DateTime::from_chrono(now) },
                 "$inc": { "reroute_count": 1_i64 },
                 "$unset": { "assigned_worker_id": "", "dispatched_at": "", "lease_expires_at": "", "dispatch_attempt_id": "", "chatgpt_url": "" },
@@ -1689,6 +1682,8 @@ pub async fn worker_submit_result_fenced(
                         "status": "queued",
                         "phase": "requeued_after_browser_failure",
                         "failure_detail": input.failure_detail,
+                        "observed_model_switcher": input.observed_model_switcher,
+                        "observed_model_effort": input.observed_model_effort,
                         "updated_at": bson::DateTime::from_chrono(now),
                     },
                     "$inc": { "retry_count": 1_i64 },
@@ -1742,6 +1737,8 @@ pub async fn worker_submit_result_fenced(
                         "failure_reason": "infrastructure_retry_exhausted",
                         "response": exhausted_response,
                         "failure_detail": input.failure_detail,
+                        "observed_model_switcher": input.observed_model_switcher,
+                        "observed_model_effort": input.observed_model_effort,
                         "response_chars": exhausted_response.len() as i64,
                         "completed_at": bson::DateTime::from_chrono(now),
                         "expires_at": bson::DateTime::from_chrono(terminal_expiry(input.retention_days)),
@@ -2380,6 +2377,184 @@ mod tests {
         assert!(validate_result_metadata(&input).is_ok());
     }
 
+    #[test]
+    fn oracle_generic_switcher_metadata_shape() {
+        for value in [
+            "gpt_6_1_pro",
+            "gpt_7_pro",
+            "gpt_5_5_pro",
+            "gpt_60_pro",
+            "gpt_999_999",
+            "absent",
+            "unrecognized",
+        ] {
+            assert!(valid_switcher_metadata(value), "{value}");
+        }
+        for value in [
+            "GPT-6 Pro",
+            "gpt_1000_pro",
+            "gpt_6_1000",
+            "gpt_6_1_2",
+            "gpt__pro",
+            "gpt_6_pro prose",
+            "gpt_6\n",
+        ] {
+            assert!(!valid_switcher_metadata(value), "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn oracle_busy_alternate_heartbeat_reroutes_and_preserves_model_evidence() {
+        let Some(db) = connect_test_database("oracle_busy_alternate").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+        let busy = submit_task(&db, &pool, &submitter(&owner), prompt_input("busy"))
+            .await
+            .unwrap()
+            .task;
+        claim_task(&db, &pool, "busy", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let task = submit_task(&db, &pool, &submitter(&owner), prompt_input("pending"))
+            .await
+            .unwrap()
+            .task;
+        let claim = claim_task(&db, &pool, "limited", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<Document>(ORACLE_WORKERS).update_one(doc! {"worker_label":"busy"}, doc! {"$set": {
+            "last_seen_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(WORKER_RECENT_SECS + 1))
+        }}).await.unwrap();
+        assert!(
+            !has_capacity_alternative(&db, &pool.id, &["limited".into()])
+                .await
+                .unwrap()
+        );
+        super::super::oracle_worker_service::report_presence(
+            &db,
+            &pool,
+            super::super::oracle_worker_service::WorkerPresenceInput {
+                worker_label: "busy".into(),
+                current_task_id: Some(busy.id),
+                logged_in: Some(true),
+                chrome_alive: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            has_capacity_alternative(&db, &pool.id, &["limited".into()])
+                .await
+                .unwrap()
+        );
+        let mut input = result_input(
+            "ERROR: model_unavailable",
+            claim.dispatch_attempt_id.as_deref(),
+            Some("model_unavailable@selecting_model"),
+        );
+        input.observed_model_switcher = Some("gpt_5_5_pro");
+        input.observed_model_effort = Some("unrecognized");
+        assert_eq!(
+            worker_submit_result(&db, &pool, "limited", &task.id, input)
+                .await
+                .unwrap(),
+            ResultOutcome::Requeued
+        );
+        settle_unroutable_capacity_tasks(&db, &pool.id, 30)
+            .await
+            .unwrap();
+        let stored = db
+            .collection::<OracleTask>(ORACLE_TASKS)
+            .find_one(doc! {"_id": &task.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, OracleTaskStatus::Queued);
+        assert_eq!(stored.retry_count, 0);
+        assert_eq!(
+            stored.observed_model_switcher.as_deref(),
+            Some("gpt_5_5_pro")
+        );
+        assert_eq!(
+            stored.observed_model_effort.as_deref(),
+            Some("unrecognized")
+        );
+        db.collection::<Document>(ORACLE_WORKERS).update_one(doc! {"worker_label":"busy"}, doc! {"$set": {
+            "last_seen_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(WORKER_RECENT_SECS + 1))
+        }}).await.unwrap();
+        settle_unroutable_capacity_tasks(&db, &pool.id, 30)
+            .await
+            .unwrap();
+        let stored = db
+            .collection::<OracleTask>(ORACLE_TASKS)
+            .find_one(doc! {"_id": &task.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, OracleTaskStatus::Failed);
+        assert_eq!(
+            stored.observed_model_switcher.as_deref(),
+            Some("gpt_5_5_pro")
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oracle_presence_ignores_incoming_page_url_and_removes_legacy_value() {
+        let Some(db) = connect_test_database("oracle_presence_url").await else {
+            return;
+        };
+        let pool = test_pool(&uuid::Uuid::new_v4().to_string());
+        for heartbeat in [false, true] {
+            db.collection::<Document>(ORACLE_WORKERS)
+                .update_one(
+                    doc! {"_id":worker_doc_id(&pool.id,"worker")},
+                    doc! {"$set":{"page_url":"https://chatgpt.com/c/legacy-private"}},
+                )
+                .upsert(true)
+                .await
+                .unwrap();
+            if heartbeat {
+                super::super::oracle_worker_service::report_presence(
+                    &db,
+                    &pool,
+                    super::super::oracle_worker_service::WorkerPresenceInput {
+                        worker_label: "worker".into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            } else {
+                upsert_worker_presence(
+                    &db,
+                    &pool,
+                    "worker",
+                    None,
+                    None,
+                    Some("https://chatgpt.com/c/incoming-private"),
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            let stored = db
+                .collection::<Document>(ORACLE_WORKERS)
+                .find_one(doc! {"_id":worker_doc_id(&pool.id,"worker")})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!stored.contains_key("page_url"));
+        }
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn oracle_capacity_exclusion_fifo_and_failure_detail() {
         let Some(db) = connect_test_database("oracle_capacity_fifo").await else {
@@ -2388,7 +2563,7 @@ mod tests {
         let owner = uuid::Uuid::new_v4().to_string();
         let pool = test_pool(&owner);
         seed_pool(&db, &pool).await;
-        // Poll before enqueue: availability comes from polling, not mere installation.
+        // Establish live presence before enqueue.
         assert!(
             claim_task(&db, &pool, "alternate", None, None)
                 .await
@@ -2491,7 +2666,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oracle_capacity_terminal_without_recent_eligible_poll_or_after_bound() {
+    async fn oracle_capacity_terminal_without_recent_eligible_heartbeat_or_after_bound() {
         let Some(db) = connect_test_database("oracle_capacity_terminal").await else {
             return;
         };
@@ -2509,7 +2684,7 @@ mod tests {
                     .unwrap();
                 let set = match scenario {
                     "stale" => {
-                        doc! { "last_polled_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(WORKER_RECENT_SECS + 1)) }
+                        doc! { "last_seen_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(WORKER_RECENT_SECS + 1)) }
                     }
                     "cooldown" => {
                         doc! { "cooldown_until": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(15)) }
@@ -3421,7 +3596,7 @@ mod tests {
         db.collection::<OracleTask>(ORACLE_TASKS)
             .update_one(
                 doc! { "_id": &submitted.task.id },
-                doc! { "$set": { "max_retries": 1_i64 } },
+                doc! { "$set": { "max_retries": 1_i64, "observed_model_switcher": "gpt_6_1_pro", "observed_model_effort": "pro_extended" } },
             )
             .await
             .unwrap();
@@ -3462,6 +3637,14 @@ mod tests {
             Some("infrastructure_retry_exhausted")
         );
         assert_eq!(failed.retry_count, 1);
+        assert_eq!(
+            failed.observed_model_switcher.as_deref(),
+            Some("gpt_6_1_pro")
+        );
+        assert_eq!(
+            failed.observed_model_effort.as_deref(),
+            Some("pro_extended")
+        );
         assert_eq!(failed.attempt_count, 2);
         assert!(failed.expires_at.is_some());
 
@@ -3504,8 +3687,8 @@ mod tests {
             &submitted.task.id,
             WorkerResultInput {
                 failure_detail: Some("page_crashed@page_ready"),
-                observed_model_switcher: None,
-                observed_model_effort: None,
+                observed_model_switcher: Some("gpt_6_1_pro"),
+                observed_model_effort: Some("pro_extended"),
                 authorized_worker: None,
                 response: "ERROR: browser_recovery_exhausted",
                 images: vec![],
@@ -3526,6 +3709,14 @@ mod tests {
         assert_eq!(retrying.status, OracleTaskStatus::Queued);
         assert_eq!(retrying.retry_count, 1);
         assert_eq!(
+            retrying.observed_model_switcher.as_deref(),
+            Some("gpt_6_1_pro")
+        );
+        assert_eq!(
+            retrying.observed_model_effort.as_deref(),
+            Some("pro_extended")
+        );
+        assert_eq!(
             retrying.failure_detail.as_deref(),
             Some("page_crashed@page_ready")
         );
@@ -3541,8 +3732,8 @@ mod tests {
             &submitted.task.id,
             WorkerResultInput {
                 failure_detail: Some("page_crashed@page_ready"),
-                observed_model_switcher: None,
-                observed_model_effort: None,
+                observed_model_switcher: Some("gpt_6_1_pro"),
+                observed_model_effort: Some("pro_extended"),
                 authorized_worker: None,
                 response: "ERROR: browser_recovery_exhausted",
                 images: vec![],
@@ -3563,6 +3754,14 @@ mod tests {
         assert_eq!(failed.status, OracleTaskStatus::Failed);
         assert_eq!(failed.attempt_count, 2);
         assert_eq!(failed.retry_count, 1);
+        assert_eq!(
+            failed.observed_model_switcher.as_deref(),
+            Some("gpt_6_1_pro")
+        );
+        assert_eq!(
+            failed.observed_model_effort.as_deref(),
+            Some("pro_extended")
+        );
         assert_eq!(
             failed.failure_detail.as_deref(),
             Some("page_crashed@page_ready")
