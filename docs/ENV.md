@@ -473,12 +473,14 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 | `INVITE_CODE_REQUIRED` | `true` | Gate new-user registration behind invite codes. Set to `false` for public registration. Accepts: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false** (SSO-only). The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated — existing users can always authenticate via direct API call even when the UI is hidden. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
 
-## Channel Bot Relay (Deprecated)
+## Channel Bot Relay
 
-> **Deprecated:** These vars apply to the legacy channel bot relay flow (see [#191](https://github.com/ChronoAIProject/NyxID/issues/191)). New deployments should use bot-as-service connections instead (`api-telegram-bot`, `api-lark-bot`, `api-feishu-bot`, `api-discord-bot`).
+Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND` | `1` | Shared per-conversation proactive send rate, checked before authentication; deliberately lower than replies because unsolicited messages are a spam surface |
+| `CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST` | `5` | Burst capacity for proactive sends, including retries/idempotent replays |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |

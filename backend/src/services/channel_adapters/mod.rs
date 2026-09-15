@@ -38,6 +38,16 @@ pub fn resolve_adapter(
         })
 }
 
+/// Unknown legacy platforms and botless device channels have no outbound transport.
+pub fn outbound_capabilities(
+    platform: &str,
+    cache: &Arc<TokenExchangeCache>,
+) -> super::channel_platform::OutboundCapabilities {
+    resolve_adapter(platform, cache)
+        .map(|adapter| adapter.outbound_capabilities())
+        .unwrap_or(super::channel_platform::OutboundCapabilities::NONE)
+}
+
 pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn PlatformAdapter>> {
     vec![
         Box::new(telegram::TelegramAdapter),
@@ -74,5 +84,47 @@ mod tests {
                 .registration()
                 .enabled
         );
+    }
+    #[tokio::test]
+    async fn outbound_capability_contract_for_every_registered_adapter() {
+        use crate::services::channel_platform::{OutboundCapabilities, OutboundEdit};
+        let adapters = registered_adapters(&Arc::new(TokenExchangeCache::new()));
+        assert_eq!(adapters.len(), 9);
+        let http = reqwest::Client::new();
+        let edit = OutboundEdit {
+            text: Some("updated".into()),
+            metadata: None,
+        };
+        for adapter in adapters {
+            let capabilities = adapter.outbound_capabilities();
+            let (reply_to, thread) = match adapter.platform_id() {
+                "telegram" | "telegram-new" | "slack" => (true, true),
+                "discord" => (false, true),
+                "whatsapp" => (true, false),
+                "lark" | "feishu" | "x" | "openclaw" => (false, false),
+                unexpected => panic!("Add outbound transport contracts for {unexpected}"),
+            };
+            // Corresponding production request-builder tests exercise these
+            // anchors and metadata keys (including deliberate ignored fields).
+            assert_eq!(
+                capabilities,
+                OutboundCapabilities {
+                    initiated_send: adapter.platform_id() != "openclaw",
+                    reply_to,
+                    thread,
+                    edit: matches!(adapter.platform_id(), "lark" | "feishu"),
+                }
+            );
+            // Invalid credentials stop the native Lark override before HTTP; the
+            // default implementation always returns EditUnsupported. Successful
+            // native HTTP edit contracts are covered in lark's wiremock test.
+            let result = adapter.edit_reply(&http, "", "message", &edit).await;
+            assert_eq!(
+                matches!(result, Err(AppError::ChannelPlatformEditUnsupported)),
+                !capabilities.edit,
+                "{}",
+                adapter.platform_id()
+            );
+        }
     }
 }

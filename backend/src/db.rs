@@ -2193,6 +2193,30 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // The composite _id is the unique (conversation, idempotency-key) identity.
+    // MongoDB enforces _id uniqueness intrinsically; ensure its standard index.
+    db.collection::<crate::models::channel_send_claim::ChannelSendClaim>(
+        crate::models::channel_send_claim::COLLECTION_NAME,
+    )
+    .create_index(IndexModel::builder().keys(doc! { "_id": 1 }).build())
+    .await?;
+
+    // Metadata-only proactive-send claims: completed and in-flight claims expire after 24h.
+    db.collection::<crate::models::channel_send_claim::ChannelSendClaim>(
+        crate::models::channel_send_claim::COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! { "expires_at": 1 })
+            .options(
+                IndexOptions::builder()
+                    .expire_after(Duration::from_secs(0))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+
     // ── channel_event_logs ──
     // ADR-013 metadata-only event forwarding ledger. No payload content is
     // stored; see models::channel_event_log::ChannelEventLog.

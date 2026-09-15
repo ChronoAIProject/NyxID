@@ -279,7 +279,15 @@ The callback payload includes normalized fields (`content.text`, `sender`, etc.)
 ### Agent-facing endpoints
 
 ```bash
-# Async reply — this is the only way for an agent to respond.
+# Discover active assigned routes, including opt-in, addressability and capabilities.
+# Agent API key only.
+GET /api/v1/channel-relay/conversations?page=1&per_page=50
+
+# Proactive send — assigned agent API key or human owner, human opt-in required.
+POST /api/v1/channel-relay/send
+{ "conversation_id": "<route-id>", "message": { "text": "Job finished" }, "idempotency_key": "job-123" }
+
+# Async reply anchored to an inbound message.
 # Authorization: Bearer <agent API key> OR <reply_token from the callback payload>.
 POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
@@ -296,6 +304,8 @@ GET /api/v1/channel-relay/messages/<conversation_id>?page=1&per_page=50
 # Resolve platform sender to NyxID user
 GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 ```
+
+Proactive sends require `addressable`, `allow_agent_initiated`, and `capabilities.initiated_send`. Only a human can enable the opt-in. Reuse an idempotency key only with identical text/metadata: completed sends replay the receipt; different content or pending/uncertain sends return 409. Claims retain only a delivery fingerprint and routing metadata for 24h. Native errors release claims for explicit retry, which can duplicate an uncertain/partial platform delivery. Known target refusals are non-retryable 400s. A platform message ID means acceptance, not recipient delivery/read confirmation. Never use Discord interaction credentials on `/send`.
 
 #### Editing a sent reply (progressive / streaming renders)
 

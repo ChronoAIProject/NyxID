@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  channelTestMessageSchema,
   createChannelBotSchema,
   updateChannelBotSchema,
   createChannelConversationSchema,
@@ -189,5 +190,36 @@ describe("conversationPlatformSchema", () => {
   it("includes device but not slack (read-back set)", () => {
     expect(conversationPlatformSchema.safeParse("device").success).toBe(true);
     expect(conversationPlatformSchema.safeParse("slack").success).toBe(false);
+  });
+});
+
+describe("agent-initiated message settings", () => {
+  it("preserves default-off and explicit human opt-in values", () => {
+    expect(
+      createChannelConversationSchema.parse({
+        channel_bot_id: UUID,
+        agent_api_key_id: UUID,
+      }).allow_agent_initiated,
+    ).toBeUndefined();
+    for (const enabled of [false, true]) {
+      expect(
+        updateChannelConversationSchema.parse({
+          allow_agent_initiated: enabled,
+        }).allow_agent_initiated,
+      ).toBe(enabled);
+    }
+    expect(
+      updateChannelConversationSchema.safeParse({
+        allow_agent_initiated: "true",
+      }).success,
+    ).toBe(false);
+  });
+  it("rejects blank test messages", () => {
+    expect(channelTestMessageSchema.safeParse({ text: "   " }).success).toBe(
+      false,
+    );
+    expect(channelTestMessageSchema.parse({ text: " hello " }).text).toBe(
+      "hello",
+    );
   });
 });
