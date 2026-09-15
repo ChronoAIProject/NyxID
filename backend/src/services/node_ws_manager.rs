@@ -398,6 +398,7 @@ struct NodeConnection {
     /// delivery (twenty-seventh-round Codex P2). Arc so shallow
     /// clones share writes after the deep auth handshake.
     capabilities: Arc<std::sync::Mutex<NodeCapabilitiesFlags>>,
+    credential_revisions: Arc<std::sync::Mutex<Option<std::collections::BTreeMap<String, String>>>>,
     /// Set to `true` once the node has sent its first `status_update`
     /// after the WS handshake — whether or not the frame carried a
     /// `capabilities` field. Callers that need to know "has the
@@ -1017,8 +1018,10 @@ pub enum CredentialAckOutcome {
 /// entirely; deserialisation sees `None`, so every flag defaults to
 /// `false` and the backend falls back to legacy behavior (twenty-
 /// seventh-round Codex P2).
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Clone, Default, serde::Deserialize)]
 pub struct NodeCapabilitiesMsg {
+    #[serde(default)]
+    pub credential_revisions: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     pub no_redirect_proxy: bool,
     /// Node echoes the `request_id` from a `credential_update` /
@@ -1033,6 +1036,35 @@ pub struct NodeCapabilitiesMsg {
     /// Maximum raw HTTP request body that fits through this node's control WS.
     #[serde(default)]
     pub proxy_max_body_size: Option<usize>,
+}
+
+impl fmt::Debug for NodeCapabilitiesMsg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeCapabilitiesMsg")
+            .field("no_redirect_proxy", &self.no_redirect_proxy)
+            .field("credential_revisions", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl NodeCapabilitiesMsg {
+    fn validated_revisions(&self) -> Option<std::collections::BTreeMap<String, String>> {
+        let revisions = self.credential_revisions.as_ref()?;
+        (revisions.len() <= 4096
+            && revisions.iter().all(|(slug, revision)| {
+                !slug.is_empty()
+                    && slug.len() <= 128
+                    && !slug.contains(['.', '$'])
+                    && revision.len() == 64
+                    && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }))
+        .then(|| {
+            revisions
+                .iter()
+                .map(|(slug, revision)| (slug.clone(), revision.to_ascii_lowercase()))
+                .collect()
+        })
+    }
 }
 
 pub struct PendingCredentialCiphertextParams<'a> {
@@ -1529,6 +1561,7 @@ impl NodeWsManager {
                 ws_proxies,
                 credential_acks: Arc::new(DashMap::new()),
                 capabilities: Arc::new(std::sync::Mutex::new(NodeCapabilitiesFlags::default())),
+                credential_revisions: Arc::new(std::sync::Mutex::new(None)),
                 capabilities_resolved: Arc::new(AtomicBool::new(false)),
                 capability_notify: Arc::new(tokio::sync::Notify::new()),
             },
@@ -2576,6 +2609,11 @@ impl NodeWsManager {
     /// (old agents → `None`).
     pub fn record_capabilities(&self, node_id: &str, caps: &NodeCapabilitiesMsg) {
         if let Some(conn) = self.connections.get(node_id)
+            && let Ok(mut revisions) = conn.credential_revisions.lock()
+        {
+            *revisions = caps.validated_revisions();
+        }
+        if let Some(conn) = self.connections.get(node_id)
             && let Ok(mut flags) = conn.capabilities.lock()
         {
             flags.credential_ack_correlation = caps.credential_ack_correlation;
@@ -2583,6 +2621,18 @@ impl NodeWsManager {
             flags.proxy_max_body_size = caps.proxy_max_body_size;
             flags.no_redirect_proxy = caps.no_redirect_proxy;
         }
+    }
+
+    pub fn credential_revisions(
+        &self,
+        node_id: &str,
+    ) -> Option<std::collections::BTreeMap<String, String>> {
+        self.connections
+            .get(node_id)?
+            .credential_revisions
+            .lock()
+            .ok()?
+            .clone()
     }
 
     /// Mark that the node has sent *some* `status_update` — with or
@@ -4016,6 +4066,36 @@ mod tests {
     }
 
     #[test]
+    fn node_credential_revisions_are_bounded_and_redacted() {
+        let caps = NodeCapabilitiesMsg {
+            credential_revisions: Some(std::collections::BTreeMap::from([(
+                "fixture".into(),
+                "a".repeat(64),
+            )])),
+            ..Default::default()
+        };
+        assert_eq!(
+            caps.validated_revisions().unwrap()["fixture"],
+            "a".repeat(64)
+        );
+        assert!(!format!("{caps:?}").contains(&"a".repeat(64)));
+        let malformed = NodeCapabilitiesMsg {
+            credential_revisions: Some(std::collections::BTreeMap::from([(
+                "fixture".into(),
+                "raw-secret".into(),
+            )])),
+            ..Default::default()
+        };
+        assert!(malformed.validated_revisions().is_none());
+        assert!(
+            serde_json::from_str::<NodeCapabilitiesMsg>(r#"{"no_redirect_proxy":true}"#)
+                .unwrap()
+                .credential_revisions
+                .is_none()
+        );
+    }
+
+    #[test]
     fn node_proxy_ws_limit_accounts_for_base64_and_envelope_overhead() {
         let raw_limit: usize = 100 * 1024 * 1024;
         let base64_len = raw_limit.div_ceil(3) * 4;
@@ -5188,6 +5268,7 @@ mod tests {
             "node-cap",
             &NodeCapabilitiesMsg {
                 no_redirect_proxy: false,
+                credential_revisions: None,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
                 proxy_max_body_size: None,

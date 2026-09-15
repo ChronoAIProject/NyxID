@@ -390,20 +390,10 @@ pub async fn refresh_delegation_token(
             .await?;
         let mut authority =
             catalog_delegation_service::authority_from_restriction_claims(restrictions)?;
-        let display = oauth_resource_service::resolve_token_resource_scope(
-            db,
-            config,
-            user_id,
-            None,
-            &authority.resources,
-            &authority.allowed_service_ids,
-            authority.allow_all_services,
-        )
-        .await?;
-        authority.resources = display.resource_uris;
+        catalog_delegation_service::normalize_authority(db, config, user_id, &mut authority)
+            .await?;
         validate_refresh_catalog_authority(
             db,
-            config,
             user_id,
             acting_client_id,
             receiving_client_id.expect("catalog receiver checked above"),
@@ -544,7 +534,8 @@ async fn attenuate_catalog_authority(
     requested_allow_all_nodes: Option<bool>,
     requested_node_ids: &[String],
 ) -> AppResult<catalog_delegation_service::CatalogAuthority> {
-    let source = catalog_delegation_service::authority_from_claims(source_claims)?;
+    let mut source = catalog_delegation_service::authority_from_claims(source_claims)?;
+    catalog_delegation_service::normalize_authority(db, config, user_id, &mut source).await?;
     if source_claims.client_id.as_deref() != Some(source_client_id) {
         return Err(AppError::Forbidden(
             "Catalog delegation requires a client-bound subject token".to_string(),
@@ -565,12 +556,12 @@ async fn attenuate_catalog_authority(
         requested_service_ids,
         "service",
     )?;
+    let requested_services =
+        normalize_service_bound(db, config, user_id, requested_services).await?;
     let requested_nodes =
         AuthorityBound::from_request(requested_allow_all_nodes, requested_node_ids, "node")?;
 
-    validate_service_bound(db, user_id, &source_services, "source").await?;
     validate_node_bound(db, user_id, &source_nodes).await?;
-    validate_service_bound(db, user_id, &requested_services, "requested").await?;
     validate_node_bound(db, user_id, &requested_nodes).await?;
 
     let source_consent = load_catalog_consent(db, user_id, source_client_id).await?;
@@ -640,7 +631,6 @@ async fn attenuate_catalog_authority(
         .map_or(requested_services.clone(), |resource_services| {
             requested_services.intersection(resource_services)
         });
-    validate_service_bound(db, user_id, &final_services, "effective").await?;
 
     let (allow_all_services, allowed_service_ids) = final_services.into_parts();
     let (allow_all_nodes, allowed_node_ids) = requested_nodes.into_parts();
@@ -656,8 +646,8 @@ async fn attenuate_catalog_authority(
     .await?;
     Ok(catalog_delegation_service::CatalogAuthority {
         resources: display.resource_uris,
-        allow_all_services,
-        allowed_service_ids,
+        allow_all_services: display.allow_all_services,
+        allowed_service_ids: display.allowed_service_ids,
         allow_all_nodes,
         allowed_node_ids,
     })
@@ -848,21 +838,28 @@ fn authority_from_consent(
     AuthorityBound::from_explicit(false, ids, &format!("{label} consent"))
 }
 
-async fn validate_service_bound(
+async fn normalize_service_bound(
     db: &mongodb::Database,
+    config: &AppConfig,
     user_id: &str,
-    bound: &AuthorityBound,
-    label: &str,
-) -> AppResult<()> {
+    bound: AuthorityBound,
+) -> AppResult<AuthorityBound> {
     let Some(ids) = bound.restricted_ids() else {
-        return Ok(());
+        return Ok(bound);
     };
-    if !oauth_resource_service::validate_grantable_service_ids(db, user_id, &ids).await? {
-        return Err(AppError::InvalidTarget(format!(
-            "{label} service authority is unknown or inaccessible"
-        )));
-    }
-    Ok(())
+    let normalized = oauth_resource_service::resolve_token_resource_scope(
+        db,
+        config,
+        user_id,
+        None,
+        &[],
+        &ids,
+        false,
+    )
+    .await?;
+    Ok(AuthorityBound::Restricted(
+        normalized.allowed_service_ids.into_iter().collect(),
+    ))
 }
 
 async fn validate_node_bound(
@@ -886,7 +883,6 @@ async fn validate_node_bound(
 
 async fn validate_refresh_catalog_authority(
     db: &mongodb::Database,
-    config: &AppConfig,
     user_id: &str,
     source_client_id: &str,
     receiving_client_id: &str,
@@ -912,15 +908,7 @@ async fn validate_refresh_catalog_authority(
         &authority_from_consent(&receiving_consent, "receiving client")?,
         "service",
     )?;
-    validate_service_bound(db, user_id, &services, "catalog").await?;
     validate_node_bound(db, user_id, &nodes).await?;
-    let resource_scope =
-        resolve_catalog_resources(db, config, user_id, &authority.resources).await?;
-    if let Some(resource_services) = &resource_scope.services
-        && !matches!(resource_services, AuthorityBound::All)
-    {
-        resource_services.ensure_within(&services, "resource service")?;
-    }
     Ok(())
 }
 

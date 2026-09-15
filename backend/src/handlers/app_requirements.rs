@@ -44,6 +44,7 @@ pub struct RequirementResponse {
 pub struct CompiledManifestResponse {
     pub catalog_service_ids: BTreeMap<String, String>,
     pub validator_versions: BTreeMap<String, u32>,
+    pub validators_by_requirement: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +86,7 @@ impl From<AppRequirementManifest> for ManifestResponse {
             compiled: CompiledManifestResponse {
                 catalog_service_ids: manifest.compiled.catalog_service_ids,
                 validator_versions: manifest.compiled.validator_versions,
+                validators_by_requirement: manifest.compiled.validators_by_requirement,
             },
             published_by: manifest.published_by,
             published_at: manifest.published_at.to_rfc3339(),

@@ -19,7 +19,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::coordination::{CoordinationLease, LEASE_COLLECTION_NAME};
 use crate::models::service_validation_record::{
-    COLLECTION_NAME, CallerContext, ServiceValidationRecord,
+    COLLECTION_NAME, CallerContext, NodeCredentialBinding, ServiceValidationRecord,
 };
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
@@ -32,6 +32,7 @@ const MIN_PROBE_INTERVAL: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub struct ValidationCaller {
     pub user_id: String,
+    pub session_id: Option<String>,
     pub context: CallerContext,
     pub allow_all_services: bool,
     pub allowed_service_ids: Vec<String>,
@@ -95,6 +96,8 @@ struct Snapshot {
     revision: Option<String>,
     credential_type: Option<String>,
     fallback_nodes: Vec<String>,
+    node_configured: bool,
+    node_credential: Option<NodeCredentialBinding>,
 }
 
 async fn snapshot(
@@ -169,7 +172,18 @@ async fn snapshot(
         }
         None => None,
     };
+    let (node_configured, node_credential) = node_routing_service::validation_route(
+        &state.db,
+        &state.node_ws_manager,
+        resolution.node_id.as_deref(),
+        &fallback_nodes,
+        &resolution.target.service.slug,
+        (!caller.allow_all_nodes).then_some(caller.allowed_node_ids.as_slice()),
+    )
+    .await?;
     Ok(Snapshot {
+        node_configured,
+        node_credential,
         service,
         resolution,
         digest,
@@ -202,6 +216,7 @@ fn fresh(record: &ServiceValidationRecord, live: &Snapshot, version: u32) -> boo
         record,
         &live.digest,
         live.revision.as_deref(),
+        live.node_credential.as_ref(),
         version,
         Utc::now(),
     )
@@ -211,6 +226,7 @@ pub(crate) fn evidence_is_fresh(
     record: &ServiceValidationRecord,
     digest: &str,
     revision: Option<&str>,
+    node_credential: Option<&NodeCredentialBinding>,
     version: u32,
     now: chrono::DateTime<Utc>,
 ) -> bool {
@@ -218,6 +234,8 @@ pub(crate) fn evidence_is_fresh(
         && record.validator_version == version
         && record.execution_authority_digest == digest
         && record.credential_revision.as_deref() == revision
+        && record.node_credential.as_ref() == node_credential
+        && node_credential.is_none_or(|node| node.revision.is_some())
         && record.valid_until > now
 }
 
@@ -456,22 +474,14 @@ async fn poll_attempt(
 struct Admission {
     deployment: SlotToken,
     session: SlotToken,
+    app: Option<SlotToken>,
     cooldown: Option<LeaseToken>,
 }
 
-async fn start_attempt(
-    state: &AppState,
-    caller: &ValidationCaller,
-    live: Snapshot,
-    profile: Option<&ValidatorProfile>,
-    previous: Option<ServiceValidationRecord>,
-    lease: &LeaseToken,
-) -> AppResult<(ServiceValidationRecord, Admission)> {
+async fn acquire_admission(state: &AppState, caller: &ValidationCaller) -> AppResult<Admission> {
     let holder = &coordination_service::cluster_lease_runtime().holder;
-    let session_scope = match &caller.context {
-        CallerContext::Human { session } => session,
-        CallerContext::App { client_id } => client_id,
-    };
+    // A token without a browser session shares its human subject's two slots.
+    let session_scope = caller.session_id.as_deref().unwrap_or(&caller.user_id);
     let deployment = SlotStore::acquire(
         &state.db,
         "service-validation-deployment",
@@ -503,12 +513,48 @@ async fn start_attempt(
     let mut admission = Admission {
         deployment,
         session,
+        app: None,
         cooldown: None,
     };
+    let result: AppResult<()> = async {
+        if let CallerContext::App { client_id } = &caller.context {
+            admission.app = Some(
+                SlotStore::acquire(
+                    &state.db,
+                    "service-validation-app",
+                    client_id,
+                    16,
+                    holder,
+                    LEASE_TTL,
+                )
+                .await?
+                .ok_or(AppError::ServiceValidationRateLimited)?,
+            );
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        release_admission(&state.db, &admission).await;
+        return Err(error);
+    }
+    Ok(admission)
+}
+
+async fn start_attempt(
+    state: &AppState,
+    caller: &ValidationCaller,
+    live: Snapshot,
+    profile: Option<&ValidatorProfile>,
+    previous: Option<ServiceValidationRecord>,
+    lease: &LeaseToken,
+) -> AppResult<(ServiceValidationRecord, Admission)> {
+    let holder = &coordination_service::cluster_lease_runtime().holder;
+    let mut admission = acquire_admission(state, caller).await?;
     let result = async {
         if let Some(profile) = profile {
             let identity = live.resolution.api_key_id.as_deref().unwrap_or(&live.service.id);
-            let cooldown_name = format!("service-validation-cooldown:{identity}:{}:{}", profile.id, live.digest);
+            let cooldown_name = format!("service-validation-cooldown:{identity}:{}", profile.id);
             admission.cooldown = Some(LeaseStore::acquire(&state.db, &cooldown_name, holder, MIN_PROBE_INTERVAL).await?.ok_or(AppError::ServiceValidationRateLimited)?);
         }
         let now = Utc::now();
@@ -524,6 +570,7 @@ async fn start_attempt(
             credential_epoch: live.resolution.api_key_id.as_ref().map(|_| live.resolution.credential_epoch),
             attempt_id: lease.lease_id.clone(), completed: false,
             credential_revision: live.revision,
+            node_credential: live.node_credential,
             reason_code: "checking".into(), outcome: ValidationOutcome::TransportUnknown,
             checked_at: now, valid_until: now + chrono::Duration::seconds(DISPLAY_WINDOW_SECS),
             caller_context: caller.context.clone(),
@@ -552,6 +599,9 @@ async fn start_attempt(
 }
 
 async fn release_admission(db: &mongodb::Database, admission: &Admission) {
+    if let Some(app) = &admission.app {
+        let _ = SlotStore::release(db, app).await;
+    }
     let _ = SlotStore::release(db, &admission.session).await;
     let _ = SlotStore::release(db, &admission.deployment).await;
     // A dispatched attempt keeps its provider cooldown after releasing active slots.
@@ -624,6 +674,10 @@ async fn run_attempt(
                     Ok::<_, AppError>(LeaseStore::renew(&state.db, &lease, LEASE_TTL).await?
                         && SlotStore::renew(&state.db, &admission.deployment, LEASE_TTL).await?
                         && SlotStore::renew(&state.db, &admission.session, LEASE_TTL).await?
+                        && match admission.app.as_ref() {
+                            Some(app) => SlotStore::renew(&state.db, app, LEASE_TTL).await?,
+                            None => true,
+                        }
                         && match admission.cooldown.as_ref() {
                             Some(cooldown) => extend_cooldown(&state.db, cooldown, MIN_PROBE_INTERVAL).await?,
                             None => true,
@@ -673,6 +727,7 @@ async fn observe(
     let before = snapshot(state, caller, &record.user_service_id).await?;
     if before.digest != record.execution_authority_digest
         || before.revision != record.credential_revision
+        || before.node_credential != record.node_credential
     {
         return Err(AttemptFailure::Superseded);
     }
@@ -703,84 +758,59 @@ async fn observe(
                 "unsupported_auth_method".to_string(),
             )
         } else {
-            let materialized = Materialized(
-                proxy_service::resolve_proxy_target_by_user_service_id(
-                    &state.db,
-                    state.encryption_keys.as_ref(),
-                    &caller.user_id,
-                    &record.user_service_id,
-                    Some(&before.service.slug),
-                    None,
-                    proxy_service::ProxyExecutionContext::new(
-                        Some(&state.connection_expiry_notifier),
-                        state.platform_user_rate_limit,
-                    )
-                    .without_usage_touch(),
-                )
-                .await
-                .map_err(AttemptFailure::materialization)?
-                .ok_or(AttemptFailure::CredentialUnavailable)?,
-            );
-            let materialized_digest =
-                execution_authority::digest(&execution_authority::build_projection(
-                    &materialized,
-                    None,
-                    before.fallback_nodes.clone(),
-                ));
-            let current = snapshot(state, caller, &record.user_service_id).await?;
-            if materialized_digest != before.digest
-                || current.digest != before.digest
-                || !materialized_matches(state, &materialized, current.revision.as_deref()).await?
+            if let Some(cooldown) = admission.cooldown.as_ref()
+                && !extend_cooldown(&state.db, cooldown, MIN_PROBE_INTERVAL).await?
             {
-                return Err(AttemptFailure::Superseded);
+                return Err(AttemptFailure::LeaseLost);
             }
-            record.credential_revision = current.revision;
-            if let Some(cooldown) = admission.cooldown.as_ref() {
-                let renewed = extend_cooldown(&state.db, cooldown, MIN_PROBE_INTERVAL).await;
-                if !matches!(renewed, Ok(true)) {
-                    return Err(AttemptFailure::LeaseLost);
+            let response = if before.node_configured {
+                if let Some(node) = &before.node_credential {
+                    validation_transport::send_via_node(
+                        state,
+                        &node.node_id,
+                        profile,
+                        slug,
+                        &before.resolution.target,
+                        dispatched,
+                    )
+                    .await
+                } else {
+                    Err(validation_transport::TransportError::Unavailable)
                 }
-            }
-            // Prefer the selected service's explicit node; a binding may route a
-            // service without node_id. Never fall through to direct egress when
-            // a configured route is offline.
-            let mut candidates: Vec<String> = materialized
-                .node_id
-                .iter()
-                .cloned()
-                .chain(before.fallback_nodes)
-                .collect();
-            candidates.dedup();
-            let configured_node = !candidates.is_empty();
-            let mut selected = None;
-            for node in candidates {
-                if !caller.allow_all_nodes && !caller.allowed_node_ids.contains(&node) {
-                    continue;
-                }
-                if node_routing_service::is_node_id_dispatchable(
-                    &state.db,
-                    &node,
-                    &state.node_ws_manager,
-                )
-                .await?
-                {
-                    selected = Some(node);
-                    break;
-                }
-            }
-            let response = if let Some(node) = selected {
-                validation_transport::send_via_node(
-                    state,
-                    &node,
-                    profile,
-                    slug,
-                    &materialized.target,
-                    dispatched,
-                )
-                .await
-            } else if configured_node {
-                Err(validation_transport::TransportError::Unavailable)
             } else {
+                let materialized = Materialized(
+                    proxy_service::resolve_proxy_target_by_user_service_id(
+                        &state.db,
+                        state.encryption_keys.as_ref(),
+                        &caller.user_id,
+                        &record.user_service_id,
+                        Some(&before.service.slug),
+                        None,
+                        proxy_service::ProxyExecutionContext::new(
+                            Some(&state.connection_expiry_notifier),
+                            state.platform_user_rate_limit,
+                        )
+                        .without_usage_touch(),
+                    )
+                    .await
+                    .map_err(AttemptFailure::materialization)?
+                    .ok_or(AttemptFailure::CredentialUnavailable)?,
+                );
+                let materialized_digest =
+                    execution_authority::digest(&execution_authority::build_projection(
+                        &materialized,
+                        None,
+                        before.fallback_nodes.clone(),
+                    ));
+                let current = snapshot(state, caller, &record.user_service_id).await?;
+                if materialized_digest != before.digest
+                    || current.digest != before.digest
+                    || !materialized_matches(state, &materialized, current.revision.as_deref())
+                        .await?
+                {
+                    return Err(AttemptFailure::Superseded);
+                }
+                record.credential_revision = current.revision;
                 validation_transport::send(profile, slug, &materialized.target, dispatched).await
             };
             match response {
@@ -814,6 +844,7 @@ async fn observe(
     let current = snapshot(state, caller, &record.user_service_id).await?;
     if current.digest != record.execution_authority_digest
         || current.revision != record.credential_revision
+        || current.node_credential != record.node_credential
     {
         return Err(AttemptFailure::Superseded);
     }
@@ -836,6 +867,10 @@ async fn observe(
     }
     record.checked_at = Utc::now();
     record.valid_until = if status_class.is_some()
+        && record
+            .node_credential
+            .as_ref()
+            .is_none_or(|node| node.revision.is_some())
         && !matches!(
             outcome,
             ValidationOutcome::TransportUnknown | ValidationOutcome::Unsupported

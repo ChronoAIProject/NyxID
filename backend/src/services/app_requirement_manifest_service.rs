@@ -56,6 +56,7 @@ pub async fn current(
 
 pub async fn compile(
     db: &mongodb::Database,
+    client_id: &str,
     input: &mut PublishManifest,
 ) -> AppResult<CompiledManifest> {
     if input.requirements.len() > 25 {
@@ -112,6 +113,17 @@ pub async fn compile(
                     "Requirements must name active, user-connectable catalog services",
                 ));
             }
+            if requirement.allow_no_credential
+                && service.visibility != "public"
+                && service
+                    .developer_app_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.iter().any(|id| id == client_id))
+            {
+                return Err(invalid(
+                    "Private no-credential services must have an independent prerequisite; they cannot depend on consent to this same app",
+                ));
+            }
             compiled
                 .catalog_service_ids
                 .insert(slug.clone(), service.id.clone());
@@ -130,12 +142,45 @@ pub async fn compile(
                     "The validator profile must apply to at least one selected catalog slug",
                 ));
             }
+            let mut profiles = BTreeMap::new();
+            for slug in &requirement.any_of_catalog_slugs {
+                let applicable = if profile.catalog_slugs.contains(&slug.as_str()) {
+                    Some(profile)
+                } else {
+                    validator_profiles::for_slug(slug)
+                }
+                .ok_or_else(|| {
+                    invalid("Every catalog alternative must have an applicable validator profile")
+                })?;
+                profiles.insert(slug.clone(), applicable.id.to_string());
+                compiled
+                    .validator_versions
+                    .insert(applicable.id.to_string(), applicable.version);
+            }
             compiled
-                .validator_versions
-                .insert(id.clone(), profile.version);
+                .validators_by_requirement
+                .insert(requirement.id.clone(), profiles);
         }
     }
     Ok(compiled)
+}
+
+/// Only the profiles and versions frozen at publication can supply evidence.
+pub fn compiled_profile(
+    manifest: &AppRequirementManifest,
+    requirement_id: &str,
+    slug: &str,
+) -> Option<&'static validator_profiles::ValidatorProfile> {
+    let id = manifest
+        .compiled
+        .validators_by_requirement
+        .get(requirement_id)?
+        .get(slug)?;
+    validator_profiles::PROFILES.iter().find(|profile| {
+        profile.id == id
+            && profile.catalog_slugs.contains(&slug)
+            && manifest.compiled.validator_versions.get(id) == Some(&profile.version)
+    })
 }
 
 fn validate_fields(requirement: &ServiceRequirement) -> AppResult<()> {
@@ -217,7 +262,7 @@ pub async fn publish(
     if !app_connect_rollout::is_enabled_for(state, client).await? {
         return Err(AppError::AppConnectLinkNotFound);
     }
-    let compiled = compile(&state.db, &mut input).await?;
+    let compiled = compile(&state.db, &client.id, &mut input).await?;
     let db = state.db.clone();
     let client_id = client.id.clone();
     let owner = client.created_by.clone();

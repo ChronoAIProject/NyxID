@@ -25,6 +25,20 @@ pub enum CallerContext {
     App { client_id: String },
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeCredentialBinding {
+    pub node_id: String,
+    pub service_slug: String,
+    pub revision: Option<String>,
+}
+
+impl std::fmt::Debug for NodeCredentialBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeCredentialBinding")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServiceValidationRecord {
     #[serde(rename = "_id")]
@@ -39,6 +53,8 @@ pub struct ServiceValidationRecord {
     pub attempt_id: String,
     pub completed: bool,
     pub credential_revision: Option<String>,
+    #[serde(default)]
+    pub node_credential: Option<NodeCredentialBinding>,
     pub reason_code: String,
     pub outcome: ValidationOutcome,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

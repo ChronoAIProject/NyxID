@@ -1028,6 +1028,7 @@ mod no_auth_strict_push_tests {
             "node-1",
             &NodeCapabilitiesMsg {
                 no_redirect_proxy: false,
+                credential_revisions: None,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: false,
                 proxy_max_body_size: None,

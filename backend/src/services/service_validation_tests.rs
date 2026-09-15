@@ -58,6 +58,10 @@ async fn fixture(prefix: &str, capable: bool) -> Option<Fixture> {
         &node_id,
         &NodeCapabilitiesMsg {
             no_redirect_proxy: capable,
+            credential_revisions: Some(std::collections::BTreeMap::from([(
+                "api-github".into(),
+                "a".repeat(64),
+            )])),
             ..Default::default()
         },
     );
@@ -105,6 +109,7 @@ async fn fixture(prefix: &str, capable: bool) -> Option<Fixture> {
         .await
         .unwrap();
     let caller = ValidationCaller {
+        session_id: None,
         user_id: owner,
         context: CallerContext::Human {
             session: uuid::Uuid::new_v4().to_string(),
@@ -277,6 +282,10 @@ async fn validation_db_node_upgrade_required_and_offline_do_not_probe() {
         &f.node_id,
         &NodeCapabilitiesMsg {
             no_redirect_proxy: true,
+            credential_revisions: Some(std::collections::BTreeMap::from([(
+                "api-github".into(),
+                "a".repeat(64),
+            )])),
             ..Default::default()
         },
     );
@@ -287,7 +296,12 @@ async fn validation_db_node_upgrade_required_and_offline_do_not_probe() {
     assert_ne!(upgraded.attempt_id, record.attempt_id);
     assert_eq!(upgraded.outcome, ValidationOutcome::Authenticated);
     assert!(upgraded.valid_until > upgraded.checked_at);
-    // A routing change invalidates evidence and receives its own digest cooldown.
+    // Routing edits do not create another provider budget. Advance only the
+    // lease clock before testing offline routing after the successful probe.
+    f.state.db.collection::<Document>(LEASE_COLLECTION_NAME).update_many(
+        doc! { "_id": { "$regex": "^service-validation-cooldown:" } },
+        doc! { "$set": { "expires_at": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(1)) } },
+    ).await.unwrap();
     let offline = uuid::Uuid::new_v4().to_string();
     f.state
         .db
@@ -476,6 +490,33 @@ async fn validation_db_retry_after_cannot_be_shortened_by_renewal() {
         .unwrap();
     assert!(latest.expires_at >= lease.expires_at);
     assert!(latest.expires_at > Utc::now() + chrono::Duration::seconds(590));
+    f.state
+        .db
+        .collection::<Document>(USER_SERVICES)
+        .update_one(
+            doc! { "_id": &f.service.id },
+            doc! { "$set": { "custom_user_agent": "edited-agent" } },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        validate(&f.state, f.caller.clone(), &f.service.id, true).await,
+        Err(AppError::ServiceValidationRateLimited)
+    ));
+    let mut alias = f.service.clone();
+    alias.id = uuid::Uuid::new_v4().to_string();
+    alias.slug = "second-alias".into();
+    f.state
+        .db
+        .collection::<UserService>(USER_SERVICES)
+        .insert_one(&alias)
+        .await
+        .unwrap();
+    assert!(matches!(
+        validate(&f.state, f.caller.clone(), &alias.id, true).await,
+        Err(AppError::ServiceValidationRateLimited)
+    ));
+    assert!(f.outbound.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -507,9 +548,7 @@ async fn validation_db_shared_deployment_and_session_admission() {
     for slot in slots {
         SlotStore::release(&f.state.db, &slot).await.unwrap();
     }
-    let CallerContext::Human { session } = &f.caller.context else {
-        unreachable!()
-    };
+    let session = f.caller.session_id.as_deref().unwrap_or(&f.caller.user_id);
     for _ in 0..2 {
         SlotStore::acquire(
             &f.state.db,
@@ -798,6 +837,17 @@ async fn validation_db_aborted_attempts_settle_and_release_unsent_cooldown() {
                     doc! { "$set": { "credential_encrypted": bson::Binary {
                         subtype: bson::spec::BinarySubtype::Generic, bytes: vec![42; 64],
                     } } },
+                )
+                .await
+                .unwrap();
+        }
+        if reason == "internal_error" {
+            f.state
+                .db
+                .collection::<Document>(USER_SERVICES)
+                .update_one(
+                    doc! { "_id": &f.service.id },
+                    doc! { "$set": { "node_id": null } },
                 )
                 .await
                 .unwrap();
@@ -1169,5 +1219,221 @@ async fn validation_db_openid_token_cannot_probe_despite_matching_allowlist() {
             .await
             .unwrap(),
         0
+    );
+}
+
+#[tokio::test]
+async fn validation_db_app_admission_separates_humans_and_caps_app_slots() {
+    let Some(mut f) = fixture("validation_app_slots", true).await else {
+        return;
+    };
+    let app_id = uuid::Uuid::new_v4().to_string();
+    f.caller.context = CallerContext::App {
+        client_id: app_id.clone(),
+    };
+    let mut other = f.caller.clone();
+    other.user_id = uuid::Uuid::new_v4().to_string();
+    let a = acquire_admission(&f.state, &other).await.unwrap();
+    let b = acquire_admission(&f.state, &other).await.unwrap();
+    assert!(matches!(
+        acquire_admission(&f.state, &other).await,
+        Err(AppError::ServiceValidationRateLimited)
+    ));
+    let c = acquire_admission(&f.state, &f.caller).await.unwrap();
+    release_admission(&f.state.db, &a).await;
+    release_admission(&f.state.db, &b).await;
+    release_admission(&f.state.db, &c).await;
+    // Sixteen distinct humans can check concurrently; the seventeenth is
+    // bounded by the app limit before reaching the deployment's 32 slots.
+    let mut held = vec![];
+    for _ in 0..16 {
+        other.user_id = uuid::Uuid::new_v4().to_string();
+        held.push(acquire_admission(&f.state, &other).await.unwrap());
+    }
+    assert!(matches!(
+        acquire_admission(&f.state, &f.caller).await,
+        Err(AppError::ServiceValidationRateLimited)
+    ));
+    for admission in held {
+        release_admission(&f.state.db, &admission).await;
+    }
+    // Two sessions belonging to one human each have their own two slots.
+    f.caller.session_id = Some(uuid::Uuid::new_v4().to_string());
+    let a = acquire_admission(&f.state, &f.caller).await.unwrap();
+    let b = acquire_admission(&f.state, &f.caller).await.unwrap();
+    f.caller.session_id = Some(uuid::Uuid::new_v4().to_string());
+    let c = acquire_admission(&f.state, &f.caller).await.unwrap();
+    for admission in [a, b, c] {
+        release_admission(&f.state.db, &admission).await;
+    }
+}
+
+#[tokio::test]
+async fn validation_db_node_revision_change_invalidates_local_and_remote_evidence() {
+    let Some(mut f) = fixture("validation_node_revisions", true).await else {
+        return;
+    };
+    let run = begin(&f, false);
+    let frame = request(&mut f).await;
+    respond(&f, &frame, 200, br#"{"login":"octocat"}"#, vec![]);
+    let record = run.await.unwrap().unwrap();
+    let live = snapshot(&f.state, &f.caller, &f.service.id).await.unwrap();
+    assert!(fresh(&record, &live, 1));
+    let revisions = std::collections::BTreeMap::from([("api-github".into(), "b".repeat(64))]);
+    f.state.node_ws_manager.record_capabilities(
+        &f.node_id,
+        &NodeCapabilitiesMsg {
+            no_redirect_proxy: true,
+            credential_revisions: Some(revisions.clone()),
+            ..Default::default()
+        },
+    );
+    let changed = snapshot(&f.state, &f.caller, &f.service.id).await.unwrap();
+    assert!(!fresh(&record, &changed, 1));
+    let owner = f
+        .state
+        .db
+        .collection::<Node>(NODES)
+        .find_one(doc! { "_id": &f.node_id })
+        .await
+        .unwrap()
+        .unwrap()
+        .connection_owner
+        .unwrap();
+    let fence = super::super::node_owner_service::NodeOwnerFence::from_owner(&f.node_id, &owner);
+    assert!(
+        super::super::node_owner_service::record_capabilities(
+            &f.state.db,
+            &fence,
+            f.state
+                .node_ws_manager
+                .session_info(&f.node_id)
+                .capabilities,
+            true,
+            Some(&revisions)
+        )
+        .await
+        .unwrap()
+    );
+    let remote = test_app_state(f.state.db.clone()).node_ws_manager;
+    let (_, binding) = node_routing_service::validation_route(
+        &f.state.db,
+        &remote,
+        Some(&f.node_id),
+        &[],
+        "api-github",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(binding, changed.node_credential);
+    assert!(!evidence_is_fresh(
+        &record,
+        &live.digest,
+        live.revision.as_deref(),
+        binding.as_ref(),
+        1,
+        Utc::now()
+    ));
+    let mut stale_fence = fence.clone();
+    stale_fence.connection_id = uuid::Uuid::new_v4().to_string();
+    assert!(
+        !super::super::node_owner_service::record_capabilities(
+            &f.state.db,
+            &stale_fence,
+            Default::default(),
+            true,
+            None
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        node_routing_service::validation_route(
+            &f.state.db,
+            &remote,
+            Some(&f.node_id),
+            &[],
+            "api-github",
+            None
+        )
+        .await
+        .unwrap()
+        .1,
+        binding
+    );
+}
+
+#[tokio::test]
+async fn validation_db_node_without_revisions_has_no_reuse_window() {
+    let Some(mut f) = fixture("validation_node_legacy_revision", true).await else {
+        return;
+    };
+    f.state.node_ws_manager.record_capabilities(
+        &f.node_id,
+        &NodeCapabilitiesMsg {
+            no_redirect_proxy: true,
+            ..Default::default()
+        },
+    );
+    let run = begin(&f, false);
+    let frame = request(&mut f).await;
+    respond(&f, &frame, 200, br#"{"login":"octocat"}"#, vec![]);
+    let record = run.await.unwrap().unwrap();
+    assert_eq!(record.outcome, ValidationOutcome::Authenticated);
+    assert_eq!(record.valid_until, record.checked_at);
+    assert!(record.node_credential.unwrap().revision.is_none());
+}
+
+#[tokio::test]
+async fn validation_db_node_telegram_path_contains_no_server_credential() {
+    let Some(mut f) = fixture("validation_telegram_path", true).await else {
+        return;
+    };
+    f.state.db.collection::<Document>("downstream_services").update_one(
+        doc! { "_id": &f.service.catalog_service_id },
+        doc! { "$set": { "slug": "api-telegram-bot", "base_url": "https://api.telegram.org", "auth_method": "path", "auth_key_name": "bot" } },
+    ).await.unwrap();
+    f.state
+        .db
+        .collection::<Document>("user_endpoints")
+        .update_one(
+            doc! { "_id": &f.service.endpoint_id },
+            doc! { "$set": { "url": "https://api.telegram.org" } },
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(USER_SERVICES)
+        .update_one(
+            doc! { "_id": &f.service.id },
+            doc! { "$set": { "auth_method": "path", "auth_key_name": "bot" } },
+        )
+        .await
+        .unwrap();
+    let run = begin(&f, false);
+    let NodeOutboundMessage::Text(frame) =
+        tokio::time::timeout(Duration::from_secs(3), f.outbound.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    else {
+        panic!();
+    };
+    assert!(!frame.contains("fixture-token"));
+    let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    assert_eq!(frame["path"], "getMe");
+    assert!(frame["query"].is_null());
+    respond(
+        &f,
+        &frame,
+        200,
+        br#"{"ok":true,"result":{"id":123,"is_bot":true}}"#,
+        vec![],
+    );
+    assert_eq!(
+        run.await.unwrap().unwrap().outcome,
+        ValidationOutcome::Authenticated
     );
 }

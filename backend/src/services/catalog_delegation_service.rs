@@ -35,6 +35,29 @@ impl CatalogAuthority {
     }
 }
 
+/// Normalize a stored ID boundary without substituting active rows for tombstones.
+pub async fn normalize_authority(
+    db: &mongodb::Database,
+    config: &crate::config::AppConfig,
+    user_id: &str,
+    authority: &mut CatalogAuthority,
+) -> AppResult<()> {
+    let normalized = oauth_resource_service::resolve_token_resource_scope(
+        db,
+        config,
+        user_id,
+        None,
+        &authority.resources,
+        &authority.allowed_service_ids,
+        authority.allow_all_services,
+    )
+    .await?;
+    authority.resources = normalized.resource_uris;
+    authority.allowed_service_ids = normalized.allowed_service_ids;
+    authority.allow_all_services = normalized.allow_all_services;
+    Ok(())
+}
+
 pub fn scope_has_catalog_read(scope: &str) -> bool {
     scope
         .split_whitespace()
@@ -98,7 +121,7 @@ pub async fn validate_live_grant(
         .client_id
         .as_deref()
         .ok_or_else(invalid_catalog_authority)?;
-    let authority = authority_from_claims(claims)?;
+    let mut authority = authority_from_claims(claims)?;
     let now = bson::DateTime::from_chrono(Utc::now());
     let grant = db
         .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
@@ -130,36 +153,12 @@ pub async fn validate_live_grant(
         &claims.scope,
         &receiving_client.delegation_scopes,
     )?;
+    // Verify the unmodified signed claims against the durable grant above, then
+    // apply live narrowing before checking consent ceilings. Inactive IDs remain
+    // bound but can never execute through the proxy.
+    normalize_authority(db, config, &claims.sub, &mut authority).await?;
     ensure_consent_authority(db, &claims.sub, actor_client_id, &authority).await?;
     ensure_consent_authority(db, &claims.sub, receiving_client_id, &authority).await?;
-    if !authority.allow_all_services
-        && !oauth_resource_service::validate_grantable_service_ids(
-            db,
-            &claims.sub,
-            &authority.allowed_service_ids,
-        )
-        .await?
-    {
-        return Err(invalid_catalog_authority());
-    }
-    if !authority.resources.is_empty() {
-        let resolved = oauth_resource_service::resolve_requested_resources(
-            db,
-            config,
-            &claims.sub,
-            Some(&authority.resources),
-        )
-        .await?
-        .ok_or_else(invalid_catalog_authority)?;
-        let mut canonical_resources = resolved.resource_uris;
-        if let Some(mcp_resource) = resolved.mcp_resource_uri {
-            canonical_resources.push(mcp_resource);
-        }
-        canonical_resources.sort();
-        if canonical_resources != authority.resources {
-            return Err(invalid_catalog_authority());
-        }
-    }
     api_key_scope_service::validate_node_ids(
         db,
         &claims.sub,

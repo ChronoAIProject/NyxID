@@ -565,6 +565,46 @@ pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> Str
 mod tests {
     use super::append_query_param;
 
+    #[tokio::test]
+    async fn validation_path_auth_injects_once() {
+        use super::super::{
+            config::NodeConfig, credential_store::CredentialStore, secret_backend::SecretBackend,
+        };
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let server = MockServer::start().await;
+        Mock::given(path("/botfixture-token/getMe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::new("file", "test-node", dir.path()).unwrap();
+        let mut config = NodeConfig::new("wss://test".into(), "node".into(), "file".into());
+        config
+            .add_path_prefix_credential_via("telegram", "bot", "fixture-token", None, &backend)
+            .unwrap();
+        let credentials = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
+        let frame = serde_json::json!({"request_id":"fixture", "service_slug":"telegram",
+            "base_url":server.uri(), "method":"GET", "path":"getMe", "follow_redirects":false});
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        super::execute_proxy_request(
+            &frame,
+            &credentials,
+            None,
+            &tokio::sync::Mutex::new(super::ReplayGuard::new()),
+            &super::NodeMetrics::new(),
+            &tx,
+            false,
+            &super::build_http_clients().unwrap(),
+        )
+        .await;
+        let super::NodeWsMessage::Text(response) = rx.recv().await.unwrap() else {
+            panic!();
+        };
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["status"], 200);
+    }
+
     #[test]
     fn append_query_param_url_encodes_name_and_value() {
         let url = append_query_param("https://example.com/api", "api key", "a=b&c d#fragment");

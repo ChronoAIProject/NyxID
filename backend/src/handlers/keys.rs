@@ -2840,6 +2840,7 @@ pub async fn validate_key(
     }
     let caller = service_validation_service::ValidationCaller {
         user_id: actor.clone(),
+        session_id: auth_user.session_id.map(|id| id.to_string()),
         context: validation_caller_context(&auth_user),
         allow_all_services: auth_user.allow_all_services,
         allowed_service_ids: auth_user.allowed_service_ids,
@@ -2871,13 +2872,12 @@ pub async fn validate_key(
 fn validation_caller_context(
     auth: &AuthUser,
 ) -> crate::models::service_validation_record::CallerContext {
-    // Access tokens without a session id or jti fall back to the actual user:
+    // Access tokens without a session id fall back to the actual user:
     // the two concurrent session slots then become two slots per user.
     crate::models::service_validation_record::CallerContext::Human {
         session: auth
             .session_id
             .map(|id| id.to_string())
-            .or_else(|| auth.token_jti.clone())
             .unwrap_or_else(|| auth.user_id.to_string()),
     }
 }

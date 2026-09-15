@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use zeroize::Zeroizing;
@@ -137,6 +138,33 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
+    /// Revision of the decrypted slot, independent of encrypted-file churn.
+    /// Hash the injection shape and target as well as the secret; never advertise
+    /// any plaintext credential or include revisions in Debug output.
+    pub fn revisions(&self) -> BTreeMap<String, String> {
+        self.credentials
+            .iter()
+            .map(|(slug, credential)| {
+                let mut hash = Sha256::new();
+                let mut part = |value: &str| {
+                    hash.update((value.len() as u64).to_be_bytes());
+                    hash.update(value.as_bytes());
+                };
+                part("nyxid-node-credential-v1");
+                part(credential.injection_method());
+                part(credential.target_name());
+                part(
+                    credential
+                        .raw_credential()
+                        .or_else(|| credential.aws_sigv4_credential())
+                        .unwrap_or_default(),
+                );
+                part(credential.target_url().unwrap_or_default());
+                (slug.clone(), hex::encode(hash.finalize()))
+            })
+            .collect()
+    }
+
     /// Load credentials from config, decrypting each encrypted value (file backend only).
     #[cfg(test)]
     pub fn from_config(config: &NodeConfig, enc: &LocalEncryption) -> Result<Self> {
@@ -394,6 +422,10 @@ impl SharedCredentials {
         (SharedCredentialsSender { tx }, Self { rx })
     }
 
+    pub async fn changed(&mut self) -> bool {
+        self.rx.changed().await.is_ok()
+    }
+
     /// Get a snapshot of the current credentials (cheap Arc clone).
     pub fn snapshot(&self) -> CredentialStore {
         self.rx.borrow().clone()
@@ -411,6 +443,46 @@ impl SharedCredentialsSender {
 mod tests {
     use super::*;
     use crate::node::config::NodeConfig;
+
+    #[test]
+    fn revisions_bind_material_injection_and_target_per_slug() {
+        let make = |value: &str, target: &str, name: &str| CredentialStore {
+            credentials: Arc::new(HashMap::from([
+                (
+                    "one".into(),
+                    ServiceCredential {
+                        injection: CredentialInjection::Header {
+                            name: name.into(),
+                            value: Zeroizing::new(value.into()),
+                        },
+                        target_url: Some(target.into()),
+                    },
+                ),
+                (
+                    "other".into(),
+                    ServiceCredential {
+                        injection: CredentialInjection::NoAuth,
+                        target_url: None,
+                    },
+                ),
+            ])),
+        };
+        let original = make("secret", "https://one.test", "Authorization").revisions();
+        assert_eq!(
+            original,
+            make("secret", "https://one.test", "Authorization").revisions()
+        );
+        for changed in [
+            make("rotated", "https://one.test", "Authorization"),
+            make("secret", "https://two.test", "Authorization"),
+            make("secret", "https://one.test", "X-Key"),
+        ] {
+            assert_ne!(original["one"], changed.revisions()["one"]);
+            assert_eq!(original["other"], changed.revisions()["other"]);
+        }
+        assert_eq!(original["one"].len(), 64);
+        assert!(!serde_json::to_string(&original).unwrap().contains("secret"));
+    }
 
     #[test]
     fn load_from_config() {

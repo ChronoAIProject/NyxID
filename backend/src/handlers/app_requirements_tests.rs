@@ -424,7 +424,7 @@ async fn app_requirements_db_publish_rejects_invalid_catalog_profiles() {
     });
     for mut input in inputs {
         assert!(matches!(
-            manifests::compile(&f.state.db, &mut input).await,
+            manifests::compile(&f.state.db, &f.app.id, &mut input).await,
             Err(AppError::AppRequirementsInvalid(_))
         ));
     }
@@ -443,7 +443,7 @@ async fn app_requirements_db_publish_rejects_invalid_catalog_profiles() {
             requirements: vec![requirement("api-github")],
         };
         assert!(matches!(
-            manifests::compile(&f.state.db, &mut input).await,
+            manifests::compile(&f.state.db, &f.app.id, &mut input).await,
             Err(AppError::AppRequirementsInvalid(_))
         ));
     }
@@ -709,6 +709,7 @@ pub(crate) async fn evidence(
     .unwrap();
     let now = Utc::now();
     let record = ServiceValidationRecord {
+        node_credential: None,
         id: Uuid::new_v4().to_string(),
         user_service_id: service.id.clone(),
         owner_id: service.user_id.clone(),
@@ -1241,4 +1242,91 @@ async fn app_requirements_db_reuses_identical_selections_with_fresh_status_and_f
     let changed = report(&f).await;
     assert_eq!(changed.requirements[0].state, "unmet");
     assert_ne!(changed.result_id, versioned.result_id);
+}
+
+#[tokio::test]
+async fn app_requirements_db_private_no_credential_requires_independent_prerequisite() {
+    let Some(f) = fixture("requirements_private_cycle").await else {
+        return;
+    };
+    let id = catalog(&f, "private-no-key", "none").await;
+    f.state
+        .db
+        .collection::<Document>("downstream_services")
+        .update_one(
+            doc! { "_id": &id },
+            doc! { "$set": { "visibility": "private", "developer_app_ids": [&f.app.id] } },
+        )
+        .await
+        .unwrap();
+    let mut r = requirement("private-no-key");
+    r.allow_no_credential = true;
+    let mut input = manifests::PublishManifest {
+        enforcement: Enforcement::Gate,
+        requirements: vec![r],
+    };
+    assert!(
+        matches!(manifests::compile(&f.state.db, &f.app.id, &mut input).await,
+        Err(AppError::AppRequirementsInvalid(message)) if message.contains("independent prerequisite"))
+    );
+    assert!(
+        manifests::compile(&f.state.db, &Uuid::new_v4().to_string(), &mut input)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn app_requirements_db_compiles_validator_for_every_alternative() {
+    let Some(f) = fixture("requirements_alternative_profiles").await else {
+        return;
+    };
+    catalog(&f, "llm-openai", "bearer").await;
+    catalog(&f, "llm-openrouter", "bearer").await;
+    let mut r = requirement("llm-openai");
+    r.any_of_catalog_slugs.push("llm-openrouter".into());
+    r.validator = ValidatorSelection::Profile {
+        id: "llm_models_v1".into(),
+    };
+    let published = publish(&f, r.clone()).await;
+    let compiled = &published.compiled.validators_by_requirement["required"];
+    assert_eq!(compiled["llm-openai"], "llm_models_v1");
+    assert_eq!(compiled["llm-openrouter"], "openrouter_key_v1");
+    let catalog_id = published.compiled.catalog_service_ids["llm-openrouter"].clone();
+    let (selected, key) = service(
+        &f,
+        &f.auth.user_id.to_string(),
+        &catalog_id,
+        "router-account",
+    )
+    .await;
+    let record = evidence(&f, &selected, &key, ValidationOutcome::Authenticated).await;
+    f.state
+        .db
+        .collection::<Document>("service_validation_records")
+        .update_one(
+            doc! { "_id": &record.id },
+            doc! { "$set": { "validator_id": "openrouter_key_v1" } },
+        )
+        .await
+        .unwrap();
+    let status = status(State(f.state.clone()), f.auth.clone())
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(status.requirements[0].state, "met");
+    assert_eq!(
+        status.requirements[0].user_service_id.as_deref(),
+        Some(selected.id.as_str())
+    );
+    catalog(&f, "unknown-validator", "bearer").await;
+    r.any_of_catalog_slugs.push("unknown-validator".into());
+    let mut input = manifests::PublishManifest {
+        enforcement: Enforcement::Gate,
+        requirements: vec![r],
+    };
+    assert!(
+        matches!(manifests::compile(&f.state.db, &f.app.id, &mut input).await,
+        Err(AppError::AppRequirementsInvalid(message)) if message.contains("Every catalog alternative"))
+    );
 }

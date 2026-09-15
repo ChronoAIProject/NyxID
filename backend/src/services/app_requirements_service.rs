@@ -13,7 +13,7 @@ use super::user_service_service::{self, CredentialSource};
 use super::validator_profiles::ValidationOutcome;
 use super::{
     execution_authority, node_routing_service, proxy_service, service_validation_service,
-    unified_key_service, validator_profiles,
+    unified_key_service,
 };
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -436,6 +436,7 @@ struct CandidateFacts {
     master: bool,
     connection: ConnectionState,
     digest: Option<String>,
+    node_credential: Option<crate::models::service_validation_record::NodeCredentialBinding>,
     records: Vec<ServiceValidationRecord>,
 }
 
@@ -500,6 +501,7 @@ async fn candidate_facts(
     } else {
         ConnectionState::Unknown
     };
+    let mut node_credential = None;
     let digest = if let Some(resolution) = &resolution {
         let fallback_nodes = node_routing_service::list_configured_binding_node_ids(
             &state.db,
@@ -507,6 +509,16 @@ async fn candidate_facts(
             &resolution.target.service.id,
         )
         .await?;
+        node_credential = node_routing_service::validation_route(
+            &state.db,
+            &state.node_ws_manager,
+            resolution.node_id.as_deref(),
+            &fallback_nodes,
+            &resolution.target.service.slug,
+            None,
+        )
+        .await?
+        .1;
         Some(execution_authority::digest(
             &execution_authority::build_projection(resolution, None, fallback_nodes),
         ))
@@ -530,6 +542,7 @@ async fn candidate_facts(
         master,
         connection,
         digest,
+        node_credential,
         records,
     }))
 }
@@ -550,6 +563,7 @@ fn evaluate_candidate(
         master,
         connection,
         digest,
+        node_credential,
         records,
     } = facts;
     let (no_credential, master, connection) = (*no_credential, *master, *connection);
@@ -596,26 +610,27 @@ fn evaluate_candidate(
         status.state = RequirementState::Broken;
     } else if (no_credential || master) && connection == ConnectionState::Connected {
         status.state = RequirementState::Included;
-    } else if let ValidatorSelection::Profile { id } = &requirement.validator {
-        let profile = validator_profiles::PROFILES
-            .iter()
-            .find(|profile| profile.id == id);
-        if let (Some(digest), Some(profile), Some(version)) = (
+    } else if matches!(requirement.validator, ValidatorSelection::Profile { .. }) {
+        if let (Some(digest), Some(profile)) = (
             digest,
-            profile,
-            manifest.compiled.validator_versions.get(id),
-        ) && profile.version == *version
-            && profile.catalog_slugs.contains(&catalog.slug.as_str())
-        {
+            super::app_requirement_manifest_service::compiled_profile(
+                manifest,
+                &requirement.id,
+                &catalog.slug,
+            ),
+        ) {
             let revision = key
                 .as_ref()
                 .map(service_validation_service::credential_revision);
-            if let Some(record) = records.iter().find(|record| &record.validator_id == id)
+            if let Some(record) = records
+                .iter()
+                .find(|record| record.validator_id == profile.id)
                 && service_validation_service::evidence_is_fresh(
                     record,
                     digest,
                     revision.as_deref(),
-                    *version,
+                    node_credential.as_ref(),
+                    profile.version,
                     Utc::now(),
                 )
             {

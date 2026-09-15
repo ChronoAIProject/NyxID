@@ -160,6 +160,61 @@ pub async fn bound_session(
 pub async fn recheck_authority(state: &AppState, link: &AppConnectLink) -> AppResult<()> {
     let manifest = links::manifest(state, link).await?;
     let report = links::evaluate(state, link, &manifest).await?;
+    let valid = authority_matches(state, link, &manifest, &report).await?;
+    if !valid {
+        reopen_for_recheck(state, link).await?;
+        return Err(AppError::AppConnectResultMismatch);
+    }
+    Ok(())
+}
+
+pub async fn reopen_for_recheck(state: &AppState, link: &AppConnectLink) -> AppResult<bool> {
+    let db = state.db.clone();
+    let link = link.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation: AppResult<bool> = async {
+                let now = bson::DateTime::now();
+                let changed = db.collection::<AppConnectLink>(LINKS).update_one(
+                doc! { "_id": &link.id, "revision": link.revision, "status": "ready_for_consent",
+                    "result_id": &link.result_id, "expires_at": { "$gt": now } },
+                doc! { "$set": { "status": "in_progress", "result_id": null,
+                    "selected_service_ids": [],
+                    "origin.consent_nonce": crate::crypto::token::generate_random_token() },
+                    "$inc": { "revision": 1 } },
+            ).session(&mut *session).await?;
+                if changed.modified_count != 1 {
+                    return Ok(false);
+                }
+                // A status read reuses identical selections. Retire the old consent
+                // result atomically so it cannot become the new checklist result.
+                if let Some(result_id) = &link.result_id {
+                    db.collection::<AppRequirementResult>(RESULTS)
+                        .update_one(
+                            doc! { "_id": result_id, "user_id": &link.user_id,
+                            "oauth_client_id": &link.oauth_client_id },
+                            doc! { "$set": { "expires_at": now } },
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
+                Ok(true)
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(operation)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+pub async fn authority_matches(
+    state: &AppState,
+    link: &AppConnectLink,
+    manifest: &AppRequirementManifest,
+    report: &RequirementsReport,
+) -> AppResult<bool> {
     // A consent screen may remain open for fifteen minutes. Recheck current local
     // eligibility/digest (the normal evidence window), not the 60-second entry window.
     for requirement in manifest.requirements.iter().filter(|r| !r.optional) {
@@ -173,7 +228,7 @@ pub async fn recheck_authority(state: &AppState, link: &AppConnectLink) -> AppRe
                 && r.user_service_id.as_ref() == selected
                 && matches!(r.state, RequirementState::Met | RequirementState::Included)
         }) {
-            return Err(AppError::AppConnectResultMismatch);
+            return Ok(false);
         }
     }
     if !oauth_resource_service::validate_grantable_service_ids(
@@ -183,9 +238,9 @@ pub async fn recheck_authority(state: &AppState, link: &AppConnectLink) -> AppRe
     )
     .await?
     {
-        return Err(AppError::AppConnectResultMismatch);
+        return Ok(false);
     }
-    Ok(())
+    Ok(true)
 }
 
 pub async fn complete_with_code(

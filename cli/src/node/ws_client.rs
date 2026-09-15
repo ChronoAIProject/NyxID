@@ -950,23 +950,31 @@ async fn connect_and_serve(
     // field; newer backends only enable the feature for nodes that
     // advertise the matching flag. Fire-and-forget — if the channel
     // is full we'll retry on the next status_update / reconnect.
-    let mut capabilities = serde_json::Map::new();
-    capabilities.insert("no_redirect_proxy".to_string(), true.into());
-    capabilities.insert("credential_ack_correlation".to_string(), true.into());
-    capabilities.insert(
-        rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY.to_string(),
-        true.into(),
-    );
-    capabilities.insert(
-        "proxy_max_body_size".to_string(),
-        config.server.proxy_max_body_size.into(),
-    );
-    let caps_msg = serde_json::json!({
-        "type": "status_update",
-        "agent_version": env!("CARGO_PKG_VERSION"),
-        "capabilities": capabilities,
+    let proxy_body_limit = config.server.proxy_max_body_size;
+    let _ = send_ws_message(
+        &tx,
+        credential_status_update(&credentials.snapshot(), proxy_body_limit),
+    )
+    .await;
+    let mut watched_credentials = credentials.clone();
+    let status_tx = tx.clone();
+    let status_task = tokio::spawn(async move {
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                changed = watched_credentials.changed() => { if !changed { break; } }
+                _ = heartbeat.tick() => {}
+            }
+            if !send_ws_message(
+                &status_tx,
+                credential_status_update(&watched_credentials.snapshot(), proxy_body_limit),
+            )
+            .await
+            {
+                break;
+            }
+        }
     });
-    let _ = send_ws_message(&tx, caps_msg.to_string()).await;
 
     // Shared state for the reader loop
     let metrics = Arc::new(NodeMetrics::new());
@@ -1040,6 +1048,13 @@ async fn connect_and_serve(
             Some("proxy_request") => {
                 let tx_clone = tx.clone();
                 let creds = credentials.snapshot();
+                if parsed["follow_redirects"] == false {
+                    // Order the revision for the exact credential snapshot ahead
+                    // of the validation response on this socket.
+                    let _ =
+                        send_ws_message(&tx, credential_status_update(&creds, proxy_body_limit))
+                            .await;
+                }
                 let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
                 let metrics_clone = metrics.clone();
@@ -1296,6 +1311,7 @@ async fn connect_and_serve(
     cancel_active_ssh_execs(&active_ssh_execs).await;
     drain_active_web_terminals(&active_web_terminals).await;
     drain_active_ws_proxies(&active_ws_proxies).await;
+    status_task.abort();
     writer_task.abort();
     Ok(())
 }
@@ -1400,6 +1416,21 @@ async fn handle_ssh_tunnel_open(
     if let Some(message) = open_rejection {
         let _ = send_ws_message(&tx, message).await;
     }
+}
+
+fn credential_status_update(credentials: &CredentialStore, proxy_body_limit: usize) -> String {
+    serde_json::json!({
+        "type": "status_update",
+        "agent_version": env!("CARGO_PKG_VERSION"),
+        "capabilities": {
+            "no_redirect_proxy": true,
+            "credential_ack_correlation": true,
+            (rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY): true,
+            "proxy_max_body_size": proxy_body_limit,
+            "credential_revisions": credentials.revisions(),
+        },
+    })
+    .to_string()
 }
 
 async fn verify_signed_ssh_tunnel_open(

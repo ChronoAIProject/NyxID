@@ -67,4 +67,6 @@ pub enum ValidatorSelection {
 pub struct CompiledManifest {
     pub catalog_service_ids: BTreeMap<String, String>,
     pub validator_versions: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub validators_by_requirement: BTreeMap<String, BTreeMap<String, String>>,
 }

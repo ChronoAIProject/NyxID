@@ -1,7 +1,9 @@
 //! Validation egress is separate from ordinary forwarding: public provider origins,
 //! DNS pinned per attempt, no redirects, and one deadline through the decoded body.
 //! Node egress uses the owner's network boundary, so server DNS pinning does not
-//! apply there. Nodes must advertise no-redirect support; the server still bounds
+//! apply there. Probes carry uncredentialed paths and the node injects once.
+//! Reuse additionally requires the routed slot revision advertised by the agent.
+//! Nodes must advertise no-redirect support; the server still bounds
 //! the entire exchange and the received body, including streaming responses.
 
 use std::net::{IpAddr, SocketAddr};
@@ -273,10 +275,6 @@ pub async fn send_via_node(
         }
     };
     // The node injects its local credential exactly as on ordinary node requests.
-    let mut delegated = Vec::new();
-    proxy_service::extend_with_path_credential(&mut delegated, target);
-    let prepared = proxy_service::prepare_delegated_request(&path, None, &delegated)
-        .map_err(|_| TransportError::Configuration)?;
     let headers = proxy_service::build_effective_outbound_headers(
         target,
         vec![
@@ -284,7 +282,7 @@ pub async fn send_via_node(
             ("accept-encoding".into(), "identity".into()),
         ],
         &[],
-        &prepared.delegated_headers,
+        &[],
         &[],
     );
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -295,8 +293,8 @@ pub async fn send_via_node(
         service_slug: target.service.slug.clone(),
         base_url,
         method: profile.method.to_string(),
-        path: prepared.path,
-        query: prepared.query,
+        path,
+        query: None,
         headers,
         body: profile.body.map(|body| body.as_bytes().to_vec()),
     };
@@ -330,7 +328,7 @@ pub async fn send_via_node(
             )
             .await
             .map_err(|error| {
-                dispatched.store(error.dispatched, Ordering::Relaxed);
+                dispatched.fetch_or(error.dispatched, Ordering::Relaxed);
                 TransportError::Unavailable
             })?;
         match response {

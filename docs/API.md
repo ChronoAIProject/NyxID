@@ -7892,8 +7892,11 @@ must use a maximum age of 60 seconds; this observation never replaces execution
 checks or changes global credential health. The shared OAuth refresh path retains
 its existing credential lifecycle behavior. `force: true` bypasses freshness reuse
 but cannot bypass admission limits. Concurrent requests join the current attempt.
-The limits are one probe per credential/profile/execution digest per 60 seconds,
-two active checks per session, and 32 per deployment, coordinated in MongoDB.
+The limits are one probe per stable credential ID/profile per 60 seconds,
+two active checks per human session (user ID when no session exists), sixteen per
+app for hosted checks, and 32 per deployment, coordinated in MongoDB. Metadata
+edits and another service alias using the same key do not reset the cooldown;
+the execution digest binds evidence freshness only.
 Provider `Retry-After` delays are honored. Admission failures use error 12009
 (429), missing attempts or an unavailable wait use 12008 (503), and locally rejected
 validation uses 12007 (422), including a disabled service. The Check connection
@@ -7918,6 +7921,15 @@ node egress: the node executes inside its owner's network, whose SSRF boundary
 belongs to that owner. Checks run only on an explicit click; the existing Agent
 Key verification UI continues to test allowed/denied scope separately.
 
+
+Node evidence additionally binds the routed node, service slug, and hash revision
+of that node's actual local credential slot. Agents advertise revisions on
+credential changes and status updates; replicas read the fenced connection owner
+record. A changed revision invalidates evidence. An agent that omits revisions
+can return an observation, but its reuse window is zero. Node probes contain the
+uncredentialed profile path; the node performs credential injection once,
+including Telegram path authentication. Server credentials are not materialized
+or sent to the node for these checks.
 
 ## App requirements
 
@@ -7976,6 +7988,17 @@ existing authorize, PAR, consent-decision, and token routes retain their paths.
 ```
 
 A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_-]{1,32}`. Each resolves to 1–25 active, user-connectable catalog slugs. `any_of_catalog_prefix` (at most 128 characters) expands active seeded, non-provider slugs at publication and freezes that membership; later seeds enter only on republish. Unknown slugs, catalog tags, explicitly listed provider-category or inactive rows, unknown profiles, and profiles applying to none of a requirement's slugs are rejected with `12000 AppRequirementsInvalid` (400). `enforcement` accepts `advise` or `gate`. An empty manifest clears the current requirements by publishing a new version.
+
+Publication stores `compiled.validators_by_requirement`, mapping each requirement
+ID and alternative slug to its applicable profile. The chosen profile applies
+where supported; other alternatives use their own code-owned profile, with every
+version frozen in the manifest. An alternative with no applicable profile is
+rejected. For example, `[llm-openai, llm-openrouter]` compiles to `llm_models_v1`
+and `openrouter_key_v1`. A private `allow_no_credential` service that lists this
+same app in `developer_app_ids` is rejected with `AppRequirementsInvalid`:
+private auto-provisioned services need an independent prerequisite, because
+consent to this gated app cannot unlock its own prerequisite.
+
 
 `owner_policy` is `personal_only` or `personal_or_org_allowed`; org candidates require the person's live proxy permission. Empty `accepted_credential_types` accepts any user credential, while the master/no-credential flags independently allow platform credentials or credential-free services. OAuth scope checks use the stored `token_scopes`. `{"kind":"stored_only"}` uses local credential readiness; a profile uses the connection-validation evidence and proves only that profile's documented claim.
 
@@ -8114,6 +8137,16 @@ unavailable required check; the read response advertises `can_try_later`.
 Expired sessions show a restart card and issue no code. The expiry sweep
 reserves terminal webhooks for both origins without a browser; it never
 delivers a browser callback.
+
+If evidence expires or local authority changes while consent is open, Allow is
+refused and the session returns atomically to `in_progress`. Reading the hosted
+checklist performs the same recovery. Selections are preserved, while the old
+result binding and consent nonce are invalidated; Re-check/Change and Ready can
+then produce a new consent binding. Catalog-delegation exchange and refresh use
+the same stored-ID normalization as ordinary tokens: disabled/tombstoned IDs
+remain bound, missing or inaccessible active IDs narrow away, and active,
+accessible slug drift fails closed. Derived resource metadata uses that same
+normalized boundary.
 
 ### App Connect Links (repair and hosted sessions)
 

@@ -850,7 +850,9 @@ async fn app_connect_links_db_real_late_probe_cannot_restore_cancelled_child() {
     let id = link.id.clone();
     let subject = link.user_id.clone();
     let running =
-        tokio::spawn(async move { links::validate_item(&state, &id, &subject, "required").await });
+        tokio::spawn(
+            async move { links::validate_item(&state, &id, &subject, "required", None).await },
+        );
     let frame = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .unwrap()
@@ -1248,6 +1250,10 @@ async fn probe_fixture(
         &node_id,
         &NodeCapabilitiesMsg {
             no_redirect_proxy: true,
+            credential_revisions: Some(std::collections::BTreeMap::from([(
+                service.slug.clone(),
+                "a".repeat(64),
+            )])),
             ..Default::default()
         },
     );
@@ -1265,7 +1271,9 @@ async fn app_connect_links_db_probe_cooldown_preserves_prior_item() {
     let id = link.id.clone();
     let subject = link.user_id.clone();
     let running =
-        tokio::spawn(async move { links::validate_item(&state, &id, &subject, "required").await });
+        tokio::spawn(
+            async move { links::validate_item(&state, &id, &subject, "required", None).await },
+        );
     let frame = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .unwrap()
@@ -1289,7 +1297,7 @@ async fn app_connect_links_db_probe_cooldown_preserves_prior_item() {
         .unwrap();
     assert_eq!(before.items[0].state, ItemState::Met);
     assert!(matches!(
-        links::validate_item(&f.state, &link.id, &link.user_id, "required").await,
+        links::validate_item(&f.state, &link.id, &link.user_id, "required", None).await,
         Err(AppError::ServiceValidationRateLimited)
     ));
     let after = links::load(&f.state, &link.id, &link.user_id)

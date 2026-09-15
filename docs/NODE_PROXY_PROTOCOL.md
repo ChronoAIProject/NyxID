@@ -595,7 +595,18 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | `ssh_node_exec_close` | Node-key SSH command completed | `request_id`, `exit_code`, `duration_ms`, `timed_out` |
 | `ssh_node_exec_error` | Node-key SSH command failed before completion | `request_id`, `error`, `error_code`, `duration_ms` |
 | `proxy_error` | If a proxied request fails | `request_id`, `error`, `status` (optional, default 502) |
-| `status_update` | Voluntary health/capability update | `agent_version` (optional), `services_ready` (optional) |
+| `status_update` | Health/capability update | `agent_version`, `services_ready`, `capabilities` (all optional) |
+
+`capabilities.credential_revisions` is an optional map of local service slug to a
+64-character SHA-256 revision of the decrypted credential slot (injection kind,
+name, value, and target URL). Agents send it after authentication, on local
+credential-store changes, and in periodic status updates. Validation responses
+are preceded by the revision for the exact credential snapshot used by that
+probe. The server stores the map on the live socket and fenced connection owner
+so another replica can compare evidence. Revisions never contain plaintext
+credentials and must be redacted from Debug/log output. An omitted map or slot
+means node observations have no reuse window. `no_redirect_proxy: true` remains
+required before NyxID sends a validation probe with `follow_redirects: false`.
 
 ---
 

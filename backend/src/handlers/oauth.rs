@@ -979,6 +979,7 @@ pub async fn authorize_decision(
     }
 
     if let Some(link) = &bound {
+        app_gate::recheck_authority(&state, link).await?;
         let (mandatory, selectable) =
             consent_selection(&state, &user_id_str, &params, Some(link)).await?;
         if mandatory
@@ -991,7 +992,6 @@ pub async fn authorize_decision(
         {
             return Err(AppError::AppConnectResultMismatch);
         }
-        app_gate::recheck_authority(&state, link).await?;
     }
 
     let consent_allowed_service_ids = if form.allow_all_services {

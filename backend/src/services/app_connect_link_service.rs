@@ -419,6 +419,12 @@ pub async fn refresh(
             }
         }
         let report = evaluate(state, &link, &manifest).await?;
+        if link.status == AppConnectStatus::ReadyForConsent
+            && !authorize_gate::authority_matches(state, &link, &manifest, &report).await?
+        {
+            authorize_gate::reopen_for_recheck(state, &link).await?;
+            continue;
+        }
         if link.status != AppConnectStatus::InProgress {
             return Ok((link, report));
         }
@@ -651,6 +657,7 @@ pub async fn validate_item(
     id: &str,
     subject: &str,
     requirement_id: &str,
+    session_id: Option<&str>,
 ) -> AppResult<()> {
     let (mut link, _) = refresh(state, id, subject).await?;
     ensure_redeemed(&link)?;
@@ -687,7 +694,7 @@ pub async fn validate_item(
     {
         return Err(AppError::RequirementNotSatisfiable);
     }
-    let ValidatorSelection::Profile { id: profile_id } = &required.validator else {
+    let ValidatorSelection::Profile { .. } = &required.validator else {
         link.items[index].reason_code = None;
         link.items[index].connect_link_id = None;
         link.items[index].state = ItemState::Unknown;
@@ -696,25 +703,17 @@ pub async fn validate_item(
         }
         return Ok(());
     };
-    let profile = validator_profiles::PROFILES
-        .iter()
-        .find(|p| {
-            p.id == profile_id
-                && manifest.compiled.validator_versions.get(profile_id) == Some(&p.version)
-        })
-        .ok_or(AppError::ServiceValidationRejected)?;
-    let service = state
-        .db
-        .collection::<UserService>(SERVICES)
-        .find_one(doc! { "_id": &service_id })
-        .await?
-        .ok_or(AppError::RequirementNotMet)?;
     let catalog_slug = manifest
         .compiled
         .catalog_service_ids
         .iter()
-        .find(|(_, id)| Some(*id) == service.catalog_service_id.as_ref())
+        .find(|(_, id)| Some(*id) == selected.catalog_service_id.as_ref())
         .map(|(slug, _)| slug.as_str());
+    let profile = catalog_slug
+        .and_then(|slug| {
+            app_requirement_manifest_service::compiled_profile(&manifest, &required.id, slug)
+        })
+        .ok_or(AppError::ServiceValidationRejected)?;
     if catalog_slug
         .and_then(validator_profiles::for_slug)
         .is_none_or(|p| p.id != profile.id)
@@ -740,6 +739,7 @@ pub async fn validate_item(
         state,
         service_validation_service::ValidationCaller {
             user_id: subject.into(),
+            session_id: session_id.map(str::to_owned),
             context: CallerContext::App {
                 client_id: link.oauth_client_id.clone(),
             },

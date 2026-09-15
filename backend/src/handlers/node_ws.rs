@@ -482,7 +482,11 @@ async fn apply_status_update_capabilities(
     if let Some(fence) = owner_fence {
         let flags = state.node_ws_manager.session_info(node_id).capabilities;
         match crate::services::node_owner_service::record_capabilities(
-            &state.db, fence, flags, true,
+            &state.db,
+            fence,
+            flags,
+            true,
+            state.node_ws_manager.credential_revisions(node_id).as_ref(),
         )
         .await
         {

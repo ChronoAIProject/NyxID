@@ -2135,6 +2135,7 @@ mod tests {
     fn owner(instance_name: &str, generation_id: &str) -> NodeConnectionOwner {
         let now = Utc::now();
         NodeConnectionOwner {
+            credential_revisions: None,
             instance_name: instance_name.to_string(),
             generation_id: generation_id.to_string(),
             connection_id: "connection-a".to_string(),

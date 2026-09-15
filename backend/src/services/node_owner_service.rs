@@ -165,6 +165,7 @@ pub async fn claim(
     let expires_at =
         now + Duration::from_std(lease_ttl).unwrap_or_else(|_| Duration::seconds(i64::MAX / 4));
     let owner = NodeConnectionOwner {
+        credential_revisions: None,
         instance_name: identity.instance_name.clone(),
         generation_id: identity.generation_id.clone(),
         connection_id: connection_id.to_string(),
@@ -254,6 +255,7 @@ pub async fn record_capabilities(
     fence: &NodeOwnerFence,
     capabilities: NodeCapabilitiesFlags,
     resolved: bool,
+    credential_revisions: Option<&std::collections::BTreeMap<String, String>>,
 ) -> AppResult<bool> {
     let now = bson::DateTime::from_chrono(Utc::now());
     let result = db
@@ -267,6 +269,8 @@ pub async fn record_capabilities(
                     "connection_owner.proxy_max_body_size": capabilities.proxy_max_body_size.map(|value| value as i64),
                     "connection_owner.capabilities_resolved": resolved,
                     "connection_owner.no_redirect_proxy": capabilities.no_redirect_proxy,
+                    "connection_owner.credential_revisions": bson::to_bson(&credential_revisions)
+                        .map_err(|error| crate::errors::AppError::Internal(error.to_string()))?,
                     "updated_at": now,
                 },
             },

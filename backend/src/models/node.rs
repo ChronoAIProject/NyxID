@@ -72,6 +72,8 @@ pub struct NodeMetrics {
 /// distinguishes reconnects handled by the same process.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeConnectionOwner {
+    #[serde(default)]
+    pub credential_revisions: Option<std::collections::BTreeMap<String, String>>,
     pub instance_name: String,
     pub generation_id: String,
     pub connection_id: String,
@@ -285,6 +287,7 @@ mod tests {
     fn connection_owner_debug_redacts_internal_address() {
         let now = Utc::now();
         let owner = NodeConnectionOwner {
+            credential_revisions: None,
             instance_name: "backend-0".to_string(),
             generation_id: uuid::Uuid::new_v4().to_string(),
             connection_id: uuid::Uuid::new_v4().to_string(),

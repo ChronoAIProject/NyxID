@@ -18,9 +18,7 @@ use crate::models::app_connect_link::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::mw::auth::{AuthMethod, AuthUser};
-use crate::services::{
-    app_connect_link_service as links, audit_service, connect_link_service, validator_profiles,
-};
+use crate::services::{app_connect_link_service as links, audit_service, connect_link_service};
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -370,7 +368,14 @@ pub async fn validate(
     {
         return Err(AppError::ServiceValidationRateLimited);
     }
-    links::validate_item(&state, &id, &subject, &requirement).await?;
+    links::validate_item(
+        &state,
+        &id,
+        &subject,
+        &requirement,
+        auth.session_id.map(|id| id.to_string()).as_deref(),
+    )
+    .await?;
     response(&state, &auth, &id).await.map(Json)
 }
 
@@ -437,6 +442,24 @@ async fn response(state: &AppState, auth: &AuthUser, id: &str) -> AppResult<Link
             .iter()
             .find(|i| i.requirement_id == r.requirement_id)
             .ok_or(AppError::AppConnectResultMismatch)?;
+        let selected_catalog = r
+            .candidates
+            .iter()
+            .find(|candidate| Some(&candidate.user_service_id) == r.user_service_id.as_ref())
+            .map(|candidate| candidate.catalog_slug.as_str())
+            .or_else(|| {
+                (required.any_of_catalog_slugs.len() == 1)
+                    .then(|| required.any_of_catalog_slugs[0].as_str())
+            });
+        let claim = selected_catalog
+            .and_then(|slug| {
+                crate::services::app_requirement_manifest_service::compiled_profile(
+                    &manifest,
+                    &required.id,
+                    slug,
+                )
+            })
+            .map(|profile| profile.claim);
         let choices = if auth.auth_method == AuthMethod::Session {
             r.candidates
                 .into_iter()
@@ -449,15 +472,6 @@ async fn response(state: &AppState, auth: &AuthUser, id: &str) -> AppResult<Link
                 .collect()
         } else {
             vec![]
-        };
-        let claim = match &required.validator {
-            crate::models::app_requirement_manifest::ValidatorSelection::Profile { id } => {
-                validator_profiles::PROFILES
-                    .iter()
-                    .find(|p| p.id == id)
-                    .map(|p| p.claim)
-            }
-            _ => None,
         };
         let granted = auth.allow_all_services
             || r.user_service_id

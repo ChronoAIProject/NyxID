@@ -56,6 +56,61 @@ pub async fn is_node_id_dispatchable(
         .is_some_and(|n| is_node_dispatchable(n, ws_manager)))
 }
 
+/// Resolve the route and local credential revision used by validation. A live
+/// local socket is authoritative; another replica reads its fenced owner row.
+pub async fn validation_route(
+    db: &mongodb::Database,
+    ws_manager: &NodeWsManager,
+    primary: Option<&str>,
+    fallback: &[String],
+    slug: &str,
+    allowed_node_ids: Option<&[String]>,
+) -> AppResult<(
+    bool,
+    Option<crate::models::service_validation_record::NodeCredentialBinding>,
+)> {
+    let configured = primary.is_some() || !fallback.is_empty();
+    for id in primary
+        .into_iter()
+        .chain(fallback.iter().map(String::as_str))
+    {
+        if allowed_node_ids.is_some_and(|allowed| !allowed.iter().any(|node| node == id)) {
+            continue;
+        }
+        let Some(node) = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": id })
+            .await?
+        else {
+            continue;
+        };
+        if !is_node_dispatchable(&node, ws_manager) {
+            continue;
+        }
+        let local_owns_socket = node.connection_owner.as_ref().map_or_else(
+            || ws_manager.is_connected(id),
+            |owner| ws_manager.has_connection(id, &owner.connection_id),
+        );
+        let revisions = if local_owns_socket {
+            ws_manager.credential_revisions(id)
+        } else {
+            node.connection_owner
+                .and_then(|owner| owner.credential_revisions)
+        };
+        return Ok((
+            configured,
+            Some(
+                crate::models::service_validation_record::NodeCredentialBinding {
+                    node_id: id.to_string(),
+                    service_slug: slug.to_string(),
+                    revision: revisions.and_then(|revisions| revisions.get(slug).cloned()),
+                },
+            ),
+        ));
+    }
+    Ok((configured, None))
+}
+
 fn collect_ordered_node_ids(
     primary_node_id: Option<String>,
     bindings: Vec<NodeServiceBinding>,
@@ -527,6 +582,7 @@ mod tests {
         let mut node = node(node_id, "owner-1");
         let expired_at = Utc::now() - chrono::Duration::seconds(1);
         node.connection_owner = Some(crate::models::node::NodeConnectionOwner {
+            credential_revisions: None,
             instance_name: "other-backend".to_string(),
             generation_id: "generation-b".to_string(),
             connection_id: "connection-b".to_string(),

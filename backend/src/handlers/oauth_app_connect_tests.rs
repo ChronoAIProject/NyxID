@@ -572,7 +572,8 @@ async fn app_connect_authorize_db_authority_drift_and_rollout_disable_refuse_bou
         return;
     };
     let id = gated(&f, true, true).await.unwrap();
-    let (_, form) = ready(&f, &params(&f)).await;
+    let (bound, form) = ready(&f, &params(&f)).await;
+    let binding = params_from_session(&bound).unwrap().app_connect.unwrap();
     f.state
         .db
         .collection::<Document>("user_services")
@@ -596,7 +597,8 @@ async fn app_connect_authorize_db_authority_drift_and_rollout_disable_refuse_bou
         .await
         .unwrap()
         .unwrap();
-    let binding = params_from_session(&link).unwrap().app_connect.unwrap();
+    assert_eq!(link.status, AppConnectStatus::InProgress);
+    assert!(link.result_id.is_none());
     assert!(
         app_gate::bound_session(&f.state, &link.user_id, &f.app, &binding)
             .await
@@ -959,6 +961,15 @@ async fn app_connect_authorize_db_shadowed_selection_is_unmet_on_status_and_both
 
 #[tokio::test]
 async fn app_connect_authorize_db_delegation_resources_only_narrow_stored_ids() {
+    check_delegation_resources(false).await;
+}
+
+#[tokio::test]
+async fn app_connect_authorize_db_catalog_delegation_normalizes_disabled_ids() {
+    check_delegation_resources(true).await;
+}
+
+async fn check_delegation_resources(disable_other: bool) {
     use crate::crypto::{jwt, token::hash_token};
     use crate::services::{catalog_delegation_service, token_exchange_service};
     let Some(f) = fixture("gate_delegation_ids").await else {
@@ -1006,6 +1017,62 @@ async fn app_connect_authorize_db_delegation_resources_only_narrow_stored_ids() 
         &f.app.id,
     )
     .unwrap();
+    if disable_other {
+        let full = token_exchange_service::exchange_token_with_authority(
+            &f.state.db,
+            &f.state.config,
+            &f.state.jwt_keys,
+            &f.app.id,
+            "fixture-secret",
+            &source,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some(catalog_scope),
+            &[],
+            Some(false),
+            &ids,
+            Some(true),
+            &[],
+        )
+        .await
+        .unwrap();
+        let claims =
+            jwt::verify_token(&f.state.jwt_keys, &f.state.config, &full.access_token).unwrap();
+        f.state
+            .db
+            .collection::<Document>("user_services")
+            .update_one(
+                doc! { "_id": &a.id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+        catalog_delegation_service::validate_live_grant(&f.state.db, &f.state.config, &claims)
+            .await
+            .unwrap();
+        let refreshed = token_exchange_service::refresh_delegation_token(
+            &f.state.db,
+            &f.state.config,
+            &f.state.jwt_keys,
+            &actor,
+            &f.app.id,
+            Some(&f.app.id),
+            catalog_scope,
+            &jwt::TokenRestrictionClaims::from_claims(&claims),
+        )
+        .await
+        .unwrap();
+        let refreshed =
+            jwt::verify_token(&f.state.jwt_keys, &f.state.config, &refreshed.access_token).unwrap();
+        let mut retained = refreshed.allowed_service_ids.unwrap();
+        retained.sort();
+        let mut expected = ids.clone();
+        expected.sort();
+        assert_eq!(
+            retained, expected,
+            "refresh retains disabled ids without substitution"
+        );
+        assert!(refreshed.resources.unwrap().contains(&uri));
+    }
     for scope in ["llm:proxy", catalog_scope] {
         let exchanged = token_exchange_service::exchange_token_with_authority(
             &f.state.db,
@@ -1509,4 +1576,72 @@ async fn app_connect_authorize_db_success_preserves_registered_query() {
             .query_pairs()
             .any(|(k, v)| k == "code" && v == "new-code")
     );
+}
+
+#[tokio::test]
+async fn app_connect_authorize_db_expired_consent_evidence_reopens_checklist() {
+    let Some(f) = fixture("gate_consent_recheck").await else {
+        return;
+    };
+    gated(&f, true, true).await;
+    let (link, form) = ready(&f, &params(&f)).await;
+    let old_token = form.consent_request.clone().unwrap();
+    f.state.db.collection::<Document>("service_validation_records").update_many(
+        doc! {}, doc! { "$set": { "valid_until": bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1)) } },
+    ).await.unwrap();
+    assert!(matches!(
+        decide(&f, form).await,
+        Err(AppError::AppConnectResultMismatch)
+    ));
+    assert_eq!(count(&f, CODES).await, 0);
+    let invalidated = f
+        .state
+        .db
+        .collection::<AppConnectLink>(LINKS)
+        .find_one(doc! { "_id": &link.id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(invalidated.status, AppConnectStatus::InProgress);
+    assert!(invalidated.result_id.is_none());
+    let (reopened, _) = app_links::refresh(&f.state, &link.id, &link.user_id)
+        .await
+        .unwrap();
+    assert_eq!(reopened.status, AppConnectStatus::InProgress);
+    // Reading the checklist stores the fresh evaluation, never the old consent result.
+    assert_ne!(reopened.result_id, link.result_id);
+    assert!(reopened.selected_service_ids.is_empty());
+    assert_eq!(
+        reopened.items[0].user_service_id,
+        link.items[0].user_service_id
+    );
+    let old_binding = verify_consent_request(&f.state, &old_token, &link.user_id)
+        .unwrap()
+        .app_connect
+        .unwrap();
+    assert!(matches!(
+        app_gate::bound_session(&f.state, &link.user_id, &f.app, &old_binding).await,
+        Err(AppError::AppConnectResultMismatch)
+    ));
+    // A new successful observation allows another ready transition with a new
+    // nonce/result binding. Preserve the selected account through the repair.
+    f.state
+        .db
+        .collection::<Document>("service_validation_records")
+        .update_many(
+            doc! {},
+            doc! { "$set": { "checked_at": bson::DateTime::now(),
+            "valid_until": bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(5)) } },
+        )
+        .await
+        .unwrap();
+    let ready_again = app_links::ready(&f.state, &link.id, &link.user_id)
+        .await
+        .unwrap();
+    assert_eq!(ready_again.status, AppConnectStatus::ReadyForConsent);
+    assert_ne!(ready_again.result_id, link.result_id);
+    let AppConnectOrigin::Authorize { consent_nonce, .. } = &ready_again.origin else {
+        panic!();
+    };
+    assert_ne!(consent_nonce, &old_binding.nonce);
 }

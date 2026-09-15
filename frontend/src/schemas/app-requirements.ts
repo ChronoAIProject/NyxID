@@ -55,6 +55,7 @@ export const manifestSchema = z.object({
   compiled: z.object({
     catalog_service_ids: z.record(z.string(), z.string()),
     validator_versions: z.record(z.string(), z.number()),
+    validators_by_requirement: z.record(z.string(), z.record(z.string(), z.string())),
   }),
   published_by: z.string(),
   published_at: z.string(),
