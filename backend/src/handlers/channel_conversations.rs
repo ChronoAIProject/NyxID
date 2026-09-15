@@ -106,17 +106,6 @@ pub struct ConversationListResponse {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn require_human_opt_in(auth: &AuthUser) -> AppResult<()> {
-    use crate::mw::auth::AuthMethod;
-    match auth.auth_method {
-        AuthMethod::Session => Ok(()),
-        AuthMethod::AccessToken if auth.oauth_client_id.is_none() => Ok(()),
-        _ => Err(AppError::Forbidden(
-            "Only a human session may change agent-initiated messaging".to_string(),
-        )),
-    }
-}
-
 /// Resolve the effective owner id for creating a conversation. When
 /// `target_org_id` is set the caller must be an admin of that org.
 async fn resolve_create_owner(
@@ -263,7 +252,7 @@ pub async fn create_conversation(
     Json(body): Json<CreateConversationRequest>,
 ) -> AppResult<(StatusCode, Json<ConversationItem>)> {
     if body.allow_agent_initiated.is_some() {
-        require_human_opt_in(&auth_user)?;
+        super::login_client_context::require_first_party_human(&auth_user)?;
     }
     let actor = auth_user.user_id.to_string();
 
@@ -505,7 +494,7 @@ pub async fn update_conversation(
     Json(body): Json<UpdateConversationRequest>,
 ) -> AppResult<Json<ConversationItem>> {
     if body.allow_agent_initiated.is_some() {
-        require_human_opt_in(&auth_user)?;
+        super::login_client_context::require_first_party_human(&auth_user)?;
     }
     let actor = auth_user.user_id.to_string();
     let (owner_id, _conv) =

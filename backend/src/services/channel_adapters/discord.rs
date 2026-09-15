@@ -287,12 +287,12 @@ fn build_message_request(
 
 #[async_trait::async_trait]
 impl PlatformAdapter for DiscordAdapter {
-    /// Thread metadata: interaction_thread_id (interaction follow-up token).
+    /// No durable thread key. interaction_thread_id is a reply-only follow-up credential.
     fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
         crate::services::channel_platform::OutboundCapabilities {
             initiated_send: true,
             reply_to: false,
-            thread: true,
+            thread: false,
             edit: false,
         }
     }
@@ -883,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_target_refusals_are_non_retryable_without_exposing_content() {
+    fn upstream_target_refusals_are_classified_and_other_diagnostics_are_bounded() {
         for marker in UNREACHABLE_TARGET_MARKERS {
             let description = format!("{marker}: private message content");
             let error = crate::services::channel_platform::classify_upstream_refusal(
@@ -897,12 +897,15 @@ mod tests {
             ));
             assert!(!error.to_string().contains("private message content"));
         }
-        let error = crate::services::channel_platform::classify_upstream_refusal(
-            "discord",
-            "temporary failure with private content",
-            UNREACHABLE_TARGET_MARKERS,
-        );
-        assert!(matches!(error, AppError::ChannelPlatformError(_)));
-        assert!(!error.to_string().contains("private content"));
+        for description in ["Invalid Form Body".to_string(), "界".repeat(201)] {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "discord",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            let expected: String = description.chars().take(200).collect();
+            assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                if detail == format!("discord send failed: {expected}")));
+        }
     }
 }

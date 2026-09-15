@@ -34,7 +34,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             })).await?;
             match auth.output {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
-                OutputFormat::Table => eprintln!(
+                OutputFormat::Table => println!(
                     "Platform accepted message {} (receipt: {}).",
                     result["message_id"].as_str().unwrap_or("-"),
                     result["platform_message_id"]
@@ -596,7 +596,9 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             if let Some(sid) = &sender_id {
                 body["platform_sender_id"] = Value::String(sid.clone());
             }
-            body["allow_agent_initiated"] = Value::Bool(allow_agent_initiated);
+            if allow_agent_initiated {
+                body["allow_agent_initiated"] = Value::Bool(true);
+            }
             if default_agent {
                 body["default_agent"] = Value::Bool(true);
             }
@@ -1392,6 +1394,9 @@ mod tests {
         })
         .await
         .expect("route create should succeed");
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = requests[0].body_json().unwrap();
+        assert!(body.get("allow_agent_initiated").is_none());
     }
 
     #[tokio::test]

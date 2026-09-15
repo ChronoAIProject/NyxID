@@ -360,13 +360,11 @@ async fn load_active_api_key(state: &AppState, api_key_id: &str) -> AppResult<Ap
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": api_key_id })
         .await?
-        .ok_or_else(|| AppError::Unauthorized("Reply token API key not found".to_string()))?;
+        .ok_or_else(|| AppError::Unauthorized("API key not found".to_string()))?;
 
     let expired = api_key.expires_at.is_some_and(|exp| exp <= Utc::now());
     if !api_key.is_active || expired {
-        return Err(AppError::Unauthorized(
-            "Reply token API key is inactive".to_string(),
-        ));
+        return Err(AppError::Unauthorized("API key is inactive".to_string()));
     }
 
     Ok(api_key)
@@ -735,15 +733,8 @@ async fn resolve_initiated_context(
     conversation_id: &str,
 ) -> AppResult<(ChannelConversation, ChannelBot)> {
     reject_relay_auth(auth_user)?;
-    match auth_user.auth_method {
-        AuthMethod::ApiKey | AuthMethod::Session => {}
-        // The CLI's saved human session is a first-party access JWT, not a cookie.
-        AuthMethod::AccessToken if auth_user.oauth_client_id.is_none() => {}
-        _ => {
-            return Err(AppError::Forbidden(
-                "Initiated sends require an agent API key or a human session".to_string(),
-            ));
-        }
+    if auth_user.auth_method != AuthMethod::ApiKey {
+        super::login_client_context::require_first_party_human(auth_user)?;
     }
     let conversation = load_active_conversation(state, conversation_id).await?;
     if auth_user.auth_method == AuthMethod::ApiKey {
@@ -818,7 +809,9 @@ pub async fn send_message(
     let Json(body) =
         Json::<SendMessageRequest>::from_request(Request::from_parts(parts.clone(), body), &state)
             .await
-            .map_err(|_| AppError::ValidationError("Invalid channel send request".to_string()))?;
+            .map_err(|rejection| AppError::ValidationError(rejection.body_text()))?;
+    uuid::Uuid::parse_str(&body.conversation_id)
+        .map_err(|_| AppError::ValidationError("conversation_id must be a UUID".to_string()))?;
     check_initiate_rate_limit(&state, &body.conversation_id).await?;
     let auth_user = AuthUser::from_request_parts(&mut parts, &state).await?;
     let (conversation, bot) =
@@ -984,7 +977,7 @@ async fn deliver_initiated_message(
             "channel_bot_id": bot.id, "agent_api_key_id": conversation.agent_api_key_id,
         })),
         None,
-        None,
+        header_value(headers, "user-agent"),
         auth_user.api_key_id.clone(),
         auth_user.api_key_name.clone(),
     );
@@ -1223,23 +1216,32 @@ pub async fn update_reply(
     // Deliberately rate-limit before auth/DB work so unauth floods fail on one cheap hashmap check.
     check_message_edit_rate_limit(&state, &body.message_id).await?;
 
+    let context = resolve_edit_request_context(&state, &headers, auth_user.as_ref(), &body).await?;
+    if is_device_reply_forbidden(&context.outbound.platform, &context.conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+    let adapter = resolve_adapter(&context.bot.platform, &state.token_exchange_cache)?;
+    edit_resolved_reply(&state, &headers, context, body, adapter.as_ref()).await
+}
+
+async fn edit_resolved_reply(
+    state: &AppState,
+    headers: &HeaderMap,
+    context: EditRequestContext,
+    body: UpdateReplyRequest,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<Json<UpdateReplyResponse>> {
     let EditRequestContext {
         outbound,
         conversation,
         bot,
         attributed_api_key_id,
-    } = resolve_edit_request_context(&state, &headers, auth_user.as_ref(), &body).await?;
-
-    if is_device_reply_forbidden(&outbound.platform, &conversation.platform) {
-        return Err(AppError::DeviceChannelReplyNotAllowed);
-    }
-
-    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
-    validate_reply_for_adapter(&body.reply, adapter.as_ref())?;
+    } = context;
+    validate_reply_for_adapter(&body.reply, adapter)?;
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
         &state.encryption_keys,
-        adapter.as_ref(),
+        adapter,
         &bot,
     )
     .await?;
@@ -1252,9 +1254,6 @@ pub async fn update_reply(
         .edit_reply(&state.http_client, &bot_token, &body.message_id, &edit)
         .await?;
 
-    let inbound_message_id = outbound.reply_to_message_id.clone().ok_or_else(|| {
-        AppError::Internal("outbound channel relay row is missing reply_to_message_id".to_string())
-    })?;
     let edited_at = Utc::now();
 
     channel_relay_service::update_outbound_message_timestamp(&state.db, &outbound.id, edited_at)
@@ -1266,7 +1265,7 @@ pub async fn update_reply(
         "channel_relay.reply.edit".to_string(),
         Some(serde_json::json!({
             "outbound_message_id": outbound.id,
-            "inbound_message_id": inbound_message_id,
+            "inbound_message_id": outbound.reply_to_message_id,
             "conversation_id": conversation.id,
             "api_key_id": attributed_api_key_id.clone(),
             "bot_id": bot.id,
@@ -1274,7 +1273,7 @@ pub async fn update_reply(
             "platform_message_id": body.message_id,
         })),
         None,
-        header_value(&headers, "user-agent"),
+        header_value(headers, "user-agent"),
         Some(attributed_api_key_id),
         None,
     );
@@ -1412,20 +1411,38 @@ mod tests {
     struct RecordingSendAdapter {
         calls: std::sync::atomic::AtomicUsize,
         fail: std::sync::atomic::AtomicBool,
+        /// Mock the native Lark edit contract when enabled.
+        editable: bool,
     }
 
     #[async_trait::async_trait]
     impl crate::services::channel_platform::PlatformAdapter for RecordingSendAdapter {
         fn platform_id(&self) -> &str {
-            "telegram"
+            if self.editable { "lark" } else { "telegram" }
         }
         fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
             crate::services::channel_platform::OutboundCapabilities {
                 initiated_send: true,
-                reply_to: true,
-                thread: true,
-                edit: false,
+                reply_to: !self.editable,
+                thread: !self.editable,
+                edit: self.editable,
             }
+        }
+        async fn edit_reply(
+            &self,
+            _http: &reqwest::Client,
+            token: &str,
+            message_id: &str,
+            edit: &OutboundEdit,
+        ) -> AppResult<()> {
+            if !self.editable {
+                return Err(AppError::ChannelPlatformEditUnsupported);
+            }
+            assert_eq!(token, "bot-token");
+            assert_eq!(message_id, "initiated-receipt");
+            assert_eq!(edit.text.as_deref(), Some("Updated digest"));
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
         }
         async fn send_reply(
             &self,
@@ -1514,7 +1531,10 @@ mod tests {
             resolve_initiated_context(&fixture.state, auth, &body.conversation_id).await?;
         deliver_initiated_message(
             &fixture.state,
-            &HeaderMap::new(),
+            &HeaderMap::from_iter([(
+                axum::http::header::USER_AGENT,
+                axum::http::HeaderValue::from_static("nyxid-channel-test"),
+            )]),
             auth,
             &conversation,
             &bot,
@@ -1533,6 +1553,10 @@ mod tests {
         enable_initiated(&mut fixture).await;
         let adapter = RecordingSendAdapter::default();
         let auth = api_key_auth_user(&fixture.api_key);
+        let audit_written = audit_service::notify_on_audit_write_for_user(
+            "channel_message_initiated",
+            &fixture.api_key.user_id,
+        );
         let first = send_with_adapter(&fixture, &auth, send_body(&fixture, Some("same")), &adapter)
             .await
             .unwrap();
@@ -1543,6 +1567,21 @@ mod tests {
         assert_eq!(first.message_id, second.message_id);
         assert_eq!(first.platform_message_id, second.platform_message_id);
         assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let audit_id = tokio::time::timeout(std::time::Duration::from_secs(5), audit_written)
+            .await
+            .unwrap()
+            .unwrap();
+        let audit = fixture
+            .state
+            .db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": audit_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(audit.user_agent.as_deref(), Some("nyxid-channel-test"));
         let row = channel_relay_service::get_message(&fixture.state.db, &first.message_id)
             .await
             .unwrap();
@@ -1855,24 +1894,164 @@ mod tests {
         };
         fixture.state.per_conversation_initiate_limiter =
             std::sync::Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(1, 1));
-        let request = || {
+        let request = |conversation_id: &str| {
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/channel-relay/send")
                 .header("content-type", "application/json")
                 .body(axum::body::Body::from(
-                    r#"{"conversation_id":"bogus","message":{"text":"hello"}}"#,
+                    serde_json::json!({ "conversation_id": conversation_id, "message": { "text": "hello" } }).to_string(),
                 ))
                 .unwrap()
         };
+        for _ in 0..2 {
+            assert!(
+                matches!(send_message(State(fixture.state.clone()), request("bogus")).await,
+                Err(AppError::ValidationError(message)) if message == "conversation_id must be a UUID")
+            );
+        }
+        let missing_id = Uuid::new_v4().to_string();
         assert!(matches!(
-            send_message(State(fixture.state.clone()), request()).await,
+            send_message(State(fixture.state.clone()), request(&missing_id)).await,
             Err(AppError::Unauthorized(_))
         ));
         assert!(matches!(
-            send_message(State(fixture.state.clone()), request()).await,
+            send_message(State(fixture.state.clone()), request(&missing_id)).await,
             Err(AppError::RateLimited)
         ));
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_initiated_edit_updates_timestamp_and_audits_null_inbound_id() {
+        use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+        let Some(mut fixture) = setup_reply_token_fixture("channel_initiated_edit").await else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        fixture.bot.platform = "lark".into();
+        fixture.conversation.platform = "lark".into();
+        fixture.outbound_message.platform = "lark".into();
+        fixture.outbound_message.reply_to_message_id = None;
+        fixture.outbound_message.platform_message_id = Some("initiated-receipt".into());
+        fixture.outbound_message.updated_at = Some(Utc::now() - chrono::Duration::hours(1));
+        let db = &fixture.state.db;
+        for (collection, row) in [
+            (
+                crate::models::channel_bot::COLLECTION_NAME,
+                bson::to_document(&fixture.bot).unwrap(),
+            ),
+            (
+                CONVERSATIONS,
+                bson::to_document(&fixture.conversation).unwrap(),
+            ),
+            (
+                crate::models::channel_message::COLLECTION_NAME,
+                bson::to_document(&fixture.outbound_message).unwrap(),
+            ),
+        ] {
+            db.collection::<bson::Document>(collection)
+                .replace_one(doc! { "_id": row.get_str("_id").unwrap() }, row.clone())
+                .await
+                .unwrap();
+        }
+        let auth = api_key_auth_user(&fixture.api_key);
+        let request = UpdateReplyRequest {
+            message_id: "initiated-receipt".into(),
+            reply: body(Some("Updated digest"), None),
+        };
+        let context =
+            resolve_edit_request_context(&fixture.state, &HeaderMap::new(), Some(&auth), &request)
+                .await
+                .unwrap();
+        let adapter = RecordingSendAdapter {
+            editable: true,
+            ..Default::default()
+        };
+        let audit_written = audit_service::notify_on_audit_write_for_user(
+            "channel_relay.reply.edit",
+            &fixture.bot.user_id,
+        );
+        let response = edit_resolved_reply(
+            &fixture.state,
+            &HeaderMap::new(),
+            context,
+            request,
+            &adapter,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let updated = channel_relay_service::get_message(db, &fixture.outbound_message.id)
+            .await
+            .unwrap();
+        assert!(updated.updated_at > fixture.outbound_message.updated_at);
+        assert_eq!(
+            updated.updated_at.unwrap().timestamp_millis(),
+            chrono::DateTime::parse_from_rfc3339(&response.edited_at)
+                .unwrap()
+                .timestamp_millis()
+        );
+        let audit_id = tokio::time::timeout(std::time::Duration::from_secs(5), audit_written)
+            .await
+            .unwrap()
+            .unwrap();
+        let audit = db
+            .collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! { "_id": audit_id })
+            .await
+            .unwrap()
+            .unwrap();
+        let data = audit.event_data.unwrap();
+        assert_eq!(
+            data.get("inbound_message_id"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(data["outbound_message_id"], fixture.outbound_message.id);
+        // The existing reply-token binding still rejects an initiated row before dispatch.
+        let claims = valid_reply_claims(&fixture);
+        insert_reply_token_use(&fixture, &claims).await;
+        let error = resolve_reply_token_edit_context(
+            &fixture.state,
+            &encode_reply_claims(&fixture.state, &claims),
+            &update_reply_request("initiated-receipt"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, AppError::Unauthorized(message) if message.contains("inbound_message_id mismatch"))
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_initiated_json_errors_report_unknown_fields_and_wrong_types() {
+        let Some(fixture) = setup_reply_token_fixture("channel_initiated_json").await else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        for (payload, detail) in [
+            (
+                serde_json::json!({ "conversation_id": fixture.conversation.id, "message": { "text": "hi" }, "message_id": "anchor" }),
+                "unknown field `message_id`",
+            ),
+            (
+                serde_json::json!({ "conversation_id": 123, "message": { "text": "hi" } }),
+                "expected a string",
+            ),
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/channel-relay/send")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap();
+            assert!(
+                matches!(send_message(State(fixture.state.clone()), request).await,
+                Err(AppError::ValidationError(message)) if message.contains(detail))
+            );
+        }
         fixture.state.db.drop().await.unwrap();
     }
 

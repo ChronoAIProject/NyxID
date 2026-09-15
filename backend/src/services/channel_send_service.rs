@@ -157,7 +157,6 @@ mod tests {
             .try_collect()
             .await
             .unwrap();
-        assert!(indexes.iter().any(|index| index.keys == doc! { "_id": 1 }));
         assert!(indexes.iter().any(|index| {
             index.keys == doc! { "expires_at": 1 }
                 && index

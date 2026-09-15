@@ -1240,7 +1240,7 @@ mod tests {
         }
     }
     #[test]
-    fn upstream_target_refusals_are_non_retryable_without_exposing_content() {
+    fn upstream_target_refusals_are_classified_and_other_diagnostics_are_bounded() {
         for marker in UNREACHABLE_TARGET_MARKERS {
             let description = format!("{marker}: private message content");
             let error = crate::services::channel_platform::classify_upstream_refusal(
@@ -1254,12 +1254,15 @@ mod tests {
             ));
             assert!(!error.to_string().contains("private message content"));
         }
-        let error = crate::services::channel_platform::classify_upstream_refusal(
-            "slack",
-            "temporary failure with private content",
-            UNREACHABLE_TARGET_MARKERS,
-        );
-        assert!(matches!(error, AppError::ChannelPlatformError(_)));
-        assert!(!error.to_string().contains("private content"));
+        for description in ["invalid_blocks".to_string(), "界".repeat(201)] {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "slack",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            let expected: String = description.chars().take(200).collect();
+            assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                if detail == format!("slack send failed: {expected}")));
+        }
     }
 }

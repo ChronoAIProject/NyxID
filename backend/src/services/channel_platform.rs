@@ -109,8 +109,8 @@ impl OutboundCapabilities {
     };
 }
 
-/// Channel-owned classification of upstream refusals. Never expose upstream prose,
-/// which can echo message bodies or credentials. Markers are adapter-owned constants.
+/// Channel-owned classification of upstream refusals. Matched refusals expose only
+/// adapter-owned markers; other failures retain up to 200 characters of diagnostic detail.
 pub fn classify_upstream_refusal(
     platform: &str,
     description: &str,
@@ -123,7 +123,10 @@ pub fn classify_upstream_refusal(
     {
         crate::errors::AppError::ChannelConversationNotReachable(format!("{platform}: {marker}"))
     } else {
-        crate::errors::AppError::ChannelPlatformError(format!("{platform} refused the message"))
+        let description: String = description.chars().take(200).collect();
+        crate::errors::AppError::ChannelPlatformError(format!(
+            "{platform} send failed: {description}"
+        ))
     }
 }
 

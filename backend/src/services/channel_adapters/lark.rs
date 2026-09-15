@@ -2015,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_target_refusals_are_non_retryable_without_exposing_content() {
+    fn upstream_target_refusals_are_classified_and_other_diagnostics_are_bounded() {
         for marker in UNREACHABLE_TARGET_MARKERS {
             let description = format!("{marker}: private message content");
             let error = crate::services::channel_platform::classify_upstream_refusal(
@@ -2029,13 +2029,19 @@ mod tests {
             ));
             assert!(!error.to_string().contains("private message content"));
         }
-        let error = crate::services::channel_platform::classify_upstream_refusal(
-            "lark",
-            "temporary failure with private content",
-            UNREACHABLE_TARGET_MARKERS,
-        );
-        assert!(matches!(error, AppError::ChannelPlatformError(_)));
-        assert!(!error.to_string().contains("private content"));
+        for description in [
+            "message content format incorrect".to_string(),
+            "界".repeat(201),
+        ] {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "lark",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            let expected: String = description.chars().take(200).collect();
+            assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                if detail == format!("lark send failed: {expected}")));
+        }
     }
 
     #[tokio::test]
@@ -2044,6 +2050,7 @@ mod tests {
             Mock, MockServer, ResponseTemplate,
             matchers::{method, path},
         };
+        let oversized = "界".repeat(201);
         for platform in ["lark", "feishu"] {
             for (code, description, unreachable) in [
                 (230002, "private upstream detail", true),
@@ -2052,7 +2059,8 @@ mod tests {
                     "bot is not in the chat: private upstream detail",
                     true,
                 ),
-                (99999, "temporary failure: private upstream detail", false),
+                (99999, "message content format incorrect", false),
+                (99999, oversized.as_str(), false),
             ] {
                 let server = MockServer::start().await;
                 Mock::given(method("POST"))
@@ -2096,7 +2104,13 @@ mod tests {
                     matches!(error, AppError::ChannelConversationNotReachable(_)),
                     unreachable
                 );
-                assert!(!error.to_string().contains("private upstream detail"));
+                if unreachable {
+                    assert!(!error.to_string().contains("private upstream detail"));
+                } else {
+                    let expected: String = description.chars().take(200).collect();
+                    assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                        if detail == format!("{platform} send failed: {expected}")));
+                }
             }
         }
     }
