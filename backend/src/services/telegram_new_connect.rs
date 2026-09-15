@@ -224,8 +224,11 @@ impl TelegramNewService<'_> {
                 let username = request.bot_username.as_deref().unwrap_or_default();
                 let _ = self.api.call(token, "sendMessage", json!({
                     "chat_id": request.telegram_user_id,
-                    "text": format!("@{username} is connected to NyxID. Setup is complete. You can choose an AI agent in the bot's settings."),
-                    "reply_markup": {"inline_keyboard": [[{"text": "Bot settings", "url": format!("{}/channel-bots/{id}", self.config.frontend_url.trim_end_matches('/'))}]]},
+                    "text": format!("@{username} is connected to NyxID. Setup is complete. Tap Open your bot to go to its chat. You can choose an AI agent for replies in Bot settings."),
+                    "reply_markup": {"inline_keyboard": [
+                        [{"text": "Open your bot", "url": format!("https://t.me/{username}")}],
+                        [{"text": "Bot settings", "url": format!("{}/channel-bots/{id}", self.config.frontend_url.trim_end_matches('/'))}],
+                    ]},
                     "link_preview_options": {"is_disabled": true},
                 })).await;
             }

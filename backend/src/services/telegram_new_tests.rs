@@ -1172,13 +1172,28 @@ async fn telegram_new_creation_webhook_completes_without_consent_or_browser_conn
             .ok()
             .is_some_and(|body| body.to_string().contains("Approve this bot"))
     }));
-    assert!(sent.iter().any(
-        |request| request.body_json::<Value>().ok().is_some_and(|body| {
+    let completion = sent
+        .iter()
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .find(|body| {
             body["text"]
                 .as_str()
                 .is_some_and(|text| text.contains("Setup is complete"))
         })
-    ));
+        .expect("automatic connection should direct the creator to the new bot");
+    assert_eq!(completion["chat_id"], 700);
+    assert_eq!(
+        completion["reply_markup"]["inline_keyboard"][0][0],
+        json!({
+            "text": "Open your bot", "url": "https://t.me/CustomerBot",
+        })
+    );
+    assert_eq!(
+        completion["reply_markup"]["inline_keyboard"][1][0],
+        json!({
+            "text": "Bot settings", "url": format!("https://app.nyxid.test/channel-bots/{}", pending.id),
+        })
+    );
     state.db.drop().await.unwrap();
 }
 

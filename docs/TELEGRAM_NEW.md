@@ -11,7 +11,7 @@ Starting from the website takes two application steps:
 1. **Continue in Telegram.** Choose a personal or organization destination and enter a label on `/channel-bots?connect=telegram-new`. One click saves the authenticated creation request with `auto_connect: true` and opens the manager chat. This action authorizes NyxID to connect one fresh bot created through that private handoff.
 2. **Create your bot.** The manager chat names the destination and website and explains that creating the bot connects it automatically. Tap **Start** if Telegram asks, then **Create bot** and finish Telegram’s native name/username form. Suggestions come from the saved label and remain editable. The verified creation webhook records the bot; a server worker retrieves and encrypts the token and installs the message webhook. No separate **Approve this bot** or **Connect bot** action is required for new website requests.
 
-The page updates automatically and opens the connected bot’s settings. The manager also sends a best-effort completion message with a settings link. Connection continues if the user closes the browser. Choosing an AI agent for replies remains part of the existing bot settings; connecting the channel alone does not configure an agent.
+The page updates automatically and opens the connected bot’s settings. The manager also sends a best-effort completion message with **Open your bot** as the primary action, linking directly to the new Telegram chat. **Bot settings** is a secondary link. The user can stay in Telegram throughout creation and connection; no return to NyxID is required to finish connecting. Telegram requires the user to tap the chat link; the manager cannot force a chat switch. Connection continues if the user closes the browser. Choosing an AI agent for replies remains part of the existing bot settings; connecting the channel alone does not configure an agent.
 
 These are two application steps, not a guarantee of two physical taps. Telegram controls its Start prompt and creation form. The direct `t.me/newbot/...` form link cannot carry an arbitrary setup identifier, and `ManagedBotCreated` does not echo the keyboard’s `request_id`. The private `/start` handoff is retained to correlate the Telegram sender with the saved NyxID request. It does not establish a verified Telegram login identity for the NyxID account.
 
@@ -131,6 +131,8 @@ Local verification uses real MongoDB transactions and a simulated Telegram API. 
 No real manager token was configured, no live Telegram bot was created, and no production deployment was performed as part of local implementation.
 
 ## Local verification record
+
+Open-chat completion validation on 2026-09-15: the existing webhook-to-connection regression passed against an isolated MongoDB replica set and WireMock after adding assertions for the creator's chat, the primary **Open your bot** URL, and the secondary **Bot settings** URL. Rust formatting and diff checks also passed. This focused follow-up did not rerun the full suites recorded below.
 
 Telegram-first claim validation on 2026-09-15:
 
