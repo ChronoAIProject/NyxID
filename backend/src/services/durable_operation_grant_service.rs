@@ -76,25 +76,18 @@ fn normalize_path(value: &str) -> AppResult<String> {
 }
 
 fn path_variable_names(path: &str) -> AppResult<Vec<String>> {
-    crate::services::proxy_authorization::validate_template(path)?;
     let mut names = Vec::new();
     for segment in path.trim_matches('/').split('/') {
         let has_brace = segment.contains('{') || segment.contains('}');
         if !has_brace {
             continue;
         }
-        // A variable occupies the whole segment, or the resource part of an AIP
-        // custom method (`{documentId}:batchUpdate`). The grammar is shared with
-        // proxy authorization so a grant cannot describe a path the proxy
-        // allowlist would read differently.
-        let (resource, _verb) =
-            crate::services::proxy_authorization::split_template_segment(segment);
-        if !(resource.starts_with('{') && resource.ends_with('}') && resource.len() > 2) {
+        if !(segment.starts_with('{') && segment.ends_with('}') && segment.len() > 2) {
             return Err(validation(
                 "durable operation path variables must occupy a complete path segment",
             ));
         }
-        let name = &resource[1..resource.len() - 1];
+        let name = &segment[1..segment.len() - 1];
         if name.contains('{') || name.contains('}') || !names.iter().all(|entry| entry != name) {
             return Err(validation(
                 "durable operation path variables must be unique and well formed",
@@ -146,36 +139,6 @@ pub fn endpoint_contract_digest(endpoint: &ServiceEndpoint) -> AppResult<String>
         contract["target_id"] = target_id.clone().into();
     }
     Ok(hash_canonical(&contract))
-}
-
-/// The Discord annotation narrows a formerly unrestricted parameter. An
-/// existing grant may retain the digest from before that one metadata addition;
-/// every other endpoint field and the current value grammar remain enforced.
-fn discord_emoji_legacy_contract_digest(endpoint: &ServiceEndpoint) -> Option<String> {
-    if endpoint.method != "PUT"
-        || endpoint.path
-            != "/channels/{channel_id}/messages/{message_id}/reactions/{emoji_name}/@me"
-    {
-        return None;
-    }
-    let mut legacy = endpoint.clone();
-    let parameters = legacy.parameters.as_mut()?.as_array_mut()?;
-    if parameters
-        .iter()
-        .filter(|parameter| parameter["name"] == "emoji_name")
-        .count()
-        != 1
-    {
-        return None;
-    }
-    let parameter = parameters
-        .iter_mut()
-        .find(|parameter| parameter["name"] == "emoji_name")?;
-    if parameter["in"] != "path" || parameter["x-nyxid-path-constraint"] != "discord_emoji" {
-        return None;
-    }
-    parameter.as_object_mut()?.remove("x-nyxid-path-constraint");
-    endpoint_contract_digest(&legacy).ok()
 }
 
 async fn load_active_published_endpoint(
@@ -648,31 +611,31 @@ fn validate_parameter_constraints(
     Ok(())
 }
 
-fn resolve_path_arguments(
-    template: &str,
-    actual_path: &str,
-    parameters: Option<&Value>,
-) -> AppResult<BTreeMap<String, Value>> {
-    use crate::services::proxy_authorization::{
-        CanonicalPath, match_path_arguments, rule_from_endpoint,
-    };
-    let mismatch = || {
-        AppError::DurableGrantMismatch(
+fn resolve_path_arguments(template: &str, actual_path: &str) -> AppResult<BTreeMap<String, Value>> {
+    let actual = normalize_path(actual_path)
+        .map_err(|_| AppError::DurableGrantMismatch("request path is not canonical".to_string()))?;
+    let template_segments: Vec<&str> = template.trim_matches('/').split('/').collect();
+    let actual_segments: Vec<&str> = actual.trim_matches('/').split('/').collect();
+    if template_segments.len() != actual_segments.len() {
+        return Err(AppError::DurableGrantMismatch(
             "request path does not match the granted endpoint template".to_string(),
-        )
-    };
-    // Execution supplies the encoded forwarding path. Decode once, before
-    // matching the verb and constrained captures, and reject residual escapes.
-    let path = CanonicalPath::from_mcp_built(actual_path).map_err(|_| mismatch())?;
-    let rule = rule_from_endpoint("POST", template, parameters).map_err(|_| mismatch())?;
-    match_path_arguments(&rule, &path)
-        .ok_or_else(mismatch)
-        .map(|arguments| {
-            arguments
-                .into_iter()
-                .map(|(name, value)| (name, Value::String(value)))
-                .collect()
-        })
+        ));
+    }
+    let mut arguments = BTreeMap::new();
+    for (template_segment, actual_segment) in template_segments.iter().zip(actual_segments) {
+        if template_segment.starts_with('{') && template_segment.ends_with('}') {
+            let name = &template_segment[1..template_segment.len() - 1];
+            let decoded = urlencoding::decode(actual_segment).map_err(|_| {
+                AppError::DurableGrantMismatch("path argument is not valid UTF-8".to_string())
+            })?;
+            arguments.insert(name.to_string(), Value::String(decoded.into_owned()));
+        } else if *template_segment != actual_segment {
+            return Err(AppError::DurableGrantMismatch(
+                "request path does not match the granted endpoint template".to_string(),
+            ));
+        }
+    }
+    Ok(arguments)
 }
 
 fn parse_query(query: Option<&str>) -> AppResult<BTreeMap<String, Value>> {
@@ -1066,9 +1029,7 @@ pub async fn authorize_and_reserve(
     .await?
     .ok_or(AppError::DurableGrantContractDrift)?;
     if endpoint.risk != Some(EndpointRisk::Write)
-        || (endpoint_contract_digest(&endpoint)? != grant.contract_digest
-            && discord_emoji_legacy_contract_digest(&endpoint).as_deref()
-                != Some(grant.contract_digest.as_str()))
+        || endpoint_contract_digest(&endpoint)? != grant.contract_digest
     {
         return Err(AppError::DurableGrantContractDrift);
     }
@@ -1078,11 +1039,7 @@ pub async fn authorize_and_reserve(
         ));
     }
 
-    let path_arguments = resolve_path_arguments(
-        &grant.normalized_path_template,
-        path,
-        endpoint.parameters.as_ref(),
-    )?;
+    let path_arguments = resolve_path_arguments(&grant.normalized_path_template, path)?;
     validate_parameter_constraints(&grant.constraints.path, &path_arguments, "path")?;
     let query_arguments = parse_query(query)?;
     validate_parameter_constraints(&grant.constraints.query, &query_arguments, "query")?;
@@ -1556,63 +1513,6 @@ pub async fn reauthorize_scheduled_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn durable_custom_methods_bind_only_the_resource_capture() {
-        let template = "/v1/documents/{documentId}:batchUpdate";
-        assert_eq!(path_variable_names(template).unwrap(), vec!["documentId"]);
-        let args = resolve_path_arguments(template, "v1/documents/id:batchUpdate", None).unwrap();
-        assert_eq!(args["documentId"], serde_json::json!("id"));
-        for path in [
-            "v1/documents/id:other",
-            "v1/documents/:batchUpdate",
-            "v1/documents/id:x:batchUpdate",
-            "v1/documents/id%2Fx:batchUpdate",
-            "v1/documents/id%253Ax:batchUpdate",
-            "v1/documents/id%25253Ax:batchUpdate",
-        ] {
-            assert!(
-                resolve_path_arguments(template, path, None).is_err(),
-                "{path}"
-            );
-        }
-        assert!(
-            resolve_path_arguments(
-                "/v1/documents/{documentId}",
-                "v1/documents/id%3AbatchUpdate",
-                None
-            )
-            .is_err()
-        );
-        for template in [
-            "/v1/documents/{id}:",
-            "/v1/documents/{id}:batch:update",
-            "/v1/documents/{id}:{verb}",
-            "/v1/documents/{bad-name}:batchUpdate",
-        ] {
-            assert!(path_variable_names(template).is_err(), "{template}");
-        }
-    }
-
-    #[test]
-    fn durable_sheets_ranges_share_the_policy_value_grammar() {
-        let parameters = serde_json::json!([{"name":"range", "in":"path", "x-nyxid-path-constraint":"sheets_a1_range"}]);
-        let template = "/v4/spreadsheets/{id}/values/{range}:append";
-        let path = "v4/spreadsheets/id/values/Sheet1%21A1:B2:append";
-        let args = resolve_path_arguments(template, path, Some(&parameters)).unwrap();
-        assert_eq!(args["range"], serde_json::json!("Sheet1!A1:B2"));
-        assert!(resolve_path_arguments(template, path, None).is_err());
-        for path in [
-            "v4/spreadsheets/id/values/A1:B2:clear",
-            "v4/spreadsheets/id/values/A1:B2:clear:append",
-            "v4/spreadsheets/id/values/A1%253AB2:append",
-        ] {
-            assert!(
-                resolve_path_arguments(template, path, Some(&parameters)).is_err(),
-                "{path}"
-            );
-        }
-    }
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, test_helpers::dummy_service,
     };
@@ -1973,252 +1873,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_google_durable_grants_enforce_paths_without_a_service_policy() {
-        let db = connect_test_database("durable_non_google_paths")
+    async fn durable_grant_creation_rejects_custom_method_templates() {
+        let db = connect_test_database("durable_custom_method_creation")
             .await
             .unwrap();
         let owner = Uuid::new_v4().to_string();
-        let key_id = Uuid::new_v4().to_string();
         let user_service_id = Uuid::new_v4().to_string();
         let user_endpoint_id = Uuid::new_v4().to_string();
-        let ordinary = endpoint();
-        let custom = ServiceEndpoint {
-            target_id: None,
-            id: Uuid::new_v4().to_string(),
-            name: "publish_item".to_string(),
+        let template = ServiceEndpoint {
             path: "/items/{item_id}:publish".to_string(),
-            ..ordinary.clone()
-        };
-        assert_eq!(path_variable_names(&custom.path).unwrap(), vec!["item_id"]);
-
-        let mut catalog_service = dummy_service();
-        catalog_service.id = ordinary.service_id.clone();
-        catalog_service.slug = "api-example-workflows".to_string();
-        assert!(
-            crate::services::google_workspace::GoogleProduct::from_slug(&catalog_service.slug)
-                .is_none()
-        );
-        assert!(catalog_service.proxy_operation_policy.is_none());
-        db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(catalog_service)
-            .await
-            .unwrap();
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
-            .insert_one(test_user_endpoint(
-                &user_endpoint_id,
-                &owner,
-                "Example workflows",
-                "https://workflows.example.test",
-                None,
-                Some(&ordinary.service_id),
-            ))
-            .await
-            .unwrap();
-        db.collection::<UserService>(USER_SERVICES)
-            .insert_one(test_user_service(
-                &user_service_id,
-                &owner,
-                "example-workflows",
-                &user_endpoint_id,
-                Some(&ordinary.service_id),
-                None,
-            ))
-            .await
-            .unwrap();
-        db.collection::<ApiKey>(API_KEYS)
-            .insert_one(scheduled_key(&key_id, &owner, &user_service_id))
-            .await
-            .unwrap();
-
-        let rejected = [
-            "urn:example:item",
-            "arn:aws:example:item",
-            "item value",
-            "item\u{a0}value",
-            "100%",
-        ];
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", "application/json".parse().unwrap());
-        let manager = NodeWsManager::new(30, 100);
-        for endpoint in [ordinary, custom] {
-            let mut grant = grant(
-                &Uuid::new_v4().to_string(),
-                &owner,
-                &key_id,
-                &user_service_id,
-                &endpoint,
-            );
-            grant.normalized_path_template = endpoint.path.clone();
-            grant.constraints.path.get_mut("item_id").unwrap().rule =
-                DurableValueConstraint::OneOf {
-                    values: std::iter::once("42")
-                        .chain(rejected)
-                        .map(|value| json!(value))
-                        .collect(),
-                };
-            normalize_and_validate_constraints(&endpoint, &grant.constraints).unwrap();
-            db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-                .insert_one(&endpoint)
-                .await
-                .unwrap();
-            db.collection::<DurableOperationGrant>(GRANTS)
-                .insert_one(&grant)
-                .await
-                .unwrap();
-
-            for (index, value) in std::iter::once("42").chain(rejected).enumerate() {
-                let path = endpoint
-                    .path
-                    .replace("{item_id}", &urlencoding::encode(value));
-                let result = authorize_and_reserve(
-                    &db,
-                    &manager,
-                    &owner,
-                    &key_id,
-                    &user_service_id,
-                    "POST",
-                    &path,
-                    Some("mode=sync"),
-                    &headers,
-                    br#"{"name":"alpha"}"#,
-                    &grant.id,
-                    &format!("value-{index}"),
-                    false,
-                )
-                .await;
-                if index == 0 {
-                    result.unwrap();
-                } else {
-                    assert!(
-                        matches!(result, Err(AppError::DurableGrantMismatch(_))),
-                        "{path}: {result:?}"
-                    );
-                }
-            }
-            assert_eq!(
-                db.collection::<DurableOperationExecution>(EXECUTIONS)
-                    .count_documents(doc! { "grant_id": &grant.id })
-                    .await
-                    .unwrap(),
-                1
-            );
-        }
-    }
-
-    fn discord_reaction_endpoint() -> ServiceEndpoint {
-        let spec =
-            serde_json::from_str(include_str!("../../specs/catalog/discord-bot.openapi.json"))
-                .unwrap();
-        let parsed = crate::services::openapi_parser::parse_openapi_spec_value(&spec)
-            .unwrap()
-            .into_iter()
-            .find(|endpoint| endpoint.source_operation_id.as_deref() == Some("add_reaction"))
-            .unwrap();
-        ServiceEndpoint {
-            target_id: None,
-            name: parsed.name,
-            description: parsed.description,
-            method: parsed.method,
-            path: parsed.path,
-            parameters: parsed.parameters,
-            request_body_schema: parsed.request_body_schema,
-            request_content_type: parsed.request_content_type,
-            request_body_required: parsed.request_body_required,
-            response: parsed.response,
-            risk: parsed.risk,
-            supports_idempotency_key: parsed.supports_idempotency_key,
             ..endpoint()
-        }
-    }
-
-    #[test]
-    fn discord_legacy_digest_preserves_all_other_contract_fences() {
-        let current = discord_reaction_endpoint();
-        let old_digest = discord_emoji_legacy_contract_digest(&current).unwrap();
-        assert_ne!(endpoint_contract_digest(&current).unwrap(), old_digest);
-        let mut changes = Vec::new();
-        let mut changed = current.clone();
-        changed.id = Uuid::new_v4().to_string();
-        changes.push(changed);
-        let mut changed = current.clone();
-        changed.service_id = Uuid::new_v4().to_string();
-        changes.push(changed);
-        let mut changed = current.clone();
-        changed.method = "POST".into();
-        changes.push(changed);
-        let mut changed = current.clone();
-        changed.path.push_str("/other");
-        changes.push(changed);
-        let mut changed = current.clone();
-        changed.parameters.as_mut().unwrap()[0]["schema"] = json!({"type":"integer"});
-        changes.push(changed);
-        let mut changed = current.clone();
-        changed.parameters.as_mut().unwrap()[2]["x-nyxid-path-constraint"] =
-            json!("sheets_a1_range");
-        changes.push(changed);
-        let mut changed = current.clone();
-        changed.request_body_schema = Some(json!({"type":"object"}));
-        changes.push(changed);
-        let mut changed = current.clone();
-        changed.request_content_type = Some("application/json".into());
-        changes.push(changed);
-        let mut changed = current.clone();
-        changed.risk = Some(EndpointRisk::Read);
-        changes.push(changed);
-        let mut changed = current;
-        changed.supports_idempotency_key = true;
-        changes.push(changed);
-        for changed in changes {
-            assert_ne!(
-                discord_emoji_legacy_contract_digest(&changed).as_deref(),
-                Some(old_digest.as_str())
-            );
-        }
-        // The existing digest binds effective body-requiredness. A body-less
-        // endpoint's otherwise unused flag is not a contract change.
-        let mut optional_body = discord_reaction_endpoint();
-        optional_body.request_body_schema = Some(json!({"type":"object"}));
-        optional_body.request_body_required = false;
-        let optional_digest = discord_emoji_legacy_contract_digest(&optional_body).unwrap();
-        optional_body.request_body_required = true;
-        assert_ne!(
-            discord_emoji_legacy_contract_digest(&optional_body).as_deref(),
-            Some(optional_digest.as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn existing_discord_grants_survive_annotation_sync_and_enforce_emoji_grammar() {
-        let db = connect_test_database("durable_discord_emoji")
-            .await
-            .unwrap();
-        let owner = Uuid::new_v4().to_string();
-        let key_id = Uuid::new_v4().to_string();
-        let user_service_id = Uuid::new_v4().to_string();
-        let user_endpoint_id = Uuid::new_v4().to_string();
-        let mut old_endpoint = discord_reaction_endpoint();
-        old_endpoint.parameters.as_mut().unwrap()[2]
-            .as_object_mut()
-            .unwrap()
-            .remove("x-nyxid-path-constraint");
+        };
         let mut catalog_service = dummy_service();
-        catalog_service.id = old_endpoint.service_id.clone();
-        catalog_service.slug = "api-discord-bot".into();
-        catalog_service.created_by = "system".into();
-        catalog_service.base_url = "https://discord.com/api/v10".into();
-        assert!(catalog_service.proxy_operation_policy.is_none());
+        catalog_service.id = template.service_id.clone();
+        catalog_service.slug = format!("durable-custom-method-{}", Uuid::new_v4());
+        catalog_service.requires_user_credential = false;
         db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(catalog_service)
+            .await
+            .unwrap();
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(&template)
             .await
             .unwrap();
         db.collection::<UserEndpoint>(USER_ENDPOINTS)
             .insert_one(test_user_endpoint(
                 &user_endpoint_id,
                 &owner,
-                "Discord",
-                "https://discord.com/api/v10",
+                "Custom method",
+                "https://durable.example.test",
                 None,
-                Some(&old_endpoint.service_id),
+                Some(&template.service_id),
             ))
             .await
             .unwrap();
@@ -2226,199 +1911,46 @@ mod tests {
             .insert_one(test_user_service(
                 &user_service_id,
                 &owner,
-                "discord-bot",
+                "durable-custom-method",
                 &user_endpoint_id,
-                Some(&old_endpoint.service_id),
+                Some(&template.service_id),
                 None,
             ))
             .await
             .unwrap();
-        db.collection::<ApiKey>(API_KEYS)
-            .insert_one(scheduled_key(&key_id, &owner, &user_service_id))
-            .await
-            .unwrap();
-        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-            .insert_one(&old_endpoint)
-            .await
-            .unwrap();
-        let valid = ["smile:12345", "👍", "👍🏽", "👩‍💻", "🇸🇬", "1️⃣", "*️⃣"];
-        let invalid = [
-            "a:b:c",
-            ":12345",
-            "smile:abc",
-            "smile :12345",
-            "100%",
-            "a:12345",
-            "smile:0",
-            "smile:18446744073709551616",
-            "smile:１２",
-            "👍👍",
-            "plain",
-            "👍:other",
-        ];
-        let mut old_grant = grant(
-            &Uuid::new_v4().to_string(),
-            &owner,
-            &key_id,
-            &user_service_id,
-            &old_endpoint,
-        );
-        old_grant.method = "PUT".into();
-        old_grant.normalized_path_template = old_endpoint.path.clone();
-        old_grant.constraints = DurableOperationConstraints {
-            path: BTreeMap::from([
-                ("channel_id".into(), exact(json!("123"))),
-                ("message_id".into(), exact(json!("456"))),
-                (
-                    "emoji_name".into(),
-                    DurableParameterConstraint {
-                        required: true,
-                        rule: DurableValueConstraint::OneOf {
-                            values: valid
-                                .into_iter()
-                                .chain(invalid)
-                                .map(|value| json!(value))
-                                .collect(),
-                        },
-                    },
-                ),
-            ]),
-            query: BTreeMap::new(),
-            headers: BTreeMap::new(),
-            body: None,
+        let now = Utc::now();
+        let selection = DurableOperationSelection {
+            user_service_id,
+            endpoint_id: template.id,
+            constraints: constraints(),
+            valid_from: now.to_rfc3339(),
+            expires_at: (now + Duration::hours(1)).to_rfc3339(),
+            total_limit: 1,
+            window: None,
+            replay_policy: DurableReplayPolicy::NonReplayable,
+            client_audit_binding: None,
         };
-        normalize_and_validate_constraints(&old_endpoint, &old_grant.constraints).unwrap();
-        db.collection::<DurableOperationGrant>(GRANTS)
-            .insert_one(&old_grant)
-            .await
-            .unwrap();
-
-        crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
-            .await
-            .unwrap();
-        let mut synced = db
-            .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-            .find_one(doc! {"_id": &old_endpoint.id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            synced.parameters.as_ref().unwrap()[2]["x-nyxid-path-constraint"],
-            "discord_emoji"
+        let result = build_operation_plans(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &owner,
+            &[],
+            &[selection],
+            Some(now + Duration::hours(2)),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(AppError::ValidationError(message))
+                if message == "durable operation path variables must occupy a complete path segment"),
+            "unexpected creation validation result: {result:?}"
         );
         assert_eq!(
-            synced.operation_generation,
-            old_endpoint.operation_generation + 1
-        );
-        synced.service_id = user_service_id.clone();
-        assert_ne!(
-            endpoint_contract_digest(&synced).unwrap(),
-            old_grant.contract_digest
-        );
-        assert_eq!(
-            discord_emoji_legacy_contract_digest(&synced).as_deref(),
-            Some(old_grant.contract_digest.as_str())
-        );
-        let mut new_grant = old_grant.clone();
-        new_grant.id = Uuid::new_v4().to_string();
-        new_grant.contract_digest = endpoint_contract_digest(&synced).unwrap();
-        db.collection::<DurableOperationGrant>(GRANTS)
-            .insert_one(&new_grant)
-            .await
-            .unwrap();
-
-        let manager = NodeWsManager::new(30, 100);
-        for grant in [&old_grant, &new_grant] {
-            for (index, emoji) in valid.into_iter().chain(invalid).enumerate() {
-                let path = format!(
-                    "/channels/123/messages/456/reactions/{}/@me",
-                    urlencoding::encode(emoji)
-                );
-                crate::services::proxy_service::validate_requested_proxy_path(&path).unwrap();
-                let result = authorize_and_reserve(
-                    &db,
-                    &manager,
-                    &owner,
-                    &key_id,
-                    &user_service_id,
-                    "PUT",
-                    &path,
-                    None,
-                    &HeaderMap::new(),
-                    &[],
-                    &grant.id,
-                    &format!("emoji-{index}"),
-                    false,
-                )
-                .await;
-                if index < valid.len() {
-                    result.unwrap();
-                } else {
-                    assert!(
-                        matches!(result, Err(AppError::DurableGrantMismatch(_))),
-                        "{emoji}: {result:?}"
-                    );
-                }
-            }
-            let raw_star = authorize_and_reserve(
-                &db,
-                &manager,
-                &owner,
-                &key_id,
-                &user_service_id,
-                "PUT",
-                "/channels/123/messages/456/reactions/*️⃣/@me",
-                None,
-                &HeaderMap::new(),
-                &[],
-                &grant.id,
-                "raw-star",
-                false,
-            )
-            .await;
-            assert!(matches!(raw_star, Err(AppError::DurableGrantMismatch(_))));
-            let stored = db
-                .collection::<DurableOperationGrant>(GRANTS)
-                .find_one(doc! {"_id": &grant.id})
+            db.collection::<DurableOperationGrant>(GRANTS)
+                .count_documents(doc! {})
                 .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(stored.contract_digest, grant.contract_digest);
-            assert_eq!(stored.total_used, valid.len() as i64);
-            assert_eq!(
-                db.collection::<DurableOperationExecution>(EXECUTIONS)
-                    .count_documents(doc! {"grant_id": &grant.id})
-                    .await
-                    .unwrap(),
-                valid.len() as u64
-            );
-        }
-        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-            .update_one(
-                doc! {"_id": &old_endpoint.id},
-                doc! {"$set": {"request_body_schema": {"type": "object"}}},
-            )
-            .await
-            .unwrap();
-        for grant in [&old_grant, &new_grant] {
-            let result = authorize_and_reserve(
-                &db,
-                &manager,
-                &owner,
-                &key_id,
-                &user_service_id,
-                "PUT",
-                "/channels/123/messages/456/reactions/smile%3A12345/@me",
-                None,
-                &HeaderMap::new(),
-                &[],
-                &grant.id,
-                "drift",
-                false,
-            )
-            .await;
-            assert!(matches!(result, Err(AppError::DurableGrantContractDrift)));
-        }
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

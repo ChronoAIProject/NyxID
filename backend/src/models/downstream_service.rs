@@ -147,7 +147,6 @@ pub struct ProxyOperationRule {
 #[serde(rename_all = "snake_case")]
 pub enum ProxyPathConstraint {
     SheetsA1Range,
-    DiscordEmoji,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

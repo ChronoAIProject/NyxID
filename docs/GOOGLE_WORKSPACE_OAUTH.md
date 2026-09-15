@@ -199,15 +199,12 @@ connections as well as the new editor services.
 Only the seven Google product services receive a seeded operation policy.
 Administrators can also set `proxy_operation_policy` on other services through
 the services API; those services inherit the same canonicalization rules.
-Durable/scheduled operation grants use the shared path grammar on **all**
-services, even without an operation policy. This includes newly supported
-custom-method templates and stricter ordinary parameter validation. See
-[Durable grant path compatibility](DURABLE_OPERATION_GRANTS.md#path-compatibility-and-rollout)
-for the cross-service impact, including Discord custom-emoji reactions.
+Durable grants retain whole-segment path matching. Custom-method (`:verb`) operations
+cannot yet receive durable grants; creation is rejected up front.
 
 Sheets' `range` parameters carry `x-nyxid-path-constraint: sheets_a1_range` on the
 OpenAPI **parameter**, outside its JSON Schema. The backend enforces this grammar
-in REST, generic MCP, typed MCP, and durable-grant matching. It accepts A1 cells,
+in REST, generic MCP, and typed MCP proxy matching. It accepts A1 cells,
 cell/row/column ranges, named ranges, and quoted sheet names, including
 `Sheet1!A1:B2`, `'Quarter 1'!$A$1:$B$2`, `A:A`, and `1:10`. Columns stop at `ZZZ`,
 Google Sheets' column limit. Spaces in quoted names are encoded on forwarding.
@@ -341,8 +338,8 @@ execution consumes and revalidates that resolved target without retargeting it. 
 policy projections retain their original shapes. The whole-catalog and exact-view fences have no
 special compatibility variant for the added operations: adding operations changes the catalog view
 that a human approved. Durable grants bind the endpoint contract, so existing operation grants remain
-valid. The narrow Discord metadata projection is unchanged. Nested execution futures are boxed to
-bound the size of enclosing async state machines without changing execution order or stack settings.
+valid. Nested execution futures are boxed to bound the size of enclosing async state machines
+without changing execution order or stack settings.
 
 Selected operations require effective bearer injection. Google keeps its stored service
 `auth_method: none` and provider requirement `injection_method: bearer`; changing those stored values
