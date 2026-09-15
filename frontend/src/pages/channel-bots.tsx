@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
-import { ManagedWhatsApp } from "@/components/channels/managed-whatsapp";
+import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
+import { TelegramSetupPage } from "@/pages/telegram-setup";
+import { useTelegramNewConfiguration } from "@/hooks/use-telegram-new";
 import { useWatch } from "react-hook-form";
 import { useAppForm } from "@/components/ui/form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -115,7 +117,7 @@ function BotRow({
         </Badge>
       </TableCell>
       <TableCell>
-        {bot.webhook_registered ? (
+        {CHANNEL_PLATFORMS[bot.platform].webhookIngestion === false ? <span className="text-xs text-muted-foreground">Polling</span> : bot.webhook_registered ? (
           <div className="flex items-center gap-1 text-xs text-muted-foreground">
             <Check className="h-3 w-3 text-success" />
             Registered
@@ -180,7 +182,7 @@ function BotCard({
         </Badge>
       </div>
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-        <span>{bot.webhook_registered ? "Webhook registered" : "No webhook"}</span>
+        <span>{CHANNEL_PLATFORMS[bot.platform].webhookIngestion === false ? "Polling" : bot.webhook_registered ? "Webhook registered" : "No webhook"}</span>
         <span>{formatDate(bot.created_at)}</span>
       </div>
     </div>
@@ -322,6 +324,8 @@ function CreateBotDialog({
   const managed = useManagedOnboarding(platform, open && Boolean(CHANNEL_PLATFORMS[platform].managedFlow));
   const [advanced, setAdvanced] = useState(false);
   const managedAvailable = Boolean(CHANNEL_PLATFORMS[platform].managedFlow && managed.data?.available);
+  const managedFlow = CHANNEL_PLATFORMS[platform].managedFlow;
+  const ManagedConnect = managedFlow ? MANAGED_FLOW_COMPONENTS[managedFlow].Connect : undefined;
 
   function onSubmit(data: CreateChannelBotFormData) {
     const payload = channelBotRegistrationPayload(data);
@@ -409,9 +413,17 @@ function CreateBotDialog({
             <Label htmlFor="platform">Platform</Label>
             <Select
               value={platform}
-              onValueChange={(value) =>
-                setValue("platform", value as ChannelPlatform)
-              }
+              onValueChange={(value) => {
+                if (value === "telegram-new") {
+                  onOpenChange(false);
+                  void navigate({
+                    to: "/channel-bots",
+                    search: { connect: "telegram-new", label, target_org_id: targetOrgId ?? undefined },
+                  });
+                } else {
+                  setValue("platform", value as ChannelPlatform);
+                }
+              }}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Select platform" />
@@ -441,14 +453,17 @@ function CreateBotDialog({
             )}
           </div>
 
-          {managedAvailable && managed.data && <>
-            <ManagedWhatsApp key={platform} bootstrap={managed.data} label={label} orgId={targetOrgId} onConnected={(bot) => {
+          {CHANNEL_PLATFORMS[platform].managedOnly && !managedAvailable && (
+            <p role="status" className="text-xs text-muted-foreground">{managed.isLoading ? "Loading account connection..." : managed.isError ? "Unable to load account connection settings. Retry shortly." : `Not available until an admin configures ${platformLabel(platform)}.`}</p>
+          )}
+          {managedAvailable && managed.data && ManagedConnect && <>
+            <ManagedConnect key={`${platform}:${targetOrgId ?? "personal"}`} platform={platform} bootstrap={managed.data} label={label} orgId={targetOrgId} onConnected={(bot) => {
               onOpenChange(false);
               void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } });
             }} />
-            <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-xs text-muted-foreground">{CHANNEL_PLATFORMS[platform].advancedLabel}</summary></details>
+            {!CHANNEL_PLATFORMS[platform].managedOnly && <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-xs text-muted-foreground">{CHANNEL_PLATFORMS[platform].advancedLabel}</summary></details>}
           </>}
-          {(!managedAvailable || advanced) && <>
+          {platform !== "telegram-new" && !CHANNEL_PLATFORMS[platform].managedOnly && (!managedAvailable || advanced) && <>
           {setupNote && (
             <div className="space-y-1 rounded-lg border border-border/70 bg-muted/30 p-4">
               <p className="text-[12px] font-medium">{setupNote.title}</p>
@@ -486,9 +501,11 @@ function CreateBotDialog({
 
 function DeleteBotDialog({
   botId,
+  deletionNote,
   onClose,
 }: {
   readonly botId: string | null;
+  readonly deletionNote?: string;
   readonly onClose: () => void;
 }) {
   const deleteMutation = useDeleteChannelBot();
@@ -513,8 +530,10 @@ function DeleteBotDialog({
         <DialogHeader>
           <DialogTitle>Delete Channel Bot</DialogTitle>
           <DialogDescription>
-            This will permanently delete this bot and all its conversation
-            routes. This action cannot be undone.
+            This deletes the NyxID connection and its conversation routes.
+            The bot remains on the messaging platform. Reconnecting requires
+            assigning its agents again.
+            {deletionNote && ` ${deletionNote}`}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -990,7 +1009,9 @@ function DeviceChannelsSection({
   );
 }
 
-export function ChannelBotsPage() {
+function ChannelBotsList() {
+  const navigate = useNavigate();
+  const telegram = useTelegramNewConfiguration();
   const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; label?: string; target_org_id?: string };
   const [scopeOrgId, setScopeOrgId] = useState<string | null>(search.target_org_id ?? null);
   const { data: bots, isLoading, error, refetch } = useChannelBots({ orgId: scopeOrgId });
@@ -1015,6 +1036,20 @@ export function ChannelBotsPage() {
           </div>
         }
       />
+
+      {telegram.data?.request && (
+        <div className="flex flex-col gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm font-medium">Telegram setup in progress</p>
+            <p className="break-words text-xs text-muted-foreground">
+              Continue setting up {telegram.data.request.label} from your saved step.
+            </p>
+          </div>
+          <Button variant="outline" onClick={() => void navigate({ to: "/channel-bots", search: { connect: "telegram-new" } })}>
+            Resume Telegram setup
+          </Button>
+        </div>
+      )}
 
       {isLoading ? (
         <LoadingSkeleton />
@@ -1044,7 +1079,12 @@ export function ChannelBotsPage() {
         onOpenChange={setCreateDeviceOpen}
         defaultOrgId={scopeOrgId}
       />
-      <DeleteBotDialog botId={deleteTarget} onClose={() => setDeleteTarget(null)} />
+      <DeleteBotDialog botId={deleteTarget} deletionNote={(() => { const bot = bots?.find((bot) => bot.id === deleteTarget); return bot && bot.credential_source !== "user" ? CHANNEL_PLATFORMS[bot.platform].deletionNote : undefined; })()} onClose={() => setDeleteTarget(null)} />
     </div>
   );
+}
+
+export function ChannelBotsPage() {
+  const search = useSearch({ strict: false }) as { connect?: ChannelPlatform };
+  return search.connect === "telegram-new" ? <TelegramSetupPage /> : <ChannelBotsList />;
 }

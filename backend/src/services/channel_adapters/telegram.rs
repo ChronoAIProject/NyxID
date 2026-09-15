@@ -397,13 +397,17 @@ impl PlatformAdapter for TelegramAdapter {
             .send()
             .await
             .map_err(|e| {
-                AppError::ChannelPlatformError(format!("Telegram sendMessage request failed: {e}"))
+                AppError::ChannelPlatformError(format!(
+                    "Telegram sendMessage request failed: {}",
+                    e.without_url()
+                ))
             })?
             .json()
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!(
-                    "Telegram sendMessage response parse failed: {e}"
+                    "Telegram sendMessage response parse failed: {}",
+                    e.without_url()
                 ))
             })?;
 
@@ -446,13 +450,17 @@ impl PlatformAdapter for TelegramAdapter {
             .send()
             .await
             .map_err(|e| {
-                AppError::ChannelPlatformError(format!("Telegram setWebhook request failed: {e}"))
+                AppError::ChannelPlatformError(format!(
+                    "Telegram setWebhook request failed: {}",
+                    e.without_url()
+                ))
             })?
             .json()
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!(
-                    "Telegram setWebhook response parse failed: {e}"
+                    "Telegram setWebhook response parse failed: {}",
+                    e.without_url()
                 ))
             })?;
 
@@ -481,12 +489,18 @@ impl PlatformAdapter for TelegramAdapter {
             .send()
             .await
             .map_err(|e| {
-                AppError::ChannelPlatformError(format!("Telegram getMe request failed: {e}"))
+                AppError::ChannelPlatformError(format!(
+                    "Telegram getMe request failed: {}",
+                    e.without_url()
+                ))
             })?
             .json()
             .await
             .map_err(|e| {
-                AppError::ChannelPlatformError(format!("Telegram getMe response parse failed: {e}"))
+                AppError::ChannelPlatformError(format!(
+                    "Telegram getMe response parse failed: {}",
+                    e.without_url()
+                ))
             })?;
 
         if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
@@ -839,6 +853,14 @@ mod tests {
             platform: "telegram".to_string(),
             label: "Test Bot".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

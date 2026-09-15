@@ -410,10 +410,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "provider_config_id": 1 })
-                .options(IndexOptions::builder().sparse(true).unique(true).build())
+                .options(
+                    IndexOptions::builder()
+                        .name("service_provider_lookup".to_string())
+                        .sparse(true)
+                        .build(),
+                )
                 .build(),
         )
         .await?;
+    // Multiple Google product services share a provider. Install the lookup
+    // index before dropping the old one-to-one constraint.
+    if let Err(error) = services.drop_index("provider_config_id_1").await {
+        match error.kind.as_ref() {
+            mongodb::error::ErrorKind::Command(command) if command.code == 27 => {}
+            _ => return Err(error),
+        }
+    }
 
     // ── user_service_connections ──
     let usc = db.collection::<mongodb::bson::Document>("user_service_connections");
@@ -1389,40 +1402,115 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // ── auth_device_codes ──
-    let auth_device_codes = db.collection::<AuthDeviceCode>(AUTH_DEVICE_CODES);
-    auth_device_codes
+    let login_codes = db.collection::<crate::models::login_code::LoginCode>(
+        crate::models::login_code::COLLECTION_NAME,
+    );
+    login_codes
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "device_code_hmac": 1 })
+                .keys(doc! {"code_hmac": 1})
                 .options(IndexOptions::builder().unique(true).build())
                 .build(),
         )
         .await?;
-    auth_device_codes
+    login_codes
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "user_code_hmac": 1 })
+                .keys(doc! {"user_id": 1, "created_at": -1})
+                .build(),
+        )
+        .await?;
+    login_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"purge_at": 1})
                 .options(
                     IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! { "status": "pending" })
+                        .expire_after(std::time::Duration::ZERO)
                         .build(),
                 )
                 .build(),
         )
         .await?;
-    auth_device_codes
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "expires_at": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .expire_after(Duration::from_secs(0))
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    for collection_name in [
+        AUTH_DEVICE_CODES,
+        crate::models::auth_device_code::V2_COLLECTION_NAME,
+    ] {
+        let auth_device_codes = db.collection::<AuthDeviceCode>(collection_name);
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"user_code_reservation_hmac": 1})
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(
+                                doc! {"user_code_reservation_hmac": {"$type": "string"}},
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "device_code_hmac": 1 })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
+            .await?;
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "user_code_hmac": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(doc! { "status": "pending" })
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+        // Cleanup must revoke undelivered grants before TTL can remove the row.
+        // Drop only the obsolete unconditional TTL index during rolling upgrades.
+        let mut indexes = auth_device_codes.list_indexes().await?;
+        while let Some(index) = indexes.try_next().await? {
+            if index.keys == doc! {"expires_at": 1}
+                && index
+                    .options
+                    .as_ref()
+                    .is_some_and(|options| options.expire_after.is_some())
+                && let Some(name) = index.options.and_then(|options| options.name)
+                && let Err(error) = auth_device_codes.drop_index(name).await
+                && !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if matches!(command.code, 26 | 27))
+            {
+                return Err(error);
+            }
+        }
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "purge_at": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .expire_after(Duration::from_secs(0))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"status": 1, "expires_at": 1})
+                    .build(),
+            )
+            .await?;
+        auth_device_codes.update_many(doc! {"status": {"$in": ["denied", "delivered"]}, "purge_at": bson::Bson::Null},
+        doc! {"$set": {"purge_at": bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::days(1))}}).await?;
+    }
 
     // ── connect_links ──
     let connect_links = db.collection::<ConnectLink>(CONNECT_LINKS);
@@ -1800,6 +1888,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    user_api_keys
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "source": 1, "status": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+
     // Multi-connection OAuth: partial unique on `connection_id` where the
     // field exists. The field is mint-once-per-add (UUID v4) for new
     // OAuth/device-code services that need independent per-connection
@@ -1850,6 +1946,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // -- user_services --
+    db.collection::<mongodb::bson::Document>("user_services")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "source": 1, "is_active": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
     let user_services = db.collection::<mongodb::bson::Document>("user_services");
     user_services
         .create_index(
@@ -1957,6 +2060,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // ── channel_bots ──
+    crate::services::telegram_new_service::ensure_indexes(db).await?;
     let channel_bots = db.collection::<mongodb::bson::Document>("channel_bots");
     channel_bots
         .create_index(
@@ -1969,6 +2073,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "platform": 1, "platform_bot_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "platform": 1, "is_active": 1, "status": 1, "last_polled_at": 1 })
                 .build(),
         )
         .await?;
@@ -2700,6 +2812,9 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+
+    crate::services::oracle_login_profile_service::ensure_indexes(db).await?;
+    crate::services::oracle_worker_enrollment_service::ensure_indexes(db).await?;
 
     // ── oracle_login_snapshots ──
     let oracle_login_snapshots =
@@ -3923,6 +4038,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
+            credential_binding: None,
             auth_method,
             auth_key_name,
             catalog_service_id,
@@ -4158,6 +4274,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
+            credential_binding: None,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
@@ -4419,6 +4536,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
+            credential_binding: None,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
@@ -4656,6 +4774,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -4679,6 +4798,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

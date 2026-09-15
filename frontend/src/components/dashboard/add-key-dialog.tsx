@@ -1,3 +1,4 @@
+import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   KEY_AUTH_ACTIVE,
@@ -16,6 +17,7 @@ import {
 } from "@/hooks/use-providers";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
+import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import { copyToClipboard } from "@/lib/utils";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -71,6 +73,7 @@ import type { OAuthFlowKind } from "@/types/oauth-popup";
 const POPUP_CLOSED_POLL_MS = 1_000;
 
 type WizardStep =
+  | "binding"
   | "catalog"
   | "routing"
   | "form"
@@ -1526,13 +1529,17 @@ function OAuthStep({
   // editing an existing connection, otherwise the provider's defaults (all
   // pre-selected) so an unedited add requests today's scopes. The full
   // selection is sent as `scopeOverride`.
-  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+  const [scopeSelection, setSelectedScopes] = useState<readonly string[]>(
     mergeScopes(
       grantedScopes.length > 0
         ? grantedScopes
         : (catalogEntry.default_scopes ?? []),
       prefillScopes,
     ),
+  );
+  const selectedScopes = includeRequiredScopes(
+    scopeSelection,
+    catalogEntry.scope_catalog ?? [],
   );
   // In-dialog authorization handoff. The whole-tab `hardRedirect` this
   // replaced destroyed any surface hosting the dialog — fatal for the
@@ -1574,12 +1581,14 @@ function OAuthStep({
   const [activeLaunchId, setActiveLaunchId] = useState<string | null>(null);
   const submittedScopes = useMemo(
     () =>
-      platformScopeAllowlist
+      catalogEntry.supports_oauth_scopes === false
+        ? []
+        : platformScopeAllowlist
         ? selectedScopes.filter((scope) =>
             platformScopeAllowlist.includes(scope),
           )
         : selectedScopes,
-    [platformScopeAllowlist, selectedScopes],
+    [catalogEntry.supports_oauth_scopes, platformScopeAllowlist, selectedScopes],
   );
 
   useEffect(() => {
@@ -1995,17 +2004,19 @@ function OAuthStep({
         description="This service uses OAuth to authenticate. Click the button below to connect your account."
       />
 
-      <UpstreamScopePicker
-        catalog={catalogEntry.scope_catalog ?? []}
-        defaultScopes={catalogEntry.default_scopes ?? []}
-        value={selectedScopes}
-        onChange={setSelectedScopes}
-        lockedScopes={lockedScopes}
-        grantedScopes={reconnectMode ? grantedScopes : undefined}
-        providerName={catalogEntry.name}
-        platformAllowlist={platformScopeAllowlist}
-        idPrefix="oauth-scope"
-      />
+      {catalogEntry.supports_oauth_scopes !== false && (
+        <UpstreamScopePicker
+          catalog={catalogEntry.scope_catalog ?? []}
+          defaultScopes={catalogEntry.default_scopes ?? []}
+          value={selectedScopes}
+          onChange={setSelectedScopes}
+          lockedScopes={lockedScopes}
+          grantedScopes={reconnectMode ? grantedScopes : undefined}
+          providerName={catalogEntry.name}
+          platformAllowlist={platformScopeAllowlist}
+          idPrefix="oauth-scope"
+        />
+      )}
 
       {error && (
         <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
@@ -2338,7 +2349,8 @@ function DeviceCodeStep({
       // providers reject a `scope` parameter at the backend, so omit the
       // override there entirely. Otherwise send the picker's complete set.
       const scopeOverride =
-        catalogEntry.device_code_format === "openai"
+        catalogEntry.device_code_format === "openai" ||
+        catalogEntry.supports_oauth_scopes === false
           ? undefined
           : selectedScopes;
       const response = await initiateMutation.mutateAsync({
@@ -2417,7 +2429,8 @@ function DeviceCodeStep({
     // Hide the scope input for those and show a short note instead, so the
     // user never enters something the backend will reject.
     const supportsAdditionalScopes =
-      catalogEntry.device_code_format !== "openai";
+      catalogEntry.device_code_format !== "openai" &&
+      catalogEntry.supports_oauth_scopes !== false;
 
     return (
       <div className="space-y-4">
@@ -2845,6 +2858,7 @@ export function AddKeyDialog({
   open,
   onOpenChange,
   prefillSlug,
+  prefillUsePlatformKey,
   prefillIncludeAllCatalog = false,
   prefillNodeId,
   prefillTargetOrgId,
@@ -2868,6 +2882,7 @@ export function AddKeyDialog({
    * generic catalog grid and have to hunt for the right entry.
    */
   readonly prefillSlug?: string;
+  readonly prefillUsePlatformKey?: boolean;
   /** Action cards use the unfiltered catalog for exact slug resolution. */
   readonly prefillIncludeAllCatalog?: boolean;
   /** Optional routing defaults supplied by an assistant browser action. */
@@ -2904,6 +2919,7 @@ export function AddKeyDialog({
     includeAll: prefillIncludeAllCatalog,
   });
   const [step, setStep] = useState<WizardStep>("catalog");
+  const [usePlatformKey, setUsePlatformKey] = useState(true);
   const [selectedEntry, setSelectedEntry] = useState<CatalogEntry | null>(null);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [authKey, setAuthKey] = useState<KeyInfo | null>(null);
@@ -2957,13 +2973,13 @@ export function AddKeyDialog({
     onOpenChange(next);
   }
 
-  function handleSelectCatalog(
+  const handleSelectCatalog = useCallback((
     entry: CatalogEntry,
     routing: {
       readonly nodeId?: string;
       readonly targetOrgId?: string;
     } = {},
-  ) {
+  ) => {
     setSelectedEntry(entry);
     setAuthKey(null);
     // Fresh entry → default back to the managed one-click choice so a prior
@@ -2982,8 +2998,9 @@ export function AddKeyDialog({
     if (routing.targetOrgId !== undefined) {
       setTargetOrgId(routing.targetOrgId || null);
     }
-    setStep("routing");
-  }
+    setUsePlatformKey(prefillUsePlatformKey ?? true);
+    setStep(entry.platform_key?.available && !routing.nodeId ? "binding" : "routing");
+  }, [prefillUsePlatformKey]);
 
   // Auto-select from `prefillSlug` once the catalog resolves. Only
   // fires on initial open (tracked via `appliedPrefillRef`) so a
@@ -3036,6 +3053,7 @@ export function AddKeyDialog({
     prefillTargetOrgId,
     catalogEntries,
     isReconnect,
+    handleSelectCatalog,
   ]);
 
   useEffect(() => {
@@ -3067,6 +3085,16 @@ export function AddKeyDialog({
     prefillSlug,
     isReconnect,
   ]);
+
+  async function handlePlatformConnect() {
+    if (!selectedEntry) return;
+    try {
+      const key = await createKey.mutateAsync({ service_slug: selectedEntry.slug, label: form.label.trim() || selectedEntry.name,
+        use_platform_key: true, ...(targetOrgId ? { target_org_id: targetOrgId } : {}) });
+      setCreatedKey({ id: key.id, slug: key.slug, catalogSlug: selectedEntry.slug, serviceName: selectedEntry.name, completionMode: "credential" });
+      setStep("verify");
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Failed to connect service"); }
+  }
 
   function handleSelectCustom() {
     setSelectedEntry(null);
@@ -3431,6 +3459,15 @@ export function AddKeyDialog({
           />
         )}
 
+        {step === "binding" && selectedEntry && (
+          <div className="space-y-4 p-5">
+            <CredentialBindingChoice value={usePlatformKey} onChange={setUsePlatformKey} platformPrice={selectedEntry.platform_key?.pricing} byokPrice={selectedEntry.byok_pricing} legacyBillable={selectedEntry.billing?.platform_billable} resaleBillable={selectedEntry.billing?.resale_billable} disabled={createKey.isPending} />
+            <div className="flex justify-end gap-2">
+              <Button onClick={() => setStep("catalog")}>Back</Button>
+              <Button variant="primary" isLoading={createKey.isPending} onClick={() => usePlatformKey ? void handlePlatformConnect() : setStep("routing")}>{usePlatformKey ? "Connect" : "Continue"}</Button>
+            </div>
+          </div>
+        )}
         {step === "routing" && (
           <RoutingStep
             catalogEntry={selectedEntry}

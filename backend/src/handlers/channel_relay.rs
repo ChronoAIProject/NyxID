@@ -335,7 +335,7 @@ async fn load_active_bot(state: &AppState, original: &ChannelMessage) -> AppResu
         )
     })?;
     let bot = channel_bot_service::get_bot(&state.db, channel_bot_id).await?;
-    if !bot.is_active {
+    if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".to_string(),
         ));
@@ -710,7 +710,13 @@ pub async fn async_reply(
     // message downstream.
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
     validate_reply_for_adapter(&body.reply, adapter.as_ref())?;
-    let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
+    let bot_token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
 
     // Use the actual platform conversation ID from the original inbound message
     // (not the route's configured value, which may be "*" for default routes).
@@ -846,7 +852,13 @@ pub async fn update_reply(
 
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
     validate_reply_for_adapter(&body.reply, adapter.as_ref())?;
-    let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
+    let bot_token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
     let edit = OutboundEdit {
         text: body.reply.text,
         metadata: body.reply.metadata,
@@ -956,7 +968,7 @@ pub async fn resolve_sender(
 
     // Currently only Telegram is supported for sender resolution
     let (nyxid_user_id, linked) = match params.platform.as_str() {
-        "telegram" => {
+        "telegram" | "telegram-new" => {
             // Parse the platform_id as an i64 chat ID
             let chat_id: i64 = params.platform_id.parse().map_err(|_| {
                 AppError::ValidationError(
@@ -1201,6 +1213,7 @@ mod tests {
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -1216,6 +1229,14 @@ mod tests {
             platform: "telegram".to_string(),
             label: "Test Bot".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -1609,6 +1630,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn telegram_new_reply_token_rejects_suspended_bot() {
+        let Some(fixture) = setup_reply_token_fixture("reply_token_suspended_bot").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &fixture.bot.id },
+                doc! { "$set": { "status": "suspended", "platform": "telegram-new" } },
+            )
+            .await
+            .unwrap();
+
+        let token = valid_reply_token(&fixture);
+        let err = resolve_reply_token_context(
+            &fixture.state,
+            &token,
+            &reply_request(&fixture.message.id),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::ChannelBotInactive(_)));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn reply_token_context_rejects_reused_jti() {
         let Some(fixture) = setup_reply_token_fixture("reply_token_reused_jti").await else {
             eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
@@ -1679,6 +1729,14 @@ mod tests {
             platform: "lark".to_string(),
             label: "Aevatar2".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

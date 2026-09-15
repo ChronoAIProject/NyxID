@@ -68,6 +68,8 @@ pub struct UpdateAssistantKeyRequest {
     pub name: Option<String>,
     pub platform: Option<String>,
     pub description: Option<String>,
+    pub allowed_service_ids: Option<Vec<String>>,
+    pub allow_auto_connected_services: Option<bool>,
     pub expected_state_version: Option<i64>,
 }
 
@@ -99,6 +101,7 @@ pub struct ExtendAssistantKeyScopeRequest {
     pub action_request_id: String,
     pub key_id: String,
     pub add_service_ids: Vec<String>,
+    pub allow_auto_connected_services: Option<bool>,
     pub expected_state_version: Option<i64>,
 }
 
@@ -134,6 +137,10 @@ struct KeyUpdateFingerprint<'a> {
     name: Option<&'a str>,
     platform: Option<&'a str>,
     description: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed_service_ids: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_auto_connected_services: Option<bool>,
     expected_state_version: Option<i64>,
 }
 
@@ -151,6 +158,8 @@ struct KeyExtendScopeFingerprint<'a> {
     action: &'static str,
     key_id: &'a str,
     add_service_ids: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_auto_connected_services: Option<bool>,
     expected_state_version: Option<i64>,
 }
 
@@ -169,6 +178,8 @@ struct NormalizedUpdate {
     name: Option<String>,
     platform: Option<String>,
     description: Option<String>,
+    pub allowed_service_ids: Option<Vec<String>>,
+    pub allow_auto_connected_services: Option<bool>,
     expected_state_version: Option<i64>,
 }
 
@@ -182,6 +193,7 @@ struct NormalizedExtend {
     action_request_id: String,
     key_id: String,
     add_service_ids: Vec<String>,
+    pub allow_auto_connected_services: Option<bool>,
     expected_state_version: Option<i64>,
 }
 
@@ -243,9 +255,14 @@ fn normalize_update(body: UpdateAssistantKeyRequest) -> AppResult<NormalizedUpda
     let name = optional_trimmed(body.name);
     let platform = optional_trimmed(body.platform);
     let description = body.description.map(|value| value.trim().to_string());
-    if name.is_none() && platform.is_none() && description.is_none() {
+    if name.is_none()
+        && platform.is_none()
+        && description.is_none()
+        && body.allow_auto_connected_services.is_none()
+        && body.allowed_service_ids.is_none()
+    {
         return Err(AppError::ValidationError(
-            "key.update requires at least one of name, platform, or description".to_string(),
+            "key.update requires at least one metadata or service scope change".to_string(),
         ));
     }
     if let Some(name) = name.as_deref() {
@@ -276,6 +293,17 @@ fn normalize_update(body: UpdateAssistantKeyRequest) -> AppResult<NormalizedUpda
         name,
         platform,
         description,
+        allowed_service_ids: body
+            .allowed_service_ids
+            .map(|ids| {
+                if ids.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    normalize_unique_ids(ids, "allowedServiceIds")
+                }
+            })
+            .transpose()?,
+        allow_auto_connected_services: body.allow_auto_connected_services,
         expected_state_version: body.expected_state_version,
     })
 }
@@ -305,7 +333,14 @@ fn normalize_extend(body: ExtendAssistantKeyScopeRequest) -> AppResult<Normalize
     Ok(NormalizedExtend {
         action_request_id: normalize_action_request_id(body.action_request_id)?,
         key_id: parse_uuid_id(&body.key_id, "keyId")?,
-        add_service_ids: normalize_unique_ids(body.add_service_ids, "addServiceIds")?,
+        add_service_ids: if body.add_service_ids.is_empty()
+            && body.allow_auto_connected_services.is_some()
+        {
+            Vec::new()
+        } else {
+            normalize_unique_ids(body.add_service_ids, "addServiceIds")?
+        },
+        allow_auto_connected_services: body.allow_auto_connected_services,
         expected_state_version: body.expected_state_version,
     })
 }
@@ -347,7 +382,15 @@ fn stale_if_conflict(error: &AppError) -> bool {
 }
 
 fn update_already_applied(key: &ApiKey, request: &NormalizedUpdate) -> bool {
-    request.name.as_ref().is_none_or(|name| key.name == *name)
+    request.allowed_service_ids.as_ref().is_none_or(|ids| {
+        let mut stored = key.allowed_service_ids.clone();
+        stored.sort();
+        stored.dedup();
+        stored == *ids
+    }) && request
+        .allow_auto_connected_services
+        .is_none_or(|value| key.allow_auto_connected_services == value)
+        && request.name.as_ref().is_none_or(|name| key.name == *name)
         && request
             .platform
             .as_ref()
@@ -358,10 +401,14 @@ fn update_already_applied(key: &ApiKey, request: &NormalizedUpdate) -> bool {
             .is_none_or(|description| key.description.as_deref() == Some(description.as_str()))
 }
 
-fn extend_already_applied(key: &ApiKey, add_service_ids: &[String]) -> bool {
-    add_service_ids
-        .iter()
-        .all(|id| key.allowed_service_ids.iter().any(|current| current == id))
+fn extend_already_applied(key: &ApiKey, request: &NormalizedExtend) -> bool {
+    request
+        .allow_auto_connected_services
+        .is_none_or(|value| key.allow_auto_connected_services == value)
+        && request
+            .add_service_ids
+            .iter()
+            .all(|id| key.allowed_service_ids.iter().any(|current| current == id))
 }
 
 async fn validate_personal_service_ids(
@@ -410,6 +457,8 @@ pub async fn update_key(
         name: request.name.as_deref(),
         platform: request.platform.as_deref(),
         description: request.description.as_deref(),
+        allowed_service_ids: request.allowed_service_ids.as_deref(),
+        allow_auto_connected_services: request.allow_auto_connected_services,
         expected_state_version: request.expected_state_version,
     })?;
     let outcome = reserve_or_replay(
@@ -489,6 +538,7 @@ pub async fn extend_scope(
         action: KEY_EXTEND_SCOPE_ACTION,
         key_id: &request.key_id,
         add_service_ids: &request.add_service_ids,
+        allow_auto_connected_services: request.allow_auto_connected_services,
         expected_state_version: request.expected_state_version,
     })?;
     let outcome = reserve_or_replay(
@@ -586,6 +636,11 @@ async fn commit_key_update(
     if !current.is_active {
         return Err(AppError::NotFound("API key not found".to_string()));
     }
+    if current.allow_all_services && request.allowed_service_ids.is_some() {
+        return Err(AppError::ValidationError(
+            "cannot set exact service ids on a key that allows all services".to_string(),
+        ));
+    }
     if update_already_applied(&current, request) {
         mark_completed(&state.db, &receipt).await?;
         return Ok(true);
@@ -598,9 +653,10 @@ async fn commit_key_update(
         request.name.as_deref(),
         request.description.as_deref(),
         None,
+        request.allowed_service_ids.as_deref(),
         None,
         None,
-        None,
+        request.allow_auto_connected_services,
         None,
         None,
         None,
@@ -687,7 +743,7 @@ async fn commit_key_extend(
             "cannot extend scope on a key that already allows all services".to_string(),
         ));
     }
-    if extend_already_applied(&current, &request.add_service_ids) {
+    if extend_already_applied(&current, request) {
         mark_completed(&state.db, &receipt).await?;
         return Ok(true);
     }
@@ -704,6 +760,7 @@ async fn commit_key_extend(
         Some(&merged),
         None,
         Some(false),
+        request.allow_auto_connected_services,
         None,
         None,
         None,
@@ -720,7 +777,7 @@ async fn commit_key_extend(
         }
         Err(error) if stale_if_conflict(&error) => {
             let (_, latest) = resolve_write_owner(state, actor, &request.key_id).await?;
-            if extend_already_applied(&latest, &request.add_service_ids) {
+            if extend_already_applied(&latest, request) {
                 mark_completed(&state.db, &receipt).await?;
                 Ok(true)
             } else {
@@ -901,6 +958,7 @@ mod tests {
             allowed_service_ids,
             allowed_node_ids: Vec::new(),
             allow_all_services: false,
+            allow_auto_connected_services: false,
             allow_all_nodes: false,
             rate_limit_per_second: Some(10),
             rate_limit_burst: Some(20),
@@ -1103,6 +1161,60 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{evidence}");
         assert_eq!(evidence["name"], "renamed-agent");
         assert_eq!(evidence["state_version"], 2);
+    }
+
+    #[tokio::test]
+    async fn key_update_rejects_exact_service_ids_on_allow_all_key_without_writing() {
+        let Some((db, actor_id, key_id, _, _)) =
+            prepare_key_database("assistant_key_update_allow_all").await
+        else {
+            return;
+        };
+        db.collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": { "allow_all_services": true } },
+            )
+            .await
+            .unwrap();
+        let before = db
+            .collection::<mongodb::bson::Document>(API_KEYS)
+            .find_one(doc! { "_id": &key_id })
+            .await
+            .unwrap()
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        // Even exact ids that are already stored must fail instead of becoming a no-op replay.
+        for ids in [
+            json!([]),
+            serde_json::to_value(before.get_array("allowed_service_ids").unwrap()).unwrap(),
+        ] {
+            let (status, body) = request(
+                app(state.clone()),
+                &token,
+                "POST",
+                "/api/v1/assistant/actions/keys/update",
+                Some(json!({
+                    "actionRequestId": Uuid::new_v4().to_string(), "keyId": key_id,
+                    "expectedStateVersion": 1, "allowedServiceIds": ids
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                body["message"],
+                "Validation error: cannot set exact service ids on a key that allows all services"
+            );
+        }
+        let after = db
+            .collection::<mongodb::bson::Document>(API_KEYS)
+            .find_one(doc! { "_id": &key_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before, after);
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1633,6 +1745,8 @@ mod tests {
             name: Some("renamed"),
             platform: None,
             description: None,
+            allowed_service_ids: None,
+            allow_auto_connected_services: None,
             expected_state_version: Some(1),
         })
         .unwrap();
@@ -1642,6 +1756,8 @@ mod tests {
             name: Some("renamed"),
             platform: None,
             description: None,
+            allowed_service_ids: None,
+            allow_auto_connected_services: None,
             expected_state_version: Some(99),
         })
         .unwrap();
@@ -1651,6 +1767,8 @@ mod tests {
             name: Some("renamed"),
             platform: None,
             description: None,
+            allowed_service_ids: None,
+            allow_auto_connected_services: None,
             expected_state_version: None,
         })
         .unwrap();
@@ -1929,5 +2047,73 @@ mod tests {
             message.contains("not active"),
             "journey must receive a typed inactive-credential error: {rejected}"
         );
+    }
+    #[tokio::test]
+    async fn auto_connected_assistant_scope_and_update_persist_and_fence_retries() {
+        let (db, actor, id, _, _) = prepare_key_database("auto_connected_assistant_scope")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor);
+        let body = json!({ "actionRequestId": "platform-extend", "keyId": id,
+            "addServiceIds": [], "allowAutoConnectedServices": true, "expectedStateVersion": 1 });
+        let (status, first) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/extend-scope",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let stored = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.allow_auto_connected_services);
+        let (status, replayed) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/extend-scope",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed["replayed"], true);
+        let mut changed = body;
+        changed["allowAutoConnectedServices"] = json!(false);
+        let (status, _) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/extend-scope",
+            Some(changed),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, updated) = request(
+            app(state),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/update",
+            Some(json!({
+                "actionRequestId": "platform-off", "keyId": id, "allowAutoConnectedServices": false,
+                "expectedStateVersion": stored.state_version
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        assert!(
+            !db.collection::<ApiKey>(API_KEYS)
+                .find_one(doc! { "_id": &id })
+                .await
+                .unwrap()
+                .unwrap()
+                .allow_auto_connected_services
+        );
+        db.drop().await.unwrap();
     }
 }

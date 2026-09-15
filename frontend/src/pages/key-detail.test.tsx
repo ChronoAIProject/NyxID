@@ -318,6 +318,15 @@ describe("KeyDetailPage — core rendering", () => {
     );
   });
 
+  it.each([true, false])("gates permission editing on supports_oauth_scopes=%s", (supported) => {
+    hooks.key.data = makeKey({ status: "active", credential_type: "oauth2" });
+    hooks.catalogEntry = { slug: "api-notion", provider_type: "oauth2", supports_oauth_scopes: supported };
+    render(<KeyDetailPage />);
+    const manage = screen.queryByRole("button", { name: /Manage permissions/i });
+    if (supported) expect(manage).toBeInTheDocument();
+    else expect(manage).not.toBeInTheDocument();
+  });
+
   it("uses continue authentication copy for pending OAuth-backed services", async () => {
     const user = userEvent.setup();
     hooks.key.data = makeKey({
@@ -961,5 +970,24 @@ describe("KeyDetailPage — Lark permission setup", () => {
     );
     expect(screen.getByText("im:message")).toBeInTheDocument();
     expect(screen.getByText("contact:user.id:readonly")).toBeInTheDocument();
+  });
+});
+
+
+describe("explicit platform connection cosmetics", () => {
+  it("offers cosmetic editors while keeping routing and auth platform managed", async () => {
+    hooks.key.data = makeKey({ credential_binding: "platform", auto_connected: false, api_key_id: null });
+    render(<KeyDetailPage />);
+    expect(screen.getByText("Recommended Skills")).toBeInTheDocument();
+    expect(screen.getByText("User-Agent override")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
+    const notSet = screen.getByText("Not set");
+    await userEvent.click(notSet.parentElement!.querySelector("button")!);
+    const input = screen.getByPlaceholderText("nyxid-service-skill-authoring, my-service-skill");
+    await userEvent.type(input, "read-docs");
+    const buttons = within(input.closest("div")!).getAllByRole("button");
+    await userEvent.click(buttons[buttons.length - 1]!);
+    expect(hooks.updateKey).toHaveBeenCalledWith({ keyId: "key-1", recommended_skills: ["read-docs"] }, expect.anything());
+    expect(hooks.updateEndpoint).not.toHaveBeenCalled();
   });
 });

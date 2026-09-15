@@ -19,6 +19,10 @@ use crate::services::{
 #[derive(Deserialize, ToSchema)]
 pub struct CreateConnectLinkRequest {
     pub service_slug: String,
+    pub use_platform_key: Option<bool>,
+    /// Additional OAuth scopes requested on top of the provider defaults.
+    #[serde(default)]
+    pub scopes: Vec<String>,
     #[serde(default)]
     pub label: Option<String>,
     #[serde(default)]
@@ -53,6 +57,8 @@ impl std::fmt::Debug for PreviewConnectLinkRequest {
 pub struct PreviewConnectLinkResponse {
     pub service_name: String,
     pub service_slug: String,
+    pub use_platform_key: Option<bool>,
+    pub scopes: Vec<String>,
     pub label: Option<String>,
     pub requested_by: Option<String>,
     pub created_at: String,
@@ -81,6 +87,7 @@ pub struct ConnectLinkStatusResponse {
     pub status: String,
     pub service_name: String,
     pub service_slug: String,
+    pub scopes: Vec<String>,
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
@@ -116,6 +123,7 @@ pub struct CompleteConnectLinkRequest {
     pub token: String,
     #[serde(default)]
     pub credential: Option<String>,
+    pub use_platform_key: Option<bool>,
     #[serde(default)]
     pub endpoint_url: Option<String>,
     #[serde(default)]
@@ -207,6 +215,8 @@ pub async fn create_connect_link(
         connect_link_service::CreateInput {
             user_id: actor_id,
             service_slug: body.service_slug,
+            use_platform_key: body.use_platform_key,
+            scopes: body.scopes,
             label: body.label,
             requested_by: auth_user.api_key_name.clone().or(body.requested_by),
             callback_url: body.callback_url,
@@ -226,6 +236,7 @@ pub async fn create_connect_link(
             "connect_link_id": &created.link.id,
             "service_id": &created.link.service_id,
             "service_slug": &created.link.service_slug,
+            "scopes": &created.link.scopes,
             "expires_at": created.link.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "has_callback_url": created.link.callback_url.is_some(),
         })),
@@ -362,6 +373,8 @@ pub async fn preview_connect_link(
     Ok(Json(PreviewConnectLinkResponse {
         service_name: view.service.service_name,
         service_slug: view.service.service_slug,
+        use_platform_key: view.link.use_platform_key,
+        scopes: view.link.scopes,
         label: view.link.label,
         requested_by: view.link.requested_by,
         created_at: view
@@ -482,6 +495,7 @@ pub async fn complete_connect_link(
         &body.token,
         connect_link_service::CompleteInput {
             credential: body.credential.as_deref(),
+            use_platform_key: body.use_platform_key,
             endpoint_url: body.endpoint_url.as_deref(),
             oauth_client_id: body.oauth_client_id.as_deref(),
             oauth_client_secret: body.oauth_client_secret.as_deref(),
@@ -532,7 +546,7 @@ pub async fn complete_connect_link(
                 &provider_id,
                 on_behalf_of,
                 Some(&redirect_path),
-                &view.link.required_scopes,
+                &view.link.scopes,
                 None,
                 Some(&connection_id),
                 Some(&view.link.id),
@@ -618,7 +632,7 @@ pub async fn complete_connect_link(
                 &actor_id,
                 &provider_id,
                 on_behalf_of,
-                &view.link.required_scopes,
+                &view.link.scopes,
                 None,
                 Some(&connection_id),
             )
@@ -644,6 +658,7 @@ fn audit_completed(state: &AppState, auth_user: &AuthUser, view: &connect_link_s
             "service_id": &view.link.service_id,
             "service_slug": &view.link.service_slug,
             "user_service_id": &view.link.completed_user_service_id,
+            "scopes": &view.link.scopes,
         })),
     );
 }
@@ -687,6 +702,7 @@ fn status_response(view: connect_link_service::LinkView) -> AppResult<ConnectLin
         status: status_name(view.link.status).to_string(),
         service_name: view.service.service_name,
         service_slug: view.service.service_slug,
+        scopes: view.link.scopes,
         expires_at: view
             .link
             .expires_at
@@ -742,6 +758,7 @@ mod tests {
         let request = CompleteConnectLinkRequest {
             token: "nyx_clk_secret".to_string(),
             credential: Some("api-secret".to_string()),
+            use_platform_key: None,
             endpoint_url: Some("https://gateway.example.test".to_string()),
             oauth_client_id: Some("client-id".to_string()),
             oauth_client_secret: Some("client-secret".to_string()),
@@ -804,7 +821,9 @@ mod tests {
             State(state.clone()),
             test_auth_user(&actor_id),
             Json(CreateConnectLinkRequest {
+                scopes: Vec::new(),
                 service_slug: service.slug.clone(),
+                use_platform_key: None,
                 label: Some("Agent setup".to_string()),
                 requested_by: Some("handler-test".to_string()),
                 callback_url: None,
@@ -904,7 +923,9 @@ mod tests {
             State(state.clone()),
             auth,
             Json(CreateConnectLinkRequest {
+                scopes: Vec::new(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: Some("untrusted body value".to_string()),
                 callback_url: Some(callback_url.to_string()),
@@ -937,6 +958,7 @@ mod tests {
             Json(CompleteConnectLinkRequest {
                 token: raw_token,
                 credential: Some("test-secret".to_string()),
+                use_platform_key: None,
                 endpoint_url: None,
                 oauth_client_id: None,
                 oauth_client_secret: None,
@@ -974,8 +996,10 @@ mod tests {
         let created = connect_link_service::create(
             &db,
             connect_link_service::CreateInput {
+                scopes: Vec::new(),
                 user_id: actor_id.clone(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: Some("https://desktop.example.test/return?flow=1".to_string()),
@@ -1040,8 +1064,10 @@ mod tests {
         let created = connect_link_service::create(
             &db,
             connect_link_service::CreateInput {
+                scopes: Vec::new(),
                 user_id: actor_id.clone(),
                 service_slug: service.slug.clone(),
+                use_platform_key: None,
                 label: Some("Completion test".to_string()),
                 requested_by: None,
                 callback_url: None,
@@ -1060,6 +1086,7 @@ mod tests {
             Json(CompleteConnectLinkRequest {
                 token: created.raw_token.clone(),
                 credential: Some("test-secret".to_string()),
+                use_platform_key: None,
                 endpoint_url: None,
                 oauth_client_id: None,
                 oauth_client_secret: None,
@@ -1077,6 +1104,7 @@ mod tests {
             Json(CompleteConnectLinkRequest {
                 token: created.raw_token.clone(),
                 credential: Some("test-secret".to_string()),
+                use_platform_key: None,
                 endpoint_url: None,
                 oauth_client_id: None,
                 oauth_client_secret: None,
@@ -1096,6 +1124,7 @@ mod tests {
             Json(CompleteConnectLinkRequest {
                 token: created.raw_token,
                 credential: Some("test-secret".to_string()),
+                use_platform_key: None,
                 endpoint_url: None,
                 oauth_client_id: None,
                 oauth_client_secret: None,

@@ -1199,6 +1199,22 @@ pub fn manifest_body() -> &'static str {
     MANIFEST_BODY.as_str()
 }
 
+// Opt-in revision: deployed Aevatar v4-v8 parsers pin service.connect exactly
+// and cannot parse booleans. Keep their default and negotiated bodies unchanged.
+static PLATFORM_KEYS_MANIFEST: LazyLock<String> = LazyLock::new(|| {
+    let mut manifest: Value = serde_json::from_str(manifest_body()).expect("valid manifest");
+    manifest["revision"] = json!("nyxid-assistant-actions.v9");
+    let action = manifest["actions"]
+        .as_array_mut()
+        .expect("actions")
+        .iter_mut()
+        .find(|action| action["action"] == "service.connect")
+        .expect("connect action");
+    action["params_schema"]["oneOf"][0]["properties"]["catalogService"]["properties"]["use_platform_key"] =
+        json!({ "type": "boolean" });
+    serde_json::to_string(&manifest).expect("manifest serialization")
+});
+
 fn pinned_revision_body(revision: &str) -> Option<&'static str> {
     PINNED_REVISION_BODIES.get(revision).map(String::as_str)
 }
@@ -1211,6 +1227,9 @@ fn resolve_assistant_actions_body(revision: Option<&str>) -> Result<&'static str
         return Err(AppError::ValidationError(
             "Invalid assistant actions revision".to_string(),
         ));
+    }
+    if revision == "nyxid-assistant-actions.v9" {
+        return Ok(PLATFORM_KEYS_MANIFEST.as_str());
     }
     pinned_revision_body(revision)
         .ok_or_else(|| AppError::NotFound("Unknown assistant actions revision".to_string()))
@@ -2722,6 +2741,22 @@ mod tests {
         assert_eq!(actions[3]["remember_eligible"], false);
         assert_eq!(actions[3]["params_schema"], key_rotate_params_schema());
         assert_eq!(manifest, golden_manifest());
+    }
+
+    #[test]
+    fn platform_key_manifest_is_opt_in_and_preserves_pinned_schemas() {
+        let current: Value = serde_json::from_str(manifest_body()).unwrap();
+        let extended: Value = serde_json::from_str(
+            resolve_assistant_actions_body(Some("nyxid-assistant-actions.v9")).unwrap(),
+        )
+        .unwrap();
+        let path = "/actions/0/params_schema/oneOf/0/properties/catalogService/properties/use_platform_key";
+        assert!(current.pointer(path).is_none());
+        assert_eq!(
+            extended.pointer(path).unwrap(),
+            &json!({ "type": "boolean" })
+        );
+        assert_eq!(extended["revision"], "nyxid-assistant-actions.v9");
     }
 
     #[test]

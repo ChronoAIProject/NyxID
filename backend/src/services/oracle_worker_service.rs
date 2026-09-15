@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
@@ -16,7 +16,13 @@ use crate::models::oracle_worker_command::{
     COLLECTION_NAME as ORACLE_WORKER_COMMANDS, OracleWorkerCommand, OracleWorkerCommandKind,
     OracleWorkerCommandStatus,
 };
-use crate::services::oracle_pool_service;
+use crate::services::{oracle_pool_service, oracle_worker_enrollment_service as enrollment};
+
+mod management;
+
+pub use management::{
+    cancel_worker_command, enqueue_worker_command, forget_authorized_worker, list_worker_commands,
+};
 
 const LABEL_ALLOCATION_ATTEMPTS: usize = 16;
 const MAX_CAPABILITIES: usize = 32;
@@ -109,11 +115,16 @@ pub struct AllocatedWorker {
     pub adopted: bool,
 }
 
-fn provisioned_worker(pool: &OraclePool, label: &str, now: chrono::DateTime<Utc>) -> OracleWorker {
+pub(super) fn provisioned_worker(
+    pool: &OraclePool,
+    label: &str,
+    now: chrono::DateTime<Utc>,
+) -> OracleWorker {
     OracleWorker {
         id: worker_doc_id(&pool.id, label),
         pool_id: pool.id.clone(),
         worker_label: label.to_string(),
+        generation: Some(uuid::Uuid::new_v4().to_string()),
         last_seen_at: now - Duration::days(365),
         current_task_id: None,
         script_version: None,
@@ -121,6 +132,7 @@ fn provisioned_worker(pool: &OraclePool, label: &str, now: chrono::DateTime<Utc>
         first_seen_at: None,
         provisioned_at: Some(now),
         instance_id: None,
+        enrollment: None,
         platform: None,
         capabilities: Vec::new(),
         desired_state: OracleWorkerDesiredState::Active,
@@ -205,12 +217,22 @@ pub async fn allocate_worker(
     ))
 }
 
+#[cfg(test)]
 pub async fn report_presence(
     db: &mongodb::Database,
     pool: &OraclePool,
     input: WorkerPresenceInput,
 ) -> AppResult<OracleWorker> {
-    let capabilities = normalize_capabilities(input.capabilities)?;
+    report_presence_for_worker(db, pool, input, None).await
+}
+
+pub async fn report_presence_for_worker(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    input: WorkerPresenceInput,
+    authorized_worker: Option<&OracleWorker>,
+) -> AppResult<OracleWorker> {
+    let mut capabilities = normalize_capabilities(input.capabilities)?;
     let script_version = input
         .script_version
         .map(|value| {
@@ -227,7 +249,25 @@ pub async fn report_presence(
     let platform = optional_metadata(input.platform, "platform")?;
     let last_error = optional_metadata(input.last_error, "last_error")?;
     let current_task_id = optional_metadata(input.current_task_id, "current_task_id")?;
-    ensure_instance_matches(db, pool, &input.worker_label, instance_id.as_deref()).await?;
+    let existing = if let Some(worker) = authorized_worker {
+        if worker.worker_label != input.worker_label
+            || worker.pool_id != pool.id
+            || worker.instance_id != instance_id
+        {
+            return Err(AppError::OracleWorkerTokenInvalid);
+        }
+        Some(worker.clone())
+    } else {
+        ensure_instance_matches(db, pool, &input.worker_label, instance_id.as_deref()).await?;
+        db.collection::<OracleWorker>(ORACLE_WORKERS)
+            .find_one(doc! { "_id": worker_doc_id(&pool.id, &input.worker_label) })
+            .await?
+    };
+    if existing.is_some_and(|worker| worker.enrollment.is_some()) {
+        capabilities.retain(|capability| {
+            capability != "saved_login_v1" && capability != "session_import_v1"
+        });
+    }
 
     let now = Utc::now();
     let mut set = doc! {
@@ -266,7 +306,9 @@ pub async fn report_presence(
         None => set.insert("chrome_alive", bson::Bson::Null),
     };
 
-    let mut filter = doc! { "_id": worker_doc_id(&pool.id, &input.worker_label) };
+    let mut filter = authorized_worker
+        .map(enrollment::worker_filter)
+        .unwrap_or_else(|| doc! { "_id": worker_doc_id(&pool.id, &input.worker_label) });
     if let Some(instance_id) = instance_id.as_deref() {
         filter.insert("instance_id", instance_id);
     }
@@ -277,18 +319,19 @@ pub async fn report_presence(
                 "$set": set,
                 "$setOnInsert": {
                     "first_seen_at": bson::DateTime::from_chrono(now),
+                    "generation": uuid::Uuid::new_v4().to_string(),
                     "desired_state": "active",
                 },
             },
         )
         .with_options(
             FindOneAndUpdateOptions::builder()
-                .upsert(true)
+                .upsert(authorized_worker.is_none())
                 .return_document(ReturnDocument::After)
                 .build(),
         )
         .await?
-        .ok_or_else(|| AppError::Internal("worker presence upsert returned no row".to_string()))
+        .ok_or(AppError::OracleWorkerTokenInvalid)
 }
 
 pub async fn ensure_instance_matches(
@@ -334,6 +377,7 @@ pub async fn ensure_instance_matches(
                     "worker_label": worker_label,
                     "last_seen_at": bson::DateTime::from_chrono(now),
                     "first_seen_at": bson::DateTime::from_chrono(now),
+                    "generation": uuid::Uuid::new_v4().to_string(),
                     "desired_state": "active",
                 },
             },
@@ -358,6 +402,47 @@ pub async fn ensure_instance_matches(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Count workers per pool whose heartbeat is newer than `window_secs`,
+/// matching the recency window `pool_status` uses for `active_workers`.
+/// One aggregation for all pools; pools with no online worker are absent.
+pub async fn count_online_workers_by_pool(
+    db: &mongodb::Database,
+    pool_ids: &[String],
+    window_secs: i64,
+) -> AppResult<HashMap<String, u32>> {
+    if pool_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let cutoff = Utc::now() - Duration::seconds(window_secs);
+    let pipeline = vec![
+        doc! { "$match": {
+            "pool_id": { "$in": pool_ids },
+            "last_seen_at": { "$gte": bson::DateTime::from_chrono(cutoff) },
+        }},
+        doc! { "$group": { "_id": "$pool_id", "count": { "$sum": 1 } } },
+    ];
+    let mut cursor = db
+        .collection::<Document>(ORACLE_WORKERS)
+        .aggregate(pipeline)
+        .await?;
+    let mut counts = HashMap::new();
+    while let Some(row) = cursor.try_next().await? {
+        let pool_id = row.get_str("_id").unwrap_or_default().to_string();
+        let count = row.get_i32("count").map(|n| n.max(0) as u32).unwrap_or(0);
+        counts.insert(pool_id, count);
+    }
+    Ok(counts)
+}
+
+pub async fn count_online_workers(
+    db: &mongodb::Database,
+    pool_id: &str,
+    window_secs: i64,
+) -> AppResult<u32> {
+    let counts = count_online_workers_by_pool(db, &[pool_id.to_string()], window_secs).await?;
+    Ok(counts.get(pool_id).copied().unwrap_or(0))
 }
 
 pub async fn list_workers(db: &mongodb::Database, pool_id: &str) -> AppResult<Vec<OracleWorker>> {
@@ -415,61 +500,23 @@ pub async fn enqueue_command(
     bundle: Option<(String, String)>,
 ) -> AppResult<OracleWorkerCommand> {
     let worker = get_worker(db, pool_id, worker_label).await?;
-    let capability = required_capability(&kind);
-    if !worker.capabilities.iter().any(|value| value == capability) {
-        return Err(AppError::OracleWorkerCapabilityUnsupported(format!(
-            "worker '{}' does not advertise {capability}",
-            worker.worker_label
-        )));
-    }
-
-    let now = Utc::now();
-    let (bundle_version, bundle_sha256) = bundle.unzip();
-    let command = OracleWorkerCommand {
-        id: uuid::Uuid::new_v4().to_string(),
-        pool_id: pool_id.to_string(),
-        worker_label: worker_label.to_string(),
-        kind,
-        status: OracleWorkerCommandStatus::Queued,
-        created_by_user_id: actor_user_id.to_string(),
-        required_capability: Some(capability.to_string()),
-        delivery_count: 0,
-        result_code: None,
-        snapshot_id,
-        bundle_version,
-        bundle_sha256,
-        delivered_at: None,
-        delivery_lease_expires_at: None,
-        completed_at: None,
-        deadline_at: now + Duration::hours(COMMAND_DEADLINE_HOURS),
-        expires_at: None,
-        created_at: now,
-        updated_at: now,
-    };
-    db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
-        .insert_one(&command)
-        .await?;
-    if let Err(error) = db
-        .collection::<Document>(ORACLE_WORKERS)
-        .update_one(
-            doc! { "_id": &worker.id },
-            doc! { "$set": { "desired_state": "draining" } },
-        )
-        .await
-    {
-        let _ = db
-            .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
-            .delete_one(doc! { "_id": &command.id, "status": "queued" })
-            .await;
-        return Err(error.into());
-    }
-    Ok(command)
+    enqueue_worker_command(db, &worker, actor_user_id, kind, snapshot_id, bundle).await
 }
 
+#[cfg(test)]
 async fn expire_stale_commands(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: Option<&str>,
+) -> AppResult<()> {
+    expire_stale_commands_filtered(db, pool_id, worker_label, None).await
+}
+
+async fn expire_stale_commands_filtered(
+    db: &mongodb::Database,
+    pool_id: &str,
+    worker_label: Option<&str>,
+    worker_generation: Option<&Option<String>>,
 ) -> AppResult<()> {
     let now = Utc::now();
     let mut filter = doc! {
@@ -479,6 +526,9 @@ async fn expire_stale_commands(
     };
     if let Some(label) = worker_label {
         filter.insert("worker_label", label);
+    }
+    if let Some(generation) = worker_generation {
+        filter.insert("worker_generation", generation);
     }
     db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
         .update_many(
@@ -499,6 +549,9 @@ async fn expire_stale_commands(
     if let Some(label) = worker_label {
         delivery_filter.insert("worker_label", label);
     }
+    if let Some(generation) = worker_generation {
+        delivery_filter.insert("worker_generation", generation);
+    }
     db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
         .update_many(
             delivery_filter,
@@ -512,9 +565,13 @@ async fn expire_stale_commands(
         )
         .await?;
     if let Some(label) = worker_label {
+        let mut latest_filter = doc! { "pool_id": pool_id, "worker_label": label };
+        if let Some(generation) = worker_generation {
+            latest_filter.insert("worker_generation", generation);
+        }
         if let Some(latest) = db
             .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
-            .find_one(doc! { "pool_id": pool_id, "worker_label": label })
+            .find_one(latest_filter)
             .sort(doc! { "created_at": -1 })
             .await?
         {
@@ -533,6 +590,7 @@ async fn expire_stale_commands(
                 .find_one(doc! {
                     "pool_id": pool_id,
                     "worker_label": &worker.worker_label,
+                    "worker_generation": &worker.generation,
                 })
                 .sort(doc! { "created_at": -1 })
                 .await?
@@ -544,13 +602,27 @@ async fn expire_stale_commands(
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn deliver_next_command(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: &str,
     capabilities: &[String],
 ) -> AppResult<Option<OracleWorkerCommand>> {
-    expire_stale_commands(db, pool_id, Some(worker_label)).await?;
+    let worker = get_worker(db, pool_id, worker_label).await?;
+    deliver_next_command_for_worker(db, &worker, capabilities).await
+}
+
+pub async fn deliver_next_command_for_worker(
+    db: &mongodb::Database,
+    worker: &OracleWorker,
+    capabilities: &[String],
+) -> AppResult<Option<OracleWorkerCommand>> {
+    enrollment::ensure_current_worker(db, worker).await?;
+    let pool_id = &worker.pool_id;
+    let worker_label = &worker.worker_label;
+    expire_stale_commands_filtered(db, pool_id, Some(worker_label), Some(&worker.generation))
+        .await?;
     if !capabilities.iter().any(|value| value == "commands_v1") {
         return Ok(None);
     }
@@ -563,6 +635,7 @@ pub async fn deliver_next_command(
             doc! {
                 "pool_id": pool_id,
                 "worker_label": worker_label,
+                "worker_generation": &worker.generation,
                 "deadline_at": { "$gt": bson::DateTime::from_chrono(now) },
                 "delivery_count": { "$lt": i64::from(MAX_COMMAND_DELIVERIES) },
                 "required_capability": { "$in": capabilities },
@@ -607,6 +680,7 @@ async fn reconcile_desired_state(
         .find_one(doc! {
             "pool_id": &command.pool_id,
             "worker_label": &command.worker_label,
+            "worker_generation": &command.worker_generation,
             "status": { "$in": ["queued", "delivered"] },
         })
         .sort(doc! { "created_at": 1 })
@@ -631,19 +705,32 @@ async fn reconcile_desired_state(
     };
     db.collection::<Document>(ORACLE_WORKERS)
         .update_one(
-            doc! { "_id": worker_doc_id(&command.pool_id, &command.worker_label) },
+            doc! { "_id": worker_doc_id(&command.pool_id, &command.worker_label), "generation": &command.worker_generation },
             doc! { "$set": { "desired_state": desired } },
         )
         .await?;
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn apply_command_reports(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: &str,
     reports: Vec<CommandReport>,
 ) -> AppResult<()> {
+    let worker = get_worker(db, pool_id, worker_label).await?;
+    apply_command_reports_for_worker(db, &worker, reports).await
+}
+
+pub async fn apply_command_reports_for_worker(
+    db: &mongodb::Database,
+    worker: &OracleWorker,
+    reports: Vec<CommandReport>,
+) -> AppResult<()> {
+    enrollment::ensure_current_worker(db, worker).await?;
+    let pool_id = &worker.pool_id;
+    let worker_label = &worker.worker_label;
     for report in reports.into_iter().take(16) {
         if !valid_metadata(&report.command_id) {
             return Err(AppError::ValidationError(
@@ -658,6 +745,7 @@ pub async fn apply_command_reports(
                 "_id": &report.command_id,
                 "pool_id": pool_id,
                 "worker_label": worker_label,
+                "worker_generation": &worker.generation,
             })
             .await?
         else {
@@ -679,6 +767,7 @@ pub async fn apply_command_reports(
                     "_id": &report.command_id,
                     "pool_id": pool_id,
                     "worker_label": worker_label,
+                    "worker_generation": &worker.generation,
                     "status": "delivered",
                 },
                 doc! { "$set": {
@@ -710,9 +799,10 @@ pub struct ForgetOutcome {
 }
 
 /// Remove a worker's presence row and command history. Refuses an online
-/// worker or one with a task in flight unless `force` (a live worker would
-/// simply re-register on its next heartbeat). Session affinity owned by the
+/// worker or one with a task in flight unless `force`. A pool-token worker can
+/// re-register; an enrolled worker must enroll again. Session affinity owned by the
 /// label is released so follow-ups do not wait out the grace window.
+#[cfg(test)]
 pub async fn forget_worker(
     db: &mongodb::Database,
     pool: &OraclePool,
@@ -720,137 +810,50 @@ pub async fn forget_worker(
     force: bool,
 ) -> AppResult<ForgetOutcome> {
     let worker = get_worker(db, &pool.id, label).await?;
-    let now = Utc::now();
-    if !force {
-        if (now - worker.last_seen_at).num_seconds() <= FORGET_ONLINE_WINDOW_SECS {
-            return Err(AppError::Conflict(format!(
-                "worker '{label}' is online; stop it first or pass force"
-            )));
-        }
-        let inflight = db
-            .collection::<Document>(ORACLE_TASKS)
-            .count_documents(doc! {
-                "pool_id": &pool.id,
-                "status": "dispatched",
-                "assigned_worker_id": label,
-            })
-            .await?;
-        if inflight > 0 {
-            return Err(AppError::Conflict(format!(
-                "worker '{label}' has a task in flight; wait for it to settle or pass force"
-            )));
-        }
-    }
-    let commands_removed = db
-        .collection::<Document>(ORACLE_WORKER_COMMANDS)
-        .delete_many(doc! { "pool_id": &pool.id, "worker_label": label })
-        .await?
-        .deleted_count;
-    let sessions_released = db
-        .collection::<Document>(ORACLE_SESSIONS)
-        .update_many(
-            doc! { "pool_id": &pool.id, "owner_worker_label": label },
-            doc! { "$set": { "owner_worker_label": null, "updated_at": bson::DateTime::from_chrono(now) } },
-        )
-        .await?
-        .modified_count;
-    let tasks_released = db
-        .collection::<Document>(ORACLE_TASKS)
-        .update_many(
-            doc! { "pool_id": &pool.id, "status": "queued", "required_worker_label": label },
-            doc! {
-                "$set": { "phase": "affinity_released_by_forget", "updated_at": bson::DateTime::from_chrono(now) },
-                "$unset": { "required_worker_label": "" },
-            },
-        )
-        .await?
-        .modified_count;
-    db.collection::<OracleWorker>(ORACLE_WORKERS)
-        .delete_one(doc! { "_id": &worker.id })
-        .await?;
-    Ok(ForgetOutcome {
-        commands_removed,
-        sessions_released,
-        tasks_released,
-    })
+    forget_authorized_worker(db, &worker, force).await
 }
 
 /// Withdraw a queued or delivered-but-unexecuted command. A delivered
 /// command may already sit in the worker's journal; the worker learns of the
 /// cancellation on its next heartbeat and drops it. Commands the worker has
 /// already settled cannot be cancelled.
+#[cfg(test)]
 pub async fn cancel_command(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: &str,
     command_id: &str,
 ) -> AppResult<OracleWorkerCommand> {
-    if !valid_metadata(command_id) {
-        return Err(AppError::ValidationError(
-            "command_id contains unsupported characters".to_string(),
-        ));
-    }
-    let now = Utc::now();
-    let commands = db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS);
-    let cancelled = commands
-        .find_one_and_update(
-            doc! {
-                "_id": command_id,
-                "pool_id": pool_id,
-                "worker_label": worker_label,
-                "status": { "$in": ["queued", "delivered"] },
-            },
-            doc! { "$set": {
-                "status": "cancelled",
-                "result_code": "cancelled_by_manager",
-                "completed_at": bson::DateTime::from_chrono(now),
-                "expires_at": bson::DateTime::from_chrono(now + Duration::days(COMMAND_RETENTION_DAYS)),
-                "updated_at": bson::DateTime::from_chrono(now),
-            } },
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?;
-    let Some(command) = cancelled else {
-        return match commands
-            .find_one(doc! { "_id": command_id, "pool_id": pool_id, "worker_label": worker_label })
-            .await?
-        {
-            Some(existing) => Err(AppError::Conflict(format!(
-                "command {command_id} is already {}",
-                match existing.status {
-                    OracleWorkerCommandStatus::Succeeded => "succeeded",
-                    OracleWorkerCommandStatus::Failed => "failed",
-                    OracleWorkerCommandStatus::Expired => "expired",
-                    OracleWorkerCommandStatus::Cancelled => "cancelled",
-                    _ => "settled",
-                }
-            ))),
-            None => Err(AppError::OracleWorkerCommandNotFound(
-                command_id.to_string(),
-            )),
-        };
-    };
-    reconcile_desired_state(db, &command).await?;
-    Ok(command)
+    let worker = get_worker(db, pool_id, worker_label).await?;
+    cancel_worker_command(db, &worker, command_id).await
 }
 
 /// Recently cancelled commands that had already been delivered, so a worker
 /// still holding one can drop it. Bounded and short-lived.
+#[cfg(test)]
 pub async fn recently_cancelled_delivered(
     db: &mongodb::Database,
     pool_id: &str,
     worker_label: &str,
 ) -> AppResult<Vec<String>> {
+    let worker = get_worker(db, pool_id, worker_label).await?;
+    recently_cancelled_delivered_for_worker(db, &worker).await
+}
+
+pub async fn recently_cancelled_delivered_for_worker(
+    db: &mongodb::Database,
+    worker: &OracleWorker,
+) -> AppResult<Vec<String>> {
+    enrollment::ensure_current_worker(db, worker).await?;
+    let pool_id = &worker.pool_id;
+    let worker_label = &worker.worker_label;
     let since = Utc::now() - Duration::hours(COMMAND_DEADLINE_HOURS);
     let commands: Vec<OracleWorkerCommand> = db
         .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
         .find(doc! {
             "pool_id": pool_id,
             "worker_label": worker_label,
+            "worker_generation": &worker.generation,
             "status": "cancelled",
             "delivery_count": { "$gt": 0 },
             "completed_at": { "$gt": bson::DateTime::from_chrono(since) },
@@ -862,6 +865,7 @@ pub async fn recently_cancelled_delivered(
     Ok(commands.into_iter().map(|command| command.id).collect())
 }
 
+#[cfg(test)]
 pub async fn list_commands(
     db: &mongodb::Database,
     pool_id: &str,
@@ -914,6 +918,51 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn online_worker_counts_use_the_recency_window_per_pool() {
+        let Some(db) = connect_test_database("oracle_worker_online_counts").await else {
+            return;
+        };
+        let busy = pool();
+        let idle = pool();
+        let fresh = allocate_worker(&db, &busy, None).await.unwrap().worker;
+        let stale = allocate_worker(&db, &busy, None).await.unwrap().worker;
+        report_presence(
+            &db,
+            &busy,
+            WorkerPresenceInput {
+                worker_label: fresh.worker_label.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.collection::<Document>(ORACLE_WORKERS)
+            .update_one(
+                doc! { "_id": worker_doc_id(&busy.id, &stale.worker_label) },
+                doc! { "$set": { "last_seen_at": bson::DateTime::from_chrono(
+                    Utc::now() - Duration::seconds(600)
+                ) } },
+            )
+            .await
+            .unwrap();
+
+        let counts = count_online_workers_by_pool(&db, &[busy.id.clone(), idle.id.clone()], 120)
+            .await
+            .unwrap();
+        assert_eq!(counts.get(&busy.id).copied(), Some(1));
+        assert_eq!(counts.get(&idle.id), None);
+        assert_eq!(count_online_workers(&db, &busy.id, 120).await.unwrap(), 1);
+        assert_eq!(count_online_workers(&db, &idle.id, 120).await.unwrap(), 0);
+        assert_eq!(count_online_workers(&db, &busy.id, 900).await.unwrap(), 2);
+        assert!(
+            count_online_workers_by_pool(&db, &[], 120)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

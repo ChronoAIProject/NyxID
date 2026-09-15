@@ -50,6 +50,7 @@ pub struct CatalogEntry {
     pub device_verification_url: Option<String>,
     pub device_token_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
+    pub supports_oauth_scopes: bool,
     /// Curated menu of notable available scopes for this provider (NyxID#917),
     /// keyed off the provider slug via `scope_catalog::for_provider`. `None`
     /// for providers with no curated catalog. The connect UIs render these as
@@ -62,6 +63,8 @@ pub struct CatalogEntry {
     pub supports_pkce: bool,
     pub device_code_format: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: HashMap<String, String>,
     pub extra_auth_params: Option<HashMap<String, String>>,
     pub oauth_client_id: Option<String>,
     pub client_id_param_name: Option<String>,
@@ -87,6 +90,9 @@ pub struct CatalogEntry {
     pub issues_url: Option<String>,
     pub capabilities: Option<ServiceCapabilities>,
     pub billing: Option<ServiceBilling>,
+    pub inference: Option<super::inference_service::InferenceView>,
+    pub platform_key: super::inference_service::PlatformKeyView,
+    pub byok_pricing: Option<super::inference_service::LanePricingView>,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
@@ -122,7 +128,43 @@ fn build_catalog_entry(
     let requires_credential =
         svc.requires_user_credential || svc.auth_method != "none" || spr.is_some();
     let platform_client_id_present = oauth_client_id.is_some();
+    let google_product = provider
+        .filter(|p| p.slug == "google")
+        .and_then(|_| super::google_workspace::GoogleProduct::from_slug(&svc.slug));
+    let default_scopes = google_product
+        .map(|p| p.default_scopes())
+        .or_else(|| provider.and_then(|p| p.default_scopes.clone()));
+    let mut scope_catalog = provider.and_then(|p| super::scope_catalog::for_provider(&p.slug));
+    if let (Some(product), Some(catalog)) = (google_product, scope_catalog.as_mut()) {
+        let allowed = product.allowed_scopes();
+        catalog.retain(|entry| allowed.contains(&entry.scope));
+        for entry in catalog {
+            entry.required = product.required_scopes().contains(&entry.scope.as_str());
+        }
+    }
+    let platform_available = super::platform_key_service::has_platform_key(&svc)
+        && svc.platform_key.as_ref().is_none_or(|p| {
+            p.audience == crate::models::downstream_service::PlatformKeyAudience::Public
+        });
+    let inference =
+        super::inference_service::view(&svc, provider.map(|p| p.slug.as_str()), platform_available);
+    let platform_key = super::inference_service::PlatformKeyView {
+        available: platform_available,
+        pricing: svc
+            .billing
+            .as_ref()
+            .and_then(|b| b.platform_key_pricing.as_ref())
+            .map(Into::into),
+    };
+    let byok_pricing = svc
+        .billing
+        .as_ref()
+        .and_then(|b| b.byok_pricing.as_ref())
+        .map(Into::into);
     CatalogEntry {
+        inference,
+        platform_key,
+        byok_pricing,
         service_type: svc.service_type.clone(),
         ssh_host: svc.ssh_config.as_ref().map(|c| c.host.clone()),
         ssh_port: svc.ssh_config.as_ref().map(|c| c.port),
@@ -170,13 +212,26 @@ fn build_catalog_entry(
         device_code_url: provider.and_then(|p| p.device_code_url.clone()),
         device_verification_url: provider.and_then(|p| p.device_verification_url.clone()),
         device_token_url: provider.and_then(|p| p.device_token_url.clone()),
-        default_scopes: provider.and_then(|p| p.default_scopes.clone()),
-        scope_catalog: provider.and_then(|p| crate::services::scope_catalog::for_provider(&p.slug)),
+        default_scopes,
+        supports_oauth_scopes: provider.is_none_or(|p| p.supports_oauth_scopes),
+        scope_catalog,
         scope_removal: provider
             .map(|p| crate::services::scope_catalog::removal_capability(&p.slug)),
         supports_pkce: provider.is_some_and(|p| p.supports_pkce),
         device_code_format: provider.map(|p| p.device_code_format.clone()),
         token_endpoint_auth_method: provider.map(|p| p.token_endpoint_auth_method.clone()),
+        token_request_encoding: provider.and_then(|p| p.token_request_encoding.clone()),
+        oauth_request_headers: provider
+            .map(|p| {
+                p.oauth_request_headers
+                    .iter()
+                    .filter(|(name, value)| {
+                        crate::models::provider_config::is_public_oauth_header(name, value)
+                    })
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
         extra_auth_params: provider.and_then(|p| p.extra_auth_params.clone()),
         oauth_client_id,
         client_id_param_name: provider.and_then(|p| p.client_id_param_name.clone()),
@@ -195,9 +250,11 @@ fn build_catalog_entry(
                     || p.credential_mode == "user"
                     || (platform_client_id_present && platform_secret_present))
         }),
-        platform_scope_allowlist: provider.and_then(|p| {
-            crate::services::scope_catalog::platform_scope_allowlist(&p.slug)
-                .map(|scopes| scopes.iter().map(|s| (*s).to_string()).collect())
+        platform_scope_allowlist: google_product.map(|p| p.allowed_scopes()).or_else(|| {
+            provider.and_then(|p| {
+                crate::services::scope_catalog::platform_scope_allowlist(&p.slug)
+                    .map(|scopes| scopes.iter().map(|s| (*s).to_string()).collect())
+            })
         }),
         requires_credential,
         openapi_spec_url: svc.openapi_spec_url,
@@ -263,6 +320,7 @@ fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
             { "visibility": { "$ne": "private" } },
             { "visibility": { "$exists": false } },
             { "visibility": "private", "created_by": user_id },
+            { "platform_key.enabled": true },
         ],
     }
 }
@@ -296,6 +354,7 @@ pub async fn list_catalog(
     list_catalog_filtered(
         db,
         encryption_keys,
+        user_id,
         doc! {
             "service_type": "http",
             "is_active": true,
@@ -305,6 +364,7 @@ pub async fn list_catalog(
                         { "requires_user_credential": true },
                         { "requires_user_credential": { "$exists": false } },
                         { "provider_config_id": { "$ne": null } },
+                        { "platform_key.enabled": true },
                     ],
                 },
                 legacy_service_category_filter(&["connection", "internal"]),
@@ -339,12 +399,13 @@ pub async fn list_catalog_all(
             visibility_filter(user_id),
         ],
     };
-    list_catalog_filtered(db, encryption_keys, filter).await
+    list_catalog_filtered(db, encryption_keys, user_id, filter).await
 }
 
 async fn list_catalog_filtered(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
+    user_id: &str,
     filter: mongodb::bson::Document,
 ) -> AppResult<Vec<CatalogEntry>> {
     let services: Vec<DownstreamService> = db
@@ -383,6 +444,7 @@ async fn list_catalog_filtered(
             .await?
     };
 
+    let grants = super::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     let mut resolved_entries = Vec::with_capacity(services.len());
     for svc in services {
         let provider = svc
@@ -408,13 +470,18 @@ async fn list_catalog_filtered(
             _ => false,
         };
 
-        resolved_entries.push(build_catalog_entry(
-            svc,
-            provider,
-            spr,
-            oauth_client_id,
-            platform_secret_present,
-        ));
+        let available =
+            super::platform_key_service::available_with_grants(&svc, provider, user_id, &grants);
+        if svc.visibility == "private" && svc.created_by != user_id && !available {
+            continue;
+        }
+        let inference =
+            super::inference_service::view(&svc, provider.map(|p| p.slug.as_str()), available);
+        let mut entry =
+            build_catalog_entry(svc, provider, spr, oauth_client_id, platform_secret_present);
+        entry.platform_key.available = available;
+        entry.inference = inference;
+        resolved_entries.push(entry);
     }
 
     Ok(resolved_entries)
@@ -483,7 +550,10 @@ async fn enforce_catalog_read_access(
     user_id: &str,
     svc: &DownstreamService,
 ) -> AppResult<()> {
-    if svc.visibility != "private" || svc.created_by == user_id {
+    if svc.visibility != "private"
+        || svc.created_by == user_id
+        || super::platform_key_service::available(db, svc, user_id).await?
+    {
         return Ok(());
     }
     let is_admin = match db
@@ -599,13 +669,19 @@ pub async fn get_catalog_entry(
         _ => false,
     };
 
-    Ok(build_catalog_entry(
+    let available = super::platform_key_service::available(db, &svc, user_id).await?;
+    let inference =
+        super::inference_service::view(&svc, provider.as_ref().map(|p| p.slug.as_str()), available);
+    let mut entry = build_catalog_entry(
         svc,
         provider.as_ref(),
         spr.as_ref(),
         oauth_client_id,
         platform_secret_present,
-    ))
+    );
+    entry.platform_key.available = available;
+    entry.inference = inference;
+    Ok(entry)
 }
 
 /// Does `user_id` have an active provisioned `UserService` for catalog
@@ -778,6 +854,7 @@ mod tests {
             slug: "test".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),

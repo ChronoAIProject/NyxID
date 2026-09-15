@@ -198,12 +198,12 @@ describe("AuthFlow — login", () => {
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
   });
 
-  it("redirects to a same-origin return_to instead of the dashboard", async () => {
+  it("preserves the approval code query when redirecting to a same-origin return_to", async () => {
     loginFn.mockResolvedValue({ mfaRequired: false });
     const assignSpy = vi
       .spyOn(window.location, "assign")
       .mockImplementation(() => {});
-    const returnTo = `${window.location.origin}/keys`;
+    const returnTo = `${window.location.origin}/login/device?user_code=2ABCDEFGH`;
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={0} returnTo={returnTo} />);
 

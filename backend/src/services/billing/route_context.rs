@@ -58,14 +58,38 @@ impl BillingRouteContext {
                     .filter(|_| credential_class == CredentialClass::NyxidManagedMaster)
             })
             .flatten();
-        let service_platform_billable =
+        let mut service_platform_billable =
             service_billing.is_some_and(|billing| billing.platform_billable);
         let legacy_metric_code = super::meter::platform_metric_code(platform_metric);
-        let platform_lago_metric_code = service_billing
+        let mut platform_lago_metric_code = service_billing
             .map(|billing| billing.active_platform_metric_code(legacy_metric_code))
             .unwrap_or(legacy_metric_code)
             .to_string();
 
+        let mut platform_metric = platform_metric;
+        if let Some(billing) =
+            service_billing.filter(|b| b.byok_pricing.is_some() || b.platform_key_pricing.is_some())
+        {
+            let lane = match credential_class {
+                CredentialClass::UserOwned
+                | CredentialClass::AgentOverrideUserOwned
+                | CredentialClass::NodeManaged => billing.byok_pricing.as_ref(),
+                CredentialClass::NyxidManagedMaster => billing.platform_key_pricing.as_ref(),
+                CredentialClass::NoAuth => None,
+            };
+            match lane {
+                Some(lane)
+                    if lane.sync_status
+                        == crate::models::service_billing::PricingSyncStatus::Synced =>
+                {
+                    platform_metric = lane.metric;
+                    platform_lago_metric_code = lane.lago_metric_code.clone();
+                    service_platform_billable = true;
+                }
+                None => service_platform_billable = false,
+                Some(_) => {} // Unsynchronized matching lane retains legacy charging.
+            }
+        }
         Self {
             ingress,
             billing_request_id,
@@ -119,6 +143,10 @@ mod tests {
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -139,6 +167,98 @@ mod tests {
             Some(&billing),
             true,
         )
+    }
+
+    #[test]
+    fn lane_selection_uses_final_credential_and_supersedes_legacy() {
+        use crate::models::service_billing::{LanePricing, PricingSyncStatus};
+        let lane = |metric, code: &str| LanePricing {
+            metric,
+            credits_per_unit: "0.125".into(),
+            lago_metric_code: code.into(),
+            sync_status: PricingSyncStatus::Synced,
+            sync_error: None,
+        };
+        for credential in [
+            CredentialClass::UserOwned,
+            CredentialClass::AgentOverrideUserOwned,
+            CredentialClass::NodeManaged,
+            CredentialClass::NyxidManagedMaster,
+            CredentialClass::NoAuth,
+        ] {
+            for byok in [false, true] {
+                for platform in [false, true] {
+                    let billing = ServiceBilling {
+                        platform_billable: true,
+                        byok_pricing: byok.then(|| lane(BillingMetric::Requests, "byok")),
+                        platform_key_pricing: platform.then(|| lane(BillingMetric::Tokens, "pk")),
+                        ..Default::default()
+                    };
+                    let ctx = BillingRouteContext::new(
+                        BillingIngress::Proxy,
+                        "req".into(),
+                        "owner".into(),
+                        "owner".into(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        NodeIntent::Direct,
+                        "bearer".into(),
+                        credential,
+                        BillingMetric::Bytes,
+                        Some(&billing),
+                        false,
+                    );
+                    let expected = match credential {
+                        CredentialClass::NyxidManagedMaster if platform => {
+                            Some((BillingMetric::Tokens, "pk"))
+                        }
+                        CredentialClass::UserOwned
+                        | CredentialClass::AgentOverrideUserOwned
+                        | CredentialClass::NodeManaged
+                            if byok =>
+                        {
+                            Some((BillingMetric::Requests, "byok"))
+                        }
+                        _ => None,
+                    };
+                    if let Some((metric, code)) = expected {
+                        assert!(ctx.service_platform_billable);
+                        assert_eq!(ctx.platform_metric, metric);
+                        assert_eq!(ctx.platform_lago_metric_code, code);
+                    } else {
+                        assert_eq!(ctx.service_platform_billable, !byok && !platform);
+                    }
+                }
+            }
+        }
+        let mut billing = ServiceBilling {
+            platform_billable: true,
+            byok_pricing: Some(lane(BillingMetric::Requests, "byok")),
+            ..Default::default()
+        };
+        for status in [PricingSyncStatus::Pending, PricingSyncStatus::Failed] {
+            billing.byok_pricing.as_mut().unwrap().sync_status = status;
+            let ctx = BillingRouteContext::new(
+                BillingIngress::Proxy,
+                "req".into(),
+                "owner".into(),
+                "owner".into(),
+                None,
+                None,
+                None,
+                None,
+                NodeIntent::Direct,
+                "bearer".into(),
+                CredentialClass::UserOwned,
+                BillingMetric::Bytes,
+                Some(&billing),
+                false,
+            );
+            assert!(ctx.service_platform_billable);
+            assert_eq!(ctx.platform_lago_metric_code, "platform_bytes");
+        }
     }
 
     #[test]
@@ -165,6 +285,10 @@ mod tests {
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

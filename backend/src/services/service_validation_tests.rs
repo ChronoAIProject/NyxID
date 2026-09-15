@@ -1437,3 +1437,86 @@ async fn validation_db_node_telegram_path_contains_no_server_credential() {
         ValidationOutcome::Authenticated
     );
 }
+
+#[tokio::test]
+async fn validation_db_platform_binding_ignores_retained_key_and_node_fallback() {
+    let Some(mut f) = fixture("validation_platform_binding_merge", true).await else {
+        return;
+    };
+    let catalog_id = f.service.catalog_service_id.clone().unwrap();
+    let encrypted = f
+        .state
+        .encryption_keys
+        .encrypt(b"platform-test-key")
+        .await
+        .unwrap();
+    f.state.db.collection::<Document>("downstream_services").update_one(
+        doc! { "_id": &catalog_id },
+        doc! { "$set": {
+            "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
+            "platform_key": { "enabled": true, "audience": "public", "allowed_owner_ids": [] },
+        } },
+    ).await.unwrap();
+    f.state
+        .db
+        .collection::<UserService>(USER_SERVICES)
+        .update_one(
+            doc! { "_id": &f.service.id },
+            doc! { "$set": { "credential_binding": "platform" }, "$unset": { "node_id": "" } },
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("node_service_bindings")
+        .insert_one(doc! {
+            "_id": uuid::Uuid::new_v4().to_string(), "user_id": &f.caller.user_id,
+        "service_id": &catalog_id, "node_id": &f.node_id, "is_active": true,
+            "priority": 0, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    f.caller.allow_all_nodes = false;
+    let before = snapshot(&f.state, &f.caller, &f.service.id).await.unwrap();
+    assert!(before.resolution.master_credential);
+    assert!(before.resolution.api_key_id.is_none());
+    assert_eq!(before.resolution.target.base_url, "https://api.github.com");
+    assert!(!before.node_configured);
+    assert!(before.node_credential.is_none());
+    assert!(before.fallback_nodes.is_empty());
+    assert!(before.revision.is_some());
+    f.state
+        .db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .update_one(
+            doc! { "_id": &f.key.id },
+            doc! { "$set": { "status": "revoked" } },
+        )
+        .await
+        .unwrap();
+    let retained_key_changed = snapshot(&f.state, &f.caller, &f.service.id).await.unwrap();
+    assert_eq!(before.revision, retained_key_changed.revision);
+    let replacement = f
+        .state
+        .encryption_keys
+        .encrypt(b"new-platform-key")
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("downstream_services")
+        .update_one(
+            doc! { "_id": &catalog_id },
+            doc! { "$set": { "credential_encrypted": bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic, bytes: replacement,
+            } } },
+        )
+        .await
+        .unwrap();
+    let rotated = snapshot(&f.state, &f.caller, &f.service.id).await.unwrap();
+    assert_ne!(before.revision, rotated.revision);
+    assert!(
+        f.outbound.try_recv().is_err(),
+        "read-only snapshots must not dispatch"
+    );
+}

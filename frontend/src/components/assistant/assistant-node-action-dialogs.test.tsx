@@ -40,6 +40,25 @@ vi.mock("@/lib/api-client", () => {
   return { api: { get: mockGet, post: mockPost }, ApiError };
 });
 
+vi.mock("@/hooks/use-keys", () => ({
+  useKeys: () => ({
+    data: [
+      {
+        id: "platform-service",
+        label: "Platform search",
+        is_active: true,
+        auto_connected: true,
+        credential_source: { type: "personal" },
+      },
+    ],
+    isLoading: false,
+    isError: false,
+  }),
+}));
+vi.mock("@/hooks/use-api-keys", () => ({
+  useApiKey: () => ({ data: undefined }),
+}));
+
 vi.mock("qrcode", () => ({
   default: { toDataURL: mockToDataURL },
 }));
@@ -599,6 +618,73 @@ describe("AssistantPendingCredentialCancelDialog", () => {
 });
 
 describe("AssistantDeviceOnboardDialog", () => {
+  it("reviews the platform grant, preserves explicit ids, and sends the durable flag", async () => {
+    mockPost.mockRejectedValue(new Error("Stop after request inspection"));
+    render(
+      <AssistantDeviceOnboardDialog
+        open
+        onOpenChange={vi.fn()}
+        actionRequestId="platform-device"
+        params={{
+          label: "Camera",
+          defaultServiceIds: ["platform-service"],
+          allowAutoConnectedServices: true,
+        }}
+        onComplete={vi.fn()}
+      />,
+    );
+    const toggle = screen.getByRole("checkbox", {
+      name: /Allow all auto-connected/,
+    });
+    const platform = screen.getByRole("checkbox", { name: "Platform search" });
+    expect(toggle).toBeChecked();
+    expect(platform).toBeChecked();
+    expect(platform).toBeDisabled();
+    await userEvent.click(toggle);
+    expect(platform).toBeEnabled();
+    expect(platform).toBeChecked();
+    await userEvent.click(toggle);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Create onboarding package" }),
+    );
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/nodes/device-onboard",
+      {
+        actionRequestId: "platform-device",
+        label: "Camera",
+        targetOrgId: undefined,
+        defaultServiceIds: ["platform-service"],
+        allowAutoConnectedServices: true,
+      },
+    );
+    await screen.findByRole("alert");
+  });
+
+  it("hides personal platform services for an organization owner", () => {
+    render(
+      <AssistantDeviceOnboardDialog
+        open
+        onOpenChange={vi.fn()}
+        actionRequestId="org-device"
+        params={{
+          label: "Camera",
+          targetOrgId: OWNER_ID,
+          allowAutoConnectedServices: true,
+        }}
+        onComplete={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("checkbox", { name: /Allow all auto-connected/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Platform search")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /cannot use platform services from your personal account/,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("creates and renders the one-time onboarding QR after canonical evidence", async () => {
     mockPost.mockResolvedValue({
       resource: { deviceId: DEVICE_ID },

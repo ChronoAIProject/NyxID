@@ -477,7 +477,7 @@ observation the parent reconciles on read, not only an in-process callback.
 `ConnectLink` gains `parent_session_id` and `requirement_id`; for such
 children the return target is derived server-side from the parent and does
 not go through the app callback validator. Children also gain
-`reauthorize_user_service_id` + `required_scopes` to drive the existing
+`reauthorize_user_service_id` + `scopes` to drive the existing
 connection-specific reauthorization path instead of a second connect with
 the same insufficient scopes.
 
@@ -667,14 +667,14 @@ User-facing:
   context. The existing Agent Key verify step is **kept** (it tests the
   key's allowed and denied services, a different property).
 
-### 5.6 Error codes (new block 12000-12010)
+### 5.6 Error codes (new block 12100-12110)
 
-`12000 AppRequirementsInvalid` (400), `12001 AppConnectLinkNotFound` (404),
-`12002 AppConnectLinkExpired` (410), `12003 AppConnectLinkCompleted` (409),
-`12004 AppConnectLinkCancelled` (409), `12005 RequirementNotSatisfiable` (409),
-`12006 RequirementNotMet` (409), `12007 ServiceValidationRejected` (422),
-`12008 ServiceValidationUnavailable` (503), `12009 ServiceValidationRateLimited` (429),
-`12010 AppConnectResultMismatch` (400, consent binding failed).
+`12100 AppRequirementsInvalid` (400), `12101 AppConnectLinkNotFound` (404),
+`12102 AppConnectLinkExpired` (410), `12103 AppConnectLinkCompleted` (409),
+`12104 AppConnectLinkCancelled` (409), `12105 RequirementNotSatisfiable` (409),
+`12106 RequirementNotMet` (409), `12107 ServiceValidationRejected` (422),
+`12108 ServiceValidationUnavailable` (503), `12109 ServiceValidationRateLimited` (429),
+`12110 AppConnectResultMismatch` (400, consent binding failed).
 
 ## 6. Frontend
 

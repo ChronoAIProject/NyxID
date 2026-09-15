@@ -3,11 +3,13 @@ import { CHANNEL_PLATFORMS } from "@/lib/channel-platforms";
 
 const channelPlatformSchema = z.enum([
   "telegram",
+  "telegram-new",
   "discord",
   "lark",
   "feishu",
   "slack",
   "whatsapp",
+  "x",
 ]);
 
 /**
@@ -17,10 +19,12 @@ const channelPlatformSchema = z.enum([
  */
 export const conversationPlatformSchema = z.enum([
   "telegram",
+  "telegram-new",
   "discord",
   "lark",
   "feishu",
   "whatsapp",
+  "x",
   "device",
 ]);
 
@@ -38,9 +42,7 @@ export const createChannelBotSchema = z
     platform: channelPlatformSchema,
     bot_token: z
       .string()
-      .min(1, "Bot token is required")
-      .max(512, "Bot token is too long")
-      .refine((v) => v.trim().length > 0, "Bot token must not be blank"),
+      .max(512, "Bot token is too long"),
     label: z
       .string()
       .min(1, "Label is required")
@@ -57,6 +59,9 @@ export const createChannelBotSchema = z
     target_org_id: z.string().optional(),
   })
   .superRefine((data, ctx) => {
+    if (!CHANNEL_PLATFORMS[data.platform].managedOnly && !data.bot_token.trim()) {
+      ctx.addIssue({ code: "custom", message: data.bot_token.length ? "Bot token must not be blank" : "Bot token is required", path: ["bot_token"] });
+    }
     for (const field of CHANNEL_PLATFORMS[data.platform].fields) {
       const value = data[field.name]?.trim();
       if (field.required && !value) {

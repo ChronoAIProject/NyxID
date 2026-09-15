@@ -10,6 +10,7 @@ export const resourceSummarySchema = z.object({
   id: z.string(),
   name: z.string(),
   owner_id: z.string(),
+  auto_connected: z.boolean().optional(),
 });
 export const agentKeySummarySchema = z.object({
   id: z.string(),
@@ -20,6 +21,7 @@ export const agentKeySummarySchema = z.object({
   owner_name: z.string(),
   scopes: z.string(),
   allow_all_services: z.boolean(),
+  allow_auto_connected_services: z.boolean().optional(),
   allow_all_nodes: z.boolean(),
   allowed_service_ids: z.array(z.string()),
   allowed_node_ids: z.array(z.string()),
@@ -35,6 +37,7 @@ export const agentKeyOptionsSchema = z.object({
   keys: z.array(agentKeySummarySchema),
   services: z.array(resourceSummarySchema),
   nodes: z.array(resourceSummarySchema),
+  personal_owner_id: z.string().optional(),
   orgs: z.array(resourceSummarySchema),
 });
 export const agentKeyPreviewSchema = previewResponseSchema.extend({
@@ -67,6 +70,7 @@ const newKeySelectionSchema = createApiKeySchema
     allowed_service_ids: z.array(z.string()).default([]),
     allowed_node_ids: z.array(z.string()).default([]),
     allow_all_services: z.boolean().default(false),
+    allow_auto_connected_services: z.boolean().optional(),
     allow_all_nodes: z.boolean().default(false),
     scope_plan_digest: z.string().optional(),
   });
@@ -133,6 +137,7 @@ export function newKeySelection(form: CreateApiKeyFormData) {
       : (form.allowed_service_ids ?? []),
     allowed_node_ids: form.allow_all_nodes ? [] : (form.allowed_node_ids ?? []),
     allow_all_services: form.allow_all_services ?? false,
+    allow_auto_connected_services: form.allow_auto_connected_services ?? false,
     allow_all_nodes: form.allow_all_nodes ?? false,
     target_org_id: form.target_org_id,
     rate_limit_per_second: form.rate_limit_per_second,

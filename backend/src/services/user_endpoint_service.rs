@@ -13,7 +13,7 @@ use crate::services::url_validation::{
     reject_url_userinfo, validate_base_url, validate_optional_spec_url,
 };
 
-fn validate_endpoint_url(url: &str) -> AppResult<()> {
+pub(crate) fn validate_endpoint_url(url: &str) -> AppResult<()> {
     // Node-resolved endpoints carry an empty URL.
     if url.is_empty() {
         return Ok(());
@@ -41,7 +41,7 @@ fn validate_endpoint_url(url: &str) -> AppResult<()> {
     validate_base_url(url)
 }
 
-fn validate_openapi_spec_url(url: &str) -> AppResult<()> {
+pub(crate) fn validate_openapi_spec_url(url: &str) -> AppResult<()> {
     // Empty string is not accepted -- callers should pass None to clear.
     // `validate_optional_spec_url` enforces 2048-char ceiling + scheme +
     // cloud-metadata blocks. Deeper SSRF hardening happens at fetch time
@@ -139,7 +139,7 @@ fn validate_recommended_skills(skills: &[String]) -> AppResult<()> {
 }
 
 /// How the caller wants to treat `recommended_skills` on update.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub enum RecommendedSkillsUpdate {
     /// Leave existing value untouched.
     #[default]
@@ -213,7 +213,7 @@ pub async fn update_endpoint_in_session(
     Ok(())
 }
 
-fn build_endpoint_update(
+pub(crate) fn build_endpoint_update(
     url: Option<&str>,
     label: Option<&str>,
     openapi_spec_url: OpenApiSpecUrlUpdate<'_>,

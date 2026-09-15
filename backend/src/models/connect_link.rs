@@ -36,10 +36,12 @@ pub struct ConnectLink {
     pub requirement_id: Option<String>,
     #[serde(default)]
     pub reauthorize_user_service_id: Option<String>,
-    #[serde(default)]
-    pub required_scopes: Vec<String>,
     pub service_slug: String,
     pub service_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_platform_key: Option<bool>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
     pub label: Option<String>,
     pub requested_by: Option<String>,
     #[serde(default)]
@@ -154,13 +156,14 @@ mod tests {
     fn fixture() -> ConnectLink {
         let now = Utc::now();
         ConnectLink {
+            scopes: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             parent_session_id: None,
             requirement_id: None,
             reauthorize_user_service_id: None,
-            required_scopes: Vec::new(),
             service_slug: "api-github-pat".to_string(),
+            use_platform_key: None,
             service_id: uuid::Uuid::new_v4().to_string(),
             label: Some("Release automation".to_string()),
             requested_by: Some("codex-release".to_string()),

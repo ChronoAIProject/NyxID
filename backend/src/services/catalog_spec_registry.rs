@@ -24,6 +24,10 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "notion",
+        include_str!("../../specs/catalog/notion.openapi.json"),
+    ),
+    (
         "anthropic",
         include_str!("../../specs/catalog/anthropic.openapi.json"),
     ),
@@ -66,6 +70,18 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
         "google-ai",
         include_str!("../../specs/catalog/google-ai.openapi.json"),
+    ),
+    (
+        "google-calendar",
+        include_str!("../../specs/catalog/google-calendar.openapi.json"),
+    ),
+    (
+        "google-gmail",
+        include_str!("../../specs/catalog/google-gmail.openapi.json"),
+    ),
+    (
+        "google-drive",
+        include_str!("../../specs/catalog/google-drive.openapi.json"),
     ),
     (
         "lark",
@@ -123,6 +139,7 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
+    ("api-notion", "notion"),
     ("api-discord", "discord"),
     ("api-discord-bot", "discord-bot"),
     ("api-elevenlabs", "elevenlabs"),
@@ -133,6 +150,10 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-github", "github"),
     ("api-github-pat", "github"),
     ("api-google", "google"),
+    ("api-google-workspace", "google-workspace"),
+    ("api-google-calendar", "google-calendar"),
+    ("api-google-drive", "google-drive"),
+    ("api-google-gmail", "google-gmail"),
     ("api-lark", "lark"),
     ("api-lark-bot", "lark-bot"),
     ("api-microsoft", "microsoft-graph"),
@@ -155,7 +176,7 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
 
 static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
     LazyLock::new(|| {
-        HOSTED_SPEC_SOURCES
+        let mut specs: HashMap<_, _> = HOSTED_SPEC_SOURCES
             .iter()
             .map(|(key, source)| {
                 let parsed =
@@ -164,7 +185,26 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
                     });
                 (*key, Arc::new(parsed))
             })
-            .collect()
+            .collect();
+        // Workspace publishes the same operations as its individual products.
+        let mut workspace = (*specs["google-drive"]).clone();
+        workspace["info"]["title"] = "Google Workspace".into();
+        workspace["info"]["description"] =
+            "Google Drive, Calendar, and Gmail read/send operations using one Google OAuth client."
+                .into();
+        for key in ["google-calendar", "google-gmail"] {
+            workspace["paths"]
+                .as_object_mut()
+                .expect("Drive paths")
+                .extend(
+                    specs[key]["paths"]
+                        .as_object()
+                        .expect("Product paths")
+                        .clone(),
+                );
+        }
+        specs.insert("google-workspace", Arc::new(workspace));
+        specs
     });
 
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
@@ -217,7 +257,7 @@ mod tests {
 
     #[test]
     fn every_embedded_spec_parses_as_openapi_with_operations() {
-        for (key, _) in HOSTED_SPEC_SOURCES {
+        for key in PARSED_SPECS.keys() {
             let spec = spec_for_key(key).expect("registered spec");
             assert!(
                 spec.get("openapi").is_some(),
@@ -226,6 +266,26 @@ mod tests {
             let endpoints = openapi_parser::parse_openapi_spec_value(&spec)
                 .unwrap_or_else(|error| panic!("spec '{key}' failed to parse: {error:?}"));
             assert!(!endpoints.is_empty(), "spec '{key}' has no operations");
+        }
+    }
+
+    #[test]
+    fn google_workspace_is_the_union_of_drive_calendar_and_gmail() {
+        let workspace = spec_for_slug("api-google-workspace").unwrap();
+        let drive = spec_for_slug("api-google-drive").unwrap();
+        let calendar = spec_for_slug("api-google-calendar").unwrap();
+        let gmail = spec_for_slug("api-google-gmail").unwrap();
+        let paths = workspace["paths"].as_object().unwrap();
+        assert_eq!(
+            paths.len(),
+            drive["paths"].as_object().unwrap().len()
+                + calendar["paths"].as_object().unwrap().len()
+                + gmail["paths"].as_object().unwrap().len()
+        );
+        for spec in [drive, calendar, gmail] {
+            for (path, item) in spec["paths"].as_object().unwrap() {
+                assert_eq!(&paths[path], item);
+            }
         }
     }
 

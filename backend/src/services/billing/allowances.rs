@@ -23,6 +23,7 @@ pub const MAX_ALLOWANCE_TARGET_USERS: usize = 500;
 #[derive(Clone, Debug)]
 pub struct CreateAllowanceInput {
     pub service_ref: String,
+    pub metric: Option<BillingMetric>,
     pub quantity: i64,
     pub recurrence: AllowanceRecurrence,
     pub target_kind: BillingTargetKind,
@@ -33,6 +34,7 @@ pub struct CreateAllowanceInput {
 #[derive(Clone, Debug, Default)]
 pub struct UpdateAllowanceInput {
     pub service_ref: Option<String>,
+    pub metric: Option<BillingMetric>,
     pub quantity: Option<i64>,
     pub recurrence: Option<AllowanceRecurrence>,
     pub target_kind: Option<BillingTargetKind>,
@@ -53,7 +55,7 @@ pub async fn create_allowance(
     validate_quantity(input.quantity)?;
     validate_targets(db, input.target_kind, &input.target_user_ids).await?;
     let service = resolve_service(db, &input.service_ref).await?;
-    let metric = super::metric_resolution::effective_platform_metric(&service);
+    let metric = super::metric_resolution::allowance_metric(&service, input.metric)?;
     let now = Utc::now();
     let allowance = UsageAllowance {
         id: Uuid::new_v4().to_string(),
@@ -87,6 +89,7 @@ pub async fn update_allowance(
         .ok_or_else(|| AppError::NotFound("Usage allowance not found".to_string()))?;
     let service = match input.service_ref.as_deref() {
         Some(reference) => Some(resolve_service(db, reference).await?),
+        None if input.metric.is_some() => Some(resolve_service(db, &current.service_id).await?),
         None => None,
     };
     let quantity = input.quantity.unwrap_or(current.quantity);
@@ -119,7 +122,13 @@ pub async fn update_allowance(
         set.insert("is_active", is_active);
     }
     if let Some(service) = service {
-        let metric = super::metric_resolution::effective_platform_metric(&service);
+        let metric = if input.metric.is_none() && service.id == current.service_id {
+            // Full-form saves from older clients repeat the service reference
+            // without a metric. Preserve the allowance's existing unit.
+            current.metric
+        } else {
+            super::metric_resolution::allowance_metric(&service, input.metric)?
+        };
         set.insert("service_id", service.id);
         set.insert("service_slug", service.slug.clone());
         set.insert(

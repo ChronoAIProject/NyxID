@@ -215,7 +215,7 @@ describe("App Connect Link hosted page", () => {
     mocks.post.mockRejectedValue(
       new ApiError(404, {
         error: "not_found",
-        error_code: 12001,
+        error_code: 12101,
         message: "App connect link not found",
       }),
     );

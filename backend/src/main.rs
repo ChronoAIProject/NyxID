@@ -577,6 +577,10 @@ async fn main() {
         .await
         .expect("Failed to seed default services");
 
+    services::inference_service::backfill(&db)
+        .await
+        .expect("Failed to backfill inference metadata");
+
     // Seed the admin-managed platform vendor provisioning templates. Existing
     // rows are never overwritten so operators can edit or disable templates.
     services::platform_vendor_template_service::seed_default_templates(&db, "system")
@@ -998,6 +1002,20 @@ async fn main() {
     );
     spawn_broker_policy_refresh_task(state.clone());
 
+    let login_cleanup_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::oracle_login_profile_service::purge_expired(&login_cleanup_db).await
+            {
+                tracing::warn!(%error, "Oracle saved login cleanup failed");
+            }
+        }
+    });
+
     // Create rate limiters
     let global_rate_limiter = mw::rate_limit::create_rate_limiter(
         state.db.clone(),
@@ -1021,6 +1039,12 @@ async fn main() {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
+                if let Err(error) = services::auth_device_service::sweep_expired(&sweep_db).await {
+                    tracing::error!(
+                        error_code = error.error_code(),
+                        "Device login expiry sweep failed"
+                    );
+                }
                 if let Err(error) =
                     services::auth_agent_key_login_service::sweep_expired(&sweep_db).await
                 {
@@ -1150,6 +1174,25 @@ async fn main() {
                 .await
                 {
                     tracing::warn!("OAuth refresh sweep error: {e}");
+                }
+            }
+        });
+    }
+
+    if config.channel_poll_interval_secs > 0 {
+        let poll_state = state.clone();
+        let poll_interval = config.channel_poll_interval_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if services::channel_poll_service::sweep(&poll_state)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Channel poll sweep failed; retrying on the next tick");
                 }
             }
         });

@@ -29,6 +29,7 @@ pub struct KeyCreateActionRequest {
     pub name: String,
     pub platform: String,
     pub allowed_service_ids: Vec<String>,
+    pub allow_auto_connected_services: bool,
 }
 
 #[derive(Debug)]
@@ -64,6 +65,8 @@ struct KeyCreateFingerprint<'a> {
     allowed_service_ids: &'a [String],
     scopes: &'static str,
     allow_all_services: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_auto_connected_services: bool,
     allow_all_nodes: bool,
 }
 
@@ -102,7 +105,7 @@ fn normalize_request(request: KeyCreateActionRequest) -> AppResult<KeyCreateActi
         .into_iter()
         .map(|value| value.trim().to_string())
         .collect::<Vec<_>>();
-    if allowed_service_ids.is_empty() {
+    if allowed_service_ids.is_empty() && !request.allow_auto_connected_services {
         return Err(AppError::ValidationError(
             "key.create requires at least one exact allowed service id".to_string(),
         ));
@@ -129,6 +132,7 @@ fn normalize_request(request: KeyCreateActionRequest) -> AppResult<KeyCreateActi
         name,
         platform,
         allowed_service_ids,
+        allow_auto_connected_services: request.allow_auto_connected_services,
     })
 }
 
@@ -153,6 +157,7 @@ fn request_fingerprint(request: &KeyCreateActionRequest) -> AppResult<String> {
         allowed_service_ids: &request.allowed_service_ids,
         scopes: "proxy",
         allow_all_services: false,
+        allow_auto_connected_services: request.allow_auto_connected_services,
         allow_all_nodes: false,
     })
     .map_err(|error| AppError::Internal(format!("failed to fingerprint action: {error}")))?;
@@ -363,6 +368,7 @@ async fn create_reserved_key(
         Some(&request.allowed_service_ids),
         Some(&no_nodes),
         Some(false),
+        Some(request.allow_auto_connected_services),
         Some(false),
         None,
         None,
@@ -528,6 +534,7 @@ mod tests {
             name: "  coding agent  ".to_string(),
             platform: "codex".to_string(),
             allowed_service_ids: ids.iter().map(|value| (*value).to_string()).collect(),
+            allow_auto_connected_services: false,
         }
     }
 
@@ -690,6 +697,7 @@ mod tests {
             name: "coding-agent".to_string(),
             platform: "codex".to_string(),
             allowed_service_ids: vec![service_id.to_string()],
+            allow_auto_connected_services: false,
         }
     }
 

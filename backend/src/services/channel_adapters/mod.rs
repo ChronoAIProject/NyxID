@@ -3,8 +3,10 @@ pub mod lark;
 pub mod openclaw;
 pub mod slack;
 pub mod telegram;
+pub mod telegram_new;
 pub mod whatsapp;
 mod whatsapp_managed;
+pub mod x;
 
 use std::sync::Arc;
 
@@ -19,21 +21,33 @@ pub fn resolve_adapter(
     platform: &str,
     token_exchange_cache: &Arc<TokenExchangeCache>,
 ) -> AppResult<Box<dyn PlatformAdapter>> {
-    registered_adapters(token_exchange_cache).into_iter()
+    let adapters = registered_adapters(token_exchange_cache);
+    let supported = adapters
+        .iter()
+        .filter(|a| a.registration().enabled)
+        .map(|a| a.platform_id())
+        .collect::<Vec<_>>()
+        .join(", ");
+    adapters
+        .into_iter()
         .find(|adapter| adapter.platform_id() == platform)
-        .ok_or_else(|| AppError::ValidationError(format!(
-            "unsupported platform: {platform}. Supported: telegram, discord, lark, feishu, slack, whatsapp"
-        )))
+        .ok_or_else(|| {
+            AppError::ValidationError(format!(
+                "unsupported platform: {platform}. Supported: {supported}"
+            ))
+        })
 }
 
 pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn PlatformAdapter>> {
     vec![
         Box::new(telegram::TelegramAdapter),
+        Box::new(telegram_new::TelegramNewAdapter),
         Box::new(discord::DiscordAdapter),
         Box::new(lark::LarkFamilyAdapter::lark(cache.clone())),
         Box::new(lark::LarkFamilyAdapter::feishu(cache.clone())),
         Box::new(slack::SlackAdapter),
         Box::new(whatsapp::WhatsAppAdapter),
+        Box::new(x::XAdapter::default()),
         Box::new(openclaw::OpenClawAdapter),
     ]
 }
@@ -52,7 +66,7 @@ mod tests {
         };
         assert_eq!(
             message,
-            "unsupported platform: unknown. Supported: telegram, discord, lark, feishu, slack, whatsapp"
+            "unsupported platform: unknown. Supported: telegram, telegram-new, discord, lark, feishu, slack, whatsapp, x"
         );
         assert!(
             !resolve_adapter("openclaw", &Arc::new(TokenExchangeCache::new()))

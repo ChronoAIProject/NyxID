@@ -74,6 +74,7 @@ pub enum ScopePlanNodeGrant {
 pub struct ScopePlanServiceGrant {
     pub user_service_id: String,
     pub resource_owner: ScopePlanPrincipal,
+    pub auto_connected: bool,
     pub node_grant: ScopePlanNodeGrant,
 }
 
@@ -119,6 +120,7 @@ pub struct EffectiveScopePlan {
     pub intended_key_owner: ScopePlanPrincipal,
     pub services: Vec<ScopePlanServiceGrant>,
     pub allowed_service_ids: Vec<String>,
+    pub allow_auto_connected_services: bool,
     pub allowed_node_ids: Vec<String>,
     pub evaluated_at: String,
     pub normalized_grant_digest: String,
@@ -755,6 +757,7 @@ fn normalized_grant_digest(
     services: &[ScopePlanServiceGrant],
     allowed_service_ids: &[String],
     allowed_node_ids: &[String],
+    allow_auto_connected_services: bool,
 ) -> String {
     let mut hasher = Sha256::new();
     digest_field(&mut hasher, "nyxid-api-key-scope-plan-digest");
@@ -802,6 +805,11 @@ fn normalized_grant_digest(
     for node_id in allowed_node_ids {
         digest_field(&mut hasher, node_id);
     }
+    // An absent/false flag must preserve the v1 byte stream exactly.
+    if allow_auto_connected_services {
+        digest_field(&mut hasher, "allow_auto_connected_services");
+        digest_field(&mut hasher, "true");
+    }
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
@@ -814,6 +822,7 @@ async fn build_base_scope_plan(
     actor_user_id: &str,
     target_owner_id: Option<&str>,
     selected_service_ids: &[String],
+    allow_auto_connected_services: bool,
 ) -> AppResult<EffectiveScopePlan> {
     reject_duplicate_service_ids(selected_service_ids)?;
     let (actor, owner) = resolve_key_owner(db, actor_user_id, target_owner_id).await?;
@@ -823,7 +832,21 @@ async fn build_base_scope_plan(
     } else {
         selected_services_for_org_key(db, actor_user_id, &owner.id, selected_service_ids).await?
     };
+    if allow_auto_connected_services {
+        let rows = db
+            .collection::<UserService>(USER_SERVICES)
+            .find(doc! {
+                "user_id": &owner.id,
+                "source": crate::models::user_service::AUTO_PROVISION_SOURCE,
+                "is_active": true,
+            })
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+        selected.extend(rows);
+    }
     selected.sort_by(|left, right| left.id.cmp(&right.id));
+    selected.dedup_by(|left, right| left.id == right.id);
 
     let mut services = Vec::with_capacity(selected.len());
     let mut allowed_service_ids = Vec::with_capacity(selected.len());
@@ -845,6 +868,8 @@ async fn build_base_scope_plan(
         services.push(ScopePlanServiceGrant {
             user_service_id: service.id,
             resource_owner,
+            auto_connected: service.source.as_deref()
+                == Some(crate::models::user_service::AUTO_PROVISION_SOURCE),
             node_grant: if configured_node_ids.is_empty() {
                 ScopePlanNodeGrant::NotRequired
             } else {
@@ -855,6 +880,11 @@ async fn build_base_scope_plan(
         });
     }
 
+    // Keep explicit ids separate from the durable grant. The service list
+    // previews today's effective grant without turning implied ids into pins.
+    if allow_auto_connected_services {
+        allowed_service_ids = normalized_set(selected_service_ids, "selected_service_ids")?;
+    }
     let allowed_node_ids: Vec<String> = allowed_node_ids.into_iter().collect();
     let normalized_grant_digest = normalized_grant_digest(
         &actor,
@@ -862,6 +892,7 @@ async fn build_base_scope_plan(
         &services,
         &allowed_service_ids,
         &allowed_node_ids,
+        allow_auto_connected_services,
     );
 
     Ok(EffectiveScopePlan {
@@ -872,6 +903,7 @@ async fn build_base_scope_plan(
         intended_key_owner: owner,
         services,
         allowed_service_ids,
+        allow_auto_connected_services,
         allowed_node_ids,
         evaluated_at: Utc::now().to_rfc3339(),
         normalized_grant_digest,
@@ -897,10 +929,19 @@ pub async fn build_scope_plan(
     actor_user_id: &str,
     target_owner_id: Option<&str>,
     selected_service_ids: &[String],
+    allow_auto_connected_services: bool,
 ) -> AppResult<EffectiveScopePlan> {
-    build_base_scope_plan(db, actor_user_id, target_owner_id, selected_service_ids).await
+    build_base_scope_plan(
+        db,
+        actor_user_id,
+        target_owner_id,
+        selected_service_ids,
+        allow_auto_connected_services,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn build_scope_plan_with_operations(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
@@ -909,9 +950,22 @@ pub async fn build_scope_plan_with_operations(
     selected_service_ids: &[String],
     selected_operations: &[DurableOperationSelection],
     key_expires_at: Option<chrono::DateTime<Utc>>,
+    allow_auto_connected_services: bool,
 ) -> AppResult<EffectiveScopePlan> {
+    if allow_auto_connected_services && !selected_operations.is_empty() {
+        return Err(AppError::ValidationError(
+            "scheduled_invocation plans require exact service grants".into(),
+        ));
+    }
     if selected_operations.is_empty() {
-        return build_scope_plan(db, actor_user_id, target_owner_id, selected_service_ids).await;
+        return build_scope_plan(
+            db,
+            actor_user_id,
+            target_owner_id,
+            selected_service_ids,
+            allow_auto_connected_services,
+        )
+        .await;
     }
 
     let mut operation_service_ids: Vec<String> = selected_operations
@@ -931,8 +985,14 @@ pub async fn build_scope_plan_with_operations(
         ));
     }
 
-    let mut plan =
-        build_base_scope_plan(db, actor_user_id, target_owner_id, &submitted_service_ids).await?;
+    let mut plan = build_base_scope_plan(
+        db,
+        actor_user_id,
+        target_owner_id,
+        &submitted_service_ids,
+        allow_auto_connected_services,
+    )
+    .await?;
     let operations = durable_operation_grant_service::build_operation_plans(
         db,
         node_ws_manager,
@@ -990,6 +1050,7 @@ pub async fn verify_durable_scope_plan_precondition(
         allowed_service_ids,
         selected_operations,
         Some(key_expires_at),
+        false,
     )
     .await?;
     let submitted_services = normalized_set(allowed_service_ids, "allowed_service_ids")?;
@@ -1033,6 +1094,7 @@ pub async fn verify_scope_plan_precondition(
     allow_all_services: bool,
     allow_all_nodes: bool,
     expected_digest: &str,
+    allow_auto_connected_services: bool,
 ) -> AppResult<()> {
     if allow_all_services || allow_all_nodes {
         return Err(AppError::ApiKeyScopePlanStale(
@@ -1042,7 +1104,14 @@ pub async fn verify_scope_plan_precondition(
     }
 
     let target_owner_id = (key_owner_user_id != actor_user_id).then_some(key_owner_user_id);
-    let plan = build_scope_plan(db, actor_user_id, target_owner_id, allowed_service_ids).await?;
+    let plan = build_scope_plan(
+        db,
+        actor_user_id,
+        target_owner_id,
+        allowed_service_ids,
+        allow_auto_connected_services,
+    )
+    .await?;
     let submitted_services = normalized_set(allowed_service_ids, "allowed_service_ids")?;
     let submitted_nodes = normalized_set(allowed_node_ids, "allowed_node_ids")?;
 
@@ -1123,6 +1192,85 @@ mod tests {
             .expect("insert user");
     }
 
+    #[tokio::test]
+    async fn auto_connected_scope_plan_previews_implied_services_and_binds_flag() {
+        let db = crate::test_utils::connect_transaction_test_database("auto_connected_plan").await;
+        let actor = Uuid::new_v4().to_string();
+        insert_user(&db, &actor, UserType::Person).await;
+        let mut service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &actor,
+            "platform",
+            "ep",
+            None,
+            None,
+        );
+        service.source = Some(crate::models::user_service::AUTO_PROVISION_SOURCE.into());
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let plan = build_scope_plan(&db, &actor, None, &[], true)
+            .await
+            .unwrap();
+        assert!(plan.allow_auto_connected_services);
+        assert!(plan.allowed_service_ids.is_empty());
+        assert_eq!(plan.services.len(), 1);
+        assert!(plan.services[0].auto_connected);
+        assert_eq!(plan.services[0].user_service_id, service.id);
+        verify_scope_plan_precondition(
+            &db,
+            &actor,
+            &actor,
+            &[],
+            &[],
+            false,
+            false,
+            &plan.normalized_grant_digest,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            verify_scope_plan_precondition(
+                &db,
+                &actor,
+                &actor,
+                &[],
+                &[],
+                false,
+                false,
+                &plan.normalized_grant_digest,
+                false
+            )
+            .await,
+            Err(AppError::ApiKeyScopePlanStale(_))
+        ));
+        let created = key_service::create_api_key_with_scope_authorization(
+            &db,
+            &actor,
+            Some(&actor),
+            "planned platform key",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            Some(&plan.normalized_grant_digest),
+        )
+        .await
+        .unwrap();
+        assert!(created.allow_auto_connected_services);
+        db.drop().await.unwrap();
+    }
+
     #[test]
     fn digest_is_stable_for_normalized_grants() {
         let actor = principal("actor", ScopePlanOwnerType::Personal);
@@ -1130,6 +1278,7 @@ mod tests {
         let services = vec![ScopePlanServiceGrant {
             user_service_id: "service-a".to_string(),
             resource_owner: owner.clone(),
+            auto_connected: false,
             node_grant: ScopePlanNodeGrant::Required {
                 node_ids: vec!["node-a".to_string(), "node-b".to_string()],
             },
@@ -1140,6 +1289,7 @@ mod tests {
             &services,
             &["service-a".to_string()],
             &["node-a".to_string(), "node-b".to_string()],
+            false,
         );
         let second = normalized_grant_digest(
             &actor,
@@ -1147,7 +1297,21 @@ mod tests {
             &services,
             &["service-a".to_string()],
             &["node-a".to_string(), "node-b".to_string()],
+            false,
         );
+        assert_eq!(
+            first,
+            "sha256:5ff60755875b599816489da7c081245ed3fe7a76040e882d3b4b93b6e526dea2"
+        );
+        let with_platform = normalized_grant_digest(
+            &actor,
+            &owner,
+            &services,
+            &["service-a".into()],
+            &["node-a".into(), "node-b".into()],
+            true,
+        );
+        assert_ne!(first, with_platform);
         assert_eq!(first, second);
         assert!(first.starts_with("sha256:"));
         assert_eq!(first.len(), 71);
@@ -1160,6 +1324,7 @@ mod tests {
         let embedded_boundary = vec![ScopePlanServiceGrant {
             user_service_id: "service-a".to_string(),
             resource_owner: owner.clone(),
+            auto_connected: false,
             node_grant: ScopePlanNodeGrant::Required {
                 node_ids: vec![
                     "service-b".to_string(),
@@ -1172,19 +1337,21 @@ mod tests {
             ScopePlanServiceGrant {
                 user_service_id: "service-a".to_string(),
                 resource_owner: owner.clone(),
+                auto_connected: false,
                 node_grant: ScopePlanNodeGrant::Required { node_ids: vec![] },
             },
             ScopePlanServiceGrant {
                 user_service_id: "service-b".to_string(),
                 resource_owner: owner.clone(),
+                auto_connected: false,
                 node_grant: ScopePlanNodeGrant::NotRequired,
             },
         ];
         let service_ids = vec!["service-a".to_string(), "service-b".to_string()];
 
         assert_ne!(
-            normalized_grant_digest(&actor, &owner, &embedded_boundary, &service_ids, &[]),
-            normalized_grant_digest(&actor, &owner, &separate_service, &service_ids, &[])
+            normalized_grant_digest(&actor, &owner, &embedded_boundary, &service_ids, &[], false,),
+            normalized_grant_digest(&actor, &owner, &separate_service, &service_ids, &[], false,)
         );
     }
 
@@ -1261,7 +1428,7 @@ mod tests {
             .expect("insert bindings");
 
         let selected = vec![routed_service_id.clone(), direct_service_id.clone()];
-        let plan = build_scope_plan(&db, &actor_id, None, &selected)
+        let plan = build_scope_plan(&db, &actor_id, None, &selected, false)
             .await
             .expect("build plan");
 
@@ -1311,6 +1478,7 @@ mod tests {
             Some(&plan.allowed_service_ids),
             Some(&plan.allowed_node_ids),
             Some(false),
+            None,
             Some(false),
             None,
             None,
@@ -1338,6 +1506,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(&plan.normalized_grant_digest),
         )
         .await
@@ -1355,6 +1524,7 @@ mod tests {
             false,
             false,
             &plan.normalized_grant_digest,
+            false,
         )
         .await
         .expect_err("unplanned node grant must be rejected");
@@ -1367,7 +1537,7 @@ mod tests {
             )
             .await
             .expect("deactivate binding");
-        let changed = build_scope_plan(&db, &actor_id, None, &selected)
+        let changed = build_scope_plan(&db, &actor_id, None, &selected, false)
             .await
             .expect("rebuild after binding deletion");
         assert_eq!(changed.allowed_node_ids, vec![node_a_id]);
@@ -1381,6 +1551,7 @@ mod tests {
             Some(&actor_id),
             &created.id,
             Some("must-not-commit"),
+            None,
             None,
             None,
             None,
@@ -1432,9 +1603,15 @@ mod tests {
             .await
             .expect("insert membership");
 
-        let plan = build_scope_plan(&db, &actor_id, None, std::slice::from_ref(&service_id))
-            .await
-            .expect("permitted org service is planable");
+        let plan = build_scope_plan(
+            &db,
+            &actor_id,
+            None,
+            std::slice::from_ref(&service_id),
+            false,
+        )
+        .await
+        .expect("permitted org service is planable");
         assert_eq!(plan.services[0].resource_owner.id, org_id);
 
         db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
@@ -1444,9 +1621,15 @@ mod tests {
             )
             .await
             .expect("narrow membership");
-        let err = build_scope_plan(&db, &actor_id, None, std::slice::from_ref(&service_id))
-            .await
-            .expect_err("narrowed permission must deny the service");
+        let err = build_scope_plan(
+            &db,
+            &actor_id,
+            None,
+            std::slice::from_ref(&service_id),
+            false,
+        )
+        .await
+        .expect_err("narrowed permission must deny the service");
         assert!(matches!(err, AppError::ApiKeyScopePlanDenied(_)));
     }
 
@@ -1495,6 +1678,7 @@ mod tests {
             &actor_id,
             Some(&org_id),
             std::slice::from_ref(&org_service_id),
+            false,
         )
         .await
         .expect("org admin can plan org-owned key");
@@ -1508,19 +1692,26 @@ mod tests {
             &actor_id,
             Some(&org_id),
             std::slice::from_ref(&personal_service_id),
+            false,
         )
         .await
         .expect_err("org key cannot include personal resource");
         assert!(matches!(err, AppError::ApiKeyScopePlanDenied(_)));
 
-        let err = build_scope_plan(&db, &actor_id, Some(&other_person_id), &[])
+        let err = build_scope_plan(&db, &actor_id, Some(&other_person_id), &[], false)
             .await
             .expect_err("person cannot be target_org_id");
         assert!(matches!(err, AppError::ApiKeyScopePlanOwnerUnsupported(_)));
         let missing_id = Uuid::new_v4().to_string();
-        let err = build_scope_plan(&db, &actor_id, None, std::slice::from_ref(&missing_id))
-            .await
-            .expect_err("missing service is typed");
+        let err = build_scope_plan(
+            &db,
+            &actor_id,
+            None,
+            std::slice::from_ref(&missing_id),
+            false,
+        )
+        .await
+        .expect_err("missing service is typed");
         assert!(matches!(err, AppError::ApiKeyScopePlanNotFound(_)));
 
         let missing_node_id = Uuid::new_v4().to_string();
@@ -1536,6 +1727,7 @@ mod tests {
             &actor_id,
             Some(&org_id),
             std::slice::from_ref(&org_service_id),
+            false,
         )
         .await
         .expect_err("missing configured node is unresolved");

@@ -1504,7 +1504,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)] // env_lock serializes env mutation across single-thread test; held across await by design
     async fn inject_secret_env_reads_from_env() {
-        let _guard = crate::test_support::env_lock().lock().unwrap();
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         // SAFETY: env mutation is serialized by env_lock and this test runs on one thread.
         unsafe {
             std::env::set_var("NYXID_RCI_TEST_SECRET", "Bearer sk-env-rci");
@@ -1583,7 +1585,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)] // env_lock serializes env mutation across single-thread test; held across await by design
     async fn inject_org_flag_resolves_correctly() {
-        let _guard = crate::test_support::env_lock().lock().unwrap();
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         // SAFETY: env mutation is serialized by env_lock and this test runs on one thread.
         unsafe {
             std::env::set_var("NYXID_WIZARD_NO_OPEN", "1");
@@ -1666,7 +1670,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)] // env_lock serializes env mutation across single-thread test; held across await by design
     async fn inject_browser_wizard_opens_url_and_polls() {
-        let _guard = crate::test_support::env_lock().lock().unwrap();
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         // SAFETY: env mutation is serialized by env_lock and this test runs on one thread.
         unsafe {
             std::env::set_var("NYXID_WIZARD_NO_OPEN", "1");
@@ -1723,7 +1729,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)] // env_lock serializes env mutation across single-thread test; held across await by design
     async fn inject_browser_wizard_secret_not_in_terminal() {
-        let _guard = crate::test_support::env_lock().lock().unwrap();
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         // SAFETY: env mutation is serialized by env_lock and this test runs on one thread.
         unsafe {
             std::env::set_var("NYXID_WIZARD_NO_OPEN", "1");

@@ -12,7 +12,7 @@ Before running anything, observe these constraints:
 
 - **Default to the `nyxid` CLI installer.** "Install NyxID" means install the CLI client unless the user explicitly asks to run their own backend/server.
 - **Do not run Docker, `docker compose`, or backend setup from `docs/SETUP.md`** unless the user explicitly asks to self-host.
-- **Do not run `nyxid login`.** The user picks the NyxID instance and enters credentials themselves.
+- **Installation alone does not authorize login or credential access.** After successful installation, offer the optional connection in Step 3. If the user chooses it, resolve their selected NyxID instance through the normal human-approved login flow.
 - **Do not ask the user for NyxID credentials, API keys, tokens, or invite codes.** The CLI handles credential entry interactively when the user runs it.
 - **Do not print secrets, environment variables, or credential files** at any point during install.
 - **Do not use `sudo`** unless the user explicitly asks for a system-wide install. The default install is fully user-scoped under `~/.local/`.
@@ -89,10 +89,28 @@ export PATH="$HOME/.local/bin:$PATH"
 After install, verify:
 
 ```bash
-nyxid doctor
+nyxid --version
 ```
 
 ### Step 2 — Place the skill files in your agent's skill directory
+
+For **Codex / Codex CLI**, use the managed installer and verify registration:
+
+```bash
+nyxid ai-setup install --tool codex
+nyxid ai-setup status
+test -f "$HOME/.agents/skills/nyxid/SKILL.md"
+```
+
+The current documented Codex user skill directory is `~/.agents/skills/`.
+`CODEX_HOME` selects Codex configuration and credential storage, not this skill
+directory. NyxID conservatively updates existing managed legacy installations.
+If an older CLI only wrote `~/.codex/skills/nyxid/`, link that managed directory
+into `~/.agents/skills/nyxid/` when the destination does not exist. Codex supports
+symlinked skill directories. Never replace an unrelated existing path. Verify
+the canonical path above, then reload Codex if its skill list is already cached.
+
+The remaining manual instructions apply to other runtimes or manual Codex installs.
 
 A Nyx skill is a folder of markdown + helper scripts:
 
@@ -107,7 +125,8 @@ Copy the entire `skills/nyxid/` directory into wherever your runtime loads skill
 
 - **Claude Code:** `~/.claude/skills/nyxid/`
 - **OpenClaw / clawdbot:** managed through the platform's skill registry — the `metadata.openclaw` / `metadata.clawdbot` block in `SKILL.md` is consumed automatically on registration
-- **Cursor / Codex / other runtimes:** consult your runtime's skills or instructions documentation
+- **Codex / Codex CLI:** `~/.agents/skills/nyxid/`
+- **Cursor / other runtimes:** consult your runtime's skills or instructions documentation
 
 Sparse-checkout fetch (preferred — pulls only the skill files):
 
@@ -133,22 +152,38 @@ If your runtime prefers per-file fetches, pull each file from `https://raw.githu
 
 After copying, reload or re-index your agent if it caches its skill list.
 
-### Step 3 — Hand off to the user for login
+### Step 3 — Offer the optional Codex connection
 
-The agent **must not** run `nyxid login` on the user's behalf — the user chooses the NyxID instance.
+Only after verifying the CLI and skills, proactively ask:
 
-Print a message to the user similar to this:
+> NyxID is installed. Would you like to upload and save your existing Codex
+> credentials in your NyxID account so compatible AI features can use them?
+> Choose Connect or Skip. API-key reuse uses paid OpenAI API access; ChatGPT
+> OAuth requires separate authorization to preserve local Codex.
 
-> The Nyx skill is installed. To finish setup, log in to your NyxID instance:
->
-> ```
-> nyxid login --base-url <URL>
-> ```
->
-> - Hosted instance: `https://nyx-api.chrono-ai.fun`
-> - Self-hosted: typically `http://localhost:3001` for a local Docker stack
->
-> If you don't have an account yet, register at <https://nyx.chrono-ai.fun/register> (an invite code may be required during early access).
+Declining or cancelling completes installation successfully. Do not inspect
+Codex configuration, credentials, or the OS credential store. Noninteractive
+installation finishes without waiting; the surrounding conversation may offer
+this optional step afterward. Generic unattended flags are not credential
+consent. Failed installation must not start this step.
+
+Check `nyxid provider connect-codex --help` before invoking the helper. The
+published `v0.15.0` predates this operation, so version text alone is insufficient.
+If unavailable, offer an update to a supporting release or separate **OpenAI
+Codex** authorization in **AI Services**. Installation remains successful.
+
+After Connect, follow the [credential connection procedure](../docs/CODEX_CONNECTION.md):
+resolve the chosen instance with normal human-approved login, inspect redacted
+status, show the live account and destination, and obtain separate explicit
+transfer approval. Existing connections require approval of their ID **and
+version**. Only the dedicated local helper may read supported credential files;
+raw credentials must never enter the conversation, arguments, logs or clipboard.
+Report AI access ready only when the helper returns `usable` after a completed
+request. Skip or unsupported storage always leaves the installation usable.
+
+Connect later with `nyxid provider connect-codex`; skip explicitly with
+`nyxid provider connect-codex --skip`. The website recommendation must ship with
+a compatible CLI release and backend deployment; see the release checklist.
 
 ---
 

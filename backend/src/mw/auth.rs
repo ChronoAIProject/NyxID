@@ -454,6 +454,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
     matches!(
         segments.as_slice(),
         ["providers", "callback"]
+            | ["providers", "codex-connection"]
             | ["providers", _, "callback"]
             | ["providers", _, "connect", "oauth"]
     )
@@ -638,7 +639,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                         auth_method: AuthMethod::ApiKey,
                                         allow_all_services: api_key.allow_all_services,
                                         allow_all_nodes: api_key.allow_all_nodes,
-                                        allowed_service_ids: api_key.allowed_service_ids.clone(),
+                                        allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(&state.db, &api_key).await?,
                                         resource_uris: None,
                                         allowed_node_ids: api_key.allowed_node_ids.clone(),
                                         api_key_id: Some(api_key.id.clone()),
@@ -857,9 +858,31 @@ impl FromRequestParts<AppState> for AuthUser {
                         (true, true, vec![], vec![], None, None)
                     };
 
+                    let session_id = if auth_method == AuthMethod::AccessToken
+                        && claims.client_id.is_none()
+                    {
+                        if let Some(id) = claims.sid.as_deref() {
+                            let id = Uuid::parse_str(id)
+                                .map_err(|_| AppError::Unauthorized("Invalid session".into()))?;
+                            let live = state.db.collection::<Session>(SESSIONS).find_one(doc! {
+                                "_id": id.to_string(), "user_id": &user_id_str, "revoked": false,
+                                "expires_at": {"$gt": bson::DateTime::from_chrono(chrono::Utc::now())}
+                            }).await?;
+                            if live.is_none() {
+                                return Err(AppError::Unauthorized(
+                                    "Session expired or revoked".into(),
+                                ));
+                            }
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     return Ok(AuthUser {
                         user_id,
-                        session_id: None,
+                        session_id,
                         scope: claims.scope.clone(),
                         acting_client_id: claims.act.map(|a| a.sub),
                         oauth_client_id: claims.client_id.clone(),
@@ -1020,7 +1043,9 @@ impl FromRequestParts<AppState> for AuthUser {
                     auth_method: AuthMethod::ApiKey,
                     allow_all_services: key.allow_all_services,
                     allow_all_nodes: key.allow_all_nodes,
-                    allowed_service_ids: key.allowed_service_ids.clone(),
+                    allowed_service_ids:
+                        crate::services::key_service::effective_allowed_service_ids(&state.db, &key)
+                            .await?,
                     resource_uris: None,
                     allowed_node_ids: key.allowed_node_ids.clone(),
                     api_key_id: Some(key.id.clone()),
@@ -2019,6 +2044,7 @@ mod tests {
             allowed_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -2388,6 +2414,9 @@ mod tests {
                 is_active: true,
                 credential_mode: "both".to_string(),
                 token_endpoint_auth_method: "client_secret_post".to_string(),
+                token_request_encoding: None,
+                oauth_request_headers: Default::default(),
+                supports_oauth_scopes: true,
                 extra_auth_params: None,
                 device_code_format: "rfc8628".to_string(),
                 client_id_param_name: None,

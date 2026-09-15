@@ -737,13 +737,14 @@ async fn app_connect_links_db_scope_repair_reuses_connection_and_provider_scope_
         child.link.reauthorize_user_service_id.as_ref(),
         Some(&service.id)
     );
-    assert_eq!(child.link.required_scopes, vec!["repo"]);
+    assert_eq!(child.link.scopes, vec!["repo"]);
     let authorization = super::super::connect_links::complete_connect_link(
         State(f.state.clone()),
         human(&f),
         peer(),
         HeaderMap::new(),
         Json(super::super::connect_links::CompleteConnectLinkRequest {
+            use_platform_key: None,
             token: child.raw_token,
             credential: None,
             endpoint_url: None,

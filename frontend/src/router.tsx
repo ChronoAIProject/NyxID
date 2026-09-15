@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { managedConnectPlatform } from "@/lib/channel-platforms";
 import {
   createRouter,
   createRoute,
@@ -19,9 +20,12 @@ import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { parseAuthDeviceSearch } from "@/schemas/auth-device";
+import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
 
 import {
   LandingPage,
+  NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
   RegisterPage,
@@ -152,6 +156,14 @@ const loginRoute = createRoute({
   component: LoginPage,
 });
 
+const nyxbotOnboardingRoute = createRoute({
+  path: "/nyxbot/onboarding",
+  getParentRoute: () => rootRoute,
+  validateSearch: (search: Record<string, unknown>) =>
+    nyxbotSearchSchema.parse(search),
+  component: NyxbotOnboardingPage,
+});
+
 const registerRoute = createRoute({
   path: "/register",
   getParentRoute: () => authLayout,
@@ -262,14 +274,14 @@ const cliPairRoute = createRoute({
 export const loginAgentKeyRoute = createRoute({
   path: "/login/agent-key",
   getParentRoute: () => rootRoute,
-  validateSearch: (): Record<string, never> => ({}),
+  validateSearch: parseAuthDeviceSearch,
   component: LoginAgentKeyPage,
 });
 
-const loginDeviceRoute = createRoute({
+export const loginDeviceRoute = createRoute({
   path: "/login/device",
   getParentRoute: () => rootRoute,
-  validateSearch: (): Record<string, never> => ({}),
+  validateSearch: parseAuthDeviceSearch,
   component: LoginDevicePage,
 });
 
@@ -283,6 +295,14 @@ const appConnectLinkRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/connect/app/$linkId",
   component: AppConnectLinkPage,
+});
+
+export const loginCodeRoute = createRoute({
+  path: "/login/code",
+  getParentRoute: () => rootRoute,
+  // This page mints a new login code; it has no code input to prefill.
+  validateSearch: (): Record<string, never> => ({}),
+  component: () => <LoginAgentKeyPage mint />,
 });
 
 const connectLinkRoute = createRoute({
@@ -732,7 +752,7 @@ const apiKeyDetailRoute = createRoute({
 
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
-  validateSearch: (search: Record<string, unknown>): { connect?: "whatsapp"; label?: string; target_org_id?: string } => ({ connect: search.connect === "whatsapp" ? "whatsapp" : undefined, label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined, target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined }),
+  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string } => ({ connect: managedConnectPlatform(search.connect), label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined, target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined }),
   getParentRoute: () => dashboardLayout,
   component: ChannelBotsPage,
 });
@@ -921,6 +941,7 @@ const adminFeatureFlagsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   landingRoute,
+  nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
   oauthLaunchingRoute,
@@ -936,6 +957,7 @@ const routeTree = rootRoute.addChildren([
   cliAuthRoute,
   cliPairRoute,
   loginDeviceRoute,
+  loginCodeRoute,
   loginAgentKeyRoute,
   appConnectLinkRoute,
   appConnectStartRoute,

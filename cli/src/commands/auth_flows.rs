@@ -138,7 +138,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn register_uppercases_invite_code_and_posts() {
-        let _guard = crate::test_support::env_lock().lock().expect("env lock");
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/auth/register"))
@@ -175,7 +177,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn reset_password_posts_token_and_password() {
-        let _guard = crate::test_support::env_lock().lock().expect("env lock");
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/auth/reset-password"))

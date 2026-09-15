@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
-import { api, apiFetch, ApiError } from "@/lib/api-client";
+import { api, apiClient, apiFetch, ApiError } from "@/lib/api-client";
 import { SsePayloadDecoder } from "@/lib/assistant/sse-frame-normalizer";
 import {
   managedBootstrapSchema,
   managedCompleteSchema,
+  managedOAuthStartSchema,
+  oauthConnectionCompleteSchema,
   type ManagedCompleteInput,
 } from "@/schemas/channel-managed";
 import type { CreateChannelBotResponse } from "@/types/channels";
@@ -25,7 +27,7 @@ export function useManagedOnboarding(platform: string, enabled = true) {
 }
 
 const progressSchema = z.object({
-  stage: z.enum(["exchanging", "subscribing", "registering"]).optional(),
+  stage: z.enum(["exchanging", "subscribing", "registering", "verifying"]).optional(),
   error: z.string().optional(),
   message: z.string().optional(),
   error_code: z.number().optional(),
@@ -58,7 +60,7 @@ export async function completeManagedOnboarding(
     return (await response.json()) as CreateChannelBotResponse;
   if (!response.body)
     throw new Error(
-      "Meta onboarding response was interrupted. Check your bot list before reconnecting.",
+      "Onboarding response was interrupted. Check your bot list before reconnecting.",
     );
   const decoder = new SsePayloadDecoder();
   const reader = response.body.getReader();
@@ -79,12 +81,28 @@ export async function completeManagedOnboarding(
       }
       if (done)
         throw new Error(
-          "Meta onboarding response was interrupted. Check your bot list before reconnecting.",
+          "Onboarding response was interrupted. Check your bot list before reconnecting.",
         );
     }
   } finally {
     reader.releaseLock();
   }
+}
+
+export async function startManagedOAuth(platform: string, label: string, orgId: string | null, signal: AbortSignal) {
+  return managedOAuthStartSchema.parse(await apiClient(
+    `/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/start`,
+    { method: "POST", body: { label: label.trim(), ...(orgId ? { target_org_id: orgId } : {}) }, signal },
+  ));
+}
+
+export async function completeManagedOAuth(platform: string, input: z.infer<typeof oauthConnectionCompleteSchema>, signal: AbortSignal, botId?: string) {
+  const body = oauthConnectionCompleteSchema.parse(input);
+  if (botId) {
+    await apiClient(`/channel-bots/${encodeURIComponent(botId)}/reconnect`, { method: "POST", body: { connection_id: body.connection_id }, signal });
+    return { id: botId, platform } as CreateChannelBotResponse;
+  }
+  return apiClient<CreateChannelBotResponse>(`/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`, { method: "POST", body, signal });
 }
 
 export function useReregisterChannelBot() {

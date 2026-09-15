@@ -127,6 +127,22 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `BILLING_FAIL_CLOSED` | `false` | Incident kill switch. When `BILLING_ENABLED=true`, rejects billable forwarding even when Lago is healthy; when billing is disabled it has no effect. |
 | `BILLING_RESALE_ENABLED` | `false` | Explicit opt-in for the dormant catalog resale layer. Resale still also requires `ServiceBilling.resale_billable=true` and final `CredentialClass::NyxidManagedMaster`. |
 
+Platform-key access and lane pricing add no environment variables. The existing
+`PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` / `PLATFORM_SERVICE_RATE_LIMIT_BURST`
+gate applies to all final platform-key traffic, including provider-linked services.
+Restricted grants are checked against the live catalog on every execution.
+
+`billing.byok_pricing` and `billing.platform_key_pricing` select independent prices
+by final credential class. With either lane present, a missing lane is free and a
+synced matching lane supersedes legacy platform pricing. Pending/failed matching
+lanes use legacy pricing until synchronization succeeds. No lanes keeps legacy
+behavior. `NoAuth` has no lane charge. The existing billing feature flag, wallet
+rollout, Lago configuration and reconcile interval still govern charging and sync.
+Each lane owns `platform_svc_{slug}_byok` or `platform_svc_{slug}_pk` on
+`LAGO_PLAN_CODE`; clearing persists cleanup until both charge and cache are removed.
+Resale is unchanged and independently gated by `BILLING_RESALE_ENABLED`.
+See [platform keys and inference](PLATFORM_KEYS_AND_INFERENCE.md).
+
 ### Billing flag matrix
 
 `BILLING_ENABLED`, `BILLING_RESALE_ENABLED`, and `BILLING_FAIL_CLOSED` are independent. `BILLING_ENABLED` controls platform metering, wallet provisioning, and the reservation gate; it does not implicitly enable catalog resale. `BILLING_RESALE_ENABLED` controls only the resale ledger layer, and `BILLING_FAIL_CLOSED` is consulted only when `BILLING_ENABLED=true`.
@@ -367,7 +383,7 @@ The approval system works without Telegram -- users can always approve/reject vi
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OAUTH_REFRESH_SWEEP_INTERVAL_SECS` | `600` (10 min) | Interval between proactive OAuth refresh sweeps. `0` disables the sweep (lazy proxy-time refresh still applies). |
+| `OAUTH_REFRESH_SWEEP_INTERVAL_SECS` | `600` (10 min) | Interval between proactive OAuth refresh sweeps. Also deletes channel-started `pending_auth` connections older than one hour. `0` disables both tasks (lazy proxy-time refresh still applies). |
 | `CONNECTION_EXPIRY_NOTIFICATIONS` | `true` | Sends a one-time notification when an OAuth connection changes from healthy to unusable. Audit events are always recorded. |
 | `OAUTH_REFRESH_SWEEP_WINDOW_SECS` | `900` (15 min) | How far ahead the sweep looks for expiring access tokens. Keep larger than the proxy-time 5-minute refresh buffer so the sweep wins for idle services. |
 
@@ -477,6 +493,7 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
+| `CHANNEL_POLL_INTERVAL_SECS` | `30` | Interval for the generic channel poll sweep; `0` disables it. Only polling adapters participate. X has a 60-second minimum per bot; provider backoff and MongoDB leases can defer the next poll. Webhook channels are unaffected. |
 
 ## Oracle Relay
 

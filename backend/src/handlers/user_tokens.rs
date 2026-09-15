@@ -877,6 +877,7 @@ async fn generic_oauth_callback_impl(
                                 "service_id": &view.link.service_id,
                                 "service_slug": &view.link.service_slug,
                                 "user_service_id": &view.link.completed_user_service_id,
+                                "scopes": &view.link.scopes,
                             })),
                             auth_user.as_ref().and_then(|user| user.ip_address.clone()),
                             auth_user.as_ref().and_then(|user| user.user_agent.clone()),
@@ -1653,6 +1654,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -2506,13 +2510,15 @@ mod tests {
         let now = Utc::now();
         db.collection::<ConnectLink>(CONNECT_LINKS)
             .insert_one(ConnectLink {
+                scopes: Vec::new(),
                 id: link_id.clone(),
                 user_id: user_id.clone(),
                 parent_session_id: None,
                 requirement_id: None,
                 reauthorize_user_service_id: None,
-                required_scopes: Vec::new(),
+
                 service_slug: "provider-service".to_string(),
+                use_platform_key: None,
                 service_id: Uuid::new_v4().to_string(),
                 label: None,
                 requested_by: None,
@@ -2999,6 +3005,7 @@ mod tests {
         let endpoint_id = Uuid::new_v4().to_string();
         let mut provider = test_provider_config(&provider_id);
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
             auth: "basic".to_string(),

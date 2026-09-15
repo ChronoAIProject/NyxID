@@ -1,3 +1,4 @@
+import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { useRef, useState } from "react";
 import { Check, Copy, KeyRound, RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -54,9 +55,10 @@ const apiKeySnapshotSchema = z
     platform: z.string().min(1).max(100),
     scopes: z.literal("proxy"),
     is_active: z.literal(true),
-    allowed_service_ids: z.array(actionControlIdentitySchema).min(1).max(64),
+    allowed_service_ids: z.array(actionControlIdentitySchema).max(64),
     allowed_node_ids: z.array(actionControlIdentitySchema).length(0),
     allow_all_services: z.literal(false),
+    allow_auto_connected_services: z.boolean().optional(),
     allow_all_nodes: z.literal(false),
   })
   .passthrough();
@@ -209,6 +211,7 @@ export interface AssistantKeyCreateParams {
   readonly name: string;
   readonly platform: string;
   readonly allowedServiceIds: readonly string[];
+  readonly allowAutoConnectedServices?: boolean;
 }
 
 export function AssistantKeyCreateDialog({
@@ -224,6 +227,17 @@ export function AssistantKeyCreateDialog({
   readonly params: AssistantKeyCreateParams;
   readonly onComplete: (keyId: string) => void;
 }) {
+  const [platformGrant, setPlatformGrant] = useState(
+    params.allowAutoConnectedServices,
+  );
+  const [platformIds, setPlatformIds] = useState<readonly string[] | undefined>(
+    params.allowedServiceIds,
+  );
+  const reviewedParams = {
+    ...params,
+    allowedServiceIds: platformIds,
+    allowAutoConnectedServices: platformGrant,
+  };
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -282,6 +296,8 @@ export function AssistantKeyCreateDialog({
         snapshot.id !== effect.resource.keyId ||
         snapshot.name !== expected.name ||
         snapshot.platform !== expected.platform ||
+        (snapshot.allow_auto_connected_services ?? false) !==
+          (expected.allowAutoConnectedServices ?? false) ||
         !sameStringSet(snapshot.allowed_service_ids, expected.allowedServiceIds)
       ) {
         throw new Error("NyxID key verification did not match this action.");
@@ -304,7 +320,7 @@ export function AssistantKeyCreateDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const expected = keyCreateActionParamsSchema.parse(params);
+      const expected = keyCreateActionParamsSchema.parse(reviewedParams);
       await verifyAllowedServices(expected.allowedServiceIds);
       const response = assistantKeyCreateResponseSchema.parse(
         await api.post<unknown>("/assistant/actions/key-create", {
@@ -312,6 +328,7 @@ export function AssistantKeyCreateDialog({
           name: expected.name,
           platform: expected.platform,
           allowedServiceIds: [...expected.allowedServiceIds],
+          allowAutoConnectedServices: expected.allowAutoConnectedServices,
         }),
       );
       setResult(response);
@@ -327,7 +344,7 @@ export function AssistantKeyCreateDialog({
   async function retryVerification() {
     if (!result) return;
     try {
-      const expected = keyCreateActionParamsSchema.parse(params);
+      const expected = keyCreateActionParamsSchema.parse(reviewedParams);
       await verifyCreatedKey(result, expected);
     } catch (caught) {
       setError(
@@ -381,7 +398,7 @@ export function AssistantKeyCreateDialog({
             <div className="space-y-2">
               <span className="text-muted-foreground">Allowed services</span>
               <div className="flex flex-wrap gap-1.5">
-                {params.allowedServiceIds.map((serviceId) => (
+                {(platformIds ?? params.allowedServiceIds).map((serviceId) => (
                   <Badge
                     key={serviceId}
                     variant="secondary"
@@ -393,11 +410,20 @@ export function AssistantKeyCreateDialog({
               </div>
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Proxy access only. All services outside this list and every node
-              are denied.
+              Proxy access follows these service selections. Node access is denied.
             </p>
           </div>
         ) : null}
+
+        {!result && (
+          <AssistantPlatformServiceFields
+            selectedIds={platformIds}
+            allowAll={platformGrant}
+            onAllowAllChange={setPlatformGrant}
+            onIdsChange={setPlatformIds}
+            disabled={submitting || verifying}
+          />
+        )}
 
         {error ? (
           <p role="alert" className="text-[11px] text-destructive">

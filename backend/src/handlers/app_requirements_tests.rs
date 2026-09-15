@@ -1048,6 +1048,142 @@ async fn app_requirements_db_master_credential_requires_opt_in_and_inactive_cata
 }
 
 #[tokio::test]
+async fn app_requirements_db_platform_binding_uses_live_grants_and_ignores_retained_key() {
+    let Some(f) = fixture("requirements_platform_merge").await else {
+        return;
+    };
+    let id = catalog(&f, "api-github", "bearer").await;
+    let (connection, key) = service(&f, &f.auth.user_id.to_string(), &id, "github").await;
+    f.state.db.collection::<Document>("downstream_services").update_one(
+        doc! { "_id": &id }, doc! { "$set": {
+            "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1,2,3] },
+            "platform_key": { "enabled": true, "audience": "restricted", "allowed_owner_ids": [f.auth.user_id.to_string()] },
+        } },
+    ).await.unwrap();
+    f.state
+        .db
+        .collection::<UserService>("user_services")
+        .update_one(
+            doc! { "_id": &connection.id },
+            doc! { "$set": { "credential_binding": "platform" } },
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<UserApiKey>("user_api_keys")
+        .update_one(
+            doc! { "_id": &key.id },
+            doc! { "$set": { "status": "revoked" } },
+        )
+        .await
+        .unwrap();
+    let mut req = requirement("api-github");
+    publish(&f, req.clone()).await;
+    assert_eq!(report(&f).await.requirements[0].state, "unmet");
+    req.allow_master_credential = true;
+    publish(&f, req).await;
+    let included = report(&f).await;
+    assert_eq!(included.requirements[0].state, "included");
+    assert_eq!(
+        included.requirements[0].user_service_id.as_deref(),
+        Some(connection.id.as_str())
+    );
+    assert!(!included.requirements[0].granted_to_caller);
+    f.state
+        .db
+        .collection::<UserService>("user_services")
+        .update_one(
+            doc! { "_id": &connection.id },
+            doc! { "$set": { "is_active": false } },
+        )
+        .await
+        .unwrap();
+    assert_eq!(report(&f).await.requirements[0].state, "disabled");
+    f.state
+        .db
+        .collection::<UserService>("user_services")
+        .update_one(
+            doc! { "_id": &connection.id },
+            doc! { "$set": { "is_active": true } },
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("downstream_services")
+        .update_one(
+            doc! { "_id": &id },
+            doc! { "$set": { "platform_key.allowed_owner_ids": [] } },
+        )
+        .await
+        .unwrap();
+    assert_ne!(report(&f).await.requirements[0].state, "included");
+}
+
+#[tokio::test]
+async fn app_requirements_db_seeded_prefixes_preserve_reviewed_validator_boundary() {
+    let Some(f) = fixture("requirements_new_seeds_merge").await else {
+        return;
+    };
+    use crate::services::{provider_service, validator_profiles};
+    provider_service::seed_default_providers(&f.state.db, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    provider_service::seed_default_services(&f.state.db, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let mut req = requirement("api-google-workspace");
+    req.any_of_catalog_slugs.clear();
+    req.any_of_catalog_prefix = Some("api-google-".into());
+    let manifest = publish(&f, req).await;
+    for slug in [
+        "api-google-workspace",
+        "api-google-calendar",
+        "api-google-drive",
+        "api-google-gmail",
+    ] {
+        assert!(manifest.compiled.catalog_service_ids.contains_key(slug));
+        assert!(validator_profiles::for_slug(slug).is_none());
+    }
+    publish(&f, requirement("api-notion")).await;
+    assert!(validator_profiles::for_slug("api-notion").is_none());
+    for profile in validator_profiles::PROFILES {
+        for slug in profile.catalog_slugs {
+            assert!(
+                f.state
+                    .db
+                    .collection::<Document>("downstream_services")
+                    .find_one(doc! { "slug": *slug, "is_active": true })
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{slug}"
+            );
+        }
+    }
+    let mut req = requirement("llm-xai");
+    publish(&f, req.clone()).await;
+    req.any_of_catalog_slugs.push("llm-openai".into());
+    req.validator = ValidatorSelection::Profile {
+        id: "llm_models_v1".into(),
+    };
+    let error = manifests::compile(
+        &f.state.db,
+        &f.app.id,
+        &mut manifests::PublishManifest {
+            enforcement: Enforcement::Advise,
+            requirements: vec![req],
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, AppError::AppRequirementsInvalid(message) if message.contains("Every catalog alternative"))
+    );
+}
+
+#[tokio::test]
 async fn app_requirements_db_node_stored_only_reads_dispatchability_without_sending() {
     let Some(f) = fixture("requirements_node").await else {
         return;

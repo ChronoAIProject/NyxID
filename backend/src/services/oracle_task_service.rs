@@ -805,6 +805,7 @@ async fn upsert_worker_presence(
     current_task_id: Option<&str>,
     script_version: Option<&str>,
     page_url: Option<&str>,
+    authorized_worker: Option<&OracleWorker>,
 ) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
     let mut set = doc! {
@@ -822,16 +823,22 @@ async fn upsert_worker_presence(
     if let Some(u) = page_url {
         set.insert("page_url", truncate_chars(u, MAX_URL_LEN));
     }
-    db.collection::<Document>(ORACLE_WORKERS)
+    let filter = authorized_worker
+        .map(super::oracle_worker_enrollment_service::worker_filter)
+        .unwrap_or_else(|| doc! { "_id": worker_doc_id(&pool.id, worker_label) });
+    let updated = db.collection::<Document>(ORACLE_WORKERS)
         .update_one(
-            doc! { "_id": worker_doc_id(&pool.id, worker_label) },
+            filter,
             doc! {
                 "$set": set,
-                "$setOnInsert": { "first_seen_at": now, "desired_state": "active" },
+                "$setOnInsert": { "first_seen_at": now, "desired_state": "active", "generation": uuid::Uuid::new_v4().to_string() },
             },
         )
-        .upsert(true)
+        .upsert(authorized_worker.is_none())
         .await?;
+    if authorized_worker.is_some() && updated.matched_count == 0 {
+        return Err(AppError::OracleWorkerTokenInvalid);
+    }
     Ok(())
 }
 
@@ -1038,7 +1045,7 @@ pub async fn claim_task(
     script_version: Option<&str>,
     page_url: Option<&str>,
 ) -> AppResult<Option<WorkerTaskPayload>> {
-    claim_task_with_retention(db, pool, worker_label, script_version, page_url, 30).await
+    claim_task_with_retention(db, pool, worker_label, script_version, page_url, 30, None).await
 }
 
 /// Requeues expired leases, releases stale affinity, idempotently returns the
@@ -1051,8 +1058,12 @@ pub async fn claim_task_with_retention(
     script_version: Option<&str>,
     page_url: Option<&str>,
     retention_days: u32,
+    authorized_worker: Option<&OracleWorker>,
 ) -> AppResult<Option<WorkerTaskPayload>> {
     validate_worker_label(worker_label)?;
+    if let Some(worker) = authorized_worker {
+        super::oracle_worker_enrollment_service::ensure_current_worker(db, worker).await?;
+    }
     requeue_expired_leases(db, &pool.id, retention_days).await?;
     release_stale_affinity(db, pool).await?;
 
@@ -1087,12 +1098,22 @@ pub async fn claim_task_with_retention(
             Some(&task.id),
             script_version,
             page_url,
+            authorized_worker,
         )
         .await?;
         return Ok(Some(worker_payload(db, pool, &task, worker_label).await?));
     }
 
-    upsert_worker_presence(db, pool, worker_label, None, script_version, page_url).await?;
+    upsert_worker_presence(
+        db,
+        pool,
+        worker_label,
+        None,
+        script_version,
+        page_url,
+        authorized_worker,
+    )
+    .await?;
     if !super::oracle_worker_service::accepts_new_tasks(db, &pool.id, worker_label).await? {
         return Ok(None);
     }
@@ -1151,6 +1172,7 @@ pub async fn claim_task_with_retention(
                 Some(&task.id),
                 script_version,
                 page_url,
+                authorized_worker,
             )
             .await?;
             Ok(Some(worker_payload(db, pool, &task, worker_label).await?))
@@ -1179,6 +1201,7 @@ pub async fn worker_ack(
 }
 
 pub struct WorkerAckInput<'a> {
+    pub authorized_worker: Option<&'a OracleWorker>,
     pub phase: Option<&'a str>,
     pub phase_detail: Option<&'a str>,
     pub script_version: Option<&'a str>,
@@ -1196,6 +1219,9 @@ pub async fn worker_ack_fenced(
     input: WorkerAckInput<'_>,
 ) -> AppResult<AckOutcome> {
     validate_worker_label(worker_label)?;
+    if let Some(worker) = input.authorized_worker {
+        super::oracle_worker_enrollment_service::ensure_current_worker(db, worker).await?;
+    }
     let now = Utc::now();
     let lease = now + Duration::seconds(pool.task_timeout_secs as i64);
 
@@ -1233,6 +1259,7 @@ pub async fn worker_ack_fenced(
         (updated.matched_count > 0).then_some(task_id),
         input.script_version,
         input.page_url,
+        input.authorized_worker,
     )
     .await?;
 
@@ -1384,6 +1411,7 @@ pub async fn worker_submit_result(
 }
 
 pub struct WorkerResultInput<'a> {
+    pub authorized_worker: Option<&'a OracleWorker>,
     pub response: &'a str,
     pub images: Vec<ResultImage>,
     pub files: Vec<ResultFile>,
@@ -1414,6 +1442,9 @@ pub async fn worker_submit_result_fenced(
     input: WorkerResultInput<'_>,
 ) -> AppResult<ResultOutcome> {
     validate_worker_label(worker_label)?;
+    if let Some(worker) = input.authorized_worker {
+        super::oracle_worker_enrollment_service::ensure_current_worker(db, worker).await?;
+    }
     let now = Utc::now();
     let trimmed = input.response.trim();
     let mut artifact_total = 0usize;
@@ -1474,8 +1505,16 @@ pub async fn worker_submit_result_fenced(
             )
             .await?;
         if requeued.is_some() {
-            upsert_worker_presence(db, pool, worker_label, None, input.script_version, None)
-                .await?;
+            upsert_worker_presence(
+                db,
+                pool,
+                worker_label,
+                None,
+                input.script_version,
+                None,
+                input.authorized_worker,
+            )
+            .await?;
             return Ok(ResultOutcome::Requeued);
         }
 
@@ -1518,7 +1557,16 @@ pub async fn worker_submit_result_fenced(
                     .build(),
             )
             .await?;
-        upsert_worker_presence(db, pool, worker_label, None, input.script_version, None).await?;
+        upsert_worker_presence(
+            db,
+            pool,
+            worker_label,
+            None,
+            input.script_version,
+            None,
+            input.authorized_worker,
+        )
+        .await?;
         return Ok(if exhausted.is_some() {
             ResultOutcome::Failed
         } else {
@@ -1600,7 +1648,16 @@ pub async fn worker_submit_result_fenced(
         )
         .await?;
 
-    upsert_worker_presence(db, pool, worker_label, None, input.script_version, None).await?;
+    upsert_worker_presence(
+        db,
+        pool,
+        worker_label,
+        None,
+        input.script_version,
+        None,
+        input.authorized_worker,
+    )
+    .await?;
 
     let Some(task) = updated else {
         return Ok(ResultOutcome::Ignored);
@@ -1691,6 +1748,7 @@ pub async fn worker_submit_transcript(
         worker_label,
         task_id,
         WorkerTranscriptInput {
+            authorized_worker: None,
             turns,
             chatgpt_url,
             retention_days,
@@ -1701,6 +1759,7 @@ pub async fn worker_submit_transcript(
 }
 
 pub struct WorkerTranscriptInput<'a> {
+    pub authorized_worker: Option<&'a OracleWorker>,
     pub turns: &'a [TranscriptTurn],
     pub chatgpt_url: Option<&'a str>,
     pub retention_days: u32,
@@ -1715,6 +1774,9 @@ pub async fn worker_submit_transcript_fenced(
     input: WorkerTranscriptInput<'_>,
 ) -> AppResult<TranscriptOutcome> {
     validate_worker_label(worker_label)?;
+    if let Some(worker) = input.authorized_worker {
+        super::oracle_worker_enrollment_service::ensure_current_worker(db, worker).await?;
+    }
     if let Some(url) = input.chatgpt_url.filter(|u| !u.is_empty()) {
         validate_attach_url(url)?;
     }
@@ -1762,7 +1824,16 @@ pub async fn worker_submit_transcript_fenced(
         )
         .await?;
 
-    upsert_worker_presence(db, pool, worker_label, None, None, input.chatgpt_url).await?;
+    upsert_worker_presence(
+        db,
+        pool,
+        worker_label,
+        None,
+        None,
+        input.chatgpt_url,
+        input.authorized_worker,
+    )
+    .await?;
 
     let Some(scrape_task) = updated else {
         return Ok(TranscriptOutcome::Ignored);
@@ -2029,7 +2100,7 @@ mod tests {
             visibility: OraclePoolVisibility::Platform,
             worker_token_hash: "h".repeat(64),
             chatgpt_project_url: Some("https://chatgpt.com/g/g-p-x/project".to_string()),
-            default_model_label: Some("chatgpt-5.5-pro".to_string()),
+            default_model_label: Some("chatgpt-6-pro".to_string()),
             allow_extract: false,
             max_workers: 2,
             max_queue_length: 3,
@@ -2350,7 +2421,7 @@ mod tests {
             claimed.required_project_url.as_deref(),
             Some("https://chatgpt.com/g/g-p-x/project")
         );
-        assert_eq!(claimed.model.as_deref(), Some("chatgpt-5.5-pro"));
+        assert_eq!(claimed.model.as_deref(), Some("chatgpt-6-pro"));
 
         // Idempotent re-claim returns the same task (tab reload survival).
         let resumed = claim_task(&db, &pool, "tab_1", Some("v1"), None)
@@ -2366,6 +2437,7 @@ mod tests {
             "tab_1",
             &first.task.id,
             WorkerAckInput {
+                authorized_worker: None,
                 phase: Some("waiting_response"),
                 phase_detail: Some("elapsed=60s"),
                 script_version: Some("v1"),
@@ -2395,11 +2467,12 @@ mod tests {
             "tab_1",
             &first.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "The answer is 42.",
                 images: vec![],
                 files: vec![],
                 chatgpt_url: Some("https://chatgpt.com/c/abc"),
-                model: Some("chatgpt-5.5-pro"),
+                model: Some("chatgpt-6-pro"),
                 script_version: Some("v1"),
                 retention_days: 30,
                 dispatch_attempt_id: None,
@@ -2422,6 +2495,7 @@ mod tests {
             "tab_2",
             &second.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "ERROR: Response too short or empty",
                 images: vec![],
                 files: vec![],
@@ -2448,6 +2522,7 @@ mod tests {
             "tab_1",
             &first.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "stale",
                 images: vec![],
                 files: vec![],
@@ -2482,6 +2557,7 @@ mod tests {
             "tab_1",
             &file_task.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "",
                 images: vec![],
                 files: vec![ResultFile {
@@ -2651,6 +2727,7 @@ mod tests {
             "tab_1",
             &old.task.id,
             WorkerAckInput {
+                authorized_worker: None,
                 phase: None,
                 phase_detail: None,
                 script_version: None,
@@ -2669,6 +2746,7 @@ mod tests {
             "tab_1",
             &old.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "from dead tab",
                 images: vec![],
                 files: vec![],
@@ -2790,6 +2868,7 @@ mod tests {
             "tab_1",
             &submitted.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "ERROR: browser_recovery_exhausted",
                 images: vec![],
                 files: vec![],
@@ -2819,6 +2898,7 @@ mod tests {
             "tab_2",
             &submitted.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "ERROR: browser_recovery_exhausted",
                 images: vec![],
                 files: vec![],
@@ -2884,6 +2964,7 @@ mod tests {
             "stable-label",
             &submitted.task.id,
             WorkerAckInput {
+                authorized_worker: None,
                 phase: None,
                 phase_detail: None,
                 script_version: None,
@@ -2901,6 +2982,7 @@ mod tests {
             "stable-label",
             &submitted.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "stale answer",
                 images: vec![],
                 files: vec![],
@@ -2921,6 +3003,7 @@ mod tests {
             "stable-label",
             &submitted.task.id,
             WorkerAckInput {
+                authorized_worker: None,
                 phase: None,
                 phase_detail: None,
                 script_version: None,
@@ -2983,6 +3066,7 @@ mod tests {
             "tab_1",
             &t1.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "turn one answer",
                 images: vec![],
                 files: vec![],
@@ -3153,6 +3237,7 @@ mod tests {
             "tab_1",
             &t1.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "turn one answer",
                 images: vec![],
                 files: vec![],
@@ -3250,6 +3335,7 @@ mod tests {
             "tab_1",
             &t1.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "turn one answer",
                 images: vec![],
                 files: vec![],
@@ -3345,6 +3431,7 @@ mod tests {
             "tab_1",
             &t1.task.id,
             WorkerResultInput {
+                authorized_worker: None,
                 response: "ERROR: extraction failed",
                 images: vec![],
                 files: vec![],
@@ -3443,6 +3530,7 @@ mod tests {
             "tab_1",
             &scrape_task.id,
             WorkerTranscriptInput {
+                authorized_worker: None,
                 turns: &[],
                 chatgpt_url: Some("https://chatgpt.com/c/abc"),
                 retention_days: 30,
@@ -3459,6 +3547,7 @@ mod tests {
             "tab_1",
             &scrape_task.id,
             WorkerTranscriptInput {
+                authorized_worker: None,
                 turns: &[
                     TranscriptTurn {
                         role: "assistant".to_string(),
@@ -3587,7 +3676,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(other_task.model_label.as_deref(), Some("chatgpt-5.5-pro"));
+        assert_eq!(other_task.model_label.as_deref(), Some("chatgpt-6-pro"));
 
         extract_url(
             &db,
@@ -3733,6 +3822,7 @@ mod tests {
             "tab_1",
             &submitted.task.id,
             WorkerAckInput {
+                authorized_worker: None,
                 phase: None,
                 phase_detail: None,
                 script_version: None,

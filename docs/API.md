@@ -50,6 +50,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Notification Settings](#notification-settings)
   - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
+  - [Telegram New Channel Creation](#telegram-new-channel-creation)
   - [Webhooks](#webhooks)
 
 ---
@@ -453,7 +454,9 @@ curl -X POST http://localhost:3001/api/v1/auth/refresh \
 
 #### POST /api/v1/auth/device/request
 
-Start a first-party device login for a CLI, desktop app, or other input-constrained client. This public contract is stable and versioned with `/api/v1`.
+Start a legacy account-only device login. New clients use the isolated
+[v2 exchange](#selectable-device-login-v2) below to let the human choose the
+grant. This route remains compatible with existing account-only clients.
 
 **Auth:** None
 
@@ -484,7 +487,7 @@ Start a first-party device login for a CLI, desktop app, or other input-constrai
 }
 ```
 
-The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance.
+The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. QR/deep links using `verification_uri_complete` prefill the web approval page and mobile app; they never trigger preview or approval. The web page validates before formatting, seeds once, and removes `user_code` from the URL with replace navigation. Malformed codes leave an empty input with an explanation. After Continue, review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
 
 #### POST /api/v1/auth/device/poll
 
@@ -598,6 +601,89 @@ Atomically reject a pending request. No tokens are minted, and the requester's n
 **Response (200):** `{ "ok": true }`
 
 Approve and deny use the same pending-status guard, so exactly one wins a concurrent decision. API-key, service-account, delegated, and relay credentials are rejected before either decision handler runs. Integrators should direct users to `verification_uri`; these are first-party review endpoints.
+
+#### Selectable Device Login V2
+
+Plain `nyxid login` deliberately defaults to this exchange: it provides requester attribution (IP, timezone, origin, screen) and human choice of account access or a restricted Agent Key. `nyxid login --callback` opts into the legacy local callback, which grants full account access without requester review. The CLI prints/opens only the bare verification URI for manual code entry; `--clipboard` copies the user code for pasting, except in JSON/no-wait modes, which do not copy or open a browser.
+
+New clients start with `POST /api/v1/auth/device/v2/request`, using the same
+client-context body as the legacy request, plus optional `requested_profile`.
+The response has the same fields, with a `nyx_adc2_` poll secret and a
+`2-XXXX-XXXX` human code. Use `/auth/device/v2/poll` or the browser-only
+`/auth/device/v2/poll-web` with `{"device_code":"nyx_adc2_<secret>"}`.
+
+V2 requests live in separate storage. Old replicas return an unsupported route
+without consuming new grants, and old TTL indexes cannot remove v2 cleanup
+work. Clients must not retry a v2 request through the legacy poll route.
+Legacy requests only offer account access.
+
+The shared public `/auth/device/preview` resolves the human-code version and
+includes the requested profile and sanitized requester context. Human decisions
+require a first-party personal session or an access JWT without an OAuth client
+ID. Third-party OAuth, delegated, relay, service-account and API-key credentials
+cannot approve or mint login grants.
+
+| Method and path | Body | Result |
+|---|---|---|
+| `POST /auth/device/options` | `{"user_code":"2-XXXX-XXXX"}` | Eligible personal/org keys and resource choices |
+| `POST /auth/device/approve` | `{"user_code":"2-XXXX-XXXX"}` | Full account approval |
+| `POST /auth/device/approve-agent-key` | Human code, `selection`, optional `credential_expires_at` | Restricted child credential approval |
+| `POST /auth/device/deny` | Human code | Denial without issuance |
+
+`selection` uses the Agent Key login contract: `{"kind":"existing","api_key_id":"<UUID>"}`
+or a `kind: "new"` selection containing the confirmed key permissions. Restricted
+decisions use a distinct fail-closed route so an old replica cannot silently
+interpret that choice as full account approval. Creation and delivery revalidate
+eligibility and effective authority.
+
+Successful CLI polling returns a tagged union. `auth_kind: "account_session"`
+includes `access_token`, `refresh_token`, `token_type` and `expires_in`.
+`auth_kind: "agent_key"` includes `credential`, `credential_id`,
+`credential_expires_at`, `label` and safe `api_key` metadata. Explicit Agent Key
+clients must reject an account grant. The existing device error contract applies;
+clients persist server backoff and stop on terminal outcomes.
+
+Browser account delivery returns `{"ok":true,"auth_kind":"account_session"}`
+and a cookie. Claim, bearer-session revocation and cookie-session insertion are
+one transaction. Browser restricted delivery returns
+`{"ok":false,"auth_kind":"agent_key","login_code":{"request_id":"<UUID>","code":"XXXX-XXXX","expires_at":"<RFC3339>"}}`.
+This code hands the credential to `nyxid login --code`; it never establishes an
+account cookie. Creating the handoff extends the initial 60-second delivery
+window to five minutes after approval; repeated handoff calls never extend that
+fixed deadline. Browser
+handoff and direct CLI delivery race atomically, with exactly one recipient.
+
+KMS failure before delivery preserves retryability. Abandoned approvals revoke
+their issued session or child; parent key configuration and other consumers
+remain intact. Cleanup completes before terminal TTL removal.
+
+#### One-Time Login Codes
+
+An authenticated human can create a five-minute code before opening a CLI. All
+paths below are under `/api/v1`; only redemption is public.
+
+| Method and path | Body or result |
+|---|---|
+| `POST /auth/login-code/options` | Eligible Agent Keys and resource choices |
+| `POST /auth/login-code` | `{"auth_kind":"account_session"}` or `{"auth_kind":"agent_key","selection":{...},"credential_expires_at":null}` |
+| `POST /auth/login-code/redeem` | `{"code":"XXXX-XXXX","requested_profile":"work","client_label":"Workstation"}` plus optional client context |
+| `GET /auth/login-code/{id}` | Issuer-only status and sanitized redemption context; no code or credential |
+| `DELETE /auth/login-code/{id}` | Cancel a pending code |
+| `POST /auth/login-code/{id}/revoke` | Revoke its delivered account session or child credential |
+
+Mint returns `request_id`, the secret `code` shown once, and `expires_at`.
+Redemption returns the same tagged delivery as v2 polling. Issuance and claim are
+one transaction; concurrent redemption has one winner and failures leave no
+orphan grant. Mint/redeem are limited by source and issuer, including invalid-code
+attempts. Terminal status is `redeemed`, `cancelled`, `expired` or `revoked`;
+`can_revoke` indicates delivered credentials. The numeric error definitions are
+authoritative in `backend/src/errors/mod.rs`. Codes belong in neither URLs, logs,
+telemetry nor persistent browser storage.
+
+First-party access JWTs carry `sid`. Protected requests and refresh validate the
+bound session's liveness, so issuer revocation invalidates both existing and
+refreshed access tokens and cascades to MCP sessions. Legacy first-party tokens
+without `sid` retain their existing compatibility behavior.
 
 ---
 
@@ -2782,6 +2868,36 @@ curl -X DELETE http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef
 
 ### User Provider Tokens
 
+#### Codex API-Key Connection
+
+`GET /api/v1/providers/codex-connection` returns the authenticated account,
+`openai` provider, nullable connection `{id,state_version}`, nullable `service_id`,
+`feature: "openai_responses"` and status `not_connected`, `saved`, `usable` or
+`reconnect_required`. Only first-party human authentication is accepted.
+
+After explicit local destination/account consent, the dedicated CLI helper posts
+`{account_id,api_key,expected_connection}` to the same route. First import uses
+`expected_connection: null`; replacing a reviewed connection must send its exact
+ID and version. Stale consent returns409. The local helper supports only Codex
+API-key file storage, never ChatGPT OAuth subscription tokens. It preserves local
+files, disables redirects and exposes only redacted results.
+
+`POST /api/v1/providers/codex-connection/verify` accepts
+`{"connection":{"id":"<UUID>","state_version":1},"model":"gpt-4.1-mini"}`.
+It makes a small paid Responses request through the ordinary metered proxy with
+the exact saved service selector. `usable` requires a bounded, completed response
+using the current key epoch and service/endpoint binding; another personal or org
+credential cannot satisfy verification. Authentication rejection reports
+`reconnect_required`; network, body or completion failures do not report ready.
+
+Import, replacement and endpoint/key/service provisioning are transactional.
+Same-value user replacement advances credential epoch; verification and lazy
+refresh do not. Disable/Delete invalidate live usable status. Explicit reconnect
+creates a fresh service when the previous one is disabled or deleted, preserving
+its tombstone. NyxID deletion does not revoke an upstream API key or modify local
+Codex. See [the lifecycle and consent guide](CODEX_CONNECTION.md) for storage
+fallbacks, separate OAuth authorization and release capability checks.
+
 Users connect to providers by submitting API keys or completing OAuth flows. These endpoints manage the user's provider token lifecycle.
 
 #### GET /api/v1/providers/my-tokens
@@ -3315,6 +3431,7 @@ Content-Type: application/json
 {
   "service_slug": "github",
   "label": "Work account",
+  "scopes": ["public_repo"],
   "callback_url": "desktop-app://connect/return",
   "expires_in": 900
 }
@@ -3332,6 +3449,12 @@ Content-Type: application/json
 
 Treat `connect_url` as a single-use secret and hand it only to the browser. The authenticated app ID and display name are recorded on the link; a request-body `requested_by` value cannot override that identity.
 
+`scopes` is an optional array of additional OAuth scopes (default `[]`). Each entry may contain comma- or whitespace-separated scopes; NyxID trims and deduplicates them in order, preserving case. The shared OAuth scope limits apply across the entire request: at most 32 scopes before deduplication, at most 256 characters per scope, and only `[A-Za-z0-9._:/~+*=-]` characters. Scopes supplement the provider defaults for OAuth and RFC 8628 device-code flows; they do not replace defaults, and the provider decides which permissions to grant. Stored scopes survive provider denial and retry.
+
+Creation returns HTTP 400 (`AppError::ValidationError`) for malformed/oversized scopes or non-empty scopes on API-key/no-auth services, providers with `supports_oauth_scopes = false`, and OpenAI-format device-code providers. An empty list preserves the existing behavior for every connection method.
+
+**Public preview:** `POST /api/v1/connect-links/preview` with `{ "token": "nyx_clk_<opaque-secret>" }` returns service and request details, including `connect_method` (`oauth`, `device_code`, `api_key`, or `none`) and `scopes: ["public_repo"]`. The `scopes` array is always present, possibly empty, including for legacy stored links. The hosted page displays these creator-selected permissions for human review; completion cannot edit them.
+
 **Polling response:**
 
 ```json
@@ -3341,6 +3464,7 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
   "service_name": "GitHub",
   "service_slug": "github",
   "expires_at": "2026-08-05T10:15:00.000Z",
+  "scopes": ["public_repo"],
   "requesting_app_id": "desktop-client-id",
   "requesting_app_name": "Desktop App",
   "last_error": "provider_access_denied",
@@ -3349,6 +3473,8 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
 ```
 
 `status` is one of `pending`, `completed`, `expired`, or `cancelled`. A completed response includes `connected_service: { "id", "slug" }`. Terminal responses with a callback include the fully merged `callback_url`.
+
+Polling always includes `scopes` (possibly `[]`) in every state. MCP `nyx__connect_service` accepts the same optional `scopes` array, or a comma/space-separated string, and echoes normalized scopes in its `pending_connection` response. Omit `credential` to use the hosted OAuth flow when requesting scopes.
 
 `last_error` is an optional short, stable, metadata-only code. `provider_access_denied` means the provider consent screen was declined, but the link remains `pending` and may be retried within its TTL and finalization grace. The field is cleared when a later attempt succeeds. Its absence means no provider decline has been recorded; it does not prove that the browser is still open.
 
@@ -7705,6 +7831,26 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 ---
 
+## Telegram New Channel Creation
+
+Telegram New is the separate `telegram-new` channel option. The existing `telegram` registration API and token-based setup remain available. See [Telegram New](TELEGRAM_NEW.md#api-and-storage) for request/response fields, status transitions, recovery rules, and administrator setup.
+
+Routes below are relative to `/api/v1`. Creation routes require an authenticated person; API keys, service accounts, relay tokens, and delegated access are rejected. Requests are bound to the initiating person and destination. Connecting requires current destination write access plus the exact bot ID and revision approved in Telegram.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| GET | `/channel-bots/telegram-new` | Read availability and the current creation request |
+| POST | `/channel-bots/telegram-new` | Prepare a request with `{label, target_org_id?}` |
+| GET | `/channel-bots/telegram-new/requests/{id}` | Read the saved request |
+| POST | `/channel-bots/telegram-new/requests/{id}/launch` | Issue a fresh Telegram launch link |
+| DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning begins |
+| POST | `/channel-bots/telegram-new/requests/{id}/connect` | Confirm `{telegram_bot_id, revision}` and connect or retry |
+| POST | `/webhooks/channel/telegram-new/manager` | Receive updates authenticated by the configured manager webhook secret |
+
+The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
+
+---
+
 ## Webhooks
 
 ### Inbound Triggers
@@ -7838,6 +7984,8 @@ Default limits:
 
 ### Connection validation
 
+Platform-bound connections validate the current catalog credential using server transport. A retained personal key or legacy node binding does not change that selection. Platform credential rotation invalidates prior observations, and live platform grants remain required.
+
 `POST /api/v1/keys/{id}/validate` accepts `{ "force": false }`. It requires a
 human session or ordinary user access token; API keys, delegated tokens, relay
 tokens, and service accounts are rejected. Read access shows the key; validation
@@ -7897,9 +8045,9 @@ two active checks per human session (user ID when no session exists), sixteen pe
 app for hosted checks, and 32 per deployment, coordinated in MongoDB. Metadata
 edits and another service alias using the same key do not reset the cooldown;
 the execution digest binds evidence freshness only.
-Provider `Retry-After` delays are honored. Admission failures use error 12009
-(429), missing attempts or an unavailable wait use 12008 (503), and locally rejected
-validation uses 12007 (422), including a disabled service. The Check connection
+Provider `Retry-After` delays are honored. Admission failures use error 12109
+(429), missing attempts or an unavailable wait use 12108 (503), and locally rejected
+validation uses 12107 (422), including a disabled service. The Check connection
 button is disabled client-side while the service is disabled. A check never
 updates the credential's last-used timestamp, including during OAuth refresh.
 A settled internal abort is returned as a 200 observation with `transport_unknown`
@@ -7987,7 +8135,7 @@ existing authorize, PAR, consent-decision, and token routes retain their paths.
 }
 ```
 
-A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_-]{1,32}`. Each resolves to 1–25 active, user-connectable catalog slugs. `any_of_catalog_prefix` (at most 128 characters) expands active seeded, non-provider slugs at publication and freezes that membership; later seeds enter only on republish. Unknown slugs, catalog tags, explicitly listed provider-category or inactive rows, unknown profiles, and profiles applying to none of a requirement's slugs are rejected with `12000 AppRequirementsInvalid` (400). `enforcement` accepts `advise` or `gate`. An empty manifest clears the current requirements by publishing a new version.
+A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_-]{1,32}`. Each resolves to 1–25 active, user-connectable catalog slugs. `any_of_catalog_prefix` (at most 128 characters) expands active seeded, non-provider slugs at publication and freezes that membership; later seeds enter only on republish. Unknown slugs, catalog tags, explicitly listed provider-category or inactive rows, unknown profiles, and profiles applying to none of a requirement's slugs are rejected with `12100 AppRequirementsInvalid` (400). `enforcement` accepts `advise` or `gate`. An empty manifest clears the current requirements by publishing a new version.
 
 Publication stores `compiled.validators_by_requirement`, mapping each requirement
 ID and alternative slug to its applicable profile. The chosen profile applies
@@ -8115,7 +8263,7 @@ services. A result ID or app name in the URL cannot replace the signed binding.
 The decision endpoint verifies the binding, immutable manifest version, live
 client activation and rollout, and local service authority. Omitting any bound
 service or required RFC 8707 service from `allowed_service_ids` returns
-`12010 AppConnectResultMismatch`, including when `allow_all_services=true`.
+`12110 AppConnectResultMismatch`, including when `allow_all_services=true`.
 Consent, the authorization code, and session completion commit together with a
 revision comparison; cancelled or already completed sessions cannot issue a
 code. Selected requirement resources are included in the code's grant, and token

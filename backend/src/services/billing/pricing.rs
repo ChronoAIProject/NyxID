@@ -82,7 +82,168 @@ pub fn metric_code_for_service(service_slug: &str) -> String {
     format!("platform_svc_{service_slug}")
 }
 
+/// Sync all independently authored charges. Keep the legacy path unchanged.
 pub async fn sync_service_price(
+    db: &mongodb::Database,
+    lago: &dyn LagoApi,
+    plan_code: &str,
+    service: &DownstreamService,
+) -> AppResult<bool> {
+    let mut changed = sync_legacy_price(db, lago, plan_code, service).await?;
+    for field in ["byok_pricing", "platform_key_pricing"] {
+        changed |= sync_lane_price(db, lago, plan_code, service, field).await?;
+    }
+    Ok(changed)
+}
+
+pub fn normalize_lane_pricing(
+    slug: &str,
+    current: Option<&ServiceBilling>,
+    requested: &mut ServiceBilling,
+) -> AppResult<()> {
+    for (lane, cleanup, previous, previous_cleanup, suffix) in [
+        (
+            &mut requested.byok_pricing,
+            &mut requested.byok_pricing_cleanup_metric_code,
+            current.and_then(|b| b.byok_pricing.as_ref()),
+            current.and_then(|b| b.byok_pricing_cleanup_metric_code.as_ref()),
+            "byok",
+        ),
+        (
+            &mut requested.platform_key_pricing,
+            &mut requested.platform_key_pricing_cleanup_metric_code,
+            current.and_then(|b| b.platform_key_pricing.as_ref()),
+            current.and_then(|b| b.platform_key_pricing_cleanup_metric_code.as_ref()),
+            "pk",
+        ),
+    ] {
+        if let Some(lane) = lane {
+            lane.credits_per_unit = normalize_price(&lane.credits_per_unit)?;
+            if let Some(previous) = previous
+                .filter(|p| p.metric == lane.metric && p.credits_per_unit == lane.credits_per_unit)
+            {
+                *lane = previous.clone();
+            } else {
+                lane.lago_metric_code = previous
+                    .map(|p| p.lago_metric_code.clone())
+                    .filter(|code| !code.is_empty())
+                    .unwrap_or_else(|| format!("platform_svc_{slug}_{suffix}"));
+                lane.sync_status = PricingSyncStatus::Pending;
+                lane.sync_error = None;
+            }
+            *cleanup = None;
+        } else {
+            *cleanup = previous
+                .map(|p| &p.lago_metric_code)
+                .filter(|c| !c.is_empty())
+                .or(previous_cleanup)
+                .cloned();
+        }
+    }
+    Ok(())
+}
+
+async fn sync_lane_price(
+    db: &mongodb::Database,
+    lago: &dyn LagoApi,
+    plan_code: &str,
+    service: &DownstreamService,
+    field: &str,
+) -> AppResult<bool> {
+    let Some(billing) = &service.billing else {
+        return Ok(false);
+    };
+    let (lane, cleanup) = match field {
+        "byok_pricing" => (
+            &billing.byok_pricing,
+            &billing.byok_pricing_cleanup_metric_code,
+        ),
+        _ => (
+            &billing.platform_key_pricing,
+            &billing.platform_key_pricing_cleanup_metric_code,
+        ),
+    };
+    let path = format!("billing.{field}");
+    let cleanup_path = format!("{path}_cleanup_metric_code");
+    let collection = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    let Some(lane) = lane else {
+        let Some(code) = cleanup.as_deref().filter(|c| !c.is_empty()) else {
+            return Ok(false);
+        };
+        if lago.remove_standard_charge(plan_code, code).await.is_err() {
+            return Ok(false);
+        }
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .delete_many(doc! { "lago_metric_code": code })
+            .await?;
+        // A concurrent re-add must be synchronized again after this removal.
+        collection
+            .update_one(
+                doc! { "_id": &service.id, format!("{path}.lago_metric_code"): code },
+                doc! { "$set": { format!("{path}.sync_status"): "pending" } },
+            )
+            .await?;
+        collection
+            .update_one(
+                doc! { "_id": &service.id, &cleanup_path: code, &path: bson::Bson::Null },
+                doc! { "$unset": { &cleanup_path: "" } },
+            )
+            .await?;
+        return Ok(true);
+    };
+    let input = ServicePriceSync {
+        metric_code: lane.lago_metric_code.clone(),
+        metric_name: format!("{} {field}", service.name),
+        metric_description: format!("NyxID {field} usage for {}", service.slug),
+        credits_per_unit: lane.credits_per_unit.clone(),
+    };
+    let synced = lago.sync_standard_charge(plan_code, &input).await.is_ok();
+    // Include the unit: identical prices in a different unit are different charges.
+    let filter = doc! { "_id": &service.id,
+        format!("{path}.lago_metric_code"): &lane.lago_metric_code,
+        format!("{path}.credits_per_unit"): &lane.credits_per_unit,
+        format!("{path}.metric"): bson::to_bson(&lane.metric).expect("metric serialization"),
+    };
+    if synced {
+        let micros = super::lago_client::decimal_credits_to_micros(&lane.credits_per_unit)
+            .ok_or_else(|| AppError::Internal("stored lane price is invalid".to_string()))?;
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .replace_one(
+                doc! { "_id": BillingRateCache::cache_id(&lane.lago_metric_code, None) },
+                BillingRateCache {
+                    id: BillingRateCache::cache_id(&lane.lago_metric_code, None),
+                    lago_metric_code: lane.lago_metric_code.clone(),
+                    model: None,
+                    credits_per_unit_micros: micros,
+                    synced_at: Utc::now(),
+                },
+            )
+            .upsert(true)
+            .await?;
+    }
+    let result = collection.update_one(filter, doc! { "$set": {
+        format!("{path}.sync_status"): if synced { "synced" } else { "failed" },
+        format!("{path}.sync_error"): if synced { bson::Bson::Null } else { bson::Bson::String("Lago price synchronization failed; reconciliation will retry".to_string()) },
+    } }).await?;
+    if result.matched_count == 0 {
+        // A stale sync can finish after a completed clear. Recreate the durable
+        // cleanup intent, so no upstream charge or cache row becomes orphaned.
+        collection
+            .update_one(
+                doc! { "_id": &service.id, &path: bson::Bson::Null },
+                doc! { "$set": { &cleanup_path: &lane.lago_metric_code } },
+            )
+            .await?;
+        // Either a newer price or a clear won. Preserve its cleanup marker, and
+        // force any live price back through sync after the stale provider write.
+        collection.update_one(doc! { "_id": &service.id, format!("{path}.lago_metric_code"): &lane.lago_metric_code },
+            doc! { "$set": { format!("{path}.sync_status"): "pending" } }).await?;
+        return Ok(false);
+    }
+    Ok(synced)
+}
+
+async fn sync_legacy_price(
     db: &mongodb::Database,
     lago: &dyn LagoApi,
     plan_code: &str,
@@ -232,6 +393,10 @@ pub async fn retry_pending_service_prices(
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
             "$or": [
+                { "billing.byok_pricing.sync_status": { "$in": ["pending", "failed"] } },
+                { "billing.platform_key_pricing.sync_status": { "$in": ["pending", "failed"] } },
+                { "billing.byok_pricing_cleanup_metric_code": { "$type": "string", "$ne": "" } },
+                { "billing.platform_key_pricing_cleanup_metric_code": { "$type": "string", "$ne": "" } },
                 {
                     "billing.platform_pricing.sync_status": { "$in": ["pending", "failed"] },
                     "billing.platform_pricing.credits_per_unit": { "$type": "string" },

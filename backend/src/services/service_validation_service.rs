@@ -60,6 +60,20 @@ async fn materialized_matches(
     target: &UserServiceResolution,
     revision: Option<&str>,
 ) -> AppResult<bool> {
+    if target.master_credential {
+        let service = state
+            .db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &target.user_service_id })
+            .await?
+            .ok_or(AppError::ServiceValidationRejected)?;
+        let encrypted = master_credential_material(&state.db, &service).await?;
+        if Some(master_revision(&encrypted).as_str()) != revision {
+            return Ok(false);
+        }
+        let plaintext = zeroize::Zeroizing::new(state.encryption_keys.decrypt(&encrypted).await?);
+        return Ok(plaintext.as_slice() == target.target.credential.as_bytes());
+    }
     let Some(id) = target.api_key_id.as_ref() else {
         return Ok(true);
     };
@@ -130,12 +144,17 @@ async fn snapshot(
     if !service.is_active {
         return Err(AppError::ServiceValidationRejected);
     }
-    let fallback_nodes = node_routing_service::list_configured_binding_node_ids(
-        &state.db,
-        &service.user_id,
-        &resolution.target.service.id,
-    )
-    .await?;
+    let fallback_nodes = if resolution.master_credential {
+        // Match ordinary proxy routing: platform material never leaves the server.
+        Vec::new()
+    } else {
+        node_routing_service::list_configured_binding_node_ids(
+            &state.db,
+            &service.user_id,
+            &resolution.target.service.id,
+        )
+        .await?
+    };
     if !caller.allow_all_nodes
         && resolution
             .node_id
@@ -181,16 +200,43 @@ async fn snapshot(
         (!caller.allow_all_nodes).then_some(caller.allowed_node_ids.as_slice()),
     )
     .await?;
+    let revision = if resolution.master_credential {
+        Some(master_revision(
+            &master_credential_material(&state.db, &service).await?,
+        ))
+    } else {
+        key.as_ref().map(credential_revision)
+    };
     Ok(Snapshot {
         node_configured,
         node_credential,
         service,
         resolution,
         digest,
-        revision: key.as_ref().map(credential_revision),
+        revision,
         credential_type: key.map(|key| key.credential_type),
         fallback_nodes,
     })
+}
+
+async fn master_credential_material(
+    db: &mongodb::Database,
+    service: &UserService,
+) -> AppResult<Vec<u8>> {
+    use crate::models::downstream_service::{COLLECTION_NAME, DownstreamService};
+    let catalog = db
+        .collection::<DownstreamService>(COLLECTION_NAME)
+        .find_one(doc! { "_id": service.catalog_service_id.as_deref().unwrap_or("") })
+        .await?
+        .ok_or(AppError::ServiceValidationRejected)?;
+    Ok(catalog.credential_encrypted)
+}
+
+fn master_revision(encrypted: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"nyxid-validation-master-credential-v1");
+    hash.update(encrypted);
+    hex::encode(hash.finalize())
 }
 
 pub(crate) fn credential_revision(key: &UserApiKey) -> String {

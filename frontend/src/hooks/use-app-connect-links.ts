@@ -27,7 +27,7 @@ export function useAppConnectLink(
         } catch (error) {
           // Another tab may already have redeemed it. An authenticated read still
           // requires the same bound subject and a redeemed association.
-          if (!(error instanceof ApiError) || error.errorCode !== 12001)
+          if (!(error instanceof ApiError) || error.errorCode !== 12101)
             throw error;
         } finally {
           // Refetches use the subject association even before the page effect

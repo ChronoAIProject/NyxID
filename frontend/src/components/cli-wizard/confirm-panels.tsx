@@ -106,11 +106,14 @@ function initialAccessScope(prefill: ApiKeyCreatePrefill): AccessScopeState {
   // the CLI's ApiKeyCreatePrefill struct defaults to `false` in Rust,
   // so we can't trust it as "user explicitly unticked" — we have to
   // infer from the CSV presence instead.
-  const allowAllServices = !servicesCsv;
+  const allowAllServices =
+    prefill.allow_all_services ||
+    (!servicesCsv && !prefill.allow_auto_connected_services);
   const allowAllNodes = !nodesCsv;
 
   return {
     allowAllServices,
+    allowAutoConnectedServices: prefill.allow_auto_connected_services ?? false,
     allowAllNodes,
     selectedServiceIds,
     selectedNodeIds,
@@ -149,6 +152,8 @@ export function ApiKeyCreateConfirm({
         name,
         scopes: Array.from(scopes).join(" "),
         allow_all_services: access.allowAllServices,
+        allow_auto_connected_services:
+          access.allowAutoConnectedServices ?? false,
         allow_all_nodes: access.allowAllNodes,
       };
       if (platform) body.platform = platform;
@@ -291,15 +296,23 @@ export function ApiKeyCreateConfirm({
               value={ownerId}
               onChange={(e) => {
                 setOwnerId(e.target.value);
+                setAccess((current) => ({
+                  ...current,
+                  selectedServiceIds: new Set(),
+                  selectedNodeIds: new Set(),
+                  allowAutoConnectedServices: false,
+                }));
               }}
               className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground transition-colors duration-300 focus-visible:outline-none"
             >
               <option value="">Personal (your account)</option>
-              {orgs.data?.map((org) => (
-                <option key={org.id} value={org.id}>
-                  Org · {org.display_name ?? org.id}
-                </option>
-              ))}
+              {orgs.data
+                ?.filter((org) => org.your_role === "admin")
+                .map((org) => (
+                  <option key={org.id} value={org.id}>
+                    Org · {org.display_name ?? org.id}
+                  </option>
+                ))}
             </select>
             <p className="mt-1 text-xs text-muted-foreground">
               Org-owned keys authenticate as the org; every admin of
@@ -308,7 +321,11 @@ export function ApiKeyCreateConfirm({
           </Field>
         ) : null}
         <ScopePicker value={scopes} onChange={setScopes} />
-        <AccessScopeCard value={access} onChange={setAccess} />
+        <AccessScopeCard
+          value={access}
+          onChange={setAccess}
+          ownerId={ownerId}
+        />
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>

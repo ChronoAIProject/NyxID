@@ -158,8 +158,12 @@ async fn evaluate_local_inner(
     }
     let visible = user_service_service::list_user_services_with_sources(&state.db, user_id).await?;
     // Disabled rows are disclosure-only evidence; they never enter credential resolution.
+    let memberships =
+        super::org_service::list_memberships_for_member(&state.db, user_id, false).await?;
     let disabled = user_service_service::list_user_services_with_sources_including_disabled(
-        &state.db, user_id,
+        &state.db,
+        user_id,
+        &memberships,
     )
     .await?
     .into_iter()
@@ -503,12 +507,16 @@ async fn candidate_facts(
     };
     let mut node_credential = None;
     let digest = if let Some(resolution) = &resolution {
-        let fallback_nodes = node_routing_service::list_configured_binding_node_ids(
-            &state.db,
-            &service.user_id,
-            &resolution.target.service.id,
-        )
-        .await?;
+        let fallback_nodes = if resolution.master_credential {
+            Vec::new()
+        } else {
+            node_routing_service::list_configured_binding_node_ids(
+                &state.db,
+                &service.user_id,
+                &resolution.target.service.id,
+            )
+            .await?
+        };
         node_credential = node_routing_service::validation_route(
             &state.db,
             &state.node_ws_manager,

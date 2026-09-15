@@ -15,7 +15,8 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::oracle_pool::{OraclePool, OraclePoolVisibility};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, oracle_pool_service, org_service};
+use crate::services::oracle_task_service::WORKER_RECENT_SECS;
+use crate::services::{audit_service, oracle_pool_service, oracle_worker_service, org_service};
 
 #[derive(Deserialize)]
 pub struct CreateOraclePoolRequest {
@@ -82,12 +83,15 @@ pub struct OraclePoolInfo {
     pub owner_user_id: String,
     /// True when the caller may manage this pool.
     pub can_manage: bool,
+    pub can_enroll: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chatgpt_project_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model_label: Option<String>,
     pub allow_extract: bool,
     pub max_workers: u32,
+    /// Workers whose heartbeat is within the pool-status recency window.
+    pub online_workers: u32,
     pub max_queue_length: u32,
     pub per_user_max_inflight: u32,
     pub task_timeout_secs: u64,
@@ -128,7 +132,12 @@ fn parse_visibility(value: &str) -> AppResult<OraclePoolVisibility> {
     }
 }
 
-fn pool_info(pool: &OraclePool, can_manage: bool) -> OraclePoolInfo {
+fn pool_info(
+    pool: &OraclePool,
+    can_manage: bool,
+    can_enroll: bool,
+    online_workers: u32,
+) -> OraclePoolInfo {
     OraclePoolInfo {
         id: pool.id.clone(),
         slug: pool.slug.clone(),
@@ -137,10 +146,12 @@ fn pool_info(pool: &OraclePool, can_manage: bool) -> OraclePoolInfo {
         visibility: pool.visibility.as_str().to_string(),
         owner_user_id: pool.user_id.clone(),
         can_manage,
+        can_enroll,
         chatgpt_project_url: pool.chatgpt_project_url.clone(),
         default_model_label: pool.default_model_label.clone(),
         allow_extract: pool.allow_extract,
         max_workers: pool.max_workers,
+        online_workers,
         max_queue_length: pool.max_queue_length,
         per_user_max_inflight: pool.per_user_max_inflight,
         task_timeout_secs: pool.task_timeout_secs,
@@ -211,7 +222,14 @@ pub async fn create_pool(
         })),
     );
 
-    let info = pool_info(&pool, true);
+    let info = pool_info(
+        &pool,
+        true,
+        crate::services::oracle_worker_enrollment_service::can_enroll(&state.db, &actor, &pool)
+            .await,
+        oracle_worker_service::count_online_workers(&state.db, &pool.id, WORKER_RECENT_SECS)
+            .await?,
+    );
     Ok((
         StatusCode::CREATED,
         Json(CreateOraclePoolResponse {
@@ -227,10 +245,23 @@ pub async fn list_pools(
 ) -> AppResult<Json<ListOraclePoolsResponse>> {
     let actor = auth_user.user_id.to_string();
     let pools = oracle_pool_service::list_visible_pools(&state.db, &actor).await?;
+    let pool_ids: Vec<String> = pools.iter().map(|pool| pool.id.clone()).collect();
+    let online = oracle_worker_service::count_online_workers_by_pool(
+        &state.db,
+        &pool_ids,
+        WORKER_RECENT_SECS,
+    )
+    .await?;
     let mut infos = Vec::with_capacity(pools.len());
     for pool in &pools {
         let manage = can_manage(&state, &actor, pool).await;
-        infos.push(pool_info(pool, manage));
+        infos.push(pool_info(
+            pool,
+            manage,
+            crate::services::oracle_worker_enrollment_service::can_enroll(&state.db, &actor, pool)
+                .await,
+            online.get(&pool.id).copied().unwrap_or(0),
+        ));
     }
     Ok(Json(ListOraclePoolsResponse { pools: infos }))
 }
@@ -244,7 +275,14 @@ pub async fn get_pool(
     let pool = oracle_pool_service::get_pool(&state.db, &id_or_slug).await?;
     oracle_pool_service::ensure_can_view(&state.db, &actor, &pool).await?;
     let manage = can_manage(&state, &actor, &pool).await;
-    Ok(Json(pool_info(&pool, manage)))
+    Ok(Json(pool_info(
+        &pool,
+        manage,
+        crate::services::oracle_worker_enrollment_service::can_enroll(&state.db, &actor, &pool)
+            .await,
+        oracle_worker_service::count_online_workers(&state.db, &pool.id, WORKER_RECENT_SECS)
+            .await?,
+    )))
 }
 
 pub async fn update_pool(
@@ -291,7 +329,14 @@ pub async fn update_pool(
         })),
     );
 
-    Ok(Json(pool_info(&pool, true)))
+    Ok(Json(pool_info(
+        &pool,
+        true,
+        crate::services::oracle_worker_enrollment_service::can_enroll(&state.db, &actor, &pool)
+            .await,
+        oracle_worker_service::count_online_workers(&state.db, &pool.id, WORKER_RECENT_SECS)
+            .await?,
+    )))
 }
 
 pub async fn rotate_token(
@@ -367,7 +412,7 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let json = serde_json::to_string(&pool_info(&pool, false)).unwrap();
+        let json = serde_json::to_string(&pool_info(&pool, false, false, 0)).unwrap();
         assert!(!json.contains("secret-hash"));
         assert!(!json.contains("worker_token"));
         assert!(json.contains("\"can_manage\":false"));

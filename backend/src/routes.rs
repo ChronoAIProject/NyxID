@@ -156,6 +156,22 @@ macro_rules! assistant_direct_billing_routes {
     };
 }
 
+macro_rules! codex_connection_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/providers/codex-connection/verify",
+                "/api/v1/providers/codex-connection/verify",
+                "handlers::codex_connection::verify",
+                post(handlers::codex_connection::verify),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! ssh_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -400,6 +416,10 @@ macro_rules! oracle_billing_routes {
 pub(crate) fn mounted_billing_route_inventory()
 -> Vec<crate::services::billing::route_inventory::BillingRouteSpec> {
     let mut routes = llm_billing_routes!(collect_billing_route_specs, ());
+    routes.extend(codex_connection_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(proxy_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(assistant_direct_billing_routes!(
         collect_billing_route_specs,
@@ -1597,6 +1617,15 @@ fn build_router_internal(
         .route("/request", post(handlers::devices::request_device_code))
         .route("/poll", post(handlers::devices::poll_device_code));
     let auth_device_public_routes = Router::new()
+        .route(
+            "/v2/request",
+            post(handlers::auth_device::request_auth_device_v2),
+        )
+        .route("/v2/poll", post(handlers::auth_device::poll_auth_device_v2))
+        .route(
+            "/v2/poll-web",
+            post(handlers::auth_device::poll_auth_device_web_v2),
+        )
         .route("/request", post(handlers::auth_device::request_auth_device))
         .route("/poll", post(handlers::auth_device::poll_auth_device))
         .route(
@@ -1634,6 +1663,10 @@ fn build_router_internal(
             get(handlers::docs::catalog_spec_json),
         )
         .nest("/auth/device", auth_device_public_routes)
+        .route(
+            "/auth/login-code/redeem",
+            post(handlers::login_code::redeem),
+        )
         .route(
             "/connect-links/preview",
             post(handlers::connect_links::preview_connect_link),
@@ -1696,6 +1729,15 @@ fn build_router_internal(
                 get(handlers::oracle_workers::list_workers),
             )
             .route(
+                "/pools/{id_or_slug}/workers/enroll",
+                post(handlers::oracle_workers::enroll_worker)
+                    .layer(DefaultBodyLimit::max(4096))
+                    .layer(middleware::map_response(|mut response: axum::response::Response| async move {
+                        response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+                        response
+                    })),
+            )
+            .route(
                 "/pools/{id_or_slug}/workers/allocate",
                 post(handlers::oracle_workers::allocate_worker),
             )
@@ -1719,6 +1761,23 @@ fn build_router_internal(
                     crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS
                         + 4096,
                 ),),
+            )
+            .route(
+                "/pools/{id_or_slug}/login-profiles",
+                get(handlers::oracle_login_profiles::list),
+            )
+            .route(
+                "/pools/{id_or_slug}/login-profiles/{name}",
+                put(handlers::oracle_login_profiles::save)
+                    .delete(handlers::oracle_login_profiles::delete)
+                    .layer(DefaultBodyLimit::max(
+                        crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS + 4096,
+                    )),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/{label}/login-profile",
+                put(handlers::oracle_login_profiles::bind)
+                    .delete(handlers::oracle_login_profiles::unbind),
             )
             .route(
                 "/worker-bundle",
@@ -1854,6 +1913,22 @@ fn build_router_internal(
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .route(
+            "/channel-bots/telegram-new",
+            get(handlers::telegram_new::configuration).post(handlers::telegram_new::begin),
+        )
+        .route(
+            "/channel-bots/telegram-new/requests/{id}",
+            get(handlers::telegram_new::get).delete(handlers::telegram_new::cancel),
+        )
+        .route(
+            "/channel-bots/telegram-new/requests/{id}/launch",
+            post(handlers::telegram_new::launch),
+        )
+        .route(
+            "/channel-bots/telegram-new/requests/{id}/connect",
+            post(handlers::telegram_new::connect),
+        )
+        .route(
             "/channel-bots/managed-onboarding/{platform}",
             get(handlers::channel_managed::bootstrap),
         )
@@ -1862,8 +1937,16 @@ fn build_router_internal(
             post(handlers::channel_managed::complete),
         )
         .route(
+            "/channel-bots/managed-onboarding/{platform}/start",
+            post(handlers::channel_managed::start),
+        )
+        .route(
             "/channel-bots/{id}/reregister",
             post(handlers::channel_managed::reregister),
+        )
+        .route(
+            "/channel-bots/{id}/reconnect",
+            post(handlers::channel_managed::reconnect),
         )
         .route(
             "/channel-bots/{id}/managed-setup/repair",
@@ -1885,8 +1968,37 @@ fn build_router_internal(
             post(handlers::devices::approve_device_code),
         )
         .route(
+            "/auth/device/options",
+            post(handlers::auth_device::auth_device_options),
+        )
+        .route(
+            "/auth/login-code/options",
+            post(handlers::login_code::options),
+        )
+        .route(
+            "/providers/codex-connection",
+            get(handlers::codex_connection::status).post(handlers::codex_connection::import),
+        )
+        .merge(codex_connection_billing_routes!(
+            register_billing_routes,
+            Router::new()
+        ))
+        .route("/auth/login-code", post(handlers::login_code::mint))
+        .route(
+            "/auth/login-code/{id}",
+            get(handlers::login_code::status).delete(handlers::login_code::cancel),
+        )
+        .route(
+            "/auth/login-code/{id}/revoke",
+            post(handlers::login_code::revoke),
+        )
+        .route(
             "/auth/device/approve",
             post(handlers::auth_device::approve_auth_device),
+        )
+        .route(
+            "/auth/device/approve-agent-key",
+            post(handlers::auth_device::approve_auth_device_agent_key),
         )
         .route(
             "/auth/device/deny",
@@ -2040,6 +2152,11 @@ fn build_router_internal(
         .nest("/api/v1/webhooks/triggers", trigger_webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
         .route(
+            "/api/v1/webhooks/channel/telegram-new/manager",
+            post(handlers::telegram_new::webhook)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
+        )
+        .route(
             "/api/v1/webhooks/channel/{platform}/{bot_id}",
             get(handlers::channel_webhooks::channel_subscription)
                 .post(handlers::channel_webhooks::channel_webhook),
@@ -2060,6 +2177,14 @@ fn build_router_internal(
             Router::new()
                 .route("/task", get(handlers::oracle_worker::poll_task))
                 .route("/heartbeat", post(handlers::oracle_worker::heartbeat))
+                .route(
+                    "/login-profile",
+                    get(handlers::oracle_login_profiles::current)
+                        .post(handlers::oracle_login_profiles::refresh)
+                        .layer(DefaultBodyLimit::max(
+                            crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS + 4096,
+                        )),
+                )
                 .route(
                     "/login-snapshots/{snapshot_id}",
                     get(handlers::oracle_worker::fetch_login_snapshot),

@@ -117,6 +117,7 @@ pub struct CreditGrantListResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateAllowanceRequest {
     pub service_ref: String,
+    pub metric: Option<crate::models::service_billing::BillingMetric>,
     pub quantity: i64,
     pub recurrence: AllowanceRecurrence,
     pub target_kind: BillingTargetKind,
@@ -127,6 +128,7 @@ pub struct CreateAllowanceRequest {
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct UpdateAllowanceRequest {
     pub service_ref: Option<String>,
+    pub metric: Option<crate::models::service_billing::BillingMetric>,
     pub quantity: Option<i64>,
     pub recurrence: Option<AllowanceRecurrence>,
     pub target_kind: Option<BillingTargetKind>,
@@ -375,6 +377,7 @@ pub async fn create_allowance(
     let allowance = billing::allowances::create_allowance(
         &state.db,
         billing::allowances::CreateAllowanceInput {
+            metric: body.metric,
             service_ref: body.service_ref,
             quantity: body.quantity,
             recurrence: body.recurrence,
@@ -431,6 +434,7 @@ pub async fn update_allowance(
         &state.db,
         &allowance_id,
         billing::allowances::UpdateAllowanceInput {
+            metric: body.metric,
             service_ref: body.service_ref,
             quantity: body.quantity,
             recurrence: body.recurrence,
@@ -694,6 +698,7 @@ mod tests {
             State(state.clone()),
             operator.clone(),
             Json(CreateAllowanceRequest {
+                metric: None,
                 service_ref: "service-1".to_string(),
                 quantity: 1,
                 recurrence: AllowanceRecurrence::Daily,
@@ -708,6 +713,7 @@ mod tests {
             operator,
             Path("allowance-1".to_string()),
             Json(UpdateAllowanceRequest {
+                metric: None,
                 is_active: Some(false),
                 ..Default::default()
             }),
@@ -782,6 +788,7 @@ mod tests {
             State(state),
             admin,
             Json(CreateAllowanceRequest {
+                metric: None,
                 service_ref: "service-1".to_string(),
                 quantity: 0,
                 recurrence: AllowanceRecurrence::Monthly,
