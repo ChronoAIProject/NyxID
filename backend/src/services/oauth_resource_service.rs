@@ -223,22 +223,25 @@ pub async fn resolve_token_resource_scope(
     // cannot mint new authority. URIs are derived from those ids, never vice versa.
     let mut grant = Vec::new();
     for id in grant_allowed_service_ids {
-        let service = user_service_service::find_user_service_by_id(db, id)
+        let Some(service) = db
+            .collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
+            .find_one(mongodb::bson::doc! { "_id": id })
             .await?
-            .ok_or_else(|| {
-                AppError::InvalidTarget("A granted service is no longer available".into())
-            })?;
-        if !can_grant_user_service(db, actor_user_id, &service).await? {
-            return Err(AppError::InvalidTarget(
-                "A granted service is no longer accessible".into(),
-            ));
+        else {
+            continue;
+        };
+        // Disable is reversible and Delete leaves a tombstone. Retain that ID;
+        // execution denies inactive rows, even if another service reuses its slug.
+        if service.is_active && !can_grant_user_service(db, actor_user_id, &service).await? {
+            continue;
         }
         let resource = user_service_resource_uri(config, &service.slug);
-        if selected_service_is_shadowed(db, actor_user_id, &service).await?
-            || resolve_single_resource(db, config, actor_user_id, &resource)
-                .await?
-                .id
-                != *id
+        if service.is_active
+            && (selected_service_is_shadowed(db, actor_user_id, &service).await?
+                || resolve_single_resource(db, config, actor_user_id, &resource)
+                    .await?
+                    .id
+                    != *id)
         {
             return Err(AppError::InvalidTarget(
                 "A granted service name resolves to another connection".into(),
@@ -264,22 +267,23 @@ pub async fn resolve_token_resource_scope(
                 include_mcp = true;
                 continue;
             }
-            let (id, _) = grant
+            let matching = grant
                 .iter()
-                .find(|(_, resource)| resource == &uri)
-                .ok_or_else(|| {
-                    AppError::InvalidTarget(
-                        "resource cannot expand beyond the previously granted services".into(),
-                    )
-                })?;
-            narrowed_ids.push(id.clone());
-            selected_uris.push(uri);
+                .filter(|(_, resource)| resource == &uri)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                return Err(AppError::InvalidTarget(
+                    "resource cannot expand beyond the previously granted services".into(),
+                ));
+            }
+            selected_uris.extend(std::iter::repeat_n(uri, matching.len()));
+            narrowed_ids.extend(matching);
         }
     }
     // MCP-only requests remain narrowing-neutral; explicit empty grants stay empty.
     if requested.is_none() || (narrowed_ids.is_empty() && include_mcp) {
-        narrowed_ids = grant_allowed_service_ids.to_vec();
-        selected_uris = grant.into_iter().map(|(_, uri)| uri).collect();
+        (narrowed_ids, selected_uris) = grant.into_iter().unzip();
     }
     if include_mcp {
         selected_uris.push(mcp_resource_uri(config));

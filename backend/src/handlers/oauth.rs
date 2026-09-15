@@ -1122,11 +1122,28 @@ async fn apply_app_gate(
     scope: &str,
     consent: Option<&Consent>,
     interactive_consent: bool,
-) -> AppResult<Option<Response>> {
+) -> AppResult<Option<String>> {
     let Some(manifest) = app_gate::gate_manifest(state, client).await? else {
         return Ok(None);
     };
-    super::app_connect_links::require_human(state, auth).await?;
+    // An ordinary person token may initiate the handoff. Redeem and every
+    // hosted action still require that person's authenticated browser session.
+    if !matches!(
+        auth.auth_method,
+        crate::mw::auth::AuthMethod::Session | crate::mw::auth::AuthMethod::AccessToken
+    ) || auth.acting_client_id.is_some()
+        || auth.api_key_id.is_some()
+    {
+        return Err(AppError::Forbidden("A human user is required".into()));
+    }
+    let person = state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! { "_id": auth.user_id.to_string(), "is_active": true })
+        .await?;
+    if !person.is_some_and(|user| user.user_type == crate::models::user::UserType::Person) {
+        return Err(AppError::Forbidden("A human user is required".into()));
+    }
     for resource in &params.resource {
         oauth_resource_service::validate_resource_uri(resource)?;
     }
@@ -1162,11 +1179,11 @@ async fn apply_app_gate(
         }
     }
     if parse_prompt(params.prompt.as_deref()).contains("none") {
-        return Ok(Some(redirect_302(&build_callback_error_url(
+        return Ok(Some(build_callback_error_url(
             params,
             "interaction_required",
             "App connection requirements need interaction",
-        ))));
+        )));
     }
     let created = app_links::start_from_authorize(
         state,
@@ -1177,7 +1194,7 @@ async fn apply_app_gate(
         &prior,
     )
     .await?;
-    Ok(Some(redirect_302(&created.connect_url)))
+    Ok(Some(created.connect_url))
 }
 
 async fn authorize_inner(
@@ -1259,7 +1276,7 @@ async fn authorize_inner(
                 )
                 .await?
                 {
-                    return Ok(response);
+                    return Ok(redirect_302(&response));
                 }
                 let params = &gated_params;
 
@@ -1358,7 +1375,15 @@ async fn authorize_inner(
         )
         .await?
         {
-            return Ok(response);
+            if prompts.contains("none") {
+                return Ok(Json(AuthorizeResponse {
+                    redirect_url: response,
+                })
+                .into_response());
+            }
+            return Err(AppError::ConsentRequired {
+                consent_url: response,
+            });
         }
         let params = &gated_params;
 

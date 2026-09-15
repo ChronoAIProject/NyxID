@@ -7986,7 +7986,12 @@ authority boundary. Resource URIs are derived from the stored IDs. Code exchange
 refresh, and token exchange resource requests may narrow that boundary; they
 cannot substitute another connection when a slug is reused or shadowed. A URI
 that does not match a stored ID, or whose live slug resolution points to another
-ID, returns `invalid_target`. The MCP resource remains narrowing-neutral.
+ID while active and accessible, returns `invalid_target`. Disabled services and
+Delete tombstones keep their original IDs and derived URIs; the proxy denies
+them while inactive, and Enable restores use without new consent. Missing legacy
+IDs and active connections whose org access was revoked are dropped from the
+issued boundary. A tombstone never grants a replacement that reuses its slug.
+The MCP resource remains narrowing-neutral.
 
 ### Gated authorization and consent
 
@@ -8007,7 +8012,13 @@ interactive request creates an Authorize-origin session containing the validated
 authorize parameters and redirects to `/connect/app/{id}#t=<capability>`.
 The capability follows the fragment/stash/redeem rules below. Clients with no
 Gate manifest, disabled rollout, or no capability retain existing authorize
-behavior, including the ordinary login redirect.
+behavior, including the ordinary login redirect. With `Accept: application/json`,
+a person authenticated by a session cookie or ordinary access token receives the
+existing `consent_required` error shape with the checklist URL in `consent_url`.
+Opening that URL still requires the bound person's browser session to redeem
+and act; API keys, delegated, relay, and service-account callers are rejected.
+API-mode `prompt=none` returns the OAuth error callback in `redirect_url` without
+creating a session.
 
 For Authorize-origin sessions, `POST /ready` repeats the 60-second check, freezes
 the selected service IDs and result, and transitions to `ready_for_consent`.

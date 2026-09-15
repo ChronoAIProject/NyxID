@@ -864,18 +864,20 @@ async fn app_connect_authorize_db_refresh_never_substitutes_or_expands_stored_id
         &service_record.slug,
     )
     .await;
-    assert!(matches!(
-        token_service::refresh_tokens(
-            &f.state.db,
-            &f.state.config,
-            &f.state.jwt_keys,
-            &refreshed.refresh_token,
-            None,
-            None
-        )
-        .await,
-        Err(AppError::InvalidTarget(_))
-    ));
+    let kept = token_service::refresh_tokens(
+        &f.state.db,
+        &f.state.config,
+        &f.state.jwt_keys,
+        &refreshed.refresh_token,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let claims =
+        crate::crypto::jwt::verify_token(&f.state.jwt_keys, &f.state.config, &kept.access_token)
+            .unwrap();
+    assert_eq!(claims.allowed_service_ids, Some(vec![id]));
 }
 
 #[tokio::test]
@@ -1082,4 +1084,246 @@ async fn app_connect_authorize_db_unmet_resource_enters_gate_before_consent_reso
     let link = session(&f, &p).await;
     assert_eq!(link.status, AppConnectStatus::InProgress);
     assert_eq!(count(&f, CODES).await, 0);
+}
+
+async fn refresh_grant(f: &Fixture, ids: &[String]) -> String {
+    oauth_service::issue_oauth_refresh_token(
+        &f.state.db,
+        &f.state.config,
+        &f.state.jwt_keys,
+        &f.app.id,
+        &f.auth.user_id.to_string(),
+        "openid proxy",
+        &[],
+        ids,
+        false,
+    )
+    .await
+    .unwrap()
+    .refresh_token
+}
+
+#[tokio::test]
+async fn app_connect_authorize_db_disabled_grant_refreshes_and_reenables_without_consent() {
+    let Some(f) = fixture("gate_disabled_refresh").await else {
+        return;
+    };
+    let cat = catalog(&f, "api-github", "bearer").await;
+    let (selected, _) = service(&f, &f.auth.user_id.to_string(), &cat, "paused").await;
+    let token = refresh_grant(&f, std::slice::from_ref(&selected.id)).await;
+    let before = count(&f, "consents").await;
+    let mut token = token;
+    for active in [false, true] {
+        f.state
+            .db
+            .collection::<Document>("user_services")
+            .update_one(
+                doc! { "_id": &selected.id },
+                doc! { "$set": { "is_active": active } },
+            )
+            .await
+            .unwrap();
+        let refreshed = token_service::refresh_tokens(
+            &f.state.db,
+            &f.state.config,
+            &f.state.jwt_keys,
+            &token,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let claims = crate::crypto::jwt::verify_token(
+            &f.state.jwt_keys,
+            &f.state.config,
+            &refreshed.access_token,
+        )
+        .unwrap();
+        assert_eq!(claims.allowed_service_ids, Some(vec![selected.id.clone()]));
+        assert_eq!(
+            claims.resources,
+            Some(vec![oauth_resource_service::user_service_resource_uri(
+                &f.state.config,
+                &selected.slug
+            )])
+        );
+        assert_eq!(count(&f, "consents").await, before);
+        token = refreshed.refresh_token;
+    }
+}
+
+#[tokio::test]
+async fn app_connect_authorize_db_revoked_org_and_missing_ids_only_narrow_refresh() {
+    let Some(f) = fixture("gate_revoked_org_refresh").await else {
+        return;
+    };
+    let cat = catalog(&f, "api-github", "bearer").await;
+    let (personal, _) = service(&f, &f.auth.user_id.to_string(), &cat, "personal").await;
+    let (org, _) = service(&f, &f.owner, &cat, "org").await;
+    let token = refresh_grant(
+        &f,
+        &[
+            personal.id.clone(),
+            org.id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+        ],
+    )
+    .await;
+    f.state
+        .db
+        .collection::<Document>("org_memberships")
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let refreshed = token_service::refresh_tokens(
+        &f.state.db,
+        &f.state.config,
+        &f.state.jwt_keys,
+        &token,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let claims = crate::crypto::jwt::verify_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &refreshed.access_token,
+    )
+    .unwrap();
+    assert_eq!(claims.allowed_service_ids, Some(vec![personal.id]));
+    assert_eq!(
+        claims.resources,
+        Some(vec![oauth_resource_service::user_service_resource_uri(
+            &f.state.config,
+            &personal.slug
+        )])
+    );
+}
+
+#[tokio::test]
+async fn app_connect_authorize_db_tombstone_slug_reuse_preserves_only_granted_id() {
+    let Some(f) = fixture("gate_tombstone_refresh").await else {
+        return;
+    };
+    let cat = catalog(&f, "api-github", "bearer").await;
+    let (old, key) = service(&f, &f.auth.user_id.to_string(), &cat, "reused").await;
+    let token = refresh_grant(&f, std::slice::from_ref(&old.id)).await;
+    f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(
+            doc! { "_id": &old.id },
+            doc! { "$set": { "is_active": false } },
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("user_api_keys")
+        .delete_one(doc! { "_id": key.id })
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("user_endpoints")
+        .delete_one(doc! { "_id": &old.endpoint_id })
+        .await
+        .unwrap();
+    let (replacement, _) = service(&f, &f.auth.user_id.to_string(), &cat, "reused").await;
+    let uri = oauth_resource_service::user_service_resource_uri(&f.state.config, &old.slug);
+    for requested in [None, Some(std::slice::from_ref(&uri))] {
+        let refreshed = token_service::refresh_tokens(
+            &f.state.db,
+            &f.state.config,
+            &f.state.jwt_keys,
+            &token,
+            None,
+            requested,
+        )
+        .await
+        .unwrap();
+        let claims = crate::crypto::jwt::verify_token(
+            &f.state.jwt_keys,
+            &f.state.config,
+            &refreshed.access_token,
+        )
+        .unwrap();
+        assert_eq!(claims.allowed_service_ids, Some(vec![old.id.clone()]));
+        assert!(
+            !claims
+                .allowed_service_ids
+                .unwrap()
+                .contains(&replacement.id)
+        );
+    }
+}
+
+#[tokio::test]
+async fn app_connect_authorize_db_api_mode_returns_checklist_consent_handoff() {
+    let Some(f) = fixture("gate_api_handoff").await else {
+        return;
+    };
+    gated(&f, false, false).await;
+    for method in [AuthMethod::Session, AuthMethod::AccessToken] {
+        let mut auth = human(&f);
+        auth.auth_method = method;
+        let result = authorize_inner(
+            &f.state,
+            OptionalAuthUser(Some(auth)),
+            &params(&f),
+            false,
+            None,
+        )
+        .await;
+        let Err(AppError::ConsentRequired { consent_url }) = result else {
+            panic!("expected consent_required checklist handoff");
+        };
+        let url = url::Url::parse(&consent_url).unwrap();
+        assert!(url.path().starts_with("/connect/app/"));
+        let link_id = url.path_segments().unwrap().next_back().unwrap();
+        let link = app_links::load(&f.state, link_id, &f.auth.user_id.to_string())
+            .await
+            .unwrap();
+        assert!(link.redeemed_at.is_none());
+        assert_eq!(link.status, AppConnectStatus::InProgress);
+        let mut app_token = f.auth.clone();
+        app_token.auth_method = AuthMethod::AccessToken;
+        assert!(
+            super::super::app_connect_links::require_human(&f.state, &app_token)
+                .await
+                .is_err()
+        );
+        app_links::redeem(
+            &f.state,
+            link_id,
+            &link.user_id,
+            url.fragment().unwrap().strip_prefix("t=").unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(count(&f, CODES).await, 0);
+    let before = count(&f, LINKS).await;
+    for method in [
+        AuthMethod::ApiKey,
+        AuthMethod::Delegated,
+        AuthMethod::Relay,
+        AuthMethod::ServiceAccount,
+    ] {
+        let mut auth = human(&f);
+        auth.auth_method = method;
+        assert!(matches!(
+            authorize_inner(
+                &f.state,
+                OptionalAuthUser(Some(auth)),
+                &params(&f),
+                false,
+                None
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+    }
+    assert_eq!(count(&f, LINKS).await, before);
 }
