@@ -360,7 +360,12 @@ fails strict verification when an observed recognized level mismatches, or a
 picker exposed recognized levels but selection/read-back could not verify the
 requested level. Recognized tokens separated by `·:()|/—-` are accepted (e.g.
 “Pro · Extended”); prose such as “Upgrade to Pro” and “Pro plan” is rejected. Both controls are read again
-immediately before the durable Send fence. Explicitly opting out permits a
+immediately before the durable Send fence. This final read-back makes at most
+three attempts within a shared five-second budget when reads fail. Exhaustion
+records both observations as `absent`: strict tasks fail as `model_unavailable`
+with reason `presend_unverified`; non-strict tasks proceed. Only page crashes or
+CDP disconnects propagate into browser recovery from these reads.
+Explicitly opting out permits a
 best-effort selection and records what was observed.
 
 Each picker interaction uses a bounded cooperative deadline, real pointer

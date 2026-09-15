@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  PRE_SEND_ACTION_MS,
+  retryPresendModelRead,
   usageCooldownConfig,
   effortSelectionMismatch,
   chooseSwitcherFamilyEntry,
@@ -890,4 +892,61 @@ test('cooldown parsing defaults explicitly for invalid and below-minimum values'
   assert.deepEqual(usageCooldownConfig('1'), {milliseconds:1000, invalid:false});
   assert.deepEqual(usageCooldownConfig('60'), {milliseconds:60000, invalid:false});
   assert.deepEqual(usageCooldownConfig('100000'), {milliseconds:86400000, invalid:false});
+});
+
+
+test('pre-send read-back retries transient errors at most three times', async () => {
+  let attempts = 0;
+  const observed = {header: {metadata:'gpt_6_pro'}, pill: {observed:'Pro'}};
+  const result = await retryPresendModelRead(async () => {
+    if (++attempts < 3) throw Object.assign(new Error('read deadline'), {code:'interaction_deadline'});
+    return observed;
+  });
+  assert.equal(result, observed);
+  assert.equal(attempts, 3);
+  attempts = 0;
+  assert.equal(await retryPresendModelRead(async () => { attempts += 1; throw new TypeError('unreadable'); }), null);
+  assert.equal(attempts, 3);
+});
+
+test('pre-send read-back rethrows crashes and disconnects without retrying', async () => {
+  for (const code of ['page_crashed', 'cdp_disconnected']) {
+    let attempts = 0;
+    const error = Object.assign(new Error(code), {code});
+    await assert.rejects(retryPresendModelRead(async () => { attempts += 1; throw error; }), e => e === error);
+    assert.equal(attempts, 1);
+  }
+});
+
+test('pre-send read-back shares PRE_SEND_ACTION_MS across retries and rejects late results', async t => {
+  t.mock.timers.enable({apis:['Date', 'setTimeout'], now:10000});
+  let attempts = 0;
+  let settled = false;
+  const budgets = [];
+  const pending = retryPresendModelRead(budget => {
+    budgets.push(budget);
+    const attempt = ++attempts;
+    return new Promise((resolve, reject) => setTimeout(() => {
+      if (attempt < 3) reject(Object.assign(new Error('read deadline'), {code:'interaction_deadline'}));
+      else resolve('late observations');
+    }, 1800));
+  });
+  pending.then(() => { settled = true; });
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  for (let i = 0; i < 2; i += 1) {
+    t.mock.timers.tick(1800);
+    await flush();
+  }
+  assert.equal(attempts, 3);
+  assert.ok(budgets.every(b => b === budgets[0] && b.deadline === 10000 + PRE_SEND_ACTION_MS));
+  t.mock.timers.tick(PRE_SEND_ACTION_MS - 3600 - 1);
+  await flush();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  assert.equal(await pending, null);
+  assert.equal(Date.now(), 10000 + PRE_SEND_ACTION_MS);
+  assert.equal(budgets[0].controller.signal.aborted, true);
+  t.mock.timers.tick(PRE_SEND_ACTION_MS);
+  await flush();
+  assert.equal(attempts, 3);
 });

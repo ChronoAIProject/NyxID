@@ -1306,7 +1306,7 @@ export function modelItemMatches(itemText, targets, exact) {
 const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
   Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
 const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
-const PRE_SEND_ACTION_MS = 5000;
+export const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
 const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible';
@@ -1599,6 +1599,36 @@ async function boundedRead(budget, read) {
   } finally {
     clearTimeout(timer);
     signal.removeEventListener("abort", abort);
+  }
+}
+
+// Retry only the final read-back, sharing one deadline across both controls
+// and all attempts. A late read cannot publish observations or start a retry.
+export async function retryPresendModelRead(read) {
+  const budget = interactionBudget(PRE_SEND_ACTION_MS);
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      budget.controller.abort();
+      reject(interactionDeadlineError());
+    }, Math.max(0, budget.deadline - Date.now()));
+  });
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        interactionOptions(budget);
+        const observed = await Promise.race([read(budget), deadline]);
+        interactionOptions(budget);
+        return observed;
+      } catch (error) {
+        if (['page_crashed', 'cdp_disconnected'].includes(stableErrorCode(error))) throw error;
+        if (budget.controller.signal.aborted || Date.now() >= budget.deadline) break;
+      }
+    }
+    return null;
+  } finally {
+    budget.controller.abort();
+    clearTimeout(timer);
   }
 }
 
@@ -2274,8 +2304,11 @@ async function handlePrompt(runtime, page, task, recovering) {
   }
   if (task.model !== 'unknown') {
     await installDomCore(page);
-    const header = await readModelSwitcher(page);
-    const pill = await pickerSnapshot(page, interactionBudget(PRE_SEND_ACTION_MS));
+    const { header, pill } = await retryPresendModelRead(async budget => {
+      const header = await readModelSwitcher(page, budget);
+      const pill = await pickerSnapshot(page, budget);
+      return { header, pill };
+    }) || { header: { text: null, metadata: 'absent' }, pill: { observed: null } };
     const observedEffort = effortMetadata(pill.observed);
     const previousEffort = runtime.state.current_task?.observed_model_effort;
     const recognizedBefore = previousEffort && !['absent', 'unrecognized'].includes(previousEffort);

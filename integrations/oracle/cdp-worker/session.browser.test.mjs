@@ -800,6 +800,32 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
     }
     if (url.pathname.endsWith('/ack')) {
       acknowledgements.push(body);
+      if (body.phase === 'ready_to_send' && config.presendReadDelay) {
+        await fixture.page.evaluate(({ control, exhaust }) => {
+          const body = document.body;
+          const query = body.querySelectorAll.bind(body);
+          const discover = window.__nyx.discoverControls;
+          window.presendReadAttempts = 0;
+          window.presendReadBlocks = 0;
+          const block = () => {
+            if (!exhaust && window.presendReadBlocks) return;
+            window.presendReadBlocks += 1;
+            const until = performance.now() + 1200;
+            while (performance.now() < until) { /* simulate a busy renderer */ }
+          };
+          body.querySelectorAll = selector => {
+            if (selector === '[data-nyx-switcher]') {
+              window.presendReadAttempts += 1;
+              if (control === 'switcher') block();
+            }
+            return query(selector);
+          };
+          window.__nyx.discoverControls = () => {
+            if (control === 'pill' && window.presendReadAttempts) block();
+            return discover();
+          };
+        }, { control: config.presendReadDelay, exhaust: !!config.presendReadExhaust });
+      }
       if (body.phase === 'sent' && config.crashAfterSend) {
         const cdp = await fixture.context.newCDPSession(fixture.page);
         setTimeout(() => { void cdp.send('Page.crash').catch(() => {}); }, 200);
@@ -1391,6 +1417,40 @@ for (const [preSendBanner, code] of [["You've reached the limit for Pro", 'usage
       assert.equal(fixture.results[0].observed_model_switcher, 'gpt_6_pro');
       assert.equal(fixture.results[0].observed_model_effort, 'high');
       assert.equal(fixture.acknowledgements.at(-1).phase_detail, 'switcher=gpt_6_pro effort=high reason=model_unavailable');
+    }
+  });
+}
+
+
+for (const control of ['switcher', 'pill']) {
+  test(`pre-send ${control} read retries a busy renderer without browser recovery or retyping`, options, async t => {
+    const fixture = await reasoningFixture(t, {strict:true, presendReadDelay:control});
+    await assertReasoningDelivered(fixture);
+    assert.equal(fixture.process.output().includes('browser failure'), false);
+    assert.equal(fixture.acknowledgements.filter(a => a.phase === 'ready_to_send').length, 1);
+    const snapshot = await fixture.page.evaluate(() => ({
+      attempts: window.presendReadAttempts, blocks: window.presendReadBlocks,
+      typed: window.clickLog.filter(e => e.event === 'typed').length,
+    }));
+    assert.equal(snapshot.blocks, 1);
+    assert.equal(snapshot.attempts, 2);
+    assert.equal(snapshot.typed, 1);
+  });
+}
+
+for (const strict of [true, false]) {
+  test(`exhausted pre-send reads record absent observations without browser recovery: strict=${strict}`, options, async t => {
+    const fixture = await reasoningFixture(t, {strict, presendReadDelay:'switcher', presendReadExhaust:true});
+    await waitUntil(() => fixture.results.length, 12000);
+    assert.equal(fixture.results[0].response, strict ? 'ERROR: model_unavailable' : 'Synthetic reasoning response', fixture.process.output());
+    assert.equal(fixture.results[0].observed_model_switcher, 'absent');
+    assert.equal(fixture.results[0].observed_model_effort, 'absent');
+    assert.equal(fixture.process.output().includes('browser failure'), false);
+    assert.equal(fixture.acknowledgements.filter(a => a.phase === 'ready_to_send').length, 1);
+    assert.equal(fixture.acknowledgements.filter(a => a.phase === 'sent').length, strict ? 0 : 1);
+    if (strict) {
+      assert.equal(fixture.results[0].failure_detail, 'model_unavailable@selecting_model');
+      assert.equal(fixture.acknowledgements.at(-1).phase_detail, 'switcher=absent effort=absent reason=presend_unverified');
     }
   });
 }
