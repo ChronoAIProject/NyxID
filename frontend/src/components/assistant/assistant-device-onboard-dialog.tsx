@@ -10,6 +10,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useAppForm } from "@/components/ui/form";
+import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
@@ -28,6 +30,7 @@ export interface AssistantDeviceOnboardParams {
   readonly label: string;
   readonly targetOrgId?: string;
   readonly defaultServiceIds?: readonly string[];
+  readonly allowAutoConnectedServices?: boolean;
 }
 
 export function AssistantDeviceOnboardDialog({
@@ -44,11 +47,16 @@ export function AssistantDeviceOnboardDialog({
   readonly onComplete: (deviceId: string) => void;
 }) {
   const submittingRef = useRef(false);
-  const [label, setLabel] = useState(params.label);
-  const [targetOrgId, setTargetOrgId] = useState(params.targetOrgId ?? "");
-  const [defaultServiceIds, setDefaultServiceIds] = useState(
-    params.defaultServiceIds?.join(", ") ?? "",
-  );
+  const form = useAppForm({
+    defaultValues: {
+      label: params.label,
+      targetOrgId: params.targetOrgId ?? "",
+      defaultServiceIds: params.defaultServiceIds?.join(", ") ?? "",
+      allowAutoConnectedServices: params.allowAutoConnectedServices ?? false,
+    },
+  });
+  const { label, targetOrgId, defaultServiceIds, allowAutoConnectedServices } =
+    form.watch();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -77,6 +85,9 @@ export function AssistantDeviceOnboardDialog({
       assertNoSensitiveActionParams(params);
       const reviewed = deviceOnboardActionParamsSchema.parse({
         label,
+        ...(allowAutoConnectedServices && !targetOrgId.trim()
+          ? { allowAutoConnectedServices: true }
+          : {}),
         ...(targetOrgId.trim() ? { targetOrgId: targetOrgId.trim() } : {}),
         ...(defaultServiceIds.trim()
           ? {
@@ -93,6 +104,9 @@ export function AssistantDeviceOnboardDialog({
           label: reviewed.label,
           targetOrgId: reviewed.targetOrgId,
           defaultServiceIds: reviewed.defaultServiceIds,
+          ...(reviewed.allowAutoConnectedServices
+            ? { allowAutoConnectedServices: true }
+            : {}),
         }),
       );
       const evidence = await readDeviceAuthorization(
@@ -191,7 +205,7 @@ export function AssistantDeviceOnboardDialog({
               <Input
                 id="assistant-device-label"
                 value={label}
-                onChange={(event) => setLabel(event.target.value)}
+                onChange={(event) => form.setValue("label", event.target.value)}
               />
             </div>
             <div className="space-y-1.5">
@@ -201,7 +215,9 @@ export function AssistantDeviceOnboardDialog({
               <Input
                 id="assistant-device-owner"
                 value={targetOrgId}
-                onChange={(event) => setTargetOrgId(event.target.value)}
+                onChange={(event) =>
+                  form.setValue("targetOrgId", event.target.value)
+                }
               />
             </div>
             <div className="space-y-1.5">
@@ -211,9 +227,26 @@ export function AssistantDeviceOnboardDialog({
               <Input
                 id="assistant-device-services"
                 value={defaultServiceIds}
-                onChange={(event) => setDefaultServiceIds(event.target.value)}
+                onChange={(event) =>
+                  form.setValue("defaultServiceIds", event.target.value)
+                }
               />
             </div>
+            <AssistantPlatformServiceFields
+              targetOrgId={targetOrgId.trim() || undefined}
+              selectedIds={defaultServiceIds
+                .split(",")
+                .map((id) => id.trim())
+                .filter(Boolean)}
+              allowAll={allowAutoConnectedServices}
+              onIdsChange={(ids) =>
+                form.setValue("defaultServiceIds", ids.join(", "))
+              }
+              onAllowAllChange={(value) =>
+                form.setValue("allowAutoConnectedServices", value)
+              }
+              disabled={submitting}
+            />
           </div>
         )}
 

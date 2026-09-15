@@ -1,3 +1,5 @@
+import { useCatalogEntry } from "@/hooks/use-keys";
+import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { useEffect, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -66,6 +68,10 @@ export function ConnectLinkPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const lastClickAtRef = useRef(0);
   const preview = usePreviewConnectLink();
+  const [platformChoice, setPlatformChoice] = useState<boolean | null>(null);
+  const { data: catalog } = useCatalogEntry(isAuthenticated ? preview.data?.service_slug : undefined);
+  const platformAvailable = Boolean(catalog?.platform_key?.available && !preview.data?.scopes.length);
+  const usePlatformKey = platformAvailable && (platformChoice ?? preview.data?.use_platform_key ?? true);
   const complete = useCompleteConnectLink();
   const cancel = useCancelHostedConnectLink();
   const actionPending =
@@ -109,7 +115,7 @@ export function ConnectLinkPage() {
 
   async function handleConnect() {
     if (!preview.data || actionPending || withinCooldown()) return;
-    if (connectLinkNeedsSetupForm(preview.data)) {
+    if (!usePlatformKey && connectLinkNeedsSetupForm(preview.data)) {
       setShowSetupForm(true);
       return;
     }
@@ -119,7 +125,8 @@ export function ConnectLinkPage() {
   async function submitCompletion(values?: CompleteConnectLinkInput) {
     setSubmitError(null);
     try {
-      const result = await complete.mutateAsync({ token, values });
+      const selected = { use_platform_key: usePlatformKey };
+      const result = await complete.mutateAsync({ token, values: usePlatformKey ? selected : { ...values, ...selected } });
       if (result.status === "oauth_required" && result.authorization_url) {
         sessionStorage.setItem(connectLinkStorageKey(result.id), token);
         window.location.assign(result.authorization_url);
@@ -238,6 +245,9 @@ export function ConnectLinkPage() {
             ) : (
               <>
                 <RequestDetails preview={preview.data} />
+                {platformAvailable && catalog?.platform_key && preview.data.status === "pending" && (
+                  <CredentialBindingChoice value={usePlatformKey} onChange={(value) => { setPlatformChoice(value); setShowSetupForm(false); }} platformPrice={catalog.platform_key.pricing} byokPrice={catalog.byok_pricing} legacyBillable={catalog.billing?.platform_billable} resaleBillable={catalog.billing?.resale_billable} disabled={actionPending} />
+                )}
                 {preview.data.status !== "pending" ? (
                   <ErrorBanner
                     message={`This connection request is ${preview.data.status}.`}
@@ -609,39 +619,53 @@ function OAuthSetupForm({
   );
 }
 
-function RequestDetails({ preview }: { readonly preview: ConnectLinkPreview }) {
+export function RequestDetails({ preview }: { readonly preview: ConnectLinkPreview }) {
   return (
-    <div className="divide-y divide-border/30 rounded-lg border border-border/50 bg-white/[0.02]">
-      <ConnectLinkDetailRow label="Service" value={preview.service_name} />
-      <ConnectLinkDetailRow
-        label="Requested by"
-        value={preview.requested_by ?? "Your NyxID account"}
-      />
-      <ConnectLinkDetailRow
-        label="Label"
-        value={preview.label ?? "Not provided"}
-      />
-      <ConnectLinkDetailRow
-        label="Created"
-        value={new Date(preview.created_at).toLocaleString()}
-      />
-      <ConnectLinkDetailRow
-        label="Status"
-        value={preview.status}
-        capitalizeValue
-      />
-      {preview.api_key_url ? (
-        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
-          <span className="text-muted-foreground">Credential source</span>
-          <a
-            className="inline-flex items-center gap-1 text-nyx-secondary-400 hover:underline"
-            href={preview.api_key_url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open provider <ExternalLink className="h-3 w-3" />
-          </a>
-        </div>
+    <div className="space-y-4">
+      <div className="divide-y divide-border/30 rounded-lg border border-border/50 bg-white/[0.02]">
+        <ConnectLinkDetailRow label="Service" value={preview.service_name} />
+        {preview.scopes.length > 0 ? (
+          <ConnectLinkDetailRow
+            label="Requested permissions"
+            value={preview.scopes.join(", ")}
+          />
+        ) : null}
+        <ConnectLinkDetailRow
+          label="Requested by"
+          value={preview.requested_by ?? "Your NyxID account"}
+        />
+        <ConnectLinkDetailRow
+          label="Label"
+          value={preview.label ?? "Not provided"}
+        />
+        <ConnectLinkDetailRow
+          label="Created"
+          value={new Date(preview.created_at).toLocaleString()}
+        />
+        <ConnectLinkDetailRow
+          label="Status"
+          value={preview.status}
+          capitalizeValue
+        />
+        {preview.api_key_url ? (
+          <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
+            <span className="text-muted-foreground">Credential source</span>
+            <a
+              className="inline-flex items-center gap-1 text-nyx-secondary-400 hover:underline"
+              href={preview.api_key_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open provider <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+        ) : null}
+      </div>
+      {preview.scopes.length > 0 &&
+      (preview.connect_method === "oauth" || preview.connect_method === "device_code") ? (
+        <p className="text-[12px] text-muted-foreground">
+          These additional permissions will be requested on top of the provider defaults.
+        </p>
       ) : null}
     </div>
   );

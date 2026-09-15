@@ -61,7 +61,7 @@ describe("statusLabel", () => {
 
 describe("platformLabel", () => {
   it("labels telegram", () => {
-    expect(platformLabel("telegram")).toBe("Telegram");
+    expect(platformLabel("telegram")).toBe("Telegram bot token");
   });
 
   it("labels discord", () => {

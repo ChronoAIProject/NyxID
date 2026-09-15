@@ -94,8 +94,16 @@ async fn response(
         backing: descriptor.backing,
         provider: descriptor.provider,
         label: descriptor.label,
-        available: service::configured(row.as_ref(), &descriptor),
-        callback_url: if matches!(
+        available: service::configured(row.as_ref(), &descriptor)
+            && (descriptor.provider != "telegram-new"
+                || row.as_ref().is_some_and(|row| {
+                    row.fields
+                        .get("webhook_ready")
+                        .is_some_and(|value| value == "true")
+                })),
+        callback_url: if descriptor.provider == "telegram-new" {
+            Some(super::telegram_new::service(state).manager_callback())
+        } else if matches!(
             descriptor.backing,
             crate::services::channel_managed::PlatformCredentialBacking::ProviderOAuth { .. }
         ) {
@@ -111,9 +119,13 @@ async fn response(
                 )
             })
         },
-        webhook_verify_token: credentials
-            .get(service::VERIFY_TOKEN_FIELD)
-            .map(String::from),
+        webhook_verify_token: if descriptor.provider == "telegram-new" {
+            None
+        } else {
+            credentials
+                .get(service::VERIFY_TOKEN_FIELD)
+                .map(String::from)
+        },
         platform,
         fields,
         setup_checklist: descriptor.setup_checklist,
@@ -148,15 +160,25 @@ pub async fn update(
 ) -> AppResult<(HeaderMap, Json<PlatformCredentialsResponse>)> {
     require_admin(&state, &auth).await?;
     let (platform, descriptor) = service::descriptor(&state.token_exchange_cache, &provider)?;
-    service::update(
-        &state.db,
-        &state.encryption_keys,
-        &descriptor,
-        &auth.user_id.to_string(),
-        &body.fields,
-        body.regenerate_verify_token,
-    )
-    .await?;
+    if provider == "telegram-new" {
+        super::telegram_new::service(&state)
+            .configure_manager(
+                &auth.user_id.to_string(),
+                &body.fields,
+                body.regenerate_verify_token,
+            )
+            .await?;
+    } else {
+        service::update(
+            &state.db,
+            &state.encryption_keys,
+            &descriptor,
+            &auth.user_id.to_string(),
+            &body.fields,
+            body.regenerate_verify_token,
+        )
+        .await?;
+    }
     let mut details = serde_json::json!({ "provider": provider, "fields": body.fields.keys().collect::<Vec<_>>(), "verify_token_regenerated": body.regenerate_verify_token });
     include_shared_provider(&mut details, &descriptor);
     audit_service::log_for_user(
@@ -178,7 +200,11 @@ pub async fn delete(
 ) -> AppResult<StatusCode> {
     require_admin(&state, &auth).await?;
     let (_, descriptor) = service::descriptor(&state.token_exchange_cache, &provider)?;
-    service::delete(&state.db, &descriptor).await?;
+    if provider == "telegram-new" {
+        super::telegram_new::service(&state).clear_manager().await?;
+    } else {
+        service::delete(&state.db, &descriptor).await?;
+    }
     let mut details = serde_json::json!({ "provider": provider, "deleted": true });
     include_shared_provider(&mut details, &descriptor);
     audit_service::log_for_user(

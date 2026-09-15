@@ -21,6 +21,28 @@ fn invalid(message: &str) -> AppError {
     AppError::ValidationError(message.to_string())
 }
 
+/// Bearer injection alone does not authorize a catalog-held key for additional
+/// recipients. Keep configured platform keys and legacy master keys single-origin.
+fn require_user_credential_source(service: &DownstreamService) -> AppResult<()> {
+    if service.platform_key.is_some()
+        || (service.service_category == "internal"
+            && !service.requires_user_credential
+            && service.auth_method != "none"
+            && !service.credential_encrypted.is_empty()
+            && service.provider_config_id.is_none())
+    {
+        return Err(invalid("Destination targets do not support platform keys"));
+    }
+    Ok(())
+}
+
+pub fn validate_credential_source(service: &DownstreamService) -> AppResult<()> {
+    if !service.destination_targets.is_empty() {
+        require_user_credential_source(service)?;
+    }
+    Ok(())
+}
+
 pub fn normalize_origin(value: &str) -> AppResult<String> {
     super::url_validation::validate_base_url(value)?;
     let url = url::Url::parse(value).map_err(|_| invalid("Invalid destination origin"))?;
@@ -113,6 +135,7 @@ pub fn select_target(
     method: &str,
     path: &CanonicalPath,
 ) -> AppResult<(String, Option<String>)> {
+    validate_credential_source(service)?;
     let forwarding = super::proxy_authorization::authorize_proxy_operation(service, method, path)?;
     let mut selected: Option<Option<String>> = None;
     if let Some(policy) = &service.proxy_operation_policy {
@@ -206,6 +229,7 @@ pub async fn validate_override_recipient(
     if catalog.destination_targets.is_empty() {
         return Ok(());
     }
+    require_user_credential_source(&catalog)?;
     normalize_targets(
         &catalog.slug,
         &service.auth_method,
@@ -278,6 +302,7 @@ pub async fn effective_catalog_auth(
         COLLECTION_NAME, ServiceProviderRequirement,
     };
     use futures::TryStreamExt;
+    require_user_credential_source(service)?;
     let requirements: Vec<ServiceProviderRequirement> = db
         .collection(COLLECTION_NAME)
         .find(mongodb::bson::doc! {"service_id": &service.id})

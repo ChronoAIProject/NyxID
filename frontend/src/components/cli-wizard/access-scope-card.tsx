@@ -1,3 +1,4 @@
+import { PlatformServiceScope } from "@/components/shared/platform-service-scope"
 /**
  * Access Scope card — Services + Nodes multi-select, porting
  * `.wizard-access-card` from `cli/src/wizard/assets/wizard.html:170-220`
@@ -23,17 +24,23 @@ import { useNodes } from "@/hooks/use-nodes"
 
 export interface AccessScopeState {
   readonly allowAllServices: boolean
+  readonly allowAutoConnectedServices?: boolean
   readonly allowAllNodes: boolean
   readonly selectedServiceIds: ReadonlySet<string>
   readonly selectedNodeIds: ReadonlySet<string>
 }
 
 export interface AccessScopeCardProps {
+  readonly ownerId?: string
   readonly value: AccessScopeState
   readonly onChange: (next: AccessScopeState) => void
 }
 
-export function AccessScopeCard({ value, onChange }: AccessScopeCardProps) {
+export function AccessScopeCard({
+  value,
+  onChange,
+  ownerId,
+}: AccessScopeCardProps) {
   const services = useKeys()
   const nodes = useNodes()
 
@@ -75,17 +82,47 @@ export function AccessScopeCard({ value, onChange }: AccessScopeCardProps) {
         listLabel="Select allowed services:"
         loading={services.isLoading}
         items={
-          services.data?.map((s) => ({
-            id: s.id,
-            primary: s.label,
-            secondary: s.slug,
-            iconSlug: s.catalog_service_slug,
-          })) ?? []
+          services.data
+            ?.filter(
+              (s) =>
+                s.is_active &&
+                !s.auto_connected &&
+                (!ownerId ||
+                  (s.credential_source?.type === "org" &&
+                    s.credential_source.org_id === ownerId)) &&
+                (s.credential_source?.type !== "org" ||
+                  s.credential_source.allowed),
+            )
+            .map((s) => ({
+              id: s.id,
+              primary: s.label,
+              secondary: s.slug,
+              iconSlug: s.catalog_service_slug,
+            })) ?? []
         }
         selectedIds={value.selectedServiceIds}
         onToggle={toggleService}
       />
 
+      {!value.allowAllServices && (
+        <PlatformServiceScope
+          services={(services.data ?? []).filter(
+            (service) =>
+              service.is_active &&
+              (!ownerId
+                ? service.credential_source?.type !== "org"
+                : service.credential_source?.type === "org" &&
+                  service.credential_source.org_id === ownerId),
+          )}
+          selectedIds={[...value.selectedServiceIds]}
+          allowAll={value.allowAutoConnectedServices}
+          onAllowAllChange={(allowAutoConnectedServices) =>
+            onChange({ ...value, allowAutoConnectedServices })
+          }
+          onToggle={toggleService}
+          orgOwned={!!ownerId}
+        />
+      )}
       <AccessGroup
         label="Nodes"
         icon={<ServersIcon />}
@@ -96,11 +133,13 @@ export function AccessScopeCard({ value, onChange }: AccessScopeCardProps) {
         listLabel="Select allowed nodes:"
         loading={nodes.isLoading}
         items={
-          nodes.data?.map((n) => ({
-            id: n.id,
-            primary: n.name,
-            secondary: n.status,
-          })) ?? []
+          nodes.data
+            ?.filter((n) => !ownerId || n.owner.id === ownerId)
+            .map((n) => ({
+              id: n.id,
+              primary: n.name,
+              secondary: n.status,
+            })) ?? []
         }
         selectedIds={value.selectedNodeIds}
         onToggle={toggleNode}

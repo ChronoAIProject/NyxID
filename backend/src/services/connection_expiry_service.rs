@@ -386,6 +386,7 @@ mod tests {
             slug: "github-work".to_string(),
             endpoint_id: Uuid::new_v4().to_string(),
             api_key_id: Some(api_key_id.to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("github-catalog".to_string()),

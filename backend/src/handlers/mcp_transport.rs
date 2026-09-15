@@ -440,7 +440,12 @@ async fn authenticate_mcp(
                     api_key_name: Some(api_key.name.clone()),
                     allow_all_services: api_key.allow_all_services,
                     allow_all_nodes: api_key.allow_all_nodes,
-                    allowed_service_ids: api_key.allowed_service_ids.clone(),
+                    allowed_service_ids:
+                        crate::services::key_service::effective_allowed_service_ids(
+                            &state.db, &api_key,
+                        )
+                        .await
+                        .map_err(axum::response::IntoResponse::into_response)?,
                     allowed_node_ids: api_key.allowed_node_ids.clone(),
                     rate_limit_per_second: api_key.rate_limit_per_second,
                     rate_limit_burst: api_key.rate_limit_burst,
@@ -2344,6 +2349,10 @@ async fn handle_meta_connect(
 
     let credential = arguments.get("credential").and_then(|c| c.as_str());
     let credential_label = arguments.get("credential_label").and_then(|l| l.as_str());
+    let scopes = match mcp_service::parse_connect_scopes(arguments.get("scopes")) {
+        Ok(scopes) => scopes,
+        Err(error) => return tool_result(request_id, &error.to_string(), true),
+    };
 
     if credential.is_none_or(|value| value.trim().is_empty()) {
         let rate_key = auth.api_key_id.as_deref().map_or_else(
@@ -2367,7 +2376,7 @@ async fn handle_meta_connect(
         }
     }
 
-    match mcp_service::connect_service(
+    match mcp_service::connect_service_with_binding(
         &state.db,
         &state.encryption_keys,
         state.node_ws_manager.as_ref(),
@@ -2377,6 +2386,11 @@ async fn handle_meta_connect(
         credential_label,
         &state.config.frontend_url,
         auth.api_key_name.as_deref(),
+        &scopes,
+        arguments
+            .get("use_platform_key")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     )
     .await
     {
@@ -2390,6 +2404,7 @@ async fn handle_meta_connect(
                         "connect_link_id": result.get("connect_link_id"),
                         "service_id": service_id,
                         "service_slug": result.get("service_slug"),
+                        "scopes": result.get("scopes"),
                     })),
                     auth.ip_address.clone(),
                     auth.user_agent.clone(),
@@ -2537,6 +2552,7 @@ async fn handle_wait_for_connection(
                 "connect_link_id": view.link.id,
                 "service_slug": view.completed_service_slug,
                 "service_id": view.link.service_id,
+                "scopes": view.link.scopes,
                 "expires_at": view.link.expires_at.to_rfc3339(),
                 "last_error": (status == "pending")
                     .then(|| view.link.last_error.clone())
@@ -3847,6 +3863,92 @@ mod tests {
             invalid_openapi_contract: false,
             proxy_operation_policy: None,
         }
+    }
+
+    #[tokio::test]
+    async fn auto_connected_mcp_auth_scope_and_tool_listing_follow_live_grant() {
+        let db = crate::test_utils::connect_transaction_test_database("auto_connected_mcp").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let ep = uuid::Uuid::new_v4().to_string();
+        let mut service = test_user_service(&id, &owner, "autoplatform", &ep, None, None);
+        service.source = Some(crate::models::user_service::AUTO_PROVISION_SOURCE.into());
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &ep,
+                &owner,
+                "Platform",
+                "https://example.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &db,
+            &owner,
+            "platform agent",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", key.full_key.parse().unwrap());
+        for flag in [false, true] {
+            let body = serde_json::from_value(
+                serde_json::json!({ "allow_auto_connected_services": flag }),
+            )
+            .unwrap();
+            let _ = crate::handlers::api_keys::update_key(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                Path(key.id.clone()),
+                axum::Json(body),
+            )
+            .await
+            .unwrap();
+            let auth = authenticate_mcp(&state, &headers, false).await.unwrap();
+            assert_eq!(auth.allowed_service_ids.contains(&id), flag);
+            let visible = filter_services_by_scope(vec![user_managed(&id)], &auth);
+            assert_eq!(visible.len(), usize::from(flag));
+            assert!(
+                matches!(mcp_service_scope(&auth), mcp_service::ServiceScope::Allowed(ids) if ids.contains(&id) == flag)
+            );
+            let response = handle_tools_list(&state, &auth, None, &tools_list_request()).await;
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let tools = body["result"]["tools"].as_array().unwrap();
+            assert_eq!(
+                tools.iter().any(|tool| tool["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("autoplatform__")),
+                flag
+            );
+        }
+        db.drop().await.unwrap();
     }
 
     #[test]

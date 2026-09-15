@@ -1,3 +1,4 @@
+import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
 import { useState } from "react";
 import { useParams } from "@tanstack/react-router";
 import { useApiKey } from "@/hooks/use-api-keys";
@@ -108,6 +109,16 @@ export function ApiKeyDetailPage() {
         <PlatformCard keyId={apiKey.id} platform={apiKey.platform} />
         <CallbackUrlCard keyId={apiKey.id} callbackUrl={apiKey.callback_url} />
 
+        <ServiceScopeCard
+          canWrite={canWrite}
+          keyId={apiKey.id}
+          allowAllServices={apiKey.allow_all_services}
+          allowAutoConnectedServices={apiKey.allow_auto_connected_services}
+          allowedServiceIds={apiKey.allowed_service_ids}
+          allowedServices={apiKey.allowed_services}
+          apiKeySource={apiKey.credential_source}
+        />
+
         <NodeScopeCard
           keyId={apiKey.id}
           allowAllNodes={apiKey.allow_all_nodes}
@@ -124,7 +135,6 @@ export function ApiKeyDetailPage() {
 
         <BindingsCard
           keyId={apiKey.id}
-          allowAllServices={apiKey.allow_all_services}
           apiKeySource={apiKey.credential_source}
         />
         <VerifyKeyCard apiKey={apiKey} />

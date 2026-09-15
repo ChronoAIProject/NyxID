@@ -130,6 +130,7 @@ pub struct OnboardDeviceRequest {
     pub label: String,
     pub target_org_id: Option<String>,
     pub default_service_ids: Option<Vec<String>>,
+    pub allow_auto_connected_services: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -249,6 +250,8 @@ struct OnboardDeviceFingerprint<'a> {
     label: &'a str,
     target_owner_user_id: &'a str,
     default_service_ids: &'a [String],
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_auto_connected_services: bool,
 }
 
 fn normalize_required(value: String, field: &str, max_len: usize) -> AppResult<String> {
@@ -964,12 +967,14 @@ pub async fn onboard_device(
     let label = normalize_required(body.label, "label", 128)?;
     let owner_user_id = normalize_owner_id(body.target_org_id, &actor)?;
     let default_service_ids = normalize_default_service_ids(body.default_service_ids)?;
+    let allow_auto_connected_services = body.allow_auto_connected_services.unwrap_or(false);
     ensure_owner_writable(&state, &actor, &owner_user_id).await?;
     let fingerprint = fingerprint_canonical(&OnboardDeviceFingerprint {
         action: DEVICE_ONBOARD_ACTION,
         label: &label,
         target_owner_user_id: &owner_user_id,
         default_service_ids: &default_service_ids,
+        allow_auto_connected_services,
     })?;
     let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
@@ -1013,6 +1018,7 @@ pub async fn onboard_device(
             org_id: (owner_user_id != actor).then_some(owner_user_id.clone()),
             label,
             default_services: Some(default_service_ids),
+            allow_auto_connected_services,
             base_url: state.config.base_url.clone(),
         },
     )
@@ -1627,6 +1633,92 @@ mod tests {
             .expect("pending");
         assert_eq!(stored.get_bool("is_active"), Ok(false));
         assert!(stored.get("declined_at").is_some());
+    }
+
+    #[test]
+    fn auto_connected_device_onboard_fingerprint_preserves_legacy_false_requests() {
+        let legacy = json!({
+            "action": DEVICE_ONBOARD_ACTION, "label": "camera",
+            "targetOwnerUserId": "owner", "defaultServiceIds": ["service"]
+        });
+        for flag in [None, Some(false), Some(true)] {
+            let body: OnboardDeviceRequest = serde_json::from_value(json!({
+                "actionRequestId": "test", "label": "camera",
+                "allowAutoConnectedServices": flag
+            }))
+            .unwrap();
+            let fingerprint = OnboardDeviceFingerprint {
+                action: DEVICE_ONBOARD_ACTION,
+                label: "camera",
+                target_owner_user_id: "owner",
+                default_service_ids: &["service".into()],
+                allow_auto_connected_services: body.allow_auto_connected_services.unwrap_or(false),
+            };
+            if flag == Some(true) {
+                assert_ne!(
+                    fingerprint_canonical(&fingerprint).unwrap(),
+                    fingerprint_canonical(&legacy).unwrap()
+                );
+            } else {
+                assert_eq!(serde_json::to_value(&fingerprint).unwrap(), legacy);
+                assert_eq!(
+                    fingerprint_canonical(&fingerprint).unwrap(),
+                    fingerprint_canonical(&legacy).unwrap()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_connected_assistant_device_onboard_persists_grant_and_binds_retry() {
+        let Some(db) = connect_test_database("assistant_device_auto_connected").await else {
+            return;
+        };
+        let actor = Uuid::new_v4().to_string();
+        insert_person(&db, &actor).await;
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor);
+        let body = json!({ "actionRequestId": "platform-onboard", "label": "camera", "allowAutoConnectedServices": true });
+        let (status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/device-onboard",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let stored = db
+            .collection::<crate::models::device_onboard_credential::DeviceOnboardCredential>(
+                crate::models::device_onboard_credential::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": first["resource"]["deviceId"].as_str().unwrap() })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.allow_auto_connected_services);
+        let (status, retry) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/device-onboard",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        let mut changed = body;
+        changed["allowAutoConnectedServices"] = json!(false);
+        let (status, _) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/device-onboard",
+            changed,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

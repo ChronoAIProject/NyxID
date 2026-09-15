@@ -1,5 +1,6 @@
 export type ChannelPlatform =
   | "telegram"
+  | "telegram-new"
   | "discord"
   | "lark"
   | "feishu"
@@ -19,7 +20,8 @@ export type ChannelBotStatus =
   | "pending_webhook"
   | "active"
   | "failed"
-  | "invalid";
+  | "invalid"
+  | "suspended";
 
 export type ConversationType = "private" | "group" | "channel" | "device";
 

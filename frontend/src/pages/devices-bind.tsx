@@ -1,3 +1,4 @@
+import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useEffect, useMemo, useState } from "react";
 import { useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -81,7 +82,7 @@ export function DevicesBindPage() {
   const grantableServices = useMemo(
     () =>
       (services ?? []).filter((service) => {
-        if (!service.is_active || service.auto_connected) return false;
+        if (!service.is_active) return false;
         const source = service.credential_source;
         if (selectedOwner) {
           return (
@@ -208,11 +209,12 @@ export function DevicesBindPage() {
                       <Select
                         disabled={isOrgsLoading}
                         value={field.value ?? PERSONAL_OWNER_VALUE}
-                        onValueChange={(value) =>
+                        onValueChange={(value) => {
                           field.onChange(
                             value === PERSONAL_OWNER_VALUE ? null : value,
-                          )
-                        }
+                          );
+                          form.setValue("allow_auto_connected_services", false);
+                        }}
                       >
                         <FormControl>
                           <SelectTrigger className="h-11 text-sm">
@@ -254,6 +256,24 @@ export function DevicesBindPage() {
                     </FormItem>
                   )}
                 />
+                <PlatformServiceScope
+                  services={grantableServices}
+                  selectedIds={form.watch("default_services") ?? []}
+                  allowAll={form.watch("allow_auto_connected_services")}
+                  orgOwned={!!selectedOwner}
+                  onAllowAllChange={(value) =>
+                    form.setValue("allow_auto_connected_services", value)
+                  }
+                  onToggle={(id) =>
+                    form.setValue(
+                      "default_services",
+                      toggleStringArray(
+                        form.getValues("default_services") ?? [],
+                        id,
+                      ),
+                    )
+                  }
+                />
 
                 <FormField
                   control={form.control}
@@ -282,43 +302,45 @@ export function DevicesBindPage() {
                                 : "Your personal account has no services available for device access."}
                             </p>
                           ) : (
-                            grantableServices.map((service) => {
-                              const checkboxId = `device-bind-service-${service.id}`;
-                              const checked = selectedServices.includes(
-                                service.id,
-                              );
-                              return (
-                                <div
-                                  key={service.id}
-                                  className="flex min-h-11 items-start gap-3 rounded-md px-2 py-2 hover:bg-accent/40"
-                                >
-                                  <Checkbox
-                                    id={checkboxId}
-                                    checked={checked}
-                                    className="mt-0.5"
-                                    onCheckedChange={() =>
-                                      field.onChange(
-                                        toggleStringArray(
-                                          selectedServices,
-                                          service.id,
-                                        ),
-                                      )
-                                    }
-                                  />
-                                  <label
-                                    htmlFor={checkboxId}
-                                    className="min-w-0 flex-1 cursor-pointer"
+                            grantableServices
+                              .filter((service) => !service.auto_connected)
+                              .map((service) => {
+                                const checkboxId = `device-bind-service-${service.id}`;
+                                const checked = selectedServices.includes(
+                                  service.id,
+                                );
+                                return (
+                                  <div
+                                    key={service.id}
+                                    className="flex min-h-11 items-start gap-3 rounded-md px-2 py-2 hover:bg-accent/40"
                                   >
-                                    <span className="block truncate text-[13px] font-medium text-foreground">
-                                      {service.label}
-                                    </span>
-                                    <span className="block truncate font-mono text-[12px] text-muted-foreground">
-                                      {service.slug}
-                                    </span>
-                                  </label>
-                                </div>
-                              );
-                            })
+                                    <Checkbox
+                                      id={checkboxId}
+                                      checked={checked}
+                                      className="mt-0.5"
+                                      onCheckedChange={() =>
+                                        field.onChange(
+                                          toggleStringArray(
+                                            selectedServices,
+                                            service.id,
+                                          ),
+                                        )
+                                      }
+                                    />
+                                    <label
+                                      htmlFor={checkboxId}
+                                      className="min-w-0 flex-1 cursor-pointer"
+                                    >
+                                      <span className="block truncate text-[13px] font-medium text-foreground">
+                                        {service.label}
+                                      </span>
+                                      <span className="block truncate font-mono text-[12px] text-muted-foreground">
+                                        {service.slug}
+                                      </span>
+                                    </label>
+                                  </div>
+                                );
+                              })
                           )}
                         </div>
                         <FormMessage />

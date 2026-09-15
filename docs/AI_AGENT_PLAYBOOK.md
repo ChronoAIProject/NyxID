@@ -629,6 +629,9 @@ The slug is auto-generated from the label (e.g., `internal-api`).
 For services that use OAuth (e.g., GitHub, Codex):
 
 ```bash
+# Hosted link for human consent, including additional OAuth scopes (CLI 0.18.1+)
+nyxid connect github --scope public_repo --no-wait --output json
+
 # CLI -- opens browser for OAuth flow
 nyxid service add github --oauth
 
@@ -651,6 +654,8 @@ curl -X POST http://localhost:3001/api/v1/providers/$PROVIDER_ID/connect/device-
   -H "Content-Type: application/json" \
   -d '{"state": "STATE_FROM_INITIATE"}'
 ```
+
+Hosted connect links carry additional permissions via repeatable, comma- or space-separated `nyxid connect --scope` or MCP `nyx__connect_service` with `scopes: ["public_repo"]` and no `credential`. The browser displays the scopes for consent and adds them to provider defaults. API-key/no-auth services, providers with OAuth scopes disabled, and OpenAI-format device-code providers reject non-empty scopes at creation. CLI versions older than **0.18.1** have no `connect --scope`; update first. To add scopes to an **existing connection**, use the console: **External Services → connection → Manage permissions**.
 
 **Never** put actual credential values in commands. Always use env vars or the dashboard.
 

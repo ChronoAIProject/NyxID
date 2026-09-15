@@ -206,3 +206,56 @@ To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register 
 3. If discovery missed the real spec location, update `openapi_spec_url` and `asyncapi_spec_url`.
 4. Enrich the service with metadata: `homepage_url`, `repository_url`, `capabilities`, `auth_notes`, `known_limitations`, `required_permissions` so AI agents can discover the service fully.
 5. Share `GET /api/v1/proxy/services/{service_id}/docs` with internal consumers so they test through NyxID instead of bypassing it.
+
+## Inference and platform-key discovery (0.20)
+
+Catalog list, `?include_all=true`, single-entry lookup and MCP
+`nyx__discover_services` expose an optional `inference` block. No block means no
+advertised model-call protocol. `wire_protocol` is `anthropic_messages`,
+`openai_responses` or `openai_completions`; `model_list=true` advertises
+`GET /api/v1/proxy/s/{slug}/models` with a `data` model array. Anthropic keeps its
+own pagination fields. Optional `realtime=true` advertises WebSocket
+`/api/v1/proxy/s/{slug}/realtime`. xAI and OpenAI preserve the bearer-injected
+`wss://api.x.ai/v1/realtime` and `wss://api.openai.com/v1/realtime` transports.
+
+`binding` is computed for the caller. `platform` means an authorized server-held
+key is available and omits `status_slug`; it does not change the binding of an
+existing personal connection. `user` means the client needs a personal connection:
+
+1. For provider-linked services, `status_slug` is `ProviderConfig.slug`. Find that
+   `provider_slug` in `GET /api/v1/llm/status`; `ready` is usable, `expired` needs
+   reauthorization, `not_connected` needs connection.
+2. Otherwise `status_slug` is the catalog slug. In `GET /api/v1/keys`, find rows
+   whose `catalog_service_slug` matches, check `is_active=true`, then inspect
+   credential health (`status` / `connection_status`). Do not match the user
+   connection's potentially customized `slug`, and do not treat a healthy
+   credential on a disabled service as a usable connection.
+3. Execute through the selected connection's returned proxy URL/slug. A user may
+   have several connections and may choose BYOK even when catalog binding is
+   platform. Restricted availability is revalidated at execution time.
+
+Every catalog entry also returns `platform_key: { available, pricing }` and
+`byok_pricing`. A price view contains `metric`, exact decimal `credits_per_unit`
+and `sync_status`; null means no configured lane price. In lane mode the missing
+lane is free. Services without lanes retain legacy `billing` behavior; resale can
+also apply. No credentials, secret lengths or allowed-owner lists are exposed.
+
+Startup fills only null/absent inference values for OpenAI, Anthropic, DeepSeek,
+Mistral, OpenRouter, xAI, `chrono-llm` and `chrono-llm-public`. Chrono uses chat
+completions and models as recorded in [its upstream contract](chat/direct-chronollm-spec.md).
+Chrono public preserves platform binding; Chrono BYOK uses `status_slug=chrono-llm`.
+Codex, Google AI and Cohere do not advertise a generic protocol block.
+
+Connect through `POST /keys` or `nyx__connect_service` with
+`use_platform_key: true`, or omit it for existing BYOK behavior. Hosted connect-link
+creation/completion accepts the same choice. Assistant clients can request the
+additive boolean schema with `GET /api/v1/assistant/actions?revision=nyxid-assistant-actions.v9`;
+the default and revisions v4-v8 keep their deployed pinned schemas. The v9
+`catalogService.use_platform_key` field is optional and the human can review the
+choice in the connection dialog.
+
+Admin-cleared inference stays absent after restart: `inference_admin_modified` is a
+stored, defaulted tombstone and is not a client inference capability. Admin catalog
+responses additionally expose `legacy_public_master`; editors render such absent
+platform configurations as enabled/public (implicit). Gateway-URL providers never
+advertise an available platform key.

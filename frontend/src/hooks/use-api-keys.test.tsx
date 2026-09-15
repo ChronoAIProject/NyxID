@@ -160,6 +160,7 @@ describe("useCreateApiKey body transforms", () => {
       expires_at: "2026-03-25",
       description: undefined,
       allow_all_services: true,
+      allow_auto_connected_services: false,
       allow_all_nodes: true,
     } as never);
 
@@ -171,6 +172,7 @@ describe("useCreateApiKey body transforms", () => {
       allowed_service_ids: undefined,
       allowed_node_ids: undefined,
       allow_all_services: true,
+      allow_auto_connected_services: false,
       allow_all_nodes: true,
       callback_url: undefined,
       target_org_id: undefined,
@@ -187,6 +189,7 @@ describe("useCreateApiKey body transforms", () => {
       scopes: ["read"],
       expires_at: null,
       allow_all_services: false,
+      allow_auto_connected_services: false,
       allow_all_nodes: false,
       allowed_service_ids: ["svc-1"],
       allowed_node_ids: ["node-1"],
@@ -201,6 +204,7 @@ describe("useCreateApiKey body transforms", () => {
       allowed_service_ids: ["svc-1"],
       allowed_node_ids: ["node-1"],
       allow_all_services: false,
+      allow_auto_connected_services: false,
       allow_all_nodes: false,
       callback_url: undefined,
       target_org_id: "org-9",

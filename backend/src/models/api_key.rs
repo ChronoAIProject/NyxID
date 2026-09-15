@@ -66,6 +66,10 @@ pub struct ApiKey {
     /// Default: true (backward compatible -- existing keys have no restrictions).
     #[serde(default = "default_true")]
     pub allow_all_services: bool,
+    /// Also grant active auto-provisioned services owned by this key owner.
+    /// Applies only when allow_all_services is false; legacy rows opt out.
+    #[serde(default)]
+    pub allow_auto_connected_services: bool,
 
     /// If true, key can route through ALL of the user's nodes.
     /// Default: true (backward compatible).
@@ -133,6 +137,7 @@ mod tests {
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -185,6 +190,7 @@ mod tests {
         doc.remove("rate_limit_per_second");
         doc.remove("rate_limit_burst");
         doc.remove("platform");
+        doc.remove("allow_auto_connected_services");
         doc.remove("callback_url");
         doc.remove("purpose");
         doc.remove("scheduled_write_enabled");
@@ -195,6 +201,7 @@ mod tests {
         assert_eq!(restored.rate_limit_per_second, None);
         assert_eq!(restored.rate_limit_burst, None);
         assert_eq!(restored.platform, None);
+        assert!(!restored.allow_auto_connected_services);
         assert_eq!(restored.callback_url, None);
         assert_eq!(restored.purpose, ApiKeyPurpose::General);
         assert!(!restored.scheduled_write_enabled);

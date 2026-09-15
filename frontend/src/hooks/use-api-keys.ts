@@ -196,6 +196,7 @@ interface CreateApiKeyPayload {
   readonly allowed_service_ids?: readonly string[];
   readonly allowed_node_ids?: readonly string[];
   readonly allow_all_services?: boolean;
+  readonly allow_auto_connected_services?: boolean;
   readonly allow_all_nodes?: boolean;
   readonly platform?: string;
   readonly callback_url?: string;
@@ -228,6 +229,8 @@ export function useCreateApiKey() {
           ? undefined
           : (data.allowed_node_ids ?? []),
         allow_all_services: allowAllServices,
+        allow_auto_connected_services:
+          data.allow_auto_connected_services ?? false,
         allow_all_nodes: allowAllNodes,
         platform: data.platform ?? undefined,
         callback_url: data.callback_url ?? undefined,
@@ -252,6 +255,7 @@ interface UpdateApiKeyParams {
   readonly allowed_service_ids?: readonly string[];
   readonly allowed_node_ids?: readonly string[];
   readonly allow_all_services?: boolean;
+  readonly allow_auto_connected_services?: boolean;
   readonly allow_all_nodes?: boolean;
   readonly platform?: string | null;
   readonly callback_url?: string | null;

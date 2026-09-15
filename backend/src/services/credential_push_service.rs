@@ -957,6 +957,7 @@ mod tests {
             slug: "openai".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: Some("ak-1".to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,

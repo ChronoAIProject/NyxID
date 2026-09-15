@@ -349,7 +349,8 @@ function UsageSummary({
         <CardTitle>Usage</CardTitle>
         <p className="mt-1 text-[12px] text-muted-foreground">
           Estimated cost per service. Expand a row for the model, agent, and
-          layer behind it.
+          layer behind it. Platform costs use the service price for your selected
+          key; your own key can be free or billed. Resale fees are separate.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">

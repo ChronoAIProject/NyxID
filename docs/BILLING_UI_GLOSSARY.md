@@ -9,7 +9,7 @@ identical to `main` at time of writing (last billing UI commit `f0691e23`).
 
 **Design background:** [ADR-014](./ADR-014-usage-billing-lago.md) (decisions) and
 [USAGE_BILLING_LAGO_SPEC.md](./USAGE_BILLING_LAGO_SPEC.md) (implementation). Lago is the billing
-engine; NyxID owns the meter, the wallet cache, and the spend gate. Lago owns pricing and invoices.
+engine; NyxID owns the meter, wallet cache, spend gate and per-service lane prices. Lago synchronizes those prices and owns invoicing.
 Where the ADR's intent and the shipped code disagree, this doc describes **the code**.
 
 > Written by two independent passes (Claude + GPT/Codex) over the same source, then reconciled;
@@ -27,8 +27,17 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 
 | Layer | What is being charged |
 |---|---|
-| **Platform** | NyxID's own fee for brokering the request — the proxy hop itself. Opt-in per service via the admin `platform_billable` flag; services default to free (`models/service_billing.rs:15-19`). |
+| **Platform** | NyxID's fee for the request. In lane mode, the final credential selects either Your own key or NyxID platform key pricing. A missing lane is free. With no lanes, the legacy `platform_billable` / `platform_pricing` settings apply. |
 | **Resale** | The downstream vendor's value, resold. Charged **only** when NyxID supplied the master credential (`CredentialClass::NyxidManagedMaster`), the catalog service sets `resale_billable` with a Lago metric code, and the operator switch `BILLING_RESALE_ENABLED` is on. Bring your own key — or have an agent binding swap yours in, or keep the credential on a node — and there is no resale line (`services/billing/route_context.rs:52-58`). |
+
+A **lane** selects the platform-layer price; it is not an extra billing layer.
+**Your own key** includes BYOK, agent credential overrides and node-managed keys.
+**NyxID platform key** means NyxID supplied the catalog master credential. The
+connect dialog and service detail show each lane's exact credits per token, request
+or byte. Pending/failed prices are labeled pending because legacy charging remains
+in force until sync succeeds. Resale may add its independent charge to platform-key
+traffic. Usage continues grouping by service/model/agent/layer; lane charges retain
+these dimensions and use the existing wallet/allowance/grant funding display.
 
 ---
 
@@ -77,6 +86,8 @@ this banner is mostly a defense against stale capability state rather than the n
 
 Backed by `GET /api/v1/billing/wallet` → `BillingWalletResponse` (`handlers/billing.rs:94-114`;
 model at `models/billing_wallet.rs`).
+
+For mixed billing lanes, the allowance unit selector follows [the metering and allowance rules](USAGE_BILLING_LAGO_SPEC.md#40-metadata-only-route-context-r1).
 
 ### Header
 

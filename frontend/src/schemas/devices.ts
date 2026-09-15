@@ -94,6 +94,7 @@ export const approveDeviceFormSchema = z.object({
   org_id: orgIdSchema,
   label: labelSchema,
   default_services: z.array(z.string()).optional(),
+  allow_auto_connected_services: z.boolean().optional(),
 });
 export type ApproveDeviceFormData = z.input<typeof approveDeviceFormSchema>;
 export type ApproveDeviceRequest = z.output<typeof approveDeviceFormSchema>;
@@ -114,6 +115,7 @@ export const onboardDeviceFormSchema = z.object({
   wifi_ssid: wifiSsidSchema,
   wifi_password: wifiPasswordSchema,
   default_services: z.array(z.string()).optional(),
+  allow_auto_connected_services: z.boolean().optional(),
 });
 export type OnboardDeviceFormData = z.input<typeof onboardDeviceFormSchema>;
 export type OnboardDeviceFormValues = z.output<typeof onboardDeviceFormSchema>;
@@ -122,6 +124,7 @@ export const onboardDeviceRequestSchema = z.object({
   org_id: orgIdSchema,
   label: onboardLabelSchema,
   default_services: z.array(z.string()).optional(),
+  allow_auto_connected_services: z.boolean().optional(),
 });
 export type OnboardDeviceRequest = z.output<typeof onboardDeviceRequestSchema>;
 

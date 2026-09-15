@@ -8,7 +8,7 @@ use mongodb::{IndexModel, bson::doc};
 use crate::models::coordination::{
     CoordinationHolder, EVENT_DEDUP_COLLECTION_NAME, LEASE_COLLECTION_NAME,
     RATE_WINDOW_COLLECTION_NAME, REPLAY_COLLECTION_NAME, SLOT_COLLECTION_NAME,
-    TOKEN_BUCKET_COLLECTION_NAME,
+    TOKEN_BUCKET_COLLECTION_NAME, TokenBucketRecord,
 };
 use crate::services::cluster_slot_service::RenewableSlotManager;
 use crate::services::coordination_service::{
@@ -316,16 +316,46 @@ async fn token_bucket_never_admits_above_the_cluster_wide_burst() {
             TokenBucketStore::admit(&db, "agent", "key-1", 1, 5)
                 .await
                 .expect("token admission")
-                .allowed
         })
     });
     let results = futures::future::join_all(attempts).await;
-    assert_eq!(
-        results
-            .into_iter()
-            .filter(|result| *result.as_ref().expect("task joined"))
-            .count(),
-        5
+    let allowed: Vec<_> = results
+        .into_iter()
+        .map(|result| result.expect("task joined"))
+        .filter(|admission| admission.allowed)
+        .collect();
+    assert!(
+        allowed.len() >= 5,
+        "initial burst capacity must be available"
+    );
+    let first = allowed
+        .iter()
+        .min_by_key(|admission| admission.reset_at)
+        .expect("initial admission");
+    assert_eq!(first.remaining, 4);
+    // The first admission consumes one token from a full bucket, so its
+    // full-refill deadline is exactly one second after MongoDB's admission time.
+    // Concurrent admits may span refills; count their server-time budget too.
+    let first_admitted_at = first.reset_at - chrono::Duration::seconds(1);
+    let bucket = db
+        .collection::<TokenBucketRecord>(TOKEN_BUCKET_COLLECTION_NAME)
+        .find_one(doc! { "namespace": "agent" })
+        .await
+        .expect("read final bucket state")
+        .expect("bucket exists");
+    let elapsed_ms = (bucket.last_refill_at - first_admitted_at).num_milliseconds();
+    let refilled = usize::try_from(elapsed_ms)
+        .expect("MongoDB refill time must not precede the first admission")
+        / 1_000;
+    let max_admitted = 5 + refilled;
+    eprintln!(
+        "token bucket: {} admitted over {elapsed_ms} ms of MongoDB refill time; budget {max_admitted}",
+        allowed.len()
+    );
+    assert!(
+        allowed.len() <= max_admitted,
+        "{} admissions exceed burst plus observed refill budget {max_admitted}",
+        allowed.len()
     );
 
     let separate = TokenBucketStore::admit(&db, "trigger", "key-1", 1, 5)

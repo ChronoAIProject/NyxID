@@ -335,7 +335,7 @@ async fn load_active_bot(state: &AppState, original: &ChannelMessage) -> AppResu
         )
     })?;
     let bot = channel_bot_service::get_bot(&state.db, channel_bot_id).await?;
-    if !bot.is_active {
+    if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".to_string(),
         ));
@@ -968,7 +968,7 @@ pub async fn resolve_sender(
 
     // Currently only Telegram is supported for sender resolution
     let (nyxid_user_id, linked) = match params.platform.as_str() {
-        "telegram" => {
+        "telegram" | "telegram-new" => {
             // Parse the platform_id as an i64 chat ID
             let chat_id: i64 = params.platform_id.parse().map_err(|_| {
                 AppError::ValidationError(
@@ -1213,6 +1213,7 @@ mod tests {
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -1611,6 +1612,35 @@ mod tests {
             .update_one(
                 doc! { "_id": &fixture.bot.id },
                 doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        let token = valid_reply_token(&fixture);
+        let err = resolve_reply_token_context(
+            &fixture.state,
+            &token,
+            &reply_request(&fixture.message.id),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::ChannelBotInactive(_)));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_reply_token_rejects_suspended_bot() {
+        let Some(fixture) = setup_reply_token_fixture("reply_token_suspended_bot").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &fixture.bot.id },
+                doc! { "$set": { "status": "suspended", "platform": "telegram-new" } },
             )
             .await
             .unwrap();

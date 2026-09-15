@@ -141,6 +141,7 @@ export function AdminCreditsPage() {
       allowance
         ? {
             service_ref: allowance.service_id,
+            metric: allowance.metric,
             quantity: allowance.quantity,
             recurrence: allowance.recurrence,
             target_kind: allowance.target_kind,

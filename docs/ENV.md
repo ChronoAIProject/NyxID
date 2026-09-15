@@ -127,6 +127,22 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `BILLING_FAIL_CLOSED` | `false` | Incident kill switch. When `BILLING_ENABLED=true`, rejects billable forwarding even when Lago is healthy; when billing is disabled it has no effect. |
 | `BILLING_RESALE_ENABLED` | `false` | Explicit opt-in for the dormant catalog resale layer. Resale still also requires `ServiceBilling.resale_billable=true` and final `CredentialClass::NyxidManagedMaster`. |
 
+Platform-key access and lane pricing add no environment variables. The existing
+`PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` / `PLATFORM_SERVICE_RATE_LIMIT_BURST`
+gate applies to all final platform-key traffic, including provider-linked services.
+Restricted grants are checked against the live catalog on every execution.
+
+`billing.byok_pricing` and `billing.platform_key_pricing` select independent prices
+by final credential class. With either lane present, a missing lane is free and a
+synced matching lane supersedes legacy platform pricing. Pending/failed matching
+lanes use legacy pricing until synchronization succeeds. No lanes keeps legacy
+behavior. `NoAuth` has no lane charge. The existing billing feature flag, wallet
+rollout, Lago configuration and reconcile interval still govern charging and sync.
+Each lane owns `platform_svc_{slug}_byok` or `platform_svc_{slug}_pk` on
+`LAGO_PLAN_CODE`; clearing persists cleanup until both charge and cache are removed.
+Resale is unchanged and independently gated by `BILLING_RESALE_ENABLED`.
+See [platform keys and inference](PLATFORM_KEYS_AND_INFERENCE.md).
+
 ### Billing flag matrix
 
 `BILLING_ENABLED`, `BILLING_RESALE_ENABLED`, and `BILLING_FAIL_CLOSED` are independent. `BILLING_ENABLED` controls platform metering, wallet provisioning, and the reservation gate; it does not implicitly enable catalog resale. `BILLING_RESALE_ENABLED` controls only the resale ledger layer, and `BILLING_FAIL_CLOSED` is consulted only when `BILLING_ENABLED=true`.

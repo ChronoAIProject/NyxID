@@ -13,6 +13,8 @@ pub struct Cli {
     pub command: Commands,
 }
 
+// Parsed once per invocation; clap flattened arguments cannot be boxed.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
     /// Log in to NyxID (opens browser by default)
@@ -55,6 +57,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: CatalogCommands,
     },
+    /// List configured service keys and their credential binding
+    Keys(AuthArgs),
     /// Manage AI services (external APIs)
     Service {
         #[command(subcommand)]
@@ -215,6 +219,11 @@ pub struct ConnectArgs {
     /// Human-readable label shown on the hosted connection page
     #[arg(long)]
     pub label: Option<String>,
+    /// Additional OAuth scopes to request on top of the provider's defaults
+    /// (repeatable, comma- or space-separated). The upstream provider decides
+    /// whether to grant them. Example: --scope "public_repo,read:org"
+    #[arg(long = "scope", value_name = "SCOPES")]
+    pub scopes: Vec<String>,
     /// Return immediately after creating the link
     #[arg(long)]
     pub no_wait: bool,
@@ -839,6 +848,42 @@ pub enum CatalogCommands {
 
 // ---- Service (C11-C13, I21-I23) ----
 
+#[derive(Args, Default)]
+pub struct CatalogServiceArgs {
+    /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
+    #[arg(long)]
+    pub catalog_admin: bool,
+    /// Inference wire protocol (none clears the block)
+    #[arg(long, value_parser = ["anthropic_messages", "openai_responses", "openai_completions", "none"])]
+    pub inference_protocol: Option<String>,
+    #[arg(long)]
+    pub inference_model_list: Option<bool>,
+    #[arg(long)]
+    pub inference_realtime: Option<bool>,
+    #[arg(long)]
+    pub platform_key_enabled: Option<bool>,
+    #[arg(long, value_parser = ["public", "restricted"])]
+    pub platform_key_audience: Option<String>,
+    /// Grant an owner UUID or organization slug/display name (repeatable)
+    #[arg(long, num_args = 1..)]
+    pub platform_key_allow: Vec<String>,
+    /// Remove an owner UUID or organization slug/display name (repeatable)
+    #[arg(long, num_args = 1..)]
+    pub platform_key_deny: Vec<String>,
+    #[arg(long, value_parser = ["tokens", "requests", "bytes"])]
+    pub byok_metric: Option<String>,
+    #[arg(long, conflicts_with = "byok_free")]
+    pub byok_price: Option<String>,
+    #[arg(long)]
+    pub byok_free: bool,
+    #[arg(long, value_parser = ["tokens", "requests", "bytes"])]
+    pub platform_key_metric: Option<String>,
+    #[arg(long, conflicts_with = "platform_key_free")]
+    pub platform_key_price: Option<String>,
+    #[arg(long)]
+    pub platform_key_free: bool,
+}
+
 #[derive(Subcommand)]
 // The `Add` variant has accreted a lot of flags as catalog adds have
 // gained capabilities (org targeting, OpenAPI spec URL, WS frame
@@ -853,6 +898,11 @@ pub enum CatalogCommands {
 pub enum ServiceCommands {
     /// Add a service from catalog or custom endpoint
     Add {
+        #[command(flatten)]
+        catalog: CatalogServiceArgs,
+        /// Use the authorized NyxID platform key without entering a credential
+        #[arg(long, conflicts_with_all = ["custom", "credential", "credential_env", "credential_file", "oauth", "device_code", "via_node", "endpoint_url", "auth_method", "auth_key_name", "oauth_client_id", "oauth_client_secret", "oauth_client_secret_env", "copy_oauth_client_from", "scopes", "openapi_spec_url", "ws_frame_preset", "ws_frame_clear", "no_wait"]) ]
+        platform_key: bool,
         /// Catalog slug (e.g., llm-openai). Omit with --custom for a custom endpoint.
         slug: Option<String>,
         /// Add a fully custom endpoint (interactive prompts)
@@ -1030,6 +1080,9 @@ pub enum ServiceCommands {
     },
     /// Show service details
     Show {
+        /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
+        #[arg(long)]
+        catalog_admin: bool,
         /// Service ID
         id: String,
         #[command(flatten)]
@@ -1074,6 +1127,15 @@ pub enum ServiceCommands {
     },
     /// Update service configuration
     Update {
+        #[command(flatten)]
+        catalog: CatalogServiceArgs,
+        #[arg(long, conflicts_with = "use_own_key")]
+        use_platform_key: bool,
+        #[arg(long)]
+        use_own_key: bool,
+        /// Read the replacement credential from an environment variable
+        #[arg(long, conflicts_with = "use_platform_key")]
+        credential_env: Option<String>,
         /// Service ID
         id: String,
         /// New display label
@@ -1526,7 +1588,7 @@ pub enum ApiKeyCommands {
         /// Expiry in days (0 = no expiry)
         #[arg(long)]
         expires_in_days: Option<u32>,
-        /// Allowed service IDs (comma-separated)
+        /// Allowed service UUIDs or slugs (comma-separated; includes platform services)
         #[arg(long)]
         allowed_services: Option<String>,
         /// Allowed node IDs (comma-separated)
@@ -1535,6 +1597,9 @@ pub enum ApiKeyCommands {
         /// Allow access to all services
         #[arg(long)]
         allow_all_services: bool,
+        /// Allow all auto-connected platform services, including future additions
+        #[arg(long)]
+        allow_auto_connected_services: bool,
         /// Allow access to all nodes
         #[arg(long)]
         allow_all_nodes: bool,
@@ -1617,12 +1682,16 @@ pub enum ApiKeyCommands {
         name: Option<String>,
         #[arg(long)]
         scopes: Option<String>,
+        /// Service UUIDs or slugs (comma-separated)
         #[arg(long)]
         allowed_services: Option<String>,
         #[arg(long)]
         allowed_nodes: Option<String>,
         #[arg(long)]
         allow_all_services: Option<bool>,
+        /// Allow all auto-connected platform services (true or false)
+        #[arg(long)]
+        allow_auto_connected_services: Option<bool>,
         #[arg(long)]
         allow_all_nodes: Option<bool>,
         /// Callback URL for channel bot relay (set empty string to clear)
@@ -2291,6 +2360,9 @@ pub enum DeviceCommands {
         /// Service(s) to grant the device proxy access to at approve time. Repeatable. Accepts slugs or service IDs. Without this, the device gets an api_key with no service access; you'll need to grant scopes separately later.
         #[arg(long = "service", value_name = "SLUG_OR_UUID")]
         service: Vec<String>,
+        /// Grant all auto-connected platform services, including future additions
+        #[arg(long)]
+        allow_auto_connected_services: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -2319,6 +2391,9 @@ pub enum DeviceCommands {
         /// Service(s) to grant the device proxy access to at onboard time. Repeatable. Accepts slugs or service IDs.
         #[arg(long = "service", value_name = "SLUG_OR_UUID")]
         service: Vec<String>,
+        /// Grant all auto-connected platform services, including future additions
+        #[arg(long)]
+        allow_auto_connected_services: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -4696,7 +4771,7 @@ pub enum AiSetupCommands {
 pub enum ChannelBotCommands {
     /// Register a new messaging platform bot
     Register {
-        /// Platform: telegram, discord, lark, feishu, slack, whatsapp (Meta Cloud API)
+        /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp
         #[arg(long)]
         platform: String,
         /// Complete managed onboarding in your browser

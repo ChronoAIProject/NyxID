@@ -637,7 +637,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                         auth_method: AuthMethod::ApiKey,
                                         allow_all_services: api_key.allow_all_services,
                                         allow_all_nodes: api_key.allow_all_nodes,
-                                        allowed_service_ids: api_key.allowed_service_ids.clone(),
+                                        allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(&state.db, &api_key).await?,
                                         resource_uris: None,
                                         allowed_node_ids: api_key.allowed_node_ids.clone(),
                                         api_key_id: Some(api_key.id.clone()),
@@ -1041,7 +1041,9 @@ impl FromRequestParts<AppState> for AuthUser {
                     auth_method: AuthMethod::ApiKey,
                     allow_all_services: key.allow_all_services,
                     allow_all_nodes: key.allow_all_nodes,
-                    allowed_service_ids: key.allowed_service_ids.clone(),
+                    allowed_service_ids:
+                        crate::services::key_service::effective_allowed_service_ids(&state.db, &key)
+                            .await?,
                     resource_uris: None,
                     allowed_node_ids: key.allowed_node_ids.clone(),
                     api_key_id: Some(key.id.clone()),
@@ -2039,6 +2041,7 @@ mod tests {
             allowed_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: None,
             rate_limit_burst: None,

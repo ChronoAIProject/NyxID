@@ -877,6 +877,7 @@ async fn generic_oauth_callback_impl(
                                 "service_id": &view.link.service_id,
                                 "service_slug": &view.link.service_slug,
                                 "user_service_id": &view.link.completed_user_service_id,
+                                "scopes": &view.link.scopes,
                             })),
                             auth_user.as_ref().and_then(|user| user.ip_address.clone()),
                             auth_user.as_ref().and_then(|user| user.user_agent.clone()),
@@ -2509,9 +2510,11 @@ mod tests {
         let now = Utc::now();
         db.collection::<ConnectLink>(CONNECT_LINKS)
             .insert_one(ConnectLink {
+                scopes: Vec::new(),
                 id: link_id.clone(),
                 user_id: user_id.clone(),
                 service_slug: "provider-service".to_string(),
+                use_platform_key: None,
                 service_id: Uuid::new_v4().to_string(),
                 label: None,
                 requested_by: None,

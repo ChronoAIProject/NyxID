@@ -85,6 +85,8 @@ pub struct ResourceSummary {
     pub id: String,
     pub name: String,
     pub owner_id: String,
+    #[serde(default)]
+    pub auto_connected: bool,
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -98,6 +100,7 @@ pub struct KeySummary {
     pub owner_name: String,
     pub scopes: String,
     pub allow_all_services: bool,
+    pub allow_auto_connected_services: bool,
     pub allow_all_nodes: bool,
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
@@ -116,6 +119,7 @@ pub struct LoginOptions {
     pub keys: Vec<KeySummary>,
     pub services: Vec<ResourceSummary>,
     pub nodes: Vec<ResourceSummary>,
+    pub personal_owner_id: String,
     pub orgs: Vec<ResourceSummary>,
 }
 
@@ -308,9 +312,10 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
         .find_one(doc! {"_id": &key.user_id})
         .await?
         .ok_or(AppError::AgentKeyLoginKeyIneligible)?;
+    let effective_ids = key_service::effective_allowed_service_ids(db, key).await?;
     let services: Vec<UserService> = db
         .collection::<UserService>(SERVICES)
-        .find(doc! {"_id": {"$in": &key.allowed_service_ids}})
+        .find(doc! {"_id": {"$in": &effective_ids}})
         .await?
         .try_collect()
         .await?;
@@ -334,11 +339,11 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
         owner_name: owner.display_name.unwrap_or(owner.email),
         scopes: key.scopes.clone(),
         allow_all_services: key.allow_all_services,
+        allow_auto_connected_services: key.allow_auto_connected_services,
         allow_all_nodes: key.allow_all_nodes,
         allowed_service_ids: key.allowed_service_ids.clone(),
         allowed_node_ids: key.allowed_node_ids.clone(),
-        allowed_services: key
-            .allowed_service_ids
+        allowed_services: effective_ids
             .iter()
             .map(|id| {
                 let row = services.iter().find(|row| &row.id == id);
@@ -346,6 +351,10 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
                     id: id.clone(),
                     name: row.map_or_else(|| "Unavailable service".into(), |r| r.slug.clone()),
                     owner_id: row.map_or_else(|| key.user_id.clone(), |r| r.user_id.clone()),
+                    auto_connected: row.is_some_and(|r| {
+                        r.source.as_deref()
+                            == Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+                    }),
                 }
             })
             .collect(),
@@ -358,6 +367,7 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
                     id: id.clone(),
                     name: row.map_or_else(|| "Unavailable node".into(), |r| r.name.clone()),
                     owner_id: row.map_or_else(|| key.user_id.clone(), |r| r.user_id.clone()),
+                    auto_connected: false,
                 }
             })
             .collect(),
@@ -383,6 +393,7 @@ pub async fn options(
 }
 
 pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOptions> {
+    super::unified_key_service::auto_provision_no_auth_services(db, actor).await?;
     let mut owners = vec![actor.to_string()];
     let mut orgs = Vec::new();
     for membership in org_service::list_memberships_for_member(db, actor, false).await? {
@@ -400,6 +411,7 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
                 orgs.push(ResourceSummary {
                     id: owner.id.clone(),
                     owner_id: owner.id,
+                    auto_connected: false,
                     name: owner.display_name.unwrap_or(owner.email),
                 });
             }
@@ -424,6 +436,8 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
             id: entry.service.id,
             name: entry.service.slug,
             owner_id: entry.service.user_id,
+            auto_connected: entry.service.source.as_deref()
+                == Some(crate::models::user_service::AUTO_PROVISION_SOURCE),
         })
         .collect();
     let nodes = node_service::list_user_nodes(db, actor)
@@ -433,12 +447,14 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
             id: entry.node.id,
             name: entry.node.name,
             owner_id: entry.node.user_id,
+            auto_connected: false,
         })
         .collect();
     Ok(LoginOptions {
         keys,
         services,
         nodes,
+        personal_owner_id: actor.to_string(),
         orgs,
     })
 }

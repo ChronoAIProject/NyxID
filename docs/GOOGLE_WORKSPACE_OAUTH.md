@@ -318,6 +318,8 @@ References: [Google web-server OAuth](https://developers.google.com/identity/pro
 
 ### Multi-origin design and decisions
 
+Platform keys cannot be combined with a destination map, including disabled platform-key configurations and legacy catalog master credentials. A bearer injection method alone does not establish authority to send a platform-held key to additional recipients. Admin writes reject this combination; runtime catalog loading, target selection, and master-credential authorization also reject it before dispatch. Workspace continues to use user-owned Google OAuth credentials and its provider requirement supplies the effective bearer injection.
+
 The catalog owns `destination_targets`, mapping stable IDs (`docs`, `sheets`, `slides`) to exact
 normalized HTTPS origins. Google recipients are explicitly limited to `docs.googleapis.com`,
 `sheets.googleapis.com`, and `slides.googleapis.com`, on port 443. Endpoint and policy `target_id`

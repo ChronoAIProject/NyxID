@@ -4047,7 +4047,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4123,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

@@ -115,6 +115,7 @@ pub struct CreateApiKeyRequest {
     /// When omitted, defaults to `true` only if `allowed_service_ids` is empty.
     /// An explicit `true` conflicts with a non-empty restriction list.
     pub allow_all_services: Option<bool>,
+    pub allow_auto_connected_services: Option<bool>,
     /// If true, key can route through ALL of the user's nodes.
     /// When omitted, defaults to `true` only if `allowed_node_ids` is empty.
     /// An explicit `true` conflicts with a non-empty restriction list.
@@ -149,6 +150,7 @@ pub struct UpdateApiKeyRequest {
     pub allowed_service_ids: Option<Vec<String>>,
     pub allowed_node_ids: Option<Vec<String>>,
     pub allow_all_services: Option<bool>,
+    pub allow_auto_connected_services: Option<bool>,
     pub allow_all_nodes: Option<bool>,
     #[serde(
         default,
@@ -179,6 +181,8 @@ pub struct UpdateApiKeyRequest {
 pub struct ApiKeyScopePlanRequest {
     /// Exact `UserService.id` values to grant. Duplicates are rejected.
     pub selected_service_ids: Vec<String>,
+    #[serde(default)]
+    pub allow_auto_connected_services: bool,
     /// Intended organization key owner. Omit for a personal key owned by the
     /// authenticated actor. The actor must be an admin of this exact org.
     pub target_org_id: Option<String>,
@@ -205,6 +209,7 @@ pub struct CreateApiKeyResponse {
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
     pub allow_all_services: bool,
+    pub allow_auto_connected_services: bool,
     pub allow_all_nodes: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_per_second: Option<u32>,
@@ -297,6 +302,7 @@ pub struct AllowedServiceInfo {
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_name: Option<String>,
+    pub auto_connected: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -325,6 +331,7 @@ pub struct ApiKeyResponse {
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
     pub allow_all_services: bool,
+    pub allow_auto_connected_services: bool,
     pub allow_all_nodes: bool,
     pub allowed_services: Vec<AllowedServiceInfo>,
     pub allowed_nodes: Vec<AllowedNodeInfo>,
@@ -376,6 +383,7 @@ pub struct ApiKeyAuthorizationEvidenceResponse {
     pub is_active: bool,
     pub allowed_service_ids: Vec<String>,
     pub allow_all_services: bool,
+    pub allow_auto_connected_services: bool,
     pub allowed_node_ids: Vec<String>,
     pub allow_all_nodes: bool,
     pub created_at: String,
@@ -411,6 +419,7 @@ impl ApiKeyAuthorizationEvidenceResponse {
             is_active: response.is_active,
             allowed_service_ids: response.allowed_service_ids,
             allow_all_services: response.allow_all_services,
+            allow_auto_connected_services: response.allow_auto_connected_services,
             allowed_node_ids: response.allowed_node_ids,
             allow_all_nodes: response.allow_all_nodes,
             created_at: response.created_at,
@@ -669,6 +678,8 @@ async fn enrich_api_keys_batch(
                             slug: svc.slug.clone(),
                             label,
                             catalog_service_name,
+                            auto_connected: svc.source.as_deref()
+                                == Some(crate::models::user_service::AUTO_PROVISION_SOURCE),
                         }
                     })
                 })
@@ -702,6 +713,7 @@ async fn enrich_api_keys_batch(
                 allowed_service_ids: key.allowed_service_ids.clone(),
                 allowed_node_ids: key.allowed_node_ids.clone(),
                 allow_all_services: key.allow_all_services,
+                allow_auto_connected_services: key.allow_auto_connected_services,
                 allow_all_nodes: key.allow_all_nodes,
                 allowed_services,
                 allowed_nodes,
@@ -1360,6 +1372,7 @@ pub async fn plan_key_scope(
             &actor,
             body.target_org_id.as_deref(),
             &body.selected_service_ids,
+            body.allow_auto_connected_services,
         )
         .await?
     } else {
@@ -1371,6 +1384,7 @@ pub async fn plan_key_scope(
             &body.selected_service_ids,
             &body.selected_operations,
             key_expires_at,
+            body.allow_auto_connected_services,
         )
         .await?
     };
@@ -1461,7 +1475,10 @@ pub async fn create_key(
     .await?;
 
     let (created, durable_grants) = if scheduled {
-        if allow_all_services || allow_all_nodes {
+        if allow_all_services
+            || allow_all_nodes
+            || body.allow_auto_connected_services.unwrap_or(false)
+        {
             return Err(AppError::ValidationError(
                 "scheduled_invocation keys require exact service and node scopes".to_string(),
             ));
@@ -1511,6 +1528,7 @@ pub async fn create_key(
             Some(&body.allowed_service_ids),
             Some(&body.allowed_node_ids),
             Some(allow_all_services),
+            body.allow_auto_connected_services,
             Some(allow_all_nodes),
             body.rate_limit_per_second,
             body.rate_limit_burst,
@@ -1571,6 +1589,7 @@ pub async fn create_key(
         allowed_service_ids: created.allowed_service_ids,
         allowed_node_ids: created.allowed_node_ids,
         allow_all_services: created.allow_all_services,
+        allow_auto_connected_services: created.allow_auto_connected_services,
         allow_all_nodes: created.allow_all_nodes,
         rate_limit_per_second: created.rate_limit_per_second,
         rate_limit_burst: created.rate_limit_burst,
@@ -1618,6 +1637,7 @@ pub async fn update_key(
         body.allowed_service_ids.as_deref(),
         body.allowed_node_ids.as_deref(),
         body.allow_all_services,
+        body.allow_auto_connected_services,
         body.allow_all_nodes,
         body.rate_limit_per_second,
         body.rate_limit_burst,
@@ -1739,6 +1759,7 @@ pub async fn rotate_key(
         allowed_service_ids: created.allowed_service_ids,
         allowed_node_ids: created.allowed_node_ids,
         allow_all_services: created.allow_all_services,
+        allow_auto_connected_services: created.allow_auto_connected_services,
         allow_all_nodes: created.allow_all_nodes,
         rate_limit_per_second: created.rate_limit_per_second,
         rate_limit_burst: created.rate_limit_burst,
@@ -1906,6 +1927,7 @@ mod tests {
             allowed_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             allowed_services: Vec::new(),
             allowed_nodes: Vec::new(),
@@ -1950,12 +1972,14 @@ mod tests {
             allowed_service_ids: vec!["service-1".to_string()],
             allowed_node_ids: vec!["node-1".to_string()],
             allow_all_services: false,
+            allow_auto_connected_services: false,
             allow_all_nodes: false,
             allowed_services: vec![super::AllowedServiceInfo {
                 id: "service-1".to_string(),
                 slug: "example".to_string(),
                 label: "Bearer Bot".to_string(),
                 catalog_service_name: None,
+                auto_connected: false,
             }],
             allowed_nodes: vec![super::AllowedNodeInfo {
                 id: "node-1".to_string(),
@@ -2012,6 +2036,7 @@ mod tests {
             [
                 "allow_all_nodes",
                 "allow_all_services",
+                "allow_auto_connected_services",
                 "allowed_node_ids",
                 "allowed_service_ids",
                 "created_at",
@@ -2126,6 +2151,7 @@ mod tests {
                 allowed_service_ids: vec![service_id],
                 allowed_node_ids: Vec::new(),
                 allow_all_services: false,
+                allow_auto_connected_services: false,
                 allow_all_nodes: true,
                 rate_limit_per_second: None,
                 rate_limit_burst: None,
@@ -2439,6 +2465,7 @@ mod tests {
                 last_used_at: None,
                 expires_at: None,
                 allow_all_services: true,
+                allow_auto_connected_services: false,
                 allow_all_nodes: true,
                 allowed_service_ids: Vec::new(),
                 allowed_node_ids: Vec::new(),
@@ -2837,6 +2864,7 @@ mod tests {
             allowed_service_ids: vec![uuid::Uuid::new_v4().to_string()],
             allowed_node_ids: Vec::new(),
             allow_all_services: false,
+            allow_auto_connected_services: false,
             allow_all_nodes: false,
             rate_limit_per_second: None,
             rate_limit_burst: None,

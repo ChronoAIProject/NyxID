@@ -186,6 +186,7 @@ pub async fn create_bot(
 
     persist_verified_bot(
         db,
+        config,
         encryption_keys,
         adapter,
         user_id,
@@ -202,6 +203,7 @@ pub async fn create_bot(
 #[allow(clippy::too_many_arguments)]
 async fn persist_verified_bot(
     db: &mongodb::Database,
+    config: &AppConfig,
     encryption_keys: &EncryptionKeys,
     adapter: &dyn PlatformAdapter,
     user_id: &str,
@@ -323,9 +325,7 @@ async fn persist_verified_bot(
     .await?;
     let bot: ChannelBot = bson::from_document(document)
         .map_err(|_| AppError::Internal("Invalid channel bot storage fields".to_string()))?;
-    db.collection::<ChannelBot>(COLLECTION_NAME)
-        .insert_one(&bot)
-        .await?;
+    insert_registered_bot(db, &bot, config.channel_relay_max_bots_per_user, None).await?;
 
     Ok(CreateBotResult {
         bot,
@@ -411,6 +411,7 @@ pub async fn create_managed_bot(
         }
         return persist_verified_bot(
             db,
+            config,
             keys,
             adapter,
             owner,
@@ -439,6 +440,7 @@ pub async fn create_managed_bot(
     );
     let created = persist_verified_bot(
         db,
+        config,
         keys,
         adapter,
         owner,
@@ -477,6 +479,81 @@ pub async fn create_managed_bot(
         bot: get_bot(db, &created.bot.id).await?,
         webhook_secret: created.webhook_secret,
     })
+}
+
+/// All registration paths serialize the identity and owner-limit check with
+/// insertion. Telegram's manual and managed variants share one remote identity.
+pub(crate) async fn insert_registered_bot(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    capacity: u32,
+    telegram_request_revision: Option<i64>,
+) -> AppResult<()> {
+    if matches!(bot.platform.as_str(), "telegram" | "telegram-new") {
+        super::telegram_new_service::with_operation(
+            db,
+            &format!("telegram-manager-identity:{}", bot.platform_bot_id),
+            insert_registered_bot_inner(db, bot, capacity, telegram_request_revision),
+        )
+        .await
+    } else {
+        insert_registered_bot_inner(db, bot, capacity, telegram_request_revision).await
+    }
+}
+
+async fn insert_registered_bot_inner(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    capacity: u32,
+    telegram_request_revision: Option<i64>,
+) -> AppResult<()> {
+    use super::api_key_mutation_service::{map_transaction_error, transaction_result};
+    use crate::models::platform_settings::{COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID};
+    use crate::models::telegram_bot_request::{COLLECTION_NAME as REQUESTS, MANAGED_BOTS};
+    db.collection::<bson::Document>(SETTINGS)
+        .update_one(
+            doc! {"_id": PLATFORM_SETTINGS_ID},
+            doc! {"$setOnInsert": {"channel_bot_registration_revision": 0_i64}},
+        )
+        .upsert(true)
+        .await?;
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let bot = bot.clone();
+    session.start_transaction().and_run2(async move |session| {
+        let operation: AppResult<()> = async {
+            db.collection::<bson::Document>(SETTINGS).update_one(doc! {"_id": PLATFORM_SETTINGS_ID}, doc! {"$inc": {"channel_bot_registration_revision": 1_i64}}).session(&mut *session).await?;
+            let bots = db.collection::<ChannelBot>(COLLECTION_NAME);
+            if let Some(existing) = bots.find_one(doc! {"_id": &bot.id}).session(&mut *session).await? {
+                if telegram_request_revision.is_some() && existing.is_active && existing.user_id == bot.user_id && existing.platform_bot_id == bot.platform_bot_id { return Ok(()); }
+                return Err(AppError::Conflict("Bot registration already exists".into()));
+            }
+            let platform = if matches!(bot.platform.as_str(), "telegram" | "telegram-new") { bson::Bson::Document(doc! {"$in": ["telegram", "telegram-new"]}) } else { bson::Bson::String(bot.platform.clone()) };
+            if bots.find_one(doc! {"platform": platform, "platform_bot_id": &bot.platform_bot_id, "is_active": true}).session(&mut *session).await?.is_some() {
+                return Err(AppError::Conflict("This bot is already connected".into()));
+            }
+            if matches!(bot.platform.as_str(), "telegram" | "telegram-new") && db.collection::<bson::Document>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider": "telegram-new", "fields.manager_bot_id": &bot.platform_bot_id}).session(&mut *session).await?.is_some() {
+                return Err(AppError::Conflict("The manager bot cannot be registered as a channel bot".into()));
+            }
+            if bots.count_documents(doc! {"user_id": &bot.user_id, "is_active": true}).session(&mut *session).await? >= u64::from(capacity) {
+                return Err(AppError::ChannelBotLimitReached(format!("maximum of {capacity} bots per owner reached")));
+            }
+            if let Some(revision) = telegram_request_revision {
+                let request = db.collection::<crate::models::telegram_bot_request::TelegramBotRequest>(REQUESTS).find_one_and_update(
+                    doc! {"_id": &bot.id, "owner_user_id": &bot.user_id, "revision": revision, "status": "ready", "active": true, "expires_at": {"$gt": bson::DateTime::now()}},
+                    doc! {"$set": {"status": "provisioning"}, "$inc": {"revision": 1}},
+                ).session(&mut *session).await?.ok_or_else(|| AppError::Conflict("The Telegram approval expired or changed. Refresh the request.".into()))?;
+                let gate = db.collection::<bson::Document>(MANAGED_BOTS).update_one(
+                    doc! {"manager_bot_id": request.manager_bot_id, "telegram_bot_id": request.telegram_bot_id, "telegram_user_id": request.telegram_user_id, "revision": request.manager_revision, "observation_id": &request.observation_id, "retired": {"$ne": true}},
+                    doc! {"$inc": {"claim_revision": 1_i64}, "$set": {"retired": true}},
+                ).session(&mut *session).await?;
+                if gate.matched_count != 1 { return Err(AppError::Conflict("Telegram management changed after consent. Start a fresh connection request.".into())); }
+            }
+            bots.insert_one(&bot).session(&mut *session).await?;
+            Ok(())
+        }.await;
+        transaction_result(operation)
+    }).await.map_err(map_transaction_error)
 }
 
 pub async fn store_managed_setup(
@@ -580,7 +657,11 @@ pub async fn reregister_managed_bot(
     adapter: &dyn PlatformAdapter,
     bot: &ChannelBot,
 ) -> AppResult<()> {
-    if bot.credential_source != "platform" || !bot.is_active {
+    if bot.credential_source != "platform"
+        || !bot.is_active
+        || bot.status == "suspended"
+        || bot.platform == "telegram-new"
+    {
         return Err(super::channel_managed::unavailable());
     }
     let descriptor = adapter
@@ -627,7 +708,11 @@ pub async fn repair_managed_bot(
     adapter: &dyn PlatformAdapter,
     bot: &ChannelBot,
 ) -> AppResult<crate::models::channel_bot::ManagedBotSetup> {
-    if bot.credential_source != "platform" || !bot.is_active {
+    if bot.credential_source != "platform"
+        || !bot.is_active
+        || bot.status == "suspended"
+        || bot.platform == "telegram-new"
+    {
         return Err(super::channel_managed::unavailable());
     }
     let descriptor = adapter
@@ -873,7 +958,32 @@ pub async fn decrypt_bot_token(
 ///
 /// Webhook deregistration errors are logged but do not fail the operation,
 /// because the bot token may have already been revoked on the platform side.
+#[allow(clippy::too_many_arguments)]
 pub async fn delete_bot(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    http_client: &reqwest::Client,
+    encryption_keys: &EncryptionKeys,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    user_id: &str,
+) -> AppResult<Option<&'static str>> {
+    let bot = get_bot_for_user(db, bot_id, user_id).await?;
+    if bot.platform == "telegram-new" {
+        return super::telegram_new_service::with_operation(db, &format!("telegram-child:{}", bot.platform_bot_id), async {
+            db.collection::<bson::Document>(crate::models::telegram_bot_request::MANAGED_BOTS).update_many(doc! {"telegram_bot_id": bot.platform_bot_id.parse::<i64>().unwrap_or_default()}, doc! {"$set": {"retired": true}}).await?;
+            delete_bot_inner(db, http_client, encryption_keys, adapter, bot_id, user_id).await?;
+            db.collection::<bson::Document>(crate::models::telegram_bot_request::COLLECTION_NAME).update_one(doc! {"_id": bot_id}, doc! {"$set": {"status": "cancelled", "active": false}, "$inc": {"revision": 1}}).await?;
+            let service = super::telegram_new_service::TelegramNewService {
+                db, config, keys: encryption_keys, api: super::telegram_new_api::TelegramApi::new(http_client),
+            };
+            Ok(Some(service.remove_owned_webhook(&bot).await.unwrap_or("failed")))
+        }).await;
+    }
+    delete_bot_inner(db, http_client, encryption_keys, adapter, bot_id, user_id).await
+}
+
+async fn delete_bot_inner(
     db: &mongodb::Database,
     http_client: &reqwest::Client,
     encryption_keys: &EncryptionKeys,
@@ -884,7 +994,8 @@ pub async fn delete_bot(
     let bot = get_bot_for_user(db, bot_id, user_id).await?;
 
     // Best-effort webhook deregistration
-    if bot.webhook_registered
+    if bot.platform != "telegram-new"
+        && bot.webhook_registered
         && let Ok(token) = decrypt_bot_token(encryption_keys, &bot).await
     {
         // Register with an empty URL to remove the webhook
@@ -900,6 +1011,7 @@ pub async fn delete_bot(
             doc! { "$set": {
                 "is_active": false,
                 "status": "inactive",
+                "webhook_registered": false,
                 "updated_at": now,
             }},
         )
@@ -916,7 +1028,7 @@ pub async fn delete_bot(
         )
         .await?;
 
-    let cleanup = if bot.credential_source == "platform" {
+    let cleanup = if bot.credential_source == "platform" && bot.platform != "telegram-new" {
         Some(
             cleanup_managed_webhook(db, http_client, encryption_keys, adapter, &bot)
                 .await

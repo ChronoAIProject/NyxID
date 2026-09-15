@@ -1933,6 +1933,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // -- user_services --
+    db.collection::<mongodb::bson::Document>("user_services")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "source": 1, "is_active": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
     let user_services = db.collection::<mongodb::bson::Document>("user_services");
     user_services
         .create_index(
@@ -2040,6 +2047,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // ── channel_bots ──
+    crate::services::telegram_new_service::ensure_indexes(db).await?;
     let channel_bots = db.collection::<mongodb::bson::Document>("channel_bots");
     channel_bots
         .create_index(
@@ -4035,6 +4043,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
+            credential_binding: None,
             auth_method,
             auth_key_name,
             catalog_service_id,
@@ -4270,6 +4279,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
+            credential_binding: None,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
@@ -4531,6 +4541,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
+            credential_binding: None,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
@@ -4769,6 +4780,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -4792,6 +4804,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

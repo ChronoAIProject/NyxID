@@ -125,6 +125,10 @@ pub struct CatalogEntryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference: Option<crate::services::inference_service::InferenceView>,
+    pub platform_key: crate::services::inference_service::PlatformKeyView,
+    pub byok_pricing: Option<crate::services::inference_service::LanePricingView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known_limitations: Option<String>,
@@ -348,6 +352,9 @@ fn catalog_entry_response(
         issues_url: entry.issues_url,
         capabilities: entry.capabilities,
         billing: entry.billing,
+        inference: entry.inference,
+        platform_key: entry.platform_key,
+        byok_pricing: entry.byok_pricing,
         auth_notes: entry.auth_notes,
         known_limitations: entry.known_limitations,
         required_permissions: entry.required_permissions,
@@ -912,7 +919,10 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
             billing: None,
+            platform_key: Default::default(),
+            byok_pricing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,

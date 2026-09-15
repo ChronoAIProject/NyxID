@@ -1,3 +1,4 @@
+import type { InferenceMetadata, PlatformKeyConfig, LanePricingView } from "@/schemas/platform-keys";
 import type { BillingMetric } from "@/schemas/billing";
 
 /// Resolved platform role for a user. `admin` is full read+write,
@@ -108,6 +109,7 @@ export interface ApiKey {
   readonly allowed_service_ids: readonly string[];
   readonly allowed_node_ids: readonly string[];
   readonly allow_all_services: boolean;
+  readonly allow_auto_connected_services?: boolean;
   readonly allow_all_nodes: boolean;
   readonly allowed_services: readonly AllowedServiceInfo[];
   readonly allowed_nodes: readonly AllowedNodeInfo[];
@@ -131,6 +133,7 @@ export interface AllowedServiceInfo {
   readonly slug: string;
   readonly label: string;
   readonly catalog_service_name: string | null;
+  readonly auto_connected?: boolean;
 }
 
 export interface AllowedNodeInfo {
@@ -208,6 +211,8 @@ export interface OAuthClient {
 }
 
 export interface DownstreamService {
+  readonly inference?: InferenceMetadata | null;
+  readonly platform_key?: PlatformKeyConfig | null;
   readonly id: string;
   readonly name: string;
   readonly slug: string;
@@ -247,6 +252,7 @@ export interface DownstreamService {
   readonly billing?: ServiceBilling | null;
   /** Backend-resolved unit used by service allowances and platform metering. */
   readonly effective_platform_metric: BillingMetric;
+  readonly legacy_public_master?: boolean;
   readonly auth_notes?: string | null;
   readonly known_limitations?: string | null;
   readonly required_permissions?: readonly string[] | null;
@@ -339,6 +345,8 @@ export interface ServiceCapabilities {
 }
 
 export interface ServiceBilling {
+  readonly byok_pricing?: LanePricingView | null;
+  readonly platform_key_pricing?: LanePricingView | null;
   /** Admin opt-in: only platform_billable services charge wallet credits. */
   readonly platform_billable?: boolean;
   /** Admin-selected metering unit; unset falls back to the slug heuristic. */
@@ -423,6 +431,9 @@ export type UpdateServicePayload =
       readonly issues_url?: string;
       readonly capabilities?: ServiceCapabilities;
       readonly billing?: ServiceBilling;
+      readonly inference?: InferenceMetadata | null;
+      readonly platform_key?: PlatformKeyConfig;
+      readonly credential?: string;
       readonly auth_notes?: string;
       readonly known_limitations?: string;
       readonly required_permissions?: readonly string[];

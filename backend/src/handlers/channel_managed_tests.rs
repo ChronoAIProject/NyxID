@@ -204,9 +204,12 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
         );
     }
     let all = credentials::descriptors(&cache);
-    assert_eq!(all.len(), 2);
-    assert_eq!(all[0].1.provider, "meta");
-    assert_eq!(all[1].1.provider, "x");
+    let mut providers: Vec<_> = all
+        .iter()
+        .map(|(_, descriptor)| descriptor.provider)
+        .collect();
+    providers.sort_unstable();
+    assert_eq!(providers, ["meta", "telegram-new", "x"]);
 }
 
 #[tokio::test]

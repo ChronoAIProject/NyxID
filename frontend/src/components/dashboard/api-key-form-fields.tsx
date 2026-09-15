@@ -1,3 +1,4 @@
+import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import type { UseFormReturn } from "react-hook-form";
 import { API_KEY_SCOPES, type CreateApiKeyFormData } from "@/schemas/api-keys";
 import {
@@ -19,7 +20,12 @@ export function ApiKeyResourceFields({
   services,
   nodes,
 }: Props & {
-  services: readonly { id: string; name: string }[];
+  services: readonly {
+    id: string;
+    name: string;
+    auto_connected?: boolean;
+    platform_grant_eligible?: boolean;
+  }[];
   nodes: readonly { id: string; name: string }[];
 }) {
   const prefix = useId();
@@ -33,7 +39,10 @@ export function ApiKeyResourceFields({
         const idsField =
           kind === "services" ? "allowed_service_ids" : "allowed_node_ids";
         const all = kind === "services" ? allServices : allNodes;
-        const resources = kind === "services" ? services : nodes;
+        const resources =
+          kind === "services"
+            ? services.filter((service) => !service.auto_connected)
+            : nodes;
         return (
           <section
             key={kind}
@@ -98,6 +107,25 @@ export function ApiKeyResourceFields({
                     <FormMessage />
                   </FormItem>
                 )}
+              />
+            )}
+            {kind === "services" && !all && (
+              <PlatformServiceScope
+                services={services}
+                selectedIds={form.watch("allowed_service_ids") ?? []}
+                allowAll={form.watch("allow_auto_connected_services")}
+                orgOwned={!!form.watch("target_org_id")}
+                onAllowAllChange={(value) =>
+                  form.setValue("allow_auto_connected_services", value)
+                }
+                onToggle={(id) =>
+                  form.setValue("allowed_service_ids", [
+                    ...toggleInArray(
+                      form.getValues("allowed_service_ids") ?? [],
+                      id,
+                    ),
+                  ])
+                }
               />
             )}
           </section>

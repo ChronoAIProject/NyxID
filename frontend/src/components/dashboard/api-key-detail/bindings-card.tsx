@@ -4,13 +4,11 @@ import {
   useCreateBinding,
   useDeleteBinding,
 } from "@/hooks/use-agent-bindings";
-import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { ApiError } from "@/lib/api-client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import {
   Card,
   CardContent,
@@ -72,18 +70,15 @@ function invalidReasonLabel(reason: string | undefined): string {
 
 export function BindingsCard({
   keyId,
-  allowAllServices,
   apiKeySource,
 }: {
   readonly keyId: string;
-  readonly allowAllServices: boolean;
   readonly apiKeySource?: CredentialSource;
 }) {
   const { data: bindings, isLoading } = useAgentBindings(keyId);
   const { data: allKeys } = useKeys();
   const createBinding = useCreateBinding();
   const deleteBinding = useDeleteBinding();
-  const updateApiKey = useUpdateApiKey();
   const [adding, setAdding] = useState(false);
   const [selectedServiceId, setSelectedServiceId] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<AgentServiceBinding | null>(
@@ -174,59 +169,14 @@ export function BindingsCard({
             <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border border-white/[0.08] bg-white/[0.04]">
               <Plus className="h-2.5 w-2.5" />
             </span>
-            Add Service
+            Add Binding
           </button>
         </div>
         <CardDescription>
-          {allowAllServices
-            ? "This agent can access all services. Add bindings to override credentials for specific services."
-            : "This agent can only access services listed below."}
+          Bindings override the default credentials for selected services. Manage service access in Service Scope.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="flex items-center justify-between rounded-lg border border-border p-3">
-          <div className="space-y-0.5">
-            <Label htmlFor="allow-all-toggle" className="text-[12px] font-medium">
-              Allow all services
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              {allowAllServices
-                ? "Agent uses default credentials; bindings are overrides"
-                : "Agent can only access services with bindings below"}
-            </p>
-          </div>
-          <Switch
-            id="allow-all-toggle"
-            checked={allowAllServices}
-            disabled={updateApiKey.isPending}
-            onCheckedChange={(checked) => {
-              // When restricting, seed allowed_service_ids from current bindings
-              // so the agent doesn't lose access to already-bound services.
-              const boundIds = checked
-                ? undefined
-                : (bindings ?? []).map((b) => b.user_service_id);
-              updateApiKey.mutate(
-                {
-                  keyId,
-                  allow_all_services: checked,
-                  allowed_service_ids: boundIds,
-                },
-                {
-                  onSuccess: () =>
-                    checked
-                      ? toast.success("Agent can now access all services")
-                      : toast.warning("Agent restricted to bound services only"),
-                  onError: (err) =>
-                    toast.error(
-                      err instanceof ApiError
-                        ? err.message
-                        : "Failed to update",
-                    ),
-                },
-              );
-            }}
-          />
-        </div>
         {adding && (
           <div className="rounded-lg border border-border p-3 space-y-3">
             <div className="space-y-1.5">

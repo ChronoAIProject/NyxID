@@ -62,8 +62,10 @@ frontend/src/components/service-icons/llm-openai.tsx
 frontend/src/components/service-icons/llm-openclaw.tsx
 frontend/src/components/service-icons/llm-openrouter.tsx
 frontend/src/components/shared/copyable-url-callout.tsx
+frontend/src/components/shared/credential-binding-choice.tsx
 frontend/src/components/shared/not-found-page.tsx
 frontend/src/components/shared/org-scope-select.tsx
+frontend/src/components/shared/platform-service-scope.tsx
 frontend/src/components/shared/twitter-oauth-guidance.tsx
 frontend/src/components/shared/upstream-scope-picker.tsx
 frontend/src/components/ui/button.tsx
@@ -91,6 +93,7 @@ frontend/src/schemas/api-keys.ts
 frontend/src/schemas/assistant-wire-log.ts
 frontend/src/schemas/cli-wizard.ts
 frontend/src/schemas/http-url.ts
+frontend/src/schemas/platform-keys.ts
 frontend/src/schemas/runtime-config.ts
 frontend/src/stores/assistant-context-store.ts
 frontend/src/stores/assistant-draft-store.ts

@@ -47,12 +47,15 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     bail!("--managed cannot be combined with credential flags");
                 }
                 let mut api = ApiClient::from_auth_checked(&auth).await?;
-                let bootstrap: Value = api
-                    .get(&format!(
+                let bootstrap_path = if platform == "telegram-new" {
+                    "/channel-bots/telegram-new".to_string()
+                } else {
+                    format!(
                         "/channel-bots/managed-onboarding/{}",
                         urlencoding::encode(&platform)
-                    ))
-                    .await?;
+                    )
+                };
+                let bootstrap: Value = api.get(&bootstrap_path).await?;
                 if bootstrap["available"] != true {
                     bail!(
                         "Managed onboarding is not supported or not configured for this platform"
@@ -80,12 +83,23 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     ),
                     OutputFormat::Table => {
                         println!("{url}");
-                        eprintln!(
-                            "Open this URL, sign in to NyxID, and complete the account connection in your browser."
-                        );
+                        if platform == "telegram-new" {
+                            eprintln!(
+                                "Open this URL, sign in to NyxID, and choose Telegram. Create and approve your bot in Telegram, then return to connect it."
+                            );
+                        } else {
+                            eprintln!(
+                                "Open this URL, sign in to NyxID, and complete the account connection in your browser."
+                            );
+                        }
                     }
                 }
                 return Ok(());
+            }
+            if platform == "telegram-new" {
+                bail!(
+                    "Telegram requires browser approval for new bot creation. Use --managed to get its creation link."
+                );
             }
             let label = label.ok_or_else(|| anyhow::anyhow!("--label is required"))?;
             let token = resolve_secret(bot_token.as_deref(), token_env.as_deref(), "bot token")?;
@@ -985,6 +999,44 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("not supported")
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_new_signup_discovers_browser_url_without_requesting_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/telegram-new"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"available": true})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/public/config"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "frontend_url": "https://nyxid.example" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut command = register(server.uri(), "telegram-new", None, None);
+        if let ChannelBotCommands::Register { managed, label, .. } = &mut command {
+            *managed = true;
+            *label = None;
+        }
+        run(command).await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        let command = register(server.uri(), "telegram-new", None, None);
+        assert!(
+            run(command)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("--managed")
         );
     }
 

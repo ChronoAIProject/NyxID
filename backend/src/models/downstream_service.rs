@@ -30,6 +30,42 @@ pub struct ServiceCapabilities {
     pub supports_streaming: bool,
 }
 
+/// Admin-authored model-call protocol; availability is resolved per caller.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceWireProtocol {
+    AnthropicMessages,
+    OpenaiResponses,
+    OpenaiCompletions,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ServiceInference {
+    pub wire_protocol: InferenceWireProtocol,
+    #[serde(default)]
+    pub model_list: bool,
+    #[serde(default)]
+    pub realtime: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformKeyAudience {
+    #[default]
+    Restricted,
+    Public,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PlatformKeyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub audience: PlatformKeyAudience,
+    #[serde(default)]
+    pub allowed_owner_ids: Vec<String>,
+}
+
 /// Declarative configuration for a server-side token exchange flow.
 ///
 /// When a service has `auth_method == "token_exchange"`, the proxy uses this
@@ -211,6 +247,8 @@ pub struct DownstreamService {
     /// Encrypted master credential for this service
     #[serde(with = "crate::models::bson_bytes::required")]
     pub credential_encrypted: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key: Option<PlatformKeyConfig>,
     /// Original auth type as selected by the admin (e.g., "api_key", "oauth2", "oidc", "basic", "bearer").
     /// Preserves the user's intent, while `auth_method` is the resolved injection method.
     #[serde(default)]
@@ -296,10 +334,14 @@ pub struct DownstreamService {
     /// Structured capability flags for proxy interaction patterns
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<ServiceCapabilities>,
-    /// Resale-layer usage billing metadata. Platform billing is plan-level
-    /// and is not configured on catalog services.
+    /// Legacy platform/resale billing and optional credential-class lane prices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<ServiceInference>,
+    /// Explicit admin edits, including clearing metadata, suppress startup defaults.
+    #[serde(default)]
+    pub inference_admin_modified: bool,
     /// Freeform notes on downstream auth expectations
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
@@ -443,6 +485,7 @@ pub mod test_helpers {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: Vec::new(),
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -466,6 +509,8 @@ pub mod test_helpers {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -542,6 +587,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1, 2, 3],
+            platform_key: None,
             auth_type: Some("bearer".to_string()),
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -570,6 +616,8 @@ mod tests {
                 ..Default::default()
             }),
             billing: None,
+            inference: None,
+            inference_admin_modified: false,
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
             required_permissions: Some(vec!["read:api".to_string()]),
@@ -624,6 +672,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -647,6 +696,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

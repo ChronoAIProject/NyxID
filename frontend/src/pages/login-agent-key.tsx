@@ -336,11 +336,19 @@ export function LoginAgentKeyPage({ flow = "agent-key", mint = false }: { flow?:
       owner_name: org?.name ?? user?.display_name ?? user?.email ?? "Personal",
       scopes: selected.scopes,
       allow_all_services: selected.allow_all_services,
+      allow_auto_connected_services: selected.allow_auto_connected_services,
       allow_all_nodes: selected.allow_all_nodes,
       allowed_service_ids: selected.allowed_service_ids,
       allowed_node_ids: selected.allowed_node_ids,
-      allowed_services: options.data.services.filter((item) =>
-        selected.allowed_service_ids.includes(item.id),
+      allowed_services: options.data.services.filter(
+        (item) =>
+          selected.allowed_service_ids.includes(item.id) ||
+          (!!selected.allow_auto_connected_services &&
+            !!item.auto_connected &&
+            item.owner_id ===
+              (selected.target_org_id ||
+                options.data?.personal_owner_id ||
+                user?.id)),
       ),
       allowed_nodes: options.data.nodes.filter((item) =>
         selected.allowed_node_ids.includes(item.id),

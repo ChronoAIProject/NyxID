@@ -12,6 +12,8 @@ use crate::cli::{ConnectArgs, OutputFormat};
 struct CreateConnectLinkRequest<'a> {
     service_slug: &'a str,
     label: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    scopes: &'a [String],
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -33,6 +35,8 @@ struct ConnectLinkStatus {
     status: String,
     service_name: String,
     service_slug: String,
+    #[serde(default)]
+    scopes: Vec<String>,
     expires_at: String,
     completed_at: Option<String>,
     connected_service: Option<ConnectedService>,
@@ -44,6 +48,8 @@ struct ConnectOutput<'a> {
     connect_url: &'a str,
     expires_at: &'a str,
     status: &'a str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    scopes: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     service_slug: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,6 +57,7 @@ struct ConnectOutput<'a> {
 }
 
 pub async fn run(args: ConnectArgs) -> Result<()> {
+    let scopes = super::normalize_oauth_scopes(&args.scopes);
     let mut api = ApiClient::from_auth_checked(&args.auth).await?;
     let created: CreateConnectLinkResponse = api
         .post(
@@ -58,15 +65,24 @@ pub async fn run(args: ConnectArgs) -> Result<()> {
             &CreateConnectLinkRequest {
                 service_slug: &args.service_slug,
                 label: args.label.as_deref(),
+                scopes: &scopes,
             },
         )
         .await?;
 
-    eprintln!("Connect {} in your browser:", args.service_slug);
+    if scopes.is_empty() {
+        eprintln!("Connect {} in your browser:", args.service_slug);
+    } else {
+        eprintln!(
+            "Connect {} in your browser (requested scopes: {}):",
+            args.service_slug,
+            scopes.join(", ")
+        );
+    }
     eprintln!("  {}", created.connect_url);
 
     if args.no_wait {
-        print_result(&args, &created, "pending", None)?;
+        print_result(&args, &created, "pending", None, &scopes)?;
         return Ok(());
     }
 
@@ -83,6 +99,7 @@ pub async fn run(args: ConnectArgs) -> Result<()> {
                         &created,
                         &status.status,
                         status.connected_service.as_ref(),
+                        &status.scopes,
                     )?;
                     return Ok(());
                 }
@@ -124,10 +141,18 @@ fn print_result(
     created: &CreateConnectLinkResponse,
     status: &str,
     connected: Option<&ConnectedService>,
+    scopes: &[String],
 ) -> Result<()> {
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
-    write_result(&mut output, args.auth.output, created, status, connected)
+    write_result(
+        &mut output,
+        args.auth.output,
+        created,
+        status,
+        connected,
+        scopes,
+    )
 }
 
 fn write_result(
@@ -136,6 +161,7 @@ fn write_result(
     created: &CreateConnectLinkResponse,
     status: &str,
     connected: Option<&ConnectedService>,
+    scopes: &[String],
 ) -> Result<()> {
     match format {
         OutputFormat::Json => {
@@ -147,6 +173,7 @@ fn write_result(
                     connect_url: &created.connect_url,
                     expires_at: &created.expires_at,
                     status,
+                    scopes,
                     service_slug: connected.map(|service| service.slug.as_str()),
                     user_service_id: connected.map(|service| service.id.as_str()),
                 })?
@@ -204,6 +231,86 @@ mod tests {
     }
 
     #[test]
+    fn connect_scopes_normalize_repeatable_comma_and_whitespace_values() {
+        let cli = crate::cli::Cli::parse_from([
+            "nyxid",
+            "connect",
+            "github",
+            "--scope",
+            " public_repo,read:org ",
+            "--scope",
+            "read:org\tuser:email",
+            "--scope",
+            "PUBLIC_REPO",
+        ]);
+        let crate::cli::Commands::Connect(args) = cli.command else {
+            panic!("connect command");
+        };
+        assert_eq!(
+            super::super::normalize_oauth_scopes(&args.scopes),
+            ["public_repo", "read:org", "user:email", "PUBLIC_REPO"]
+        );
+        assert!(super::super::normalize_oauth_scopes(&[" , ".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn connect_json_output_includes_only_nonempty_scopes() {
+        let created = CreateConnectLinkResponse {
+            id: "test-link".to_string(),
+            connect_url: "https://app.example.test/connect/test".to_string(),
+            expires_at: "2026-08-05T10:15:00Z".to_string(),
+        };
+        for scopes in [vec![], vec!["public_repo".to_string()]] {
+            let mut output = Vec::new();
+            write_result(
+                &mut output,
+                OutputFormat::Json,
+                &created,
+                "pending",
+                None,
+                &scopes,
+            )
+            .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            if scopes.is_empty() {
+                assert!(value.get("scopes").is_none());
+            } else {
+                assert_eq!(value["scopes"], serde_json::json!(scopes));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_sends_normalized_scopes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connect-links"))
+            .and(body_json(serde_json::json!({
+                "service_slug": "github", "label": null, "scopes": ["public_repo", "read:org"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "test-link", "connect_url": "https://app.example.test/connect/test",
+                "expires_at": "2026-08-05T10:15:00Z",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(ConnectArgs {
+            service_slug: "github".to_string(),
+            label: None,
+            scopes: vec![
+                "public_repo, read:org".to_string(),
+                "public_repo".to_string(),
+            ],
+            no_wait: true,
+            timeout: 30,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
     fn only_documented_statuses_are_terminal() {
         assert!(!is_terminal_status("pending"));
         for status in ["completed", "expired", "cancelled"] {
@@ -230,6 +337,7 @@ mod tests {
             &created,
             "completed",
             Some(&connected),
+            &[],
         )
         .expect("write table result");
 
@@ -259,6 +367,7 @@ mod tests {
 
         run(ConnectArgs {
             service_slug: "github".to_string(),
+            scopes: Vec::new(),
             label: Some("Coding agent".to_string()),
             no_wait: true,
             timeout: 30,
@@ -302,6 +411,7 @@ mod tests {
 
         run(ConnectArgs {
             service_slug: "github".to_string(),
+            scopes: Vec::new(),
             label: None,
             no_wait: false,
             timeout: 30,

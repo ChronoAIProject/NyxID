@@ -3,6 +3,7 @@ pub mod lark;
 pub mod openclaw;
 pub mod slack;
 pub mod telegram;
+pub mod telegram_new;
 pub mod whatsapp;
 mod whatsapp_managed;
 pub mod x;
@@ -40,6 +41,7 @@ pub fn resolve_adapter(
 pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn PlatformAdapter>> {
     vec![
         Box::new(telegram::TelegramAdapter),
+        Box::new(telegram_new::TelegramNewAdapter),
         Box::new(discord::DiscordAdapter),
         Box::new(lark::LarkFamilyAdapter::lark(cache.clone())),
         Box::new(lark::LarkFamilyAdapter::feishu(cache.clone())),
@@ -64,7 +66,7 @@ mod tests {
         };
         assert_eq!(
             message,
-            "unsupported platform: unknown. Supported: telegram, discord, lark, feishu, slack, whatsapp, x"
+            "unsupported platform: unknown. Supported: telegram, telegram-new, discord, lark, feishu, slack, whatsapp, x"
         );
         assert!(
             !resolve_adapter("openclaw", &Arc::new(TokenExchangeCache::new()))

@@ -1273,3 +1273,123 @@ async fn workspace_external_response_omission_preserves_template_tools_and_cache
         before_digest
     );
 }
+
+#[tokio::test]
+async fn workspace_platform_keys_are_rejected_before_target_selection_and_catalog_projection() {
+    let db = connect_test_database("workspace_platform_recipient")
+        .await
+        .unwrap();
+    seed(&db, true).await;
+    let owner = uuid::Uuid::new_v4().to_string();
+    let connection = connect(&db, &owner, "api-google-workspace").await;
+    let state = test_app_state(db.clone());
+    let catalog_id = connection.catalog_service_id.as_ref().unwrap();
+    let catalog = db
+        .collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
+        .find_one(doc! {"_id": catalog_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        effective_catalog_auth(&db, &catalog).await.unwrap(),
+        "bearer"
+    );
+    let mut configured = catalog.clone();
+    configured.platform_key = Some(downstream_service::PlatformKeyConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    let mut disabled = configured.clone();
+    disabled.platform_key.as_mut().unwrap().enabled = false;
+    let mut legacy = catalog.clone();
+    legacy.auth_method = "bearer".into();
+    legacy.requires_user_credential = false;
+    legacy.service_category = "internal".into();
+    legacy.provider_config_id = None;
+    legacy.credential_encrypted = state
+        .encryption_keys
+        .encrypt(b"platform-token")
+        .await
+        .unwrap();
+    for service in [configured, disabled, legacy] {
+        assert!(matches!(
+            crate::services::proxy_service::authorize_master_credential_server_chosen(&db, &service).await,
+            Err(AppError::ValidationError(message)) if message == "Destination targets do not support platform keys"
+        ));
+        assert!(matches!(effective_catalog_auth(&db, &service).await,
+            Err(AppError::ValidationError(message)) if message == "Destination targets do not support platform keys"));
+        let mut target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
+            base_url: catalog.base_url.clone(),
+            auth_method: "bearer".into(),
+            auth_key_name: "Authorization".into(),
+            credential: "platform-token".into(),
+            service: service.clone(),
+            catalog_default_headers: vec![],
+            user_service_default_headers: vec![],
+            ws_frame_injections: vec![],
+            connection_id: None,
+        };
+        let path = CanonicalPath::from_mcp_literal("/v1/documents/doc:batchUpdate").unwrap();
+        assert!(
+            matches!(resolve_target(&mut target, "POST", &path, Some(Some("docs"))),
+            Err(AppError::ValidationError(message)) if message == "Destination targets do not support platform keys")
+        );
+        assert_eq!(target.base_url, catalog.base_url);
+        assert!(target.target_id.is_none());
+        db.collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
+            .replace_one(doc! {"_id": catalog_id}, &service)
+            .await
+            .unwrap();
+        let error = rest_call(
+            &state,
+            &owner,
+            &connection.slug,
+            "/v1/documents/doc:batchUpdate",
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, AppError::ValidationError(ref message) if message == "Destination targets do not support platform keys"),
+            "{error:?}"
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn user_owned_bearer_target_does_not_become_platform_by_catalog_category() {
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.service_category = "internal".into();
+    service.requires_user_credential = false;
+    service.auth_method = "bearer".into();
+    service.destination_targets = workspace_targets();
+    service.proxy_operation_policy = Some(
+        crate::services::google_workspace::GoogleProduct::Workspace
+            .operation_policy()
+            .unwrap(),
+    );
+    // A resolved UserService carries its own credential, not encrypted catalog
+    // master material. Catalog category/requirement flags alone do not select a key.
+    assert!(service.credential_encrypted.is_empty());
+    let mut target = ProxyTarget {
+        workspace_destinations_pending: false,
+        target_id: None,
+        base_url: "https://www.googleapis.com".into(),
+        auth_method: "bearer".into(),
+        auth_key_name: "Authorization".into(),
+        credential: "user-owned-token".into(),
+        service,
+        catalog_default_headers: vec![],
+        user_service_default_headers: vec![],
+        ws_frame_injections: vec![],
+        connection_id: None,
+    };
+    let path = CanonicalPath::from_mcp_literal("/v1/documents/doc:batchUpdate").unwrap();
+    resolve_target(&mut target, "POST", &path, Some(Some("docs"))).unwrap();
+    assert_eq!(target.target_id.as_deref(), Some("docs"));
+    assert_eq!(target.base_url, "https://docs.googleapis.com");
+    validate_outbound_destination(&target, "POST", "/v1/documents/doc:batchUpdate", &[]).unwrap();
+}

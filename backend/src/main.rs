@@ -545,6 +545,10 @@ async fn main() {
     .await
     .expect("Failed to seed default services");
 
+    services::inference_service::backfill(&db)
+        .await
+        .expect("Failed to backfill inference metadata");
+
     // Seed the admin-managed platform vendor provisioning templates. Existing
     // rows are never overwritten so operators can edit or disable templates.
     services::platform_vendor_template_service::seed_default_templates(&db, "system")

@@ -1829,6 +1829,22 @@ fn build_router_internal(
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .route(
+            "/channel-bots/telegram-new",
+            get(handlers::telegram_new::configuration).post(handlers::telegram_new::begin),
+        )
+        .route(
+            "/channel-bots/telegram-new/requests/{id}",
+            get(handlers::telegram_new::get).delete(handlers::telegram_new::cancel),
+        )
+        .route(
+            "/channel-bots/telegram-new/requests/{id}/launch",
+            post(handlers::telegram_new::launch),
+        )
+        .route(
+            "/channel-bots/telegram-new/requests/{id}/connect",
+            post(handlers::telegram_new::connect),
+        )
+        .route(
             "/channel-bots/managed-onboarding/{platform}",
             get(handlers::channel_managed::bootstrap),
         )
@@ -2023,6 +2039,11 @@ fn build_router_internal(
         .nest("/api/v1/webhooks", webhook_routes)
         .nest("/api/v1/webhooks/triggers", trigger_webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
+        .route(
+            "/api/v1/webhooks/channel/telegram-new/manager",
+            post(handlers::telegram_new::webhook)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
+        )
         .route(
             "/api/v1/webhooks/channel/{platform}/{bot_id}",
             get(handlers::channel_webhooks::channel_subscription)

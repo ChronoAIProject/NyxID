@@ -187,7 +187,10 @@ pub(crate) async fn process_inbound_messages(
             let agent_scope = crate::crypto::jwt::RelayAgentScope {
                 api_key_id: api_key.id.clone(),
                 api_key_name: api_key.name.clone(),
-                allowed_service_ids: api_key.allowed_service_ids.clone(),
+                allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(
+                    state.db, &api_key,
+                )
+                .await?,
                 allowed_node_ids: api_key.allowed_node_ids.clone(),
                 allow_all_services: api_key.allow_all_services,
                 allow_all_nodes: api_key.allow_all_nodes,

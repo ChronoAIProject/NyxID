@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
+import { TelegramSetupPage } from "@/pages/telegram-setup";
+import { useTelegramNewConfiguration } from "@/hooks/use-telegram-new";
 import { useWatch } from "react-hook-form";
 import { useAppForm } from "@/components/ui/form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -411,9 +413,17 @@ function CreateBotDialog({
             <Label htmlFor="platform">Platform</Label>
             <Select
               value={platform}
-              onValueChange={(value) =>
-                setValue("platform", value as ChannelPlatform)
-              }
+              onValueChange={(value) => {
+                if (value === "telegram-new") {
+                  onOpenChange(false);
+                  void navigate({
+                    to: "/channel-bots",
+                    search: { connect: "telegram-new", label, target_org_id: targetOrgId ?? undefined },
+                  });
+                } else {
+                  setValue("platform", value as ChannelPlatform);
+                }
+              }}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Select platform" />
@@ -453,7 +463,7 @@ function CreateBotDialog({
             }} />
             {!CHANNEL_PLATFORMS[platform].managedOnly && <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-xs text-muted-foreground">{CHANNEL_PLATFORMS[platform].advancedLabel}</summary></details>}
           </>}
-          {!CHANNEL_PLATFORMS[platform].managedOnly && (!managedAvailable || advanced) && <>
+          {platform !== "telegram-new" && !CHANNEL_PLATFORMS[platform].managedOnly && (!managedAvailable || advanced) && <>
           {setupNote && (
             <div className="space-y-1 rounded-lg border border-border/70 bg-muted/30 p-4">
               <p className="text-[12px] font-medium">{setupNote.title}</p>
@@ -520,8 +530,9 @@ function DeleteBotDialog({
         <DialogHeader>
           <DialogTitle>Delete Channel Bot</DialogTitle>
           <DialogDescription>
-            This will permanently delete this bot and all its conversation
-            routes. This action cannot be undone.
+            This deletes the NyxID connection and its conversation routes.
+            The bot remains on the messaging platform. Reconnecting requires
+            assigning its agents again.
             {deletionNote && ` ${deletionNote}`}
           </DialogDescription>
         </DialogHeader>
@@ -998,7 +1009,9 @@ function DeviceChannelsSection({
   );
 }
 
-export function ChannelBotsPage() {
+function ChannelBotsList() {
+  const navigate = useNavigate();
+  const telegram = useTelegramNewConfiguration();
   const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; label?: string; target_org_id?: string };
   const [scopeOrgId, setScopeOrgId] = useState<string | null>(search.target_org_id ?? null);
   const { data: bots, isLoading, error, refetch } = useChannelBots({ orgId: scopeOrgId });
@@ -1023,6 +1036,20 @@ export function ChannelBotsPage() {
           </div>
         }
       />
+
+      {telegram.data?.request && (
+        <div className="flex flex-col gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm font-medium">Telegram setup in progress</p>
+            <p className="break-words text-xs text-muted-foreground">
+              Continue setting up {telegram.data.request.label} from your saved step.
+            </p>
+          </div>
+          <Button variant="outline" onClick={() => void navigate({ to: "/channel-bots", search: { connect: "telegram-new" } })}>
+            Resume Telegram setup
+          </Button>
+        </div>
+      )}
 
       {isLoading ? (
         <LoadingSkeleton />
@@ -1055,4 +1082,9 @@ export function ChannelBotsPage() {
       <DeleteBotDialog botId={deleteTarget} deletionNote={(() => { const bot = bots?.find((bot) => bot.id === deleteTarget); return bot && bot.credential_source !== "user" ? CHANNEL_PLATFORMS[bot.platform].deletionNote : undefined; })()} onClose={() => setDeleteTarget(null)} />
     </div>
   );
+}
+
+export function ChannelBotsPage() {
+  const search = useSearch({ strict: false }) as { connect?: ChannelPlatform };
+  return search.connect === "telegram-new" ? <TelegramSetupPage /> : <ChannelBotsList />;
 }

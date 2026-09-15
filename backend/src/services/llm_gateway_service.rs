@@ -51,15 +51,21 @@ pub async fn resolve_llm_service_by_slug(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("LLM provider '{provider_slug}' not found")))?;
 
-    let service = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+    let service = resolve_llm_service_for_provider(db, &provider).await?;
+    Ok((service, provider))
+}
+
+/// Reuse a provider from the request's batch when choosing a gateway route.
+pub async fn resolve_llm_service_for_provider(
+    db: &mongodb::Database,
+    provider: &ProviderConfig,
+) -> AppResult<DownstreamService> {
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(build_llm_service_filter(Some(&provider.id)))
         .await?
         .ok_or_else(|| {
-            AppError::NotFound(format!("LLM provider '{provider_slug}' is not available"))
-        })?;
-
-    Ok((service, provider))
+            AppError::NotFound(format!("LLM provider '{}' is not available", provider.slug))
+        })
 }
 
 /// Get the LLM gateway status for a user.
@@ -96,33 +102,31 @@ pub async fn get_llm_status(
     // effective scope so we can apply role + service filters.
     let mut credential_owners: Vec<CredentialOwner> =
         vec![CredentialOwner::Personal(user_id.to_string())];
-    match org_service::find_active_memberships_with_timeout(db, user_id).await {
-        Ok(memberships) => {
-            for m in memberships {
-                if !m.role.can_proxy() {
-                    continue; // viewers cannot use org credentials
-                }
-                let effective_scope =
-                    crate::services::org_role_scope_service::effective_scope_for_membership(db, &m)
-                        .await?;
-                credential_owners.push(CredentialOwner::Org {
-                    org_user_id: m.org_user_id,
-                    effective_scope,
-                    role: m.role,
-                });
-            }
-        }
+    let memberships = match org_service::find_active_memberships_with_timeout(db, user_id).await {
+        Ok(rows) => rows,
         Err(AppError::OrgQueryTimeout) => {
-            // Degrade gracefully: an informational endpoint should not 503
-            // because the org-fallback query was slow. Personal credentials
-            // are still reported.
-            tracing::warn!(
-                user_id = %user_id,
-                "Org membership query timed out while computing LLM status; \
-                 reporting personal credentials only"
-            );
+            tracing::warn!(user_id = %user_id, "Org membership query timed out while computing LLM status; reporting personal credentials only");
+            vec![]
         }
         Err(e) => return Err(e),
+    };
+    let platform_grants = crate::services::platform_key_service::OwnerGrants::from_memberships(
+        db,
+        user_id,
+        &memberships,
+    )
+    .await?;
+    for m in memberships {
+        if !m.role.can_proxy() {
+            continue;
+        }
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
+        credential_owners.push(CredentialOwner::Org {
+            org_user_id: m.org_user_id,
+            effective_scope,
+            role: m.role,
+        });
     }
 
     // Pre-fetch the legacy provider tokens for the actor in one round-trip.
@@ -169,7 +173,8 @@ pub async fn get_llm_status(
         // to the legacy provider token. Stop at the first `Ready`.
         let mut best = LlmStatusRank::NotConnected;
         for owner in &credential_owners {
-            let candidate = lookup_user_service_status(db, owner, &service.id).await?;
+            let candidate =
+                lookup_user_service_status(db, owner, service, provider, &platform_grants).await?;
             if candidate > best {
                 best = candidate;
             }
@@ -192,6 +197,15 @@ pub async fn get_llm_status(
                     best = legacy;
                 }
             }
+        }
+
+        if crate::services::platform_key_service::available_with_grants(
+            service,
+            Some(provider),
+            user_id,
+            &platform_grants,
+        ) {
+            best = LlmStatusRank::Ready;
         }
 
         statuses.push(LlmProviderStatus {
@@ -226,6 +240,7 @@ pub async fn get_llm_status(
             "embed-*".to_string(),
             "rerank-*".to_string(),
             "deepseek-*".to_string(),
+            "grok-*".to_string(),
         ],
     })
 }
@@ -295,16 +310,33 @@ impl LlmStatusRank {
 async fn lookup_user_service_status(
     db: &mongodb::Database,
     owner: &CredentialOwner,
-    catalog_service_id: &str,
+    catalog: &DownstreamService,
+    provider: &ProviderConfig,
+    platform_grants: &crate::services::platform_key_service::OwnerGrants,
 ) -> AppResult<LlmStatusRank> {
     let Some(us) =
-        user_service_service::find_by_catalog_service_id(db, owner.user_id(), catalog_service_id)
-            .await?
+        user_service_service::find_by_catalog_service_id(db, owner.user_id(), &catalog.id).await?
     else {
         return Ok(LlmStatusRank::NotConnected);
     };
     if !owner.allows(&us) {
         return Ok(LlmStatusRank::NotConnected);
+    }
+    if crate::services::platform_key_service::binding(&us) == "platform"
+        && (catalog.platform_key.is_some() || us.auth_method != "none")
+    {
+        return Ok(
+            if crate::services::platform_key_service::available_with_grants(
+                catalog,
+                Some(provider),
+                owner.user_id(),
+                platform_grants,
+            ) {
+                LlmStatusRank::Ready
+            } else {
+                LlmStatusRank::NotConnected
+            },
+        );
     }
     let Some(api_key_id) = us.api_key_id.as_deref() else {
         // No-auth services have no api_key but are always reachable.
@@ -379,6 +411,8 @@ pub fn resolve_provider_for_model(model: &str) -> Option<&'static str> {
         || model_lower.starts_with("rerank-")
     {
         Some("cohere")
+    } else if model_lower.starts_with("grok-") {
+        Some("xai")
     } else if model_lower.starts_with("deepseek-") {
         Some("deepseek")
     } else {
