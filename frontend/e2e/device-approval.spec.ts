@@ -308,9 +308,27 @@ test("adding another service changes the new key draft without creating a servic
   });
   await expect(services).toContainText("2 connections selected");
   await expect(services).toContainText("Slack workspace");
+  const review = page.getByRole("region", { name: "Final access review" });
+  await expect(
+    review.getByText("Creates new key", { exact: true }),
+  ).toBeVisible();
+  await expect(review.locator("details")).not.toHaveAttribute("open");
+  await expect(
+    review.getByText("Matched + 2 extras", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    review.getByText("Effective permissions", { exact: true }),
+  ).toBeHidden();
+  await page
+    .getByText("View permissions and service access", { exact: true })
+    .click();
   await expect(
     page.getByRole("heading", { name: "Access beyond the requested filters" }),
   ).toBeVisible();
+  await review.locator("summary").click();
+  await expect(
+    review.getByText("Effective permissions", { exact: true }),
+  ).toBeHidden();
   expect(writes).toEqual([]);
   for (const [width, height] of [
     [1280, 900],
@@ -325,6 +343,9 @@ test("adding another service changes the new key draft without creating a servic
     await page.screenshot({
       path: info.outputPath(`additional-service-${width}.png`),
       fullPage: true,
+    });
+    await review.screenshot({
+      path: info.outputPath(`compact-review-${width}.png`),
     });
   }
   await page.getByRole("button", { name: "Create & continue" }).click();
@@ -434,6 +455,36 @@ for (const grant of ["account", "agent-key"] as const) {
     if (grant === "agent-key") {
       await expect(page.getByText("Exact match")).toBeVisible();
       await page.getByRole("radio", { name: "Reader", exact: true }).check();
+      const review = page.getByRole("region", { name: "Final access review" });
+      await expect(review).toHaveCount(1);
+      await expect(
+        review.getByText("Existing key", { exact: true }),
+      ).toBeVisible();
+      await expect(review.locator("details")).not.toHaveAttribute("open");
+      await expect(
+        review.getByText("Effective permissions", { exact: true }),
+      ).toBeHidden();
+      await review.locator("summary").focus();
+      await page.keyboard.press("Enter");
+      await expect(
+        review.getByText("Effective permissions", { exact: true }),
+      ).toBeVisible();
+      const loginExpiry = await page.evaluate(() =>
+        new Date(Date.now() + 86400000).toISOString().slice(0, 16),
+      );
+      await page
+        .getByLabel("Login credential expiry (optional)")
+        .fill(loginExpiry);
+      await expect(review).toContainText(
+        await page.evaluate(
+          (value) => new Date(value).toLocaleDateString(),
+          loginExpiry,
+        ),
+      );
+      await review.locator("summary").click();
+      await expect(
+        review.getByText("Effective permissions", { exact: true }),
+      ).toBeHidden();
     }
     expect(requests.filter((r) => r.path.includes("approve"))).toEqual([]);
     for (const [size, width, height] of [
@@ -624,6 +675,12 @@ test("new platform grant discloses future access and binds only same-owner curre
       name: "Allow all auto-connected platform services (includes ones added later)",
     })
     .check();
+  await expect(
+    page.getByText("Includes future platform services", { exact: true }),
+  ).toBeVisible();
+  await page
+    .getByText("View permissions and service access", { exact: true })
+    .click();
   await expect(
     page.getByText("All current and future auto-connected platform services", {
       exact: true,

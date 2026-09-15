@@ -1895,9 +1895,27 @@
       .key-option .match-permissions {
         margin-top: 8px;
       }
-      #grantSettings > summary {
+      #grantAccessDetails > summary {
         color: var(--muted);
         font-size: 11px;
+        align-items: center;
+        flex-wrap: wrap;
+        justify-content: flex-start;
+      }
+      #grantAccessDetails > summary::after {
+        content: "⌄";
+        margin-left: auto;
+      }
+      #grantAccessDetails[open] > summary::after {
+        transform: rotate(180deg);
+      }
+      #grantAccessDetails > summary:focus-visible {
+        outline: 2px solid var(--purple);
+        outline-offset: 3px;
+      }
+      #grantAccessDetails > summary #grantMatch {
+        color: var(--amber);
+        text-align: left;
       }
       #createKeyTitle:focus {
         outline: none;
@@ -2904,80 +2922,11 @@
                         <strong>Final access review</strong
                         ><span id="grantKind">Awaiting selection</span>
                       </div>
-
+                      <p class="helper" id="grantOutcome"></p>
                       <div id="grantDetails" hidden>
                         <div class="grant-key">
                           <strong id="grantName"></strong
                           ><span class="neutral-badge" id="grantOwner"></span>
-                        </div>
-                        <details class="compact-details" id="grantSettings">
-                          <summary>
-                            View all key settings and service permissions
-                          </summary>
-                          <dl class="grant-rows">
-                            <div>
-                              <dt>Effective permissions</dt>
-                              <dd id="grantEffective"></dd>
-                            </div>
-                            <div>
-                              <dt>Configured scopes</dt>
-                              <dd id="grantScopes" class="chips"></dd>
-                            </div>
-                            <div>
-                              <dt>Services</dt>
-                              <dd
-                                id="grantServices"
-                                class="resource-summary"
-                              ></dd>
-                            </div>
-                            <div>
-                              <dt>Nodes</dt>
-                              <dd id="grantNodes" class="resource-summary"></dd>
-                            </div>
-                            <div>
-                              <dt>Key expiry</dt>
-                              <dd id="grantExpiry"></dd>
-                            </div>
-                            <div>
-                              <dt>Rate limit</dt>
-                              <dd id="grantRate"></dd>
-                            </div>
-                            <div>
-                              <dt>Platform</dt>
-                              <dd id="grantPlatform"></dd>
-                            </div>
-                          </dl>
-                          <div
-                            id="grantedServiceCards"
-                            class="granted-service-cards"
-                          ></div>
-                          <div class="field expiry-field">
-                            <label for="credentialExpiry"
-                              >Login credential expiry</label
-                            ><select class="select" id="credentialExpiry">
-                              <option value="parent">Use key expiry</option>
-                              <option value="1">1 day</option>
-                              <option value="7">7 days</option>
-                              <option value="30">30 days</option>
-                              <option value="90">90 days</option>
-                            </select>
-                            <p class="helper" id="expiryHint"></p>
-                          </div>
-                        </details>
-                        <p class="helper warning" id="grantBroad" hidden></p>
-                        <p class="helper warning" id="grantExtra" hidden></p>
-                        <div id="existingNote">
-                          <p class="helper">
-                            Approval issues a login credential with this key’s
-                            permissions.
-                          </p>
-                          <button
-                            class="text-button"
-                            id="customizeKey"
-                            type="button"
-                          >
-                            Customize as a new key →
-                          </button>
                         </div>
                         <div class="grant-preview">
                           <div>
@@ -2985,6 +2934,84 @@
                             ><span id="grantPreview" aria-live="polite"></span>
                           </div>
                         </div>
+                        <details
+                          class="compact-details"
+                          id="grantAccessDetails"
+                        >
+                          <summary>
+                            <span>View permissions and service access</span
+                            ><span id="grantMatch" hidden></span>
+                          </summary>
+                          <div id="grantSettings">
+                            <dl class="grant-rows">
+                              <div>
+                                <dt>Effective permissions</dt>
+                                <dd id="grantEffective"></dd>
+                              </div>
+                              <div>
+                                <dt>Configured scopes</dt>
+                                <dd id="grantScopes" class="chips"></dd>
+                              </div>
+                              <div>
+                                <dt>Services</dt>
+                                <dd
+                                  id="grantServices"
+                                  class="resource-summary"
+                                ></dd>
+                              </div>
+                              <div>
+                                <dt>Nodes</dt>
+                                <dd
+                                  id="grantNodes"
+                                  class="resource-summary"
+                                ></dd>
+                              </div>
+                              <div>
+                                <dt>Key expiry</dt>
+                                <dd id="grantExpiry"></dd>
+                              </div>
+                              <div>
+                                <dt>Rate limit</dt>
+                                <dd id="grantRate"></dd>
+                              </div>
+                              <div>
+                                <dt>Platform</dt>
+                                <dd id="grantPlatform"></dd>
+                              </div>
+                            </dl>
+                            <div
+                              id="grantedServiceCards"
+                              class="granted-service-cards"
+                            ></div>
+                            <div class="field expiry-field">
+                              <label for="credentialExpiry"
+                                >Login credential expiry</label
+                              ><select class="select" id="credentialExpiry">
+                                <option value="parent">Use key expiry</option>
+                                <option value="1">1 day</option>
+                                <option value="7">7 days</option>
+                                <option value="30">30 days</option>
+                                <option value="90">90 days</option>
+                              </select>
+                              <p class="helper" id="expiryHint"></p>
+                            </div>
+                          </div>
+                          <p class="helper warning" id="grantBroad" hidden></p>
+                          <p class="helper warning" id="grantExtra" hidden></p>
+                          <div id="existingNote">
+                            <p class="helper">
+                              Approval issues a login credential with this key’s
+                              permissions.
+                            </p>
+                            <button
+                              class="text-button"
+                              id="customizeKey"
+                              type="button"
+                            >
+                              Customize as a new key →
+                            </button>
+                          </div>
+                        </details>
                       </div>
                     </div>
                     <p
@@ -6765,9 +6792,13 @@
             : "Default limits");
         $("#grantKind").textContent = grant
           ? source === "new"
-            ? "New form · creates key"
+            ? "Creates new key"
             : "Existing key"
           : "Awaiting selection";
+        $("#grantOutcome").textContent =
+          source === "new"
+            ? "This draft will create one Agent Key when you approve."
+            : "This approval uses the selected key; its existing secret is unchanged.";
         $("#existingNote").hidden = source !== "existing";
         $("#approveRestricted").textContent =
           source === "new"
@@ -6781,8 +6812,8 @@
         $("#restrictedConsent").hidden = !grant;
         $("#restrictedConsent").textContent =
           source === "new"
-            ? "Create & continue creates one Agent Key and approves this device with its displayed access. The selected services are existing connections; no new service accounts are created."
-            : "Approving gives this device a new login credential with this key’s full access, including any extras shown above.";
+            ? "Create & continue grants this device the access shown above. Selected services use your existing connected accounts."
+            : "Approving grants this device the selected key’s access, including any extras.";
         updateStepper();
         $("#validationHint").textContent = invalid;
         $("#validationHint").hidden = !invalid || !grant;
@@ -6802,20 +6833,17 @@
             .join("") || "None selected";
         $("#grantServices").innerHTML = resourceSummary("services", grant);
         $("#grantNodes").innerHTML = resourceSummary("nodes", grant);
-        $("#grantedServiceCards").innerHTML =
-          source === "new"
-            ? resources.services
-                .filter(
-                  (item) =>
-                    (grant.allServices && item.owner === grant.owner) ||
-                    grant.services.includes(item.id),
-                )
-                .map(
-                  (item) =>
-                    `<div class="review-service"><strong class="review-service-name">${serviceIcon(item.catalogSlug)}${escapeHtml(item.name)} <span class="mono">${escapeHtml(item.slug)}</span></strong><p>${item.permissionsReported ? item.permissions.map((permission) => escapeHtml(permission.label)).join(" · ") : "Provider permissions are not reported."}</p></div>`,
-                )
-                .join("")
-            : "";
+        $("#grantedServiceCards").innerHTML = resources.services
+          .filter(
+            (item) =>
+              (grant.allServices && item.owner === grant.owner) ||
+              grant.services.includes(item.id),
+          )
+          .map(
+            (item) =>
+              `<div class="review-service"><strong class="review-service-name">${serviceIcon(item.catalogSlug)}${escapeHtml(item.name)} <span class="mono">${escapeHtml(item.slug)}</span></strong><p>${item.permissionsReported ? item.permissions.map((permission) => escapeHtml(permission.label)).join(" · ") : "Provider permissions are not reported."}</p></div>`,
+          )
+          .join("");
         populateServiceIcons($("#grantedServiceCards"));
         $("#grantExpiry").textContent = dateText(grant.expiry);
         $("#grantRate").textContent =
@@ -6830,11 +6858,14 @@
         $("#grantExtra").hidden = extra.length === 0;
         $("#grantExtra").textContent =
           "Access beyond the requested filters: " + extra.join("; ") + ".";
+        $("#grantMatch").hidden = extra.length === 0;
+        $("#grantMatch").textContent =
+          `${matchesPermissions(grant) ? "Matched + " : "+ "}${extra.length} extra${extra.length === 1 ? "" : "s"}`;
         const expiry = credentialExpiry(grant);
         $("#expiryHint").textContent =
           `${expiry == null ? "No expiry." : "Effective login expiry: " + dateText(expiry) + "."} The login cannot outlast the key.`;
         $("#grantPreview").textContent =
-          `${source === "new" ? "Create " + grant.name + " and issue" : "Issue"} a new login credential · ${effectivePermissions(grant).join(", ")} · ${grant.allServices ? "all services" : grant.services.length + (grant.services.length === 1 ? " service" : " services")} · ${grant.allNodes ? "all nodes" : grant.nodes.length + (grant.nodes.length === 1 ? " node" : " nodes")} · ${expiry == null ? "no expiry" : "expires " + dateText(expiry)}`;
+          `${effectivePermissions(grant).join(", ")} · ${grant.allServices ? "all current and future services" : grant.services.length + (grant.services.length === 1 ? " service" : " services")} · ${grant.allNodes ? "all current and future nodes" : grant.nodes.length + (grant.nodes.length === 1 ? " node" : " nodes")} · ${expiry == null ? "no expiry" : "expires " + dateText(expiry)}`;
       }
       $$("[data-next]").forEach((button) =>
         button.addEventListener("click", () => {

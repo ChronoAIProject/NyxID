@@ -227,6 +227,7 @@ describe("three-step device approval", () => {
     await click("Create new Agent Key");
     expect(screen.getByLabelText("Name")).toHaveValue("Build agent");
     fireEvent.click(screen.getByText("Key settings and actual NyxID grant"));
+    fireEvent.click(screen.getByText("View permissions and service access"));
     expect(
       screen.getByRole("button", { name: "January 31, 2026" }),
     ).toBeVisible();
@@ -290,6 +291,7 @@ describe("three-step device approval", () => {
     await scope();
     await click("Create new Agent Key");
     fireEvent.click(screen.getByText("Key settings and actual NyxID grant"));
+    fireEvent.click(screen.getByText("View permissions and service access"));
     fireEvent.click(
       screen.getByRole("checkbox", {
         name: "Allow all auto-connected platform services (includes ones added later)",

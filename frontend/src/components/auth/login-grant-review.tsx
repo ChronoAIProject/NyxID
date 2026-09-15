@@ -1,4 +1,5 @@
-import { KeyRound } from "lucide-react";
+import type { ReactNode } from "react";
+import { ChevronDown, KeyRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   effectivePermissions,
@@ -9,6 +10,10 @@ import type {
   PermissionComparison,
 } from "@/lib/login-permissions";
 import { PermissionIcon } from "./login-permission-picker";
+import {
+  AgentKeyIssuanceNotice,
+  AgentKeyPermissions,
+} from "./agent-key-permissions";
 
 export function AccessEntries({
   label,
@@ -57,21 +62,26 @@ export function LoginGrantReview({
   apiKey,
   comparison,
   kind,
+  children,
+  credentialExpiresAt,
 }: {
   apiKey: AgentKeySummary;
   comparison: PermissionComparison;
   kind: "existing" | "new";
+  children?: ReactNode;
+  credentialExpiresAt?: string;
 }) {
+  const expiry = credentialExpiresAt || apiKey.expires_at;
   return (
     <section
       aria-label="Final access review"
-      className="space-y-3 rounded-xl border border-border p-3"
+      className="space-y-3 rounded-xl border border-border bg-card/40 p-3"
     >
       <div className="flex flex-wrap items-center gap-2">
         <KeyRound className="size-4 text-muted-foreground" aria-hidden="true" />
         <h3 className="text-[12px] font-semibold">Final access review</h3>
         <Badge variant={kind === "new" ? "info" : "secondary"}>
-          {kind === "new" ? "New form · creates key" : "Existing key"}
+          {kind === "new" ? "Creates new key" : "Existing key"}
         </Badge>
       </div>
       <p className="text-[11px] text-muted-foreground">
@@ -81,35 +91,81 @@ export function LoginGrantReview({
       </p>
       <div className="rounded-lg bg-muted/20 p-3">
         <div className="flex flex-wrap items-center gap-2">
-          <strong className="text-[12px]">{apiKey.name}</strong>
+          <strong className="min-w-0 break-words text-[12px]">
+            {apiKey.name}
+          </strong>
           <span className="text-[11px] text-muted-foreground">
             {apiKey.owner_name}
           </span>
         </div>
-        <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[11px]">
-          <dt className="text-muted-foreground">Permissions</dt>
-          <dd>{effectivePermissions(apiKey.scopes)}</dd>
-          <dt className="text-muted-foreground">Services</dt>
-          <dd>
-            {apiKey.allow_all_services
-              ? "All services"
-              : apiKey.allowed_services
-                  .map((service) => service.name)
-                  .join(", ") || "None"}
-          </dd>
-          <dt className="text-muted-foreground">Expiry</dt>
-          <dd>
-            {apiKey.expires_at
-              ? new Date(apiKey.expires_at).toLocaleString()
-              : "No expiry"}
-          </dd>
+        <dl className="mt-3 space-y-1.5 text-[11px] [&>div]:grid [&>div]:grid-cols-[5rem_minmax(0,1fr)] [&>div]:gap-x-3">
+          <div>
+            <dt className="text-muted-foreground">Permissions</dt>
+            <dd className="font-medium">
+              {effectivePermissions(apiKey.scopes)}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Services</dt>
+            <dd className="font-medium">
+              {apiKey.allow_all_services
+                ? "All services, including future additions"
+                : `${apiKey.allowed_services.length} ${apiKey.allowed_services.length === 1 ? "service" : "services"}`}
+              {!apiKey.allow_all_services &&
+                apiKey.allow_auto_connected_services && (
+                  <span className="block text-warning">
+                    Includes future platform services
+                  </span>
+                )}
+            </dd>
+          </div>
+          {(apiKey.allow_all_nodes || apiKey.allowed_nodes.length > 0) && (
+            <div>
+              <dt className="text-muted-foreground">Nodes</dt>
+              <dd className="font-medium">
+                {apiKey.allow_all_nodes
+                  ? "All nodes, including future additions"
+                  : `${apiKey.allowed_nodes.length} ${apiKey.allowed_nodes.length === 1 ? "node" : "nodes"}`}
+              </dd>
+            </div>
+          )}
+          <div>
+            <dt className="text-muted-foreground">Login expiry</dt>
+            <dd className="font-medium">
+              {expiry ? new Date(expiry).toLocaleDateString() : "No expiry"}
+            </dd>
+          </div>
         </dl>
       </div>
-      <AccessEntries label="Requested access" entries={comparison.matched} />
-      <AccessEntries
-        label="Access beyond the requested filters"
-        entries={comparison.extras}
-      />
+      <details className="group border-t border-border/70 pt-1">
+        <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 rounded-md py-2 text-[11px] font-medium text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
+          <span>View permissions and service access</span>
+          {comparison.extras.length > 0 && (
+            <span className="text-warning">
+              {comparison.matches ? "Matched + " : "+ "}
+              {comparison.extras.length} extra
+              {comparison.extras.length === 1 ? "" : "s"}
+            </span>
+          )}
+          <ChevronDown
+            aria-hidden="true"
+            className="ml-auto size-3.5 transition-transform group-open:rotate-180"
+          />
+        </summary>
+        <div className="mt-3 space-y-4">
+          <AgentKeyPermissions apiKey={apiKey} />
+          <AccessEntries
+            label="Requested access"
+            entries={comparison.matched}
+          />
+          <AccessEntries
+            label="Access beyond the requested filters"
+            entries={comparison.extras}
+          />
+          {children}
+          <AgentKeyIssuanceNotice existing={kind === "existing"} />
+        </div>
+      </details>
     </section>
   );
 }

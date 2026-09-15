@@ -73,6 +73,15 @@ test("mockup preserves service glyphs and preloaded permission choices", async (
     page.locator("#permissionOptions .service-glyph svg").first(),
   ).toBeVisible();
   await page.keyboard.press("Escape");
+  await page.locator('#keyList input[name="existing-key"]').first().check();
+  await expect(page.locator("#grantKind")).toHaveText("Existing key");
+  await expect(page.locator("#grantAccessDetails")).not.toHaveAttribute("open");
+  await expect(page.locator("#grantEffective")).toBeHidden();
+  await page.locator("#grantAccessDetails summary").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#grantEffective")).toBeVisible();
+  await page.locator("#grantAccessDetails summary").click();
+  await expect(page.locator("#grantEffective")).toBeHidden();
   await page.locator("#createMatchingKey").click();
   await expect(
     page.locator("#resourceList .service-glyph svg").first(),
@@ -182,6 +191,14 @@ test("mockup selects a connected account in the permission dropdown and complete
     0,
   );
   await expect(page.locator("#approveRestricted")).toBeEnabled();
+  await expect(page.locator("#grantKind")).toHaveText("Creates new key");
+  await expect(page.locator("#grantAccessDetails")).not.toHaveAttribute("open");
+  await expect(page.locator("#grantPreview")).toBeVisible();
+  await expect(page.locator("#grantEffective")).toBeHidden();
+  await page.locator("#grantAccessDetails summary").click();
+  await expect(page.locator("#grantEffective")).toBeVisible();
+  await page.locator("#grantAccessDetails summary").click();
+  await expect(page.locator("#grantEffective")).toBeHidden();
   await page.locator("#permissionSearch").fill("gmail");
   const sendPermission = page.locator(
     '[data-permission="api-google-gmail::https://www.googleapis.com/auth/gmail.send"]',

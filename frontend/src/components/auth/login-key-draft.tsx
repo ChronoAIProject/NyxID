@@ -30,7 +30,6 @@ import {
   type LoginInventory,
 } from "@/lib/login-permissions";
 import { LoginPermissionPicker } from "./login-permission-picker";
-import { AgentKeyIssuanceNotice } from "./agent-key-permissions";
 import { LoginGrantReview } from "./login-grant-review";
 
 export function LoginKeyDraft({
@@ -286,11 +285,9 @@ export function LoginKeyDraft({
               edit the requested filters.
             </p>
           )}
-          <AgentKeyIssuanceNotice existing={false} />
           <p className="text-[12px] text-muted-foreground">
-            Create &amp; continue creates one Agent Key and approves the
-            requesting device with its displayed access. The selected services
-            are existing connections; no new service accounts are created.
+            Create &amp; continue grants this device the access shown above.
+            Selected services use your existing connected accounts.
           </p>
           <Button
             type="submit"

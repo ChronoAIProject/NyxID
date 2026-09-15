@@ -13,9 +13,6 @@ import {
 import { LoginPermissionPicker } from "./login-permission-picker";
 import { LoginKeyDraft } from "./login-key-draft";
 import { LoginGrantReview } from "./login-grant-review";
-import {
-  AgentKeyIssuanceNotice,
-} from "./agent-key-permissions";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   previewAgentKey,
@@ -27,6 +24,7 @@ import { fetchLoginInventory } from "@/hooks/use-login-inventory";
 import { useApproveAuthDevice } from "@/hooks/use-auth-device";
 import {
   agentKeyErrorMessage,
+  effectivePermissions,
   newKeySelection,
   type AgentKeyPreview,
   type AgentKeyApprove,
@@ -742,7 +740,10 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         <h3 className="font-semibold">
                           Choose an existing Agent Key
                         </h3>
-                        <span>{comparisons.length} matches</span>
+                        <span>
+                          {comparisons.length}{" "}
+                          {comparisons.length === 1 ? "match" : "matches"}
+                        </span>
                       </div>
                       <fieldset
                         disabled={blocked}
@@ -773,17 +774,13 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                   : `Matched + ${comparison.extras.length} extra${comparison.extras.length === 1 ? "" : "s"}`}
                               </span>
                             </label>
-                            <p className="text-[11px] text-muted-foreground">
+                            <p className="pl-6 text-[11px] text-muted-foreground">
                               {key.owner_name} ·{" "}
-                              {key.owner_type === "org"
-                                ? "Organization"
-                                : "Personal"}
+                              {effectivePermissions(key.scopes)} ·{" "}
+                              {key.allow_all_services
+                                ? "All services"
+                                : `${key.allowed_services.length} ${key.allowed_services.length === 1 ? "service" : "services"}`}
                             </p>
-                            <LoginGrantReview
-                              apiKey={key}
-                              comparison={comparison}
-                              kind="existing"
-                            />
                           </div>
                         ))}
                       </fieldset>
@@ -807,19 +804,26 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                       )}
                       {chosen && (
                         <>
-                          <AgentKeyIssuanceNotice existing />
-                          <label className="block space-y-2 text-[12px]">
-                            Login credential expiry (optional)
-                            <Input
-                              type="datetime-local"
-                              aria-label="Login credential expiry (optional)"
-                              value={credentialExpiry}
-                              disabled={blocked}
-                              onChange={(e) =>
-                                setCredentialExpiry(e.target.value)
-                              }
-                            />
-                          </label>
+                          <LoginGrantReview
+                            key={chosen.key.id}
+                            apiKey={chosen.key}
+                            comparison={chosen.comparison}
+                            kind="existing"
+                            credentialExpiresAt={credentialExpiry}
+                          >
+                            <label className="block space-y-2 text-[12px]">
+                              Login credential expiry (optional)
+                              <Input
+                                type="datetime-local"
+                                aria-label="Login credential expiry (optional)"
+                                value={credentialExpiry}
+                                disabled={blocked}
+                                onChange={(e) =>
+                                  setCredentialExpiry(e.target.value)
+                                }
+                              />
+                            </label>
+                          </LoginGrantReview>
                           <Button
                             className="border-success/30 bg-success/10 text-success hover:bg-success/20"
                             disabled={

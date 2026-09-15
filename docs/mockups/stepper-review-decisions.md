@@ -32,20 +32,26 @@ Selected connections and their actual permissions appear below it, followed by
 the key name and settings. Its final action is **Create & continue**, with copy
 stating that this creates the key and approves the device with the shown access. There is
 no separate review step or repeated confirmation. Detailed key settings live
-in a disclosure; the final grant summary and extra access stay visible.
+in a disclosure; the final grant summary and extra-access count stay visible.
 
 Creation is labelled **New Agent Key · Draft** before the search. The selected
 connections sit in **Services this key can use**, with a count and **Add service**
 action that opens the shared dropdown. These are existing accounts whose access
 will be included in the key. Their cards split requested and extra permissions;
-the final **Key to create** preview lists access beyond the filters. No service
+the final **Final access review** lists access beyond the filters on expansion. No service
 account is created by this page, and no Agent Key is created before the final CTA.
 
-The final access review has the same layout for both paths. It shows the key,
-effective account permissions, services, expiry, requested access, and access
-beyond the requested filters. Its outcome badge says **Existing key** or
-**New form · creates key**, so the user can tell whether approval reuses a key
-or creates one.
+The final access review has the same layout for both paths. It keeps the key,
+owner, effective account permissions, service count, and expiry in a compact
+summary. Future-service and node access remain visible; extras have a compact
+**Matched + N extras** count. **View permissions and service access** opens the complete key
+settings, service permissions, requested access, and access beyond the
+requested filters, login credential information and optional expiry control.
+Its outcome badge says **Existing key** or **Creates new key**, so the user can
+tell whether approval reuses a key or creates one without reading the detailed
+grant first. Existing-key choices are compact; selecting one shows the single
+final review immediately above the approval action. Details start closed and
+can be opened and closed by mouse, touch or keyboard.
 
 Creation stays disabled while a name, requested API permission or requested
 service is missing, or filters/settings are invalid. Filters are editable
@@ -55,9 +61,9 @@ key's or service connection's authority.
 ## Matching choices
 
 Exact matches appear first, then matches with extra access, sorted by the
-number of additional access entries and then by name. Cards group their full
-matched permissions by service. **Also grants — included with this key** lists
-the additional permissions. Identity permissions count as extras when absent
+number of additional access entries and then by name. The selected key's review
+groups its full matched permissions by service. **Access beyond the requested
+filters** lists the additional permissions. Identity permissions count as extras when absent
 from the request. Additional services, nodes, future-resource grants and
 unreported provider access prevent an exact-match claim.
 
