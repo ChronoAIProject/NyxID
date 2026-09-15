@@ -30,6 +30,8 @@ const ONLINE_WINDOW_SECS: i64 = 90;
 
 #[derive(Serialize)]
 pub struct OracleWorkerInfo {
+    pub bundle_outdated: bool,
+    pub cooldown_until: Option<String>,
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_user_id: Option<String>,
@@ -213,6 +215,10 @@ pub(super) fn decode_login_snapshot_envelope(encoded: &str) -> AppResult<Zeroizi
 fn worker_info(worker: OracleWorker) -> OracleWorkerInfo {
     let last_seen_secs_ago = (Utc::now() - worker.last_seen_at).num_seconds().max(0);
     OracleWorkerInfo {
+        bundle_outdated: crate::services::oracle_worker_bundle_service::bundle_outdated(
+            worker.script_version.as_deref(),
+        ),
+        cooldown_until: worker.cooldown_until.map(|t| t.to_rfc3339()),
         owner_user_id: worker
             .enrollment
             .as_ref()

@@ -43,6 +43,7 @@ pub struct CreatePoolInput {
     pub visibility: Option<OraclePoolVisibility>,
     pub chatgpt_project_url: Option<String>,
     pub default_model_label: Option<String>,
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     pub max_workers: Option<u32>,
     pub max_queue_length: Option<u32>,
@@ -58,12 +59,31 @@ pub struct UpdatePoolInput {
     pub visibility: Option<OraclePoolVisibility>,
     pub chatgpt_project_url: Option<String>,
     pub default_model_label: Option<String>,
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     pub max_workers: Option<u32>,
     pub max_queue_length: Option<u32>,
     pub per_user_max_inflight: Option<u32>,
     pub task_timeout_secs: Option<u64>,
     pub is_active: Option<bool>,
+}
+
+/// Retire only the former seeded default; preserve every custom pool label.
+pub async fn migrate_legacy_default_model_label(
+    db: &mongodb::Database,
+) -> Result<u64, mongodb::error::Error> {
+    let result = db
+        .collection::<OraclePool>(ORACLE_POOLS)
+        .update_many(
+            doc! { "default_model_label": "chatgpt-5.5-pro" },
+            doc! { "$set": { "default_model_label": "chatgpt-6-pro" } },
+        )
+        .await?;
+    tracing::info!(
+        pool_count = result.modified_count,
+        "Migrated legacy Oracle default model labels"
+    );
+    Ok(result.modified_count)
 }
 
 fn validate_slug(slug: &str) -> AppResult<()> {
@@ -223,6 +243,7 @@ pub async fn create_pool(
     let (raw_token, token_hash) = mint_worker_token();
     let now = Utc::now();
     let pool = OraclePool {
+        require_model_match: input.require_model_match.unwrap_or(true),
         id: uuid::Uuid::new_v4().to_string(),
         user_id: owner_user_id.to_string(),
         slug: input.slug,
@@ -231,7 +252,12 @@ pub async fn create_pool(
         visibility,
         worker_token_hash: token_hash,
         chatgpt_project_url: input.chatgpt_project_url.filter(|u| !u.is_empty()),
-        default_model_label: input.default_model_label.filter(|m| !m.is_empty()),
+        default_model_label: Some(
+            input
+                .default_model_label
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "chatgpt-6-pro".to_string()),
+        ),
         allow_extract: input.allow_extract.unwrap_or(false),
         max_workers,
         max_queue_length,
@@ -373,6 +399,9 @@ pub async fn update_pool(
     }
     if let Some(u) = input.chatgpt_project_url {
         set.insert("chatgpt_project_url", u);
+    }
+    if let Some(value) = input.require_model_match {
+        set.insert("require_model_match", value);
     }
     if let Some(m) = input.default_model_label {
         set.insert("default_model_label", m);
@@ -580,6 +609,46 @@ mod tests {
             visibility: Some(OraclePoolVisibility::Platform),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn oracle_legacy_default_migration_is_exact_and_idempotent() {
+        let Some(db) = connect_test_database("oracle_default_migration").await else {
+            return;
+        };
+        let pools = db.collection::<mongodb::bson::Document>(ORACLE_POOLS);
+        for label in [
+            "chatgpt-5.5-pro",
+            "chatgpt-6-pro",
+            "chatgpt-5.5-pro-standard",
+            "GPT-5.5 Pro",
+        ] {
+            pools
+                .insert_one(
+                    doc! {"_id": uuid::Uuid::new_v4().to_string(), "default_model_label": label},
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(migrate_legacy_default_model_label(&db).await.unwrap(), 1);
+        assert_eq!(migrate_legacy_default_model_label(&db).await.unwrap(), 0);
+        assert_eq!(
+            pools
+                .count_documents(doc! {"default_model_label":"chatgpt-6-pro"})
+                .await
+                .unwrap(),
+            2
+        );
+        for label in ["chatgpt-5.5-pro-standard", "GPT-5.5 Pro"] {
+            assert_eq!(
+                pools
+                    .count_documents(doc! {"default_model_label":label})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
