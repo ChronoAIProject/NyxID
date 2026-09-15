@@ -1,5 +1,6 @@
-import { Check, Link2, X } from "lucide-react";
+import { Check, Link2, Plus, X } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Button } from "@/components/ui/button";
 import { ServiceIcon } from "@/components/service-icon";
 import {
   canonicalScope,
@@ -53,6 +54,7 @@ function loginConnectionChoices(
           scope,
           label: option?.label ?? scope,
           description: option?.description,
+          requested: required.includes(canonicalScope(group, scope)),
         };
       });
       const extras = permissions.filter(
@@ -77,6 +79,7 @@ function loginConnectionChoices(
           permissions,
           extras,
           covers,
+          constrained,
           ready,
           status,
         },
@@ -109,7 +112,7 @@ export function LoginConnectionChoices({
     <div className="mt-2 space-y-1 rounded-lg border border-border/70 bg-background/50 p-2">
       <p className="mb-2 flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground">
         <Link2 className="size-3" />
-        {choices.length ? "Choose a connection to grant" : "Not connected"}
+        {choices.length ? "Use an existing connection" : "Not connected"}
       </p>
       {choices.map(({ service, connection, permissions, ready, status }) => {
         const implied =
@@ -184,10 +187,12 @@ export function SelectedLoginConnections({
   selection,
   requested,
   disabled,
+  onAddService,
 }: {
   selection: ConnectionSelection;
   requested: RequestedPermissions;
   disabled: boolean;
+  onAddService: () => void;
 }) {
   const choices = loginConnectionChoices(selection, requested).filter(
     (c) =>
@@ -197,73 +202,129 @@ export function SelectedLoginConnections({
   );
   return (
     <section
-      aria-label="Connections to grant"
+      aria-label="Services this key can use"
       className="space-y-2 rounded-xl border border-border p-3 text-[12px]"
     >
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="font-semibold">Connections to grant</h3>
-        <span className="text-[11px] text-muted-foreground">
-          {choices.length} selected
-        </span>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="font-semibold">Services this key can use</h3>
+          <p className="text-[11px] text-muted-foreground">
+            {choices.length}{" "}
+            {choices.length === 1 ? "connection" : "connections"} selected
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={disabled}
+          onClick={onAddService}
+        >
+          <Plus aria-hidden="true" />
+          Add service
+        </Button>
       </div>
-      {choices.map(({ service, connection, group, permissions, status }) => {
-        const implied =
-          selection.allowAll || selection.impliedIds.includes(service.id);
-        return (
-          <div
-            key={service.id}
-            className="flex items-start gap-2.5 rounded-lg bg-muted/25 p-2.5"
-          >
-            <ServiceIcon slug={group} size="sm" />
-            <div className="min-w-0 flex-1 space-y-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <strong>{connection.label || service.name}</strong>
-                <span
-                  className={`text-[10px] ${status === "Exact match" ? "text-success" : "text-muted-foreground"}`}
-                >
-                  {status}
-                </span>
-              </div>
-              <p className="break-words text-[11px] text-muted-foreground">
-                {service.name}
-                {implied ? " · Included by your broader grant" : ""}
-              </p>
-              <div className="flex flex-wrap gap-1">
-                {permissions.map((p) => (
-                  <span
-                    key={p.scope}
-                    title={[p.scope, p.description].filter(Boolean).join(" · ")}
-                    className="max-w-full break-words rounded-md border border-border px-1.5 py-0.5 text-[10px]"
-                  >
-                    {p.label}
-                  </span>
-                ))}
-              </div>
-            </div>
-            {implied ? (
-              <Check
-                aria-label="Included by broader grant"
-                className="mt-1 size-3.5 text-muted-foreground"
-              />
-            ) : (
-              <button
-                type="button"
-                disabled={disabled}
-                onClick={() => selection.onToggle(service.id)}
-                aria-label={`Remove connection ${service.name}`}
-                className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
+      <p className="text-[11px] text-muted-foreground">
+        Choose existing connected accounts to include in this key's access.
+      </p>
+      <div className="max-h-80 space-y-2 overflow-y-auto overscroll-contain">
+        {choices.map(
+          ({
+            service,
+            connection,
+            group,
+            permissions,
+            status,
+            constrained,
+          }) => {
+            const implied =
+              selection.allowAll || selection.impliedIds.includes(service.id);
+            return (
+              <div
+                key={service.id}
+                className="flex items-start gap-2.5 rounded-lg bg-muted/25 p-2.5"
               >
-                <X className="size-3.5" />
-              </button>
-            )}
-          </div>
-        );
-      })}
+                <ServiceIcon slug={group} size="sm" />
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <strong>{connection.label || service.name}</strong>
+                    <span
+                      className={`text-[10px] ${status === "Exact match" ? "text-success" : "text-muted-foreground"}`}
+                    >
+                      {status}
+                    </span>
+                  </div>
+                  <p className="break-words text-[11px] text-muted-foreground">
+                    {service.name}
+                    {implied ? " · Included by your broader grant" : ""}
+                  </p>
+                  {[
+                    {
+                      label: constrained
+                        ? "Requested permissions"
+                        : "Permissions included",
+                      items: permissions.filter(
+                        (p) => !constrained || p.requested,
+                      ),
+                      extra: false,
+                    },
+                    {
+                      label: "Extra permissions included",
+                      items: permissions.filter(
+                        (p) => constrained && !p.requested,
+                      ),
+                      extra: true,
+                    },
+                  ]
+                    .filter(({ items }) => items.length > 0)
+                    .map(({ label, items, extra }) => (
+                      <div key={label} className="space-y-1 pt-1">
+                        <p
+                          className={`text-[10px] ${extra ? "text-warning" : "text-muted-foreground"}`}
+                        >
+                          {label} · {items.length}
+                        </p>
+                        <div className="flex flex-wrap gap-1">
+                          {items.map((p) => (
+                            <span
+                              key={p.scope}
+                              title={[p.scope, p.description]
+                                .filter(Boolean)
+                                .join(" · ")}
+                              className="max-w-full break-words rounded-md border border-border px-1.5 py-0.5 text-[10px]"
+                            >
+                              {p.label}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+                {implied ? (
+                  <Check
+                    aria-label="Included by broader grant"
+                    className="mt-1 size-3.5 text-muted-foreground"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => selection.onToggle(service.id)}
+                    aria-label={`Remove connection ${service.name}`}
+                    className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
+              </div>
+            );
+          },
+        )}
+      </div>
       {!choices.length && (
         <p className="text-[11px] text-muted-foreground">
-          Choose connections in the dropdown above when this key needs service
-          access. A key with only NyxID account permissions needs no service
-          connection.
+          Optional for account-only keys. Use Add service when this key needs
+          access to a connected service.
         </p>
       )}
       {choices.length > 0 && (

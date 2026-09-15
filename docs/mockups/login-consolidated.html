@@ -2293,6 +2293,15 @@
       #chooseConnections {
         margin: 10px 0;
       }
+      .connection-access-group {
+        margin-top: 10px;
+      }
+      .connection-access-group > .helper {
+        margin-bottom: 4px;
+      }
+      #newKeyIntro {
+        margin-bottom: 16px;
+      }
     </style>
   </head>
   <body>
@@ -2590,6 +2599,16 @@
                     </button>
                   </div>
                   <div id="agentScope" hidden>
+                    <div class="new-key-heading" id="newKeyIntro" hidden>
+                      <button class="text-button" id="backToKeys" type="button">
+                        ← Back to matching keys
+                      </button>
+                      <h2 tabindex="-1" id="createKeyTitle">New Agent Key · Draft</h2>
+                      <p class="helper">
+                        Configure one Agent Key for this device. Service access is optional; the key
+                        is created when you select Create &amp; continue.
+                      </p>
+                    </div>
                     <div class="permission-filter" id="permissionFilter">
                       <label class="filter-label" for="permissionSearch"
                         >Search permissions</label
@@ -2752,45 +2771,25 @@
                       ></p>
                     </div>
                     <div id="newPanel" hidden>
-                      <div class="new-key-heading">
-                        <button
-                          class="text-button"
-                          id="backToKeys"
-                          type="button"
-                        >
-                          ← Back to matching keys
-                        </button>
-                        <h2 tabindex="-1" id="createKeyTitle">
-                          Create a new Agent Key
-                        </h2>
-                        <p class="helper">
-                          Choose permissions and connections together in the
-                          search above. Review the selected access, then name
-                          your key.
-                        </p>
-                      </div>
                       <section
                         class="resource-card"
-                        aria-label="Connections to grant"
+                        aria-label="Services this key can use"
                       >
                         <div class="connection-summary-heading">
-                          <strong>Connections to grant</strong
+                          <strong>Services this key can use</strong
                           ><span class="selection-count" id="serviceCount"
-                            >0 selected</span
+                            >0 connections selected</span
                           >
                         </div>
-                        <div class="resource-list" id="resourceList"></div>
-                        <button
-                          class="text-button"
-                          type="button"
-                          id="chooseConnections"
-                        >
-                          Choose in permission dropdown
+                        <p class="helper">Choose existing connected accounts to include in this key's access.</p>
+                        <button class="btn" type="button" id="chooseConnections">
+                          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                          Add service
                         </button>
+                        <div class="resource-list" id="resourceList"></div>
                         <p class="helper">
-                          A key with only NyxID account permissions needs no
-                          service connection. Selected connections keep all
-                          their provider permissions.
+                          Optional for account-only keys. Selected connections
+                          keep all their provider permissions.
                         </p>
                       </section>
                       <details class="compact-details" id="resourceAdvanced">
@@ -6626,7 +6625,28 @@
                 `<span class="access-pill" title="${escapeHtml(p.scope + " · " + (p.description || ""))}">${escapeHtml(p.label)}</span>`,
             )
             .join("");
-        return `<article class="selected-connection-card" data-selected-connection="${escapeHtml(item.id)}">${serviceIcon(item.catalogSlug)}<div class="selected-connection-copy"><div class="connection-title"><strong>${escapeHtml(item.name)}</strong><span class="match-badge ${comparison.exact ? "exact" : "extra"}">${escapeHtml(status)}</span></div><p class="helper">${escapeHtml(item.slug)} · ${escapeHtml(item.ownerName || owners[item.owner])}</p><div class="access-pills">${pills(item.permissions.slice(0, 4))}</div>${item.permissions.length > 4 ? `<details class="compact-permissions"><summary>+${item.permissions.length - 4} more permissions</summary><div class="access-pills">${pills(item.permissions.slice(4))}</div></details>` : ""}</div>${draft.allServices ? '<span class="helper">Included</span>' : `<button type="button" class="remove-connection" data-remove-service="${escapeHtml(item.id)}" aria-label="Remove connection ${escapeHtml(item.slug)}">×</button>`}</article>`;
+        return `<article class="selected-connection-card" data-selected-connection="${escapeHtml(item.id)}">${serviceIcon(item.catalogSlug)}<div class="selected-connection-copy"><div class="connection-title"><strong>${escapeHtml(item.name)}</strong><span class="match-badge ${comparison.exact ? "exact" : "extra"}">${escapeHtml(status)}</span></div><p class="helper">${escapeHtml(item.slug)} · ${escapeHtml(item.ownerName || owners[item.owner])}</p>${[
+          {
+            label: comparison.constrained
+              ? "Requested permissions"
+              : "Permissions included",
+            items: comparison.constrained ? comparison.matched : item.permissions,
+            extra: false,
+          },
+          {
+            label: "Extra permissions included",
+            items: comparison.constrained ? comparison.extra : [],
+            extra: true,
+          },
+        ]
+          .filter((group) => group.items.length)
+          .map(
+            (group) =>
+              `<div class="connection-access-group"><p class="helper ${group.extra ? "warning" : ""}">${group.label} · ${group.items.length}</p><div class="access-pills">${pills(group.items.slice(0, 4))}</div>${group.items.length > 4 ? `<details class="compact-permissions"><summary>+${group.items.length - 4} more permissions</summary><div class="access-pills">${pills(group.items.slice(4))}</div></details>` : ""}</div>`,
+          )
+          .join(
+            "",
+          )}</div>${draft.allServices ? '<span class="helper">Included</span>' : `<button type="button" class="remove-connection" data-remove-service="${escapeHtml(item.id)}" aria-label="Remove connection ${escapeHtml(item.slug)}">×</button>`}</article>`;
       }
       function renderResources() {
         const selected = resources.services.filter(
@@ -6636,11 +6656,14 @@
         );
         $("#resourceList").innerHTML = selected.length
           ? selected.map(selectedConnectionCard).join("")
-          : '<p class="empty-state">No connections selected. Choose an account in the permission dropdown when this key needs service access.</p>';
+          : '<p class="empty-state">No connections selected. Use Add service when this key needs access to a connected service.</p>';
         populateServiceIcons($("#resourceList"));
         $("#serviceCount").textContent = draft.allServices
           ? "All services"
-          : selected.length + " selected";
+          : selected.length +
+            (selected.length === 1
+              ? " connection selected"
+              : " connections selected");
         $("#nodeCount").textContent = draft.allNodes
           ? "All nodes"
           : draft.nodes.size + " nodes";
@@ -6655,8 +6678,7 @@
               (item) =>
                 `<label class="node-choice"><input type="checkbox" data-node="${escapeHtml(item.id)}" ${draft.allNodes || draft.nodes.has(item.id) ? "checked" : ""} ${draft.allNodes || !canSelectConnection(item) ? "disabled" : ""}>${escapeHtml(item.name)}</label>`,
             )
-            .join("") ||
-          '<p class="helper">No node connections in this preview.</p>';
+            .join("") || '<p class="helper">No node connections in this preview.</p>';
       }
 
       function newGrant() {
@@ -6727,6 +6749,7 @@
             : "Choose an existing key below. Exact matches appear first; extra permissions stay part of the grant.";
         const grant = currentGrant();
         $("#existingPanel").hidden = source !== "existing";
+        $("#newKeyIntro").hidden = source !== "new";
         $("#newPanel").hidden = source !== "new";
         $("#grantCard").hidden = !grant;
         $("#grantDetails").hidden = !grant;
@@ -6758,7 +6781,7 @@
         $("#restrictedConsent").hidden = !grant;
         $("#restrictedConsent").textContent =
           source === "new"
-            ? "Create & continue creates this Agent Key and approves this device with the access shown above."
+            ? "Create & continue creates one Agent Key and approves this device with its displayed access. The selected services are existing connections; no new service accounts are created."
             : "Approving gives this device a new login credential with this key’s full access, including any extras shown above.";
         updateStepper();
         $("#validationHint").textContent = invalid;
@@ -6806,7 +6829,7 @@
           : [];
         $("#grantExtra").hidden = extra.length === 0;
         $("#grantExtra").textContent =
-          "Extra access included: " + extra.join("; ") + ".";
+          "Access beyond the requested filters: " + extra.join("; ") + ".";
         const expiry = credentialExpiry(grant);
         $("#expiryHint").textContent =
           `${expiry == null ? "No expiry." : "Effective login expiry: " + dateText(expiry) + "."} The login cannot outlast the key.`;

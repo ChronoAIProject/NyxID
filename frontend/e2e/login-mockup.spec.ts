@@ -129,7 +129,37 @@ test("mockup selects a connected account in the permission dropdown and complete
   await expect(account).toHaveAttribute("aria-selected", "false");
   await account.click();
   await expect(account).toHaveAttribute("aria-selected", "true");
-  await expect(page.locator("#serviceCount")).toHaveText("2 selected");
+  await expect(page.locator("#serviceCount")).toHaveText(
+    "2 connections selected",
+  );
+  await page.locator("#permissionSearch").press("Escape");
+  await page.getByRole("button", { name: "Add service", exact: true }).click();
+  await expect(page.locator("#permissionSearch")).toBeFocused();
+  await expect(page.locator("#permissionSearch")).toHaveValue("");
+  await page.locator("#permissionSearch").fill("gmail");
+  await page
+    .getByRole("option", {
+      name: "Grant connection api-google-gmail-3",
+      exact: true,
+    })
+    .click();
+  await page.locator("#permissionSearch").press("Escape");
+  await expect(page.locator("#serviceCount")).toHaveText(
+    "3 connections selected",
+  );
+  await expect(page.locator("#resourceList")).toContainText(
+    "Extra permissions included · 1",
+  );
+  await page
+    .getByRole("button", {
+      name: "Remove connection api-google-gmail-3",
+      exact: true,
+    })
+    .click();
+  await expect(page.locator("#serviceCount")).toHaveText(
+    "2 connections selected",
+  );
+  await page.locator("#permissionSearch").fill("gmail");
   for (const [width, height] of [
     [1280, 900],
     [390, 844],

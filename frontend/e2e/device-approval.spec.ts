@@ -164,8 +164,8 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
     page.getByRole("button", { name: "Create & continue" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("region", { name: "Connections to grant" }),
-  ).toContainText("0 selected");
+    page.getByRole("region", { name: "Services this key can use" }),
+  ).toContainText("0 connections selected");
   const search = page.getByRole("textbox", {
     name: "Search permissions & connections",
   });
@@ -228,8 +228,8 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
   await search.press("Escape");
   await expect(search).toBeFocused();
   await expect(
-    page.getByRole("region", { name: "Connections to grant" }),
-  ).toContainText("1 selected");
+    page.getByRole("region", { name: "Services this key can use" }),
+  ).toContainText("1 connection selected");
   await page.getByRole("button", { name: "Create & continue" }).click();
   await expect(
     page.getByText("Approved — return to the requesting device"),
@@ -247,6 +247,105 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
       }),
     },
   ]);
+});
+
+test("adding another service changes the new key draft without creating a service or approving early", async ({
+  page,
+}, info) => {
+  const inventory = loginInventory();
+  const slack = {
+    ...inventory.connections[0]!,
+    id: "slack-work",
+    label: "Slack workspace",
+    slug: "slack-work",
+    catalog_service_slug: "slack",
+    granted_scopes: ["channels:read"],
+    permission_snapshot: "s".repeat(64),
+  };
+  inventory.connections.push(slack);
+  inventory.options.connections = inventory.connections;
+  inventory.options.services.push({
+    id: slack.id,
+    name: "Slack workspace",
+    owner_id: "user",
+  });
+  inventory.catalog.push({ slug: "slack", name: "Slack" });
+  const requests = await fixture(page, true, false, true, inventory);
+  const writes: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (
+      request.method() === "POST" &&
+      !["/api/v1/auth/device/preview", "/api/v1/auth/device/options"].includes(
+        path,
+      )
+    )
+      writes.push(path);
+  });
+  await page.goto(`/login/device?${hints}&key_name=Build+agent&key_source=new`);
+  await restricted(page);
+  await page
+    .getByRole("button", { name: "Create new Agent Key", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "New Agent Key Draft" }),
+  ).toBeVisible();
+  const search = page.getByRole("textbox", {
+    name: "Search permissions & connections",
+  });
+  await search.fill("GitHub");
+  await search.press("Escape");
+  await page.getByRole("button", { name: "Add service", exact: true }).click();
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue("");
+  await search.fill("Slack");
+  await page
+    .getByRole("checkbox", { name: "Grant connection Slack workspace" })
+    .check();
+  await search.press("Escape");
+  const services = page.getByRole("region", {
+    name: "Services this key can use",
+  });
+  await expect(services).toContainText("2 connections selected");
+  await expect(services).toContainText("Slack workspace");
+  await expect(
+    page.getByRole("heading", { name: "Access beyond the requested filters" }),
+  ).toBeVisible();
+  expect(writes).toEqual([]);
+  for (const [width, height] of [
+    [1280, 900],
+    [390, 844],
+  ]) {
+    await page.setViewportSize({ width: width!, height: height! });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: info.outputPath(`additional-service-${width}.png`),
+      fullPage: true,
+    });
+  }
+  await page.getByRole("button", { name: "Create & continue" }).click();
+  await expect(
+    page.getByText("Approved — return to the requesting device"),
+  ).toBeVisible();
+  expect(writes).toEqual(["/api/v1/auth/device/approve-agent-key"]);
+  expect(
+    requests.find((r) => r.path.endsWith("/approve-agent-key"))?.body,
+  ).toEqual(
+    expect.objectContaining({
+      selection: expect.objectContaining({
+        kind: "new",
+        allowed_service_ids: ["svc", "slack-work"],
+        connection_snapshots: [
+          { service_id: "svc", permission_snapshot: "c".repeat(64) },
+          { service_id: "slack-work", permission_snapshot: "s".repeat(64) },
+        ],
+      }),
+    }),
+  );
 });
 
 test("public preview preserves hints and identity login requires fresh explicit consent", async ({
@@ -531,10 +630,10 @@ test("new platform grant discloses future access and binds only same-owner curre
     }),
   ).toBeVisible();
   await expect(
-    page.getByRole("region", { name: "Connections to grant" }),
+    page.getByRole("region", { name: "Services this key can use" }),
   ).toContainText("Platform user");
   await expect(
-    page.getByRole("region", { name: "Connections to grant" }),
+    page.getByRole("region", { name: "Services this key can use" }),
   ).not.toContainText("Platform org");
   expect(requests.filter((r) => r.path.includes("/approve"))).toEqual([]);
   expect(

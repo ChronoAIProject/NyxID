@@ -394,6 +394,11 @@ export function LoginPermissionPicker({
           selection={connections}
           requested={selected}
           disabled={disabled}
+          onAddService={() => {
+            setSearch("");
+            setOpen(true);
+            searchInput.current?.focus();
+          }}
         />
       )}
     </div>

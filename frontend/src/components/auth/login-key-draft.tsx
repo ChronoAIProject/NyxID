@@ -1,5 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
+import { KeyRound } from "lucide-react";
 import { Form, useAppForm } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -132,6 +133,23 @@ export function LoginKeyDraft({
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onApprove)} className="space-y-4">
         <fieldset disabled={disabled} className="space-y-4">
+          <div className="space-y-1">
+            <h3 className="flex items-center gap-2 text-[13px] font-semibold">
+              <KeyRound
+                aria-hidden="true"
+                className="size-4 text-muted-foreground"
+              />
+              New Agent Key
+              <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">
+                Draft
+              </span>
+            </h3>
+            <p className="text-[12px] text-muted-foreground">
+              Configure one Agent Key for this device. Service access is
+              optional; the key is created when you select Create &amp;
+              continue.
+            </p>
+          </div>
           <LoginPermissionPicker
             options={permissionOptions(inventory)}
             value={requested}
@@ -308,10 +326,10 @@ export function LoginKeyDraft({
             </div>
           </details>
           <div className="space-y-3 rounded-xl border border-border p-3">
-            <h3 className="text-[12px] font-semibold">Actual grant</h3>
+            <h3 className="text-[12px] font-semibold">Key to create</h3>
             <AgentKeyPermissions apiKey={summary} />
             <AccessEntries
-              label="Also grants — included with this key"
+              label="Access beyond the requested filters"
               entries={comparison.extras}
             />
           </div>
@@ -323,8 +341,9 @@ export function LoginKeyDraft({
           )}
           <AgentKeyIssuanceNotice existing={false} />
           <p className="text-[12px] text-muted-foreground">
-            Create &amp; continue creates this key and approves the requesting
-            device with the displayed access.
+            Create &amp; continue creates one Agent Key and approves the
+            requesting device with its displayed access. The selected services
+            are existing connections; no new service accounts are created.
           </p>
           <Button
             type="submit"

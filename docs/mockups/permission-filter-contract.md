@@ -26,6 +26,14 @@ filters remain available. Selected connections appear in compact cards below the
 requested filters. There is no separate service-selection list. A key that needs
 only NyxID account permissions can be created without selecting a service.
 
+The create path is labelled **New Agent Key · Draft**. **Services this key can
+use** lists existing connected accounts in a bounded card, with an **Add service**
+action that clears and focuses the same dropdown. Each card separates requested
+permissions from extra permissions included. Selecting a connection edits the
+draft; **Create & continue** creates one Agent Key and approves the requester.
+It does not create external service accounts. The final preview names access
+outside the filters **Access beyond the requested filters**.
+
 ## Hints and matching
 
 `permissions` contains supported NyxID API scopes; `services` contains catalog

@@ -694,7 +694,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
             <p className="text-[11px] text-muted-foreground">
               {mode === "full"
                 ? "Full account access · No scope configuration needed."
-                : "Scope optional · Select permissions to find a matching key."}
+                : choice === "new"
+                  ? "Scope optional · Configure the Agent Key to create."
+                  : "Scope optional · Select permissions to find a matching key."}
             </p>
             {mode === "full" ? (
               <>

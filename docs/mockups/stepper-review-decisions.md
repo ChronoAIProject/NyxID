@@ -34,6 +34,13 @@ stating that this creates the key and approves the device with the shown access.
 no separate review step or repeated confirmation. Detailed key settings live
 in a disclosure; the final grant summary and extra access stay visible.
 
+Creation is labelled **New Agent Key · Draft** before the search. The selected
+connections sit in **Services this key can use**, with a count and **Add service**
+action that opens the shared dropdown. These are existing accounts whose access
+will be included in the key. Their cards split requested and extra permissions;
+the final **Key to create** preview lists access beyond the filters. No service
+account is created by this page, and no Agent Key is created before the final CTA.
+
 Creation stays disabled while a name, requested API permission or requested
 service is missing, or filters/settings are invalid. Filters are editable
 suggestions; users can explicitly revise them. They never trim an existing

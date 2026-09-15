@@ -124,8 +124,8 @@ describe("three-step device approval", () => {
     await scope();
     await click("Create new Agent Key");
     expect(
-      screen.getByRole("region", { name: "Connections to grant" }),
-    ).toHaveTextContent("0 selected");
+      screen.getByRole("region", { name: "Services this key can use" }),
+    ).toHaveTextContent("0 connections selected");
     expect(
       screen.getByRole("button", { name: "Create & continue" }),
     ).toBeEnabled();
@@ -301,10 +301,10 @@ describe("three-step device approval", () => {
       ),
     ).toBeVisible();
     expect(
-      screen.getByRole("region", { name: "Connections to grant" }),
+      screen.getByRole("region", { name: "Services this key can use" }),
     ).toHaveTextContent("Platform user");
     expect(
-      screen.getByRole("region", { name: "Connections to grant" }),
+      screen.getByRole("region", { name: "Services this key can use" }),
     ).not.toHaveTextContent("Platform org");
     expect(approvals()).toEqual([]);
     await click("Create & continue");

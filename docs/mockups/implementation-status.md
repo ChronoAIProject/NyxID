@@ -16,11 +16,12 @@ implemented contract and [ADR-015](../ADR-015-auth-device-login.md) for rollout.
 | Sharing | Protocol, ADR/API and NyxID skill reference updated. The existing private Ornn skill `nyxid-device-login-protocol` is updated to version 1.1; registry validation and readback passed. |
 
 Verification on the integrated implementation includes 3,188 frontend unit
-tests, ten React browser regressions, mobile tests, TypeScript and native
+tests, eleven React browser regressions, mobile tests, TypeScript and native
 dependency sync. Frontend lint and the production build pass. Three additional
 mockup browser regressions cover icons, inert hostile icon text, and connection
 selection in the shared dropdown. The browser tests verify that ambiguous
-accounts require a choice and approval carries only the chosen connection.
+accounts require a choice, adding services edits the draft without an early
+write, and approval carries the chosen connections and their permission snapshots.
 Frontend coverage passed in CI before this UI follow-up; its new result is
 recorded on the PR.
 
