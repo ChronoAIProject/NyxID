@@ -45,6 +45,7 @@ pub struct WorkerPresenceInput {
     pub logged_in: Option<bool>,
     pub chrome_alive: Option<bool>,
     pub last_error: Option<String>,
+    pub cooldown_remaining_secs: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -121,6 +122,8 @@ pub(super) fn provisioned_worker(
     now: chrono::DateTime<Utc>,
 ) -> OracleWorker {
     OracleWorker {
+        cooldown_until: None,
+        last_polled_at: None,
         id: worker_doc_id(&pool.id, label),
         pool_id: pool.id.clone(),
         worker_label: label.to_string(),
@@ -247,7 +250,16 @@ pub async fn report_presence_for_worker(
         .transpose()?;
     let instance_id = optional_metadata(input.instance_id, "instance_id")?;
     let platform = optional_metadata(input.platform, "platform")?;
-    let last_error = optional_metadata(input.last_error, "last_error")?;
+    let last_error = input
+        .last_error
+        .map(|value| {
+            if super::oracle_task_service::valid_failure_detail(&value) || valid_metadata(&value) {
+                Ok(value)
+            } else {
+                Err(AppError::ValidationError("invalid last_error".to_string()))
+            }
+        })
+        .transpose()?;
     let current_task_id = optional_metadata(input.current_task_id, "current_task_id")?;
     let existing = if let Some(worker) = authorized_worker {
         if worker.worker_label != input.worker_label
@@ -276,6 +288,23 @@ pub async fn report_presence_for_worker(
         "last_seen_at": bson::DateTime::from_chrono(now),
         "capabilities": &capabilities,
     };
+    if let Some(seconds) = input.cooldown_remaining_secs {
+        if seconds > 86_400 {
+            return Err(AppError::ValidationError(
+                "cooldown exceeds one day".to_string(),
+            ));
+        }
+        set.insert(
+            "cooldown_until",
+            if seconds == 0 {
+                bson::Bson::Null
+            } else {
+                bson::Bson::DateTime(bson::DateTime::from_chrono(
+                    now + Duration::seconds(i64::from(seconds)),
+                ))
+            },
+        );
+    }
     for (key, value) in [
         ("script_version", script_version),
         ("platform", platform),
@@ -479,7 +508,12 @@ pub async fn accepts_new_tasks(
         .collection::<OracleWorker>(ORACLE_WORKERS)
         .find_one(doc! { "_id": worker_doc_id(pool_id, label) })
         .await?;
-    Ok(worker.is_none_or(|worker| worker.desired_state == OracleWorkerDesiredState::Active))
+    Ok(worker.is_none_or(|worker| {
+        worker.desired_state == OracleWorkerDesiredState::Active
+            && worker
+                .cooldown_until
+                .is_none_or(|until| until <= Utc::now())
+    }))
 }
 
 fn required_capability(kind: &OracleWorkerCommandKind) -> &'static str {
@@ -897,9 +931,34 @@ mod tests {
     use crate::test_utils::connect_test_database;
     use mongodb::{IndexModel, options::IndexOptions};
 
+    #[tokio::test]
+    async fn oracle_presence_cooldown_preserves_detail_and_blocks_claims() {
+        let Some(db) = connect_test_database("oracle_cooldown").await else {
+            return;
+        };
+        let pool = pool();
+        let detail = "usage_limit_reached@waiting_response";
+        let input = |seconds| WorkerPresenceInput {
+            worker_label: "limited".to_string(),
+            last_error: Some(detail.to_string()),
+            cooldown_remaining_secs: Some(seconds),
+            ..Default::default()
+        };
+        let worker = report_presence(&db, &pool, input(900)).await.unwrap();
+        assert_eq!(worker.last_error.as_deref(), Some(detail));
+        assert!(worker.cooldown_until.unwrap() > Utc::now() + Duration::minutes(14));
+        assert!(!accepts_new_tasks(&db, &pool.id, "limited").await.unwrap());
+        assert!(report_presence(&db, &pool, input(86401)).await.is_err());
+        let cleared = report_presence(&db, &pool, input(0)).await.unwrap();
+        assert!(cleared.cooldown_until.is_none());
+        assert!(accepts_new_tasks(&db, &pool.id, "limited").await.unwrap());
+        db.drop().await.unwrap();
+    }
+
     fn pool() -> OraclePool {
         let now = Utc::now();
         OraclePool {
+            require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: format!("worker-test-{}", uuid::Uuid::new_v4()),

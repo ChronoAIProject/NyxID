@@ -43,6 +43,7 @@ pub struct CreatePoolInput {
     pub visibility: Option<OraclePoolVisibility>,
     pub chatgpt_project_url: Option<String>,
     pub default_model_label: Option<String>,
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     pub max_workers: Option<u32>,
     pub max_queue_length: Option<u32>,
@@ -58,6 +59,7 @@ pub struct UpdatePoolInput {
     pub visibility: Option<OraclePoolVisibility>,
     pub chatgpt_project_url: Option<String>,
     pub default_model_label: Option<String>,
+    pub require_model_match: Option<bool>,
     pub allow_extract: Option<bool>,
     pub max_workers: Option<u32>,
     pub max_queue_length: Option<u32>,
@@ -223,6 +225,7 @@ pub async fn create_pool(
     let (raw_token, token_hash) = mint_worker_token();
     let now = Utc::now();
     let pool = OraclePool {
+        require_model_match: input.require_model_match.unwrap_or(true),
         id: uuid::Uuid::new_v4().to_string(),
         user_id: owner_user_id.to_string(),
         slug: input.slug,
@@ -231,7 +234,12 @@ pub async fn create_pool(
         visibility,
         worker_token_hash: token_hash,
         chatgpt_project_url: input.chatgpt_project_url.filter(|u| !u.is_empty()),
-        default_model_label: input.default_model_label.filter(|m| !m.is_empty()),
+        default_model_label: Some(
+            input
+                .default_model_label
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "chatgpt-6-pro".to_string()),
+        ),
         allow_extract: input.allow_extract.unwrap_or(false),
         max_workers,
         max_queue_length,
@@ -373,6 +381,9 @@ pub async fn update_pool(
     }
     if let Some(u) = input.chatgpt_project_url {
         set.insert("chatgpt_project_url", u);
+    }
+    if let Some(value) = input.require_model_match {
+        set.insert("require_model_match", value);
     }
     if let Some(m) = input.default_model_label {
         set.insert("default_model_label", m);

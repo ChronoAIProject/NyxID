@@ -85,6 +85,8 @@ const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000);
 // instead of spinning to MAX_WAIT_MS. Mirrors the userscript's
 // NO_OUTPUT_IDLE_TIMEOUT (420s).
 const NO_OUTPUT_IDLE_MS = Number(process.env.NYXID_NO_OUTPUT_IDLE_MS || 7 * 60 * 1000);
+const USAGE_COOLDOWN_MS = Math.max(1000, Math.min(86400000,
+  Number(process.env.NYXID_ORACLE_USAGE_COOLDOWN_SECS || 900) * 1000 || 900000));
 const HEARTBEAT_MS = 60000;
 const PRESENCE_MS = Number(process.env.NYXID_PRESENCE_MS || 20000);
 const HTTP_TIMEOUT_MS = Number(process.env.NYXID_HTTP_TIMEOUT_MS || 30000);
@@ -349,11 +351,12 @@ export function taskRecoveryDecision({
   kind,
   phase,
   failureCount,
+  shapeFailures = 0,
   maxFailures = MAX_TASK_RECOVERY_FAILURES,
   relaunchEvery = MAX_CDP_FAILURES_BEFORE_RELAUNCH,
 }) {
   const preSend = ["claimed", "page_ready", "ready_to_send"].includes(phase || "claimed");
-  if (failureCount >= maxFailures) {
+  if (failureCount >= maxFailures || (preSend && shapeFailures >= 2)) {
     return {
       action: "fail",
       code:
@@ -364,8 +367,25 @@ export function taskRecoveryDecision({
   }
   return {
     action: "recover",
-    forceRelaunch: relaunchEvery > 0 && failureCount % relaunchEvery === 0,
+    forceRelaunch: (preSend && shapeFailures > 0) || (relaunchEvery > 0 && failureCount % relaunchEvery === 0),
   };
+}
+
+export function failureDetail(code, phase) {
+  const safeCode = /^[a-z0-9_]{1,64}$/.test(code || "") ? code : "worker_error";
+  return /^[a-z0-9_]{1,40}$/.test(phase || "") ? `${safeCode}@${phase}` : safeCode;
+}
+
+export function cooldownRemaining(until, now = Date.now()) {
+  return Math.max(0, Math.min(86400, Math.ceil(((Number(until) || 0) - now) / 1000)));
+}
+
+// Text is inspected only inside scoped UI banners; the result is a fixed code.
+export function classifyChatGptError(text) {
+  if (/reached.{0,60}(limit|cap)|usage limit|message cap|too many requests|达到.{0,20}(上限|限制)|已达.{0,20}上限/i.test(text || "")) return "usage_limit_reached";
+  if (/model.{0,40}(unavailable|not available)|模型.{0,20}(不可用|无法使用)/i.test(text || "")) return "model_unavailable";
+  if (/something went wrong|network error|error generating|unable to (generate|load)|出错了|发生错误|网络错误/i.test(text || "")) return "chatgpt_error_response";
+  return null;
 }
 
 function defaultState() {
@@ -430,11 +450,12 @@ function clearTaskState(state) {
   saveState(state);
 }
 
-function stableErrorCode(error) {
+export function stableErrorCode(error) {
   if (error?.code && /^[a-z0-9_]{1,64}$/.test(error.code)) return error.code;
   if (error?.code && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code)) return error.code.toLowerCase();
   if (error?.status) return `http_${error.status}`;
   const message = String(error?.message || "").toLowerCase();
+  if (/target crashed|page crashed|page crash/.test(message)) return "page_crashed";
   if (/target page|browser.*closed|session closed|cdp|econnrefused/.test(message)) {
     return "cdp_disconnected";
   }
@@ -611,26 +632,66 @@ window.__nyx = (function () {
   }
 
   function isStillGenerating() {
-    const dom = !!(
-      document.querySelector("button[aria-label='Stop generating']") ||
-      document.querySelector("button[aria-label='Stop streaming']") ||
-      document.querySelector("button[aria-label='停止生成']") ||
-      document.querySelector("button[data-testid='stop-button']") ||
-      document.querySelector("[class*='result-streaming']") ||
-      document.querySelector("[class*='streaming']") ||
-      document.querySelector("[class*='thinking']") ||
-      document.querySelector("[class*='reasoning']")
-    );
-    if (dom) return true;
-    try {
-      const main = document.querySelector("main");
-      if (!main) return false;
-      const txt = main.innerText || "";
-      const pre = /Pro thinking|Extended Pro|Reasoning…/i.test(txt);
-      const post = /Thought for\\s+\\d+/i.test(txt);
-      if (pre && !post) return true;
-    } catch (e) {}
-    return false;
+    const { input } = discoverControls();
+    const region = input?.closest("form") || input?.parentElement;
+    const stop = region?.querySelector("button[data-testid='stop-button'], button[aria-label='Stop generating'], button[aria-label='Stop streaming'], button[aria-label='停止生成']");
+    if (stop && pickerElementVisible(stop) && !stop.closest('[data-message-author-role]')) return true;
+    const turn = latestAssistantTurn();
+    if (!turn) return false;
+    // Explicit live state only. Collapsed reasoning and persistent Pro pills
+    // are not evidence that a response is still streaming.
+    return [turn, ...turn.querySelectorAll('[data-is-streaming="true"], [data-state="streaming"], [aria-busy="true"], .result-streaming')]
+      .some(el => pickerElementVisible(el) && (el.matches('[data-is-streaming="true"], [data-state="streaming"], [aria-busy="true"], .result-streaming')));
+  }
+
+  const classifyChatGptError = ${classifyChatGptError.toString()};
+  function errorCode() {
+    const latest = latestAssistantTurn();
+    const banners = [...document.querySelectorAll('[role="alert"], [data-testid="error-message"], [data-testid="conversation-error"]')]
+      .filter(el => pickerElementVisible(el) && (!el.closest('[data-message-author-role]') || latest?.contains(el)));
+    const composer = discoverControls().input?.closest('form');
+    if (composer) banners.push(...composer.querySelectorAll('[role="status"]'));
+    for (const banner of banners) {
+      const code = classifyChatGptError(banner.innerText);
+      if (code) return code;
+    }
+    // A normal Regenerate action is not a failure; an explicit retry affordance is.
+    if (latest && [...latest.querySelectorAll('button[data-testid="retry-button"]')].some(pickerElementVisible)) return 'chatgpt_error_response';
+    return null;
+  }
+
+  function discoverControls() {
+    document.querySelectorAll('[data-nyx-composer], [data-nyx-send]').forEach(el => {
+      el.removeAttribute('data-nyx-composer'); el.removeAttribute('data-nyx-send');
+    });
+    const valid = el => pickerElementVisible(el) && !el.closest('[data-message-author-role], [role="dialog"]') && (el.tagName === 'TEXTAREA' || el.isContentEditable);
+    const exact = [...document.querySelectorAll('#prompt-textarea, [data-testid="prompt-textarea"], [contenteditable="true"][role="textbox"]')].filter(valid);
+    const candidates = exact.length ? exact : [...document.querySelectorAll('main form textarea, main form [contenteditable="true"], main [role="textbox"]')].filter(valid);
+    const input = candidates.length === 1 ? candidates[0] : null;
+    if (!input) return { input: null, send: null };
+    input.setAttribute('data-nyx-composer', '');
+    let region = input.closest('form') || input.parentElement;
+    const selector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="发送提示"], button[aria-label="Send message"], button[aria-label="发送消息"]';
+    while (region && region !== document.body && !region.querySelector(selector) && !input.closest('form')) region = region.parentElement;
+    const known = [...(region?.querySelectorAll(selector) || [])].filter(pickerElementVisible);
+    const fallback = input.closest('form') ? [...input.closest('form').querySelectorAll('button[type="submit"]')].filter(pickerElementVisible) : [];
+    const sends = known.length ? known : fallback;
+    const send = sends.length === 1 ? sends[0] : null;
+    if (send) send.setAttribute('data-nyx-send', '');
+    return { input, send };
+  }
+
+  function structuralProbe() {
+    const { input, send } = discoverControls();
+    const roles = [...document.querySelectorAll('[data-message-author-role]')];
+    const role = roles.at(-1)?.getAttribute('data-message-author-role');
+    const login = [...document.querySelectorAll('a,button')].some(el => /^(log in|sign up|登录|注册)$/i.test((el.textContent || '').trim()));
+    const account = document.querySelector('[data-testid="profile-button"], [data-testid="model-switcher-dropdown-button"]') ||
+      [...document.querySelectorAll('header button[aria-haspopup]')].find(el => pickerElementVisible(el) && /^(chatgpt|gpt)[ -]*[56]/i.test((el.innerText || '').trim()));
+    return { composer_found: !!input, send_found: !!send, pill_found: !!document.querySelector('button.__composer-pill'),
+      helper_installed: !!window.__nyx, logged_in: !login && !!(input || account),
+      url_host: ['chatgpt.com', 'chat.openai.com'].includes(location.hostname) ? location.hostname : 'other',
+      error_banner: !!errorCode(), latest_turn_role: ['assistant', 'user'].includes(role) ? role : 'none', turns: roles.length };
   }
 
   function assistantCount() {
@@ -645,8 +706,9 @@ window.__nyx = (function () {
       const scope = turns[turns.length - 1];
       return scope.querySelector("[data-message-author-role='user']") ? null : scope;
     }
-    const els = main.querySelectorAll("[data-message-author-role='assistant']");
-    return els.length ? els[els.length - 1] : null;
+    const els = main.querySelectorAll("[data-message-author-role]");
+    const last = els[els.length - 1];
+    return last?.getAttribute('data-message-author-role') === 'assistant' ? last : null;
   }
 
   function scrollContainer() {
@@ -669,11 +731,10 @@ window.__nyx = (function () {
 
   // Latest assistant message text (the answer to the last prompt).
   function extractResponse() {
-    const main = document.querySelector("main");
-    if (!main) return "";
-    const els = main.querySelectorAll("[data-message-author-role='assistant']");
-    if (!els.length) return "";
-    return cleanText(extractTextWithMath(els[els.length - 1]));
+    const scope = latestAssistantTurn();
+    if (!scope) return "";
+    const assistant = scope.matches("[data-message-author-role='assistant']") ? scope : scope.querySelector("[data-message-author-role='assistant']");
+    return assistant ? cleanText(extractTextWithMath(assistant)) : "";
   }
 
   // Image URLs in the LATEST assistant turn (generated images). An image-gen
@@ -810,19 +871,37 @@ window.__nyx = (function () {
     return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
   }
 
-  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+  return { version: 2, discoverControls, structuralProbe, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
     beginModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem };
 })();
 `;
 
-async function installDomCore(page) {
-  // applies on future navigations…
-  await page.addInitScript({ content: DOM_CORE });
-  // …and right now.
+const initializedPages = new WeakSet();
+export async function installDomCore(page) {
+  if (!initializedPages.has(page)) {
+    await page.addInitScript({ content: DOM_CORE });
+    initializedPages.add(page);
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      if (await page.evaluate(() => window.__nyx?.version === 2)) return;
+      await page.evaluate(DOM_CORE);
+      if (await page.evaluate(() => window.__nyx?.version === 2)) return;
+    } catch (error) {
+      if (['page_crashed', 'cdp_disconnected'].includes(stableErrorCode(error))) throw error;
+    }
+    await sleep(100);
+  }
+  throw Object.assign(new Error('dom_core_unavailable'), { code: 'dom_core_unavailable' });
+}
+
+async function failureProbe(page) {
   try {
-    await page.evaluate(DOM_CORE);
-  } catch (e) {
-    /* page mid-navigation; addInitScript covers the next load */
+    await installDomCore(page);
+    return await page.evaluate(() => window.__nyx?.structuralProbe());
+  } catch {
+    return { composer_found: false, send_found: false, pill_found: false, helper_installed: false,
+      logged_in: false, url_host: 'unavailable', error_banner: false, latest_turn_role: 'none', turns: 0 };
   }
 }
 
@@ -976,16 +1055,8 @@ async function waitForChromeExit(timeoutMs = 5000) {
 async function detectLoggedIn(page) {
   if (!page || page.isClosed() || !isChatGptUrl(page.url())) return false;
   try {
-    return await page.evaluate(() => {
-      const composer = document.querySelector(
-        "#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']"
-      );
-      const loginLink = Array.from(document.querySelectorAll("a,button")).some((element) => {
-        const text = (element.textContent || "").trim();
-        return /^(log in|sign up|登录|注册)$/i.test(text);
-      });
-      return Boolean(composer) && !loginLink;
-    });
+    await installDomCore(page);
+    return await page.evaluate(() => window.__nyx?.structuralProbe().logged_in === true);
   } catch {
     return false;
   }
@@ -1064,6 +1135,7 @@ async function connectChrome(runtime) {
   runtime.context = browser.contexts()[0] || (await browser.newContext());
   watchLoginChanges(runtime);
   runtime.page = await getChatPage(runtime.context);
+  runtime.page.on("crash", () => { runtime.pageCrashed = true; });
   runtime.health.cdp = 0;
   markChatPageRecovered(runtime);
   return runtime.page;
@@ -1109,7 +1181,19 @@ async function recoverChrome(runtime, forceRelaunch = false) {
   }
 }
 
+export async function replaceCrashedPage(runtime, targetUrl) {
+  const stale = runtime.page;
+  runtime.page = await runtime.context.newPage();
+  runtime.page.on('crash', () => { runtime.pageCrashed = true; });
+  runtime.pageCrashed = false;
+  await stale?.close().catch(() => {});
+  await runtime.page.goto(targetUrl || 'https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await installDomCore(runtime.page);
+  return runtime.page;
+}
+
 async function ensureChatPage(runtime, targetUrl) {
+  if (runtime.pageCrashed && runtime.context) await replaceCrashedPage(runtime, targetUrl);
   if (!runtime.browser || !runtime.context || runtime.page?.isClosed()) {
     await recoverChrome(runtime);
   }
@@ -1134,6 +1218,7 @@ async function ensureChatPage(runtime, targetUrl) {
       });
       await installDomCore(runtime.page);
     }
+    await installDomCore(runtime.page);
     markChatPageRecovered(runtime);
     return runtime.page;
   } catch (error) {
@@ -1176,9 +1261,10 @@ export function modelLevelTargets(label) {
   // Pro plans may split Pro into "Pro Standard" and "Pro Extended" entries.
   // The canonical level stays "Pro" (verification and phase_detail use it);
   // the alias order decides which entry the exact pass prefers.
+  if (/standard|标准/.test(lower)) return ["Pro", "Pro Standard", "Pro 标准", "标准"];
   if (/扩展|extended/.test(lower)) return ["Pro", "Pro Extended", "Pro 扩展", "扩展"];
   if (/\bpro\b|pro$/.test(lower) || compact.endsWith("pro")) {
-    return ["Pro", "Pro Standard", "Pro 扩展", "扩展"];
+    return ["Pro", "Pro Extended", "Pro 扩展", "扩展"];
   }
   if (/extra\s*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
   if (/\bhigh\b|高级|advanced/.test(lower)) return ["High", "高级"];
@@ -1193,8 +1279,9 @@ function normalizeMenuText(value) {
 
 // Exact pass first so "High" never selects "Extra High"; fuzzy pass second.
 export function modelItemMatches(itemText, targets, exact) {
-  const candidate = normalizeMenuText(itemText);
+  const candidate = normalizeMenuText(String(itemText || "").trim().split(/\r?\n/)[0]);
   if (!candidate) return false;
+  if (targets?.[0] === "Pro" && !pillShowsLevel(itemText, targets)) return false;
   const wanted = (targets || []).map(normalizeMenuText).filter(Boolean);
   if (!exact && MODEL_LEVELS.some((aliases) => aliases[0] === targets?.[0]) &&
       detectPillLevel(itemText) !== targets[0]) return false;
@@ -1207,8 +1294,8 @@ const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
   Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
 const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
 const PRE_SEND_ACTION_MS = 5000;
-const COMPOSER_SELECTOR = "#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']";
-const SEND_SELECTOR = "button[data-testid='send-button'], button[aria-label='Send prompt'], button[aria-label='发送提示']";
+const COMPOSER_SELECTOR = "[data-nyx-composer]";
+const SEND_SELECTOR = "[data-nyx-send]";
 const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible';
 const COMPOSER_REGION_XPATH = "xpath=ancestor::*[.//button[@data-testid='send-button' or @aria-label='Send prompt' or @aria-label='发送提示']][1]";
 
@@ -1223,20 +1310,25 @@ const MODEL_LEVELS = [
 // Canonical levels only, with word boundaries so e.g. "Profile" is not Pro.
 // Preserve the existing Chinese aliases; structural discovery handles locale.
 export function detectPillLevel(text) {
-  const label = String(text || "").toLowerCase().replace(/[._-]+/g, " ");
-  for (const aliases of MODEL_LEVELS) {
-    const english = aliases[0].toLowerCase().replace(/ /g, "\\s*");
-    if (new RegExp(`(?:^|[^a-z])${english}(?:$|[^a-z])`).test(label) ||
-        aliases.slice(1).some((alias) => label.includes(alias.toLowerCase()))) return aliases[0];
-  }
-  return null;
+  const label = String(text || '').trim().split(/\r?\n/)[0]
+    .replace(/^(?:(?:chatgpt|gpt)[\s._-]*)?\d+(?:\.\d+)*[\s._-]*/i, '')
+    .toLowerCase().replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (/^(?:pro(?: (?:standard|extended|扩展|标准))?|扩展|标准)$/.test(label)) return 'Pro';
+  return MODEL_LEVELS.find(aliases => aliases.some(alias => alias.toLowerCase() === label))?.[0] || null;
 }
 
 export function pillShowsLevel(pillText, targets) {
+  pillText = String(pillText || "").trim().split(/\r?\n/)[0];
   const canonical = (targets || [])[0];
   if (!canonical || !pillText) return false;
   if (MODEL_LEVELS.some((aliases) => aliases[0] === canonical)) {
-    return detectPillLevel(pillText) === canonical;
+    if (detectPillLevel(pillText) !== canonical) return false;
+    if (canonical === 'Pro') {
+      const wantedStandard = targets.includes('Pro Standard');
+      if (/standard|标准/i.test(pillText)) return wantedStandard;
+      if (/extended|扩展/i.test(pillText)) return !wantedStandard;
+    }
+    return true;
   }
   return normalizeMenuText(pillText).includes(normalizeMenuText(canonical));
 }
@@ -1245,21 +1337,116 @@ export function pillShowsLevel(pillText, targets) {
 // item, even if checked. A submenu may contain account actions, not levels.
 export function chooseNestedLevelEntry(items, targets, allowChecked = true) {
   const recognized = (item) => detectPillLevel(item.text) !== null;
-  // Exact pass walks aliases in priority order so "Pro Standard" beats
-  // "Pro Extended" for a plain Pro label regardless of menu order.
-  for (const target of targets || []) {
+  // Split tiers outrank generic Pro. Never fall back to a checked lower tier.
+  const priority = targets?.[0] === 'Pro' ? [...targets.slice(1), targets[0]] : targets;
+  for (const target of priority || []) {
     const index = items.findIndex((item) => recognized(item) && modelItemMatches(item.text, [target], true));
     if (index >= 0) return index;
   }
   const fuzzy = items.findIndex((item) => recognized(item) && modelItemMatches(item.text, targets, false));
   if (fuzzy >= 0) return fuzzy;
-  return allowChecked ? items.findIndex((item) => recognized(item) && item.checked) : -1;
+  return allowChecked ? items.findIndex((item) => recognized(item) && item.checked && modelItemMatches(item.text, targets, false)) : -1;
+}
+
+// Canonical observations deliberately discard raw UI labels.
+export function switcherMetadata(text) {
+  const label = String(text || '').trim().split(/\r?\n/)[0];
+  if (!label) return 'absent';
+  const match = /^(?:chatgpt|gpt)[\s-]*([56])(?![\d.])(?:[\s-]+(pro|专业)(?=$|[\s-]))?/i.exec(label);
+  if (!match) return 'unrecognized';
+  return `gpt_${match[1]}${match[2] ? '_pro' : ''}`;
+}
+
+export function switcherMatches(text, requested) {
+  const request = String(requested || '').replace(/^openai-/, 'gpt-');
+  let target = switcherMetadata(request);
+  // Locale/effort-only Pro aliases refer to the default latest family.
+  if (target === 'unrecognized' && !/\d/.test(request) && modelLevelTargets(request)[0] === 'Pro') target = 'gpt_6_pro';
+  return !['absent', 'unrecognized'].includes(target) && switcherMetadata(text) === target;
+}
+
+export function chooseSwitcherEntry(items, requested) {
+  const candidates = items.map((item, index) => ({ ...item, index }))
+    .filter(item => switcherMatches(item.text, requested));
+  const exact = candidates.find(item => normalizeMenuText(item.text).replace(/^chatgpt/, 'gpt') === normalizeMenuText(requested).replace(/^chatgpt/, 'gpt'));
+  return (exact || candidates[0])?.index ?? -1;
+}
+
+export function effortMetadata(text) {
+  text = String(text || '').trim().split(/\r?\n/)[0];
+  if (!text) return 'absent';
+  const level = detectPillLevel(text);
+  if (level === 'Pro') {
+    if (/extended|扩展/i.test(text)) return 'pro_extended';
+    if (/standard|标准/i.test(text)) return 'pro_standard';
+  }
+  return level ? level.toLowerCase().replace(/ /g, '_') : 'unrecognized';
+}
+
+async function readModelSwitcher(page, budget = interactionBudget(1000)) {
+  const snapshot = await boundedRead(budget, timeout => page.locator('body').evaluate((body, { deadline, pickerId }) => {
+    if (Date.now() >= deadline) return null;
+    const visible = el => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0 && getComputedStyle(el).visibility !== 'hidden';
+    body.querySelectorAll('[data-nyx-switcher]').forEach(el => el.removeAttribute('data-nyx-switcher'));
+    const exact = [...body.querySelectorAll('button[data-testid="model-switcher-dropdown-button"]')].filter(visible);
+    const fallback = [...body.querySelectorAll('header button[aria-haspopup="menu"], header button[aria-haspopup="listbox"], [role="banner"] button[aria-haspopup]')]
+      .filter(el => visible(el) && /^(chatgpt|gpt)[\s-]*[56](?![\d.])/i.test((el.innerText || '').trim()));
+    const candidates = exact.length ? exact : fallback;
+    const trigger = candidates.length === 1 ? candidates[0] : null;
+    if (trigger) trigger.setAttribute('data-nyx-switcher', '');
+    return { text: trigger ? (trigger.innerText || trigger.getAttribute('aria-label') || '').trim() : null,
+      found: !!trigger, open: (window.__nyx?.modelPickerMenus(pickerId).length || 0) > 0,
+      items: (window.__nyx?.modelPickerItems(pickerId) || []).map(el => ({ text: (el.innerText || el.textContent || '').trim() })) };
+  }, { deadline: Date.now() + timeout, pickerId: budget.picker?.id }, interactionOptions(budget, 1000)));
+  return { ...snapshot, metadata: switcherMetadata(snapshot.text) };
+}
+
+export async function selectModelSwitcher(page, requested) {
+  await installDomCore(page);
+  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID() });
+  const timer = setTimeout(() => budget.controller.abort(), MODEL_SELECT_TIMEOUT_MS);
+  let result = { verified: false, metadata: 'absent' };
+  try {
+    let snapshot = await readModelSwitcher(page, budget);
+    if (!switcherMatches(snapshot.text, requested) && snapshot.found) {
+      await clearRadixLock(page, budget);
+      await beginModelPicker(page, budget);
+      await page.locator('[data-nyx-switcher]').click(interactionOptions(budget));
+      const menuDeadline = Math.min(budget.deadline, Date.now() + 3000);
+      do {
+        await budgetPause(budget, 100);
+        snapshot = await readModelSwitcher(page, budget);
+      } while (!snapshot.open && Date.now() < menuDeadline);
+      const index = chooseSwitcherEntry(snapshot.items, requested);
+      if (index >= 0) await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
+      const verifyDeadline = Math.min(budget.deadline, Date.now() + 1000);
+      do {
+        await budgetPause(budget, 100);
+        snapshot = await readModelSwitcher(page, budget);
+      } while (!switcherMatches(snapshot.text, requested) && Date.now() < verifyDeadline);
+      if (LOG_PICKER_LABELS && !switcherMatches(snapshot.text, requested)) log(formatPickerLabels({ observed: snapshot.text, items: snapshot.items }));
+    }
+    result = { verified: switcherMatches(snapshot.text, requested), metadata: snapshot.metadata };
+  } catch (error) {
+    if (stableErrorCode(error) === 'page_crashed') throw error;
+  } finally {
+    budget.controller.abort();
+    clearTimeout(timer);
+    const cleanup = interactionBudget(2000, budget.picker);
+    const cleanupTimer = setTimeout(() => cleanup.controller.abort(), 2000);
+    try {
+      for (let i = 0; i < 3 && (await readModelSwitcher(page, cleanup)).open; i += 1) {
+        await page.locator('body').press('Escape', interactionOptions(cleanup));
+        await budgetPause(cleanup, 100);
+      }
+    } catch {} finally { cleanup.controller.abort(); clearTimeout(cleanupTimer); }
+  }
+  return result;
 }
 
 export function reportedPromptModel(task) {
-  // model_selected is exclusively an observed pill label, never a clicked
-  // item or a claim of verification. Retain the request when no pill is read.
-  return task.model_selected || task.model;
+  // Keep the request separate from the canonical, read-back observations.
+  return task.model;
 }
 
 export function modelSelectionDetail(result) {
@@ -1363,6 +1550,7 @@ async function pickerSnapshot(page, budget) {
       const style = getComputedStyle(el);
       return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
     };
+    window.__nyx?.discoverControls();
     const input = body.querySelector(composerSelector);
     const form = input?.closest("form");
     let region = form || input?.parentElement;
@@ -1370,15 +1558,15 @@ async function pickerSnapshot(page, budget) {
     if (region === body || region === document.documentElement) region = null;
     const pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]')].filter(visible);
     const candidates = pills.length ? pills : [...(region?.querySelectorAll('button[aria-haspopup="menu"]') || [])].filter(visible);
-    const menus = window.__nyx.modelPickerMenus(pickerId);
-    const items = window.__nyx.modelPickerItems(pickerId).map((el) => ({
+    const menus = window.__nyx?.modelPickerMenus(pickerId) || [];
+    const items = (window.__nyx?.modelPickerItems(pickerId) || []).map((el) => ({
       text: (el.innerText || el.textContent || "").trim(),
       checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true",
     }));
     return {
       candidates: candidates.map((el) => (el.innerText || el.textContent || "").trim()),
       structural: !!pills.length, form: !!form,
-      open: menus.length > 0, items, submenu: !!window.__nyx.modelPickerTrigger(pickerId),
+      open: menus.length > 0, items, submenu: !!window.__nyx?.modelPickerTrigger(pickerId),
     };
   }, { composerSelector: COMPOSER_SELECTOR, sendSelector: SEND_SELECTOR, deadline: Date.now() + timeout,
     pickerId: budget.picker?.id }, interactionOptions(budget, 1000)));
@@ -1412,7 +1600,7 @@ async function clearRadixLock(page, budget) {
 async function beginModelPicker(page, budget) {
   await boundedRead(budget, (timeout) => page.locator("body").evaluate((_, { id, deadline }) => {
     if (Date.now() >= deadline) return null;
-    return window.__nyx.beginModelPicker(id);
+    return window.__nyx?.beginModelPicker(id);
   }, { id: budget.picker.id, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
 }
 
@@ -1428,8 +1616,8 @@ async function clickPickerElement(page, budget, entry) {
   try {
     handle = await boundedRead(budget, (timeout) => page.locator("body").evaluateHandle((_, { id, deadline, entry }) => {
       if (Date.now() >= deadline) return "deadline";
-      return entry.trigger ? window.__nyx.modelPickerTrigger(id)
-        : window.__nyx.modelPickerItem(id, entry.index, entry.text);
+      return entry.trigger ? window.__nyx?.modelPickerTrigger(id)
+        : window.__nyx?.modelPickerItem(id, entry.index, entry.text);
     }, { id: budget.picker.id, deadline: Date.now() + timeout, entry }, interactionOptions(budget, 1000)).then((value) => {
       // If evaluation completed after the read/selection deadline, release its
       // handle without allowing a late click or leaking a remote reference.
@@ -1461,6 +1649,7 @@ async function clickMatchingLevel(page, targets, budget, allowChecked = false) {
   if (index < 0) return false;
   // Revalidate innerText and membership page-side, then click that exact node.
   // Hidden hints in textContent cannot invalidate a visible level match.
+  budget.picker.expectedEffort = effortMetadata(snapshot.items[index].text);
   await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
   return true;
 }
@@ -1479,12 +1668,14 @@ async function closeOpenMenus(page, budget) {
 // drains the inner promise before menu cleanup; no detached selection loop
 // can race prompt typing or Send.
 async function selectModel(page, modelLabel) {
+  await installDomCore(page);
   const targets = modelLevelTargets(modelLabel);
   const result = { level: targets[0] || null, verified: false, observed: null, reason: "picker_unavailable" };
   const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID(), snapshot: null });
   let timer;
   let drainTimer;
   const inner = selectModelInner(page, targets, budget, result).catch((error) => {
+    if (stableErrorCode(error) === "page_crashed") result.failureCode = "page_crashed";
     result.reason = modelSelectionFailureReason(error, {
       deadline: budget.deadline, aborted: budget.controller.signal.aborted,
     }, Date.now());
@@ -1517,7 +1708,10 @@ async function selectModel(page, modelLabel) {
     cleanup.controller.abort();
     clearTimeout(cleanupTimer);
   }
-  result.verified = pillShowsLevel(result.observed, targets);
+  if (result.failureCode) throw Object.assign(new Error(result.failureCode), { code: result.failureCode });
+  result.verified = pillShowsLevel(result.observed, targets) &&
+    !["timeout", "menu_not_opened", "interaction_deadline", "selection_failed", "level_unavailable"].includes(result.reason) &&
+    (!["pro_extended", "pro_standard"].includes(budget.picker.expectedEffort) || effortMetadata(result.observed) === budget.picker.expectedEffort);
   if (result.verified && !["timeout", "already_selected"].includes(result.reason)) result.reason = "selected";
   log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)}`);
   if (LOG_PICKER_LABELS && ["level_unavailable", "unverified", "menu_not_opened", "picker_unavailable"].includes(result.reason)) {
@@ -1530,7 +1724,7 @@ async function selectModelInner(page, targets, budget, result) {
   const before = await pickerSnapshot(page, budget);
   interactionOptions(budget);
   result.observed = before.observed;
-  if (pillShowsLevel(before.observed, targets)) {
+  if (pillShowsLevel(before.observed, targets) && (targets[0] !== "Pro" || effortMetadata(before.observed) !== "pro")) {
     result.reason = "already_selected";
     return;
   }
@@ -1538,13 +1732,14 @@ async function selectModelInner(page, targets, budget, result) {
   await clearRadixLock(page, budget);
   await beginModelPicker(page, budget);
   await pickerLocator(page, before.pill).click(interactionOptions(budget));
+  const menuWait = interactionOptions(budget, 5000);
   try {
-    await page.locator("body").waitForFunction((_, id) => window.__nyx.modelPickerMenus(id).length > 0,
-      budget.picker.id, interactionOptions(budget, 5000));
+    await page.locator("body").waitForFunction((_, id) => window.__nyx?.modelPickerMenus(id).length > 0,
+      budget.picker.id, menuWait);
   } catch (error) {
     interactionOptions(budget);
     if (error?.name !== "TimeoutError") throw error;
-    result.reason = "menu_not_opened";
+    result.reason = menuWait.timeout < 5000 ? "timeout" : "menu_not_opened";
     return;
   }
   let clicked = await clickMatchingLevel(page, targets, budget);
@@ -1585,7 +1780,8 @@ async function ensureComposerUnobstructed(page) {
     while (true) {
       const state = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
         if (Date.now() >= deadline) return null;
-        const input = body.querySelector(composerSelector);
+        window.__nyx?.discoverControls();
+    const input = body.querySelector(composerSelector);
         const rect = input?.getBoundingClientRect();
         const hit = rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
         const main = body.querySelector("main");
@@ -1601,7 +1797,8 @@ async function ensureComposerUnobstructed(page) {
       }
       await budgetPause(budget, 100);
     }
-  } catch {
+  } catch (error) {
+    if (stableErrorCode(error) === "page_crashed") throw error;
     log("composer_unobstructed_failed");
     throw Object.assign(new Error("composer_unobstructed_failed"), { code: "composer_unobstructed_failed" });
   } finally {
@@ -1751,13 +1948,13 @@ async function pinCurrentConversation(runtime, page, task) {
 }
 
 async function transcriptSnapshot(page) {
+  await installDomCore(page);
   return page.evaluate(() => {
     const main = document.querySelector("main");
-    const composer = document.querySelector(
-      "#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']"
-    );
+    const composer = window.__nyx?.discoverControls().input;
     return {
       ready: Boolean(main && composer && window.__nyx),
+      errorCode: window.__nyx?.errorCode(),
       generating: Boolean(window.__nyx?.isStillGenerating()),
       turns: window.__nyx?.extractTranscript() || [],
       assistantCount: window.__nyx?.assistantCount() || 0,
@@ -1801,8 +1998,10 @@ async function submitPromptResult(
       images: downloadedImages.items,
       files: downloadedFiles.items,
       chatgpt_url: page.url(),
-      // The observed pill is useful even when selection was unverified.
+      // Observations are canonical metadata, never raw picker labels.
       model: reportedPromptModel(task),
+      observed_model_switcher: runtime.state.current_task?.observed_model_switcher,
+      observed_model_effort: runtime.state.current_task?.observed_model_effort,
     })
   );
   log(
@@ -1814,6 +2013,8 @@ async function submitPromptResult(
 
 async function handlePrompt(runtime, page, task, recovering) {
   const { task_id } = task;
+  task.model ||= "chatgpt-6-pro";
+  if (task.require_model_match === true && task.model === "unknown") throw new TaskFailure("model_unavailable");
   log(`prompt task ${task_id} (followup=${!!task.is_followup})`);
   await page.bringToFront().catch(() => {});
 
@@ -1852,6 +2053,11 @@ async function handlePrompt(runtime, page, task, recovering) {
   if (recovering && !["claimed", "page_ready", "ready_to_send"].includes(priorPhase)) {
     await sleep(1500);
     const snapshot = await transcriptSnapshot(page);
+    if (snapshot.errorCode) {
+      const answer = await recoverContentFailure(runtime, page, task, snapshot.assistantCount, snapshot.errorCode);
+      await submitPromptResult(runtime, page, task, answer.text, answer.images, answer.files);
+      return;
+    }
     const decision = decidePromptResume({
       phase: priorPhase,
       prompt: task.prompt,
@@ -1891,10 +2097,28 @@ async function handlePrompt(runtime, page, task, recovering) {
     }
   }
 
+  await installDomCore(page);
+  const readyProbe = await failureProbe(page);
+  if (readyProbe.error_banner) {
+    const code = await page.evaluate(() => window.__nyx?.errorCode());
+    if (code) throw new TaskFailure(code);
+  }
   if (task.model && task.model !== "unknown") {
     if (await ack(runtime, task, "selecting_model")) throw new TaskFailure("cancelled");
+    const headerSelection = await selectModelSwitcher(page, task.model);
+    if (task.require_model_match !== false && !headerSelection.verified) throw new TaskFailure("model_unavailable");
     const selected = await selectModel(page, task.model);
-    task.model_selected = selected.observed;
+    const observedSwitcher = await readModelSwitcher(page).catch(error => {
+      if (stableErrorCode(error) === "page_crashed") throw error;
+      return { text: null, metadata: "absent" };
+    });
+    updateTaskState(runtime.state, { observed_model_switcher: observedSwitcher.metadata,
+      observed_model_effort: effortMetadata(selected.observed) });
+    // Re-read BOTH controls after selecting effort, since either may change the other.
+    if (task.require_model_match !== false && (!switcherMatches(observedSwitcher.text, task.model) ||
+        (selected.observed !== null && !selected.verified) || (selected.observed === null && selected.reason !== 'picker_unavailable'))) {
+      throw new TaskFailure('model_unavailable');
+    }
     if (await ack(runtime, task, "selecting_model", modelSelectionDetail(selected))) {
       throw new TaskFailure("cancelled");
     }
@@ -1903,14 +2127,28 @@ async function handlePrompt(runtime, page, task, recovering) {
   // Type the prompt into the composer (native — more robust than the
   // userscript's execCommand fallbacks) and send.
   const input = page.locator(COMPOSER_SELECTOR).first();
-  await input.waitFor({ state: "visible", timeout: 60000 });
+  await page.evaluate(() => window.__nyx?.discoverControls());
+  try {
+    const deadline = Date.now() + 15000;
+    while (!(await page.evaluate(() => !!window.__nyx?.discoverControls().input))) {
+      if (Date.now() >= deadline) throw new Error('composer_not_found');
+      await sleep(100);
+    }
+    await input.waitFor({ state: "visible", timeout: PRE_SEND_ACTION_MS });
+  } catch (error) {
+    if (stableErrorCode(error) === 'page_crashed') throw error;
+    throw Object.assign(new Error('composer_not_found'), { code: 'composer_not_found' });
+  }
   await ensureComposerUnobstructed(page);
   await input.click({ timeout: PRE_SEND_ACTION_MS });
   await input.fill(task.prompt, { timeout: PRE_SEND_ACTION_MS });
+  const typed = await input.evaluate(el => el.value ?? el.innerText);
+  if (normalizePromptText(typed) !== normalizePromptText(task.prompt)) throw Object.assign(new Error('composer_readback_failed'), { code: 'composer_readback_failed' });
+  await installDomCore(page);
   const before = await boundedRead(interactionBudget(PRE_SEND_ACTION_MS), (timeout) =>
     page.locator("body").evaluate(() => ({
       baseline: window.__nyx?.extractTranscript()?.length || 0,
-      assistantCount: window.__nyx.assistantCount(),
+      assistantCount: window.__nyx?.assistantCount() || 0,
     }), undefined, { timeout }));
   const baseline = before.baseline;
   updateTaskState(runtime.state, { phase: "ready_to_send", baseline_turn_count: baseline });
@@ -1934,9 +2172,27 @@ async function handlePrompt(runtime, page, task, recovering) {
   await ensureComposerUnobstructed(page);
   // Resolve actionability while still pre-send. The actual click is the
   // only operation after the durable uncertainty fence.
-  await sendBtn.click({ trial: true, timeout: PRE_SEND_ACTION_MS });
+  try { await sendBtn.click({ trial: true, timeout: PRE_SEND_ACTION_MS }); }
+  catch (error) {
+    if (stableErrorCode(error) === 'page_crashed') throw error;
+    throw Object.assign(new Error('send_button_not_found'), { code: 'send_button_not_found' });
+  }
   if (!task.is_followup && (task.pdf_base64 || task.attachment_base64)) {
     if (await ack(runtime, task, "ready_to_send")) throw new TaskFailure("cancelled");
+  }
+  if (task.model !== 'unknown') {
+    await installDomCore(page);
+    const header = await readModelSwitcher(page);
+    const pill = await pickerSnapshot(page, interactionBudget(PRE_SEND_ACTION_MS));
+    const observedEffort = effortMetadata(pill.observed);
+    const previousEffort = runtime.state.current_task?.observed_model_effort;
+    if (task.require_model_match !== false && (!switcherMatches(header.text, task.model) ||
+      (pill.pill && !pillShowsLevel(pill.observed, modelLevelTargets(task.model))) ||
+      (previousEffort !== 'absent' && observedEffort === 'absent') ||
+      (['pro_extended', 'pro_standard'].includes(previousEffort) && previousEffort !== observedEffort))) {
+      throw new TaskFailure('model_unavailable');
+    }
+    updateTaskState(runtime.state, { observed_model_switcher: header.metadata, observed_model_effort: observedEffort });
   }
   updateTaskState(runtime.state, { phase: "send_attempted", baseline_turn_count: baseline });
   await sendBtn.click({ timeout: PRE_SEND_ACTION_MS });
@@ -1956,6 +2212,7 @@ function convId(url) {
 // Returns the latest assistant turn's text plus on-page image and file sources.
 // Artifact-only turns are valid; the stability key spans all three outputs.
 async function waitForResponse(runtime, page, task, beforeCount) {
+  updateTaskState(runtime.state, { phase: "waiting_response", last_phase: "waiting_response" });
   const start = Date.now();
   let lastHeartbeat = start;
   let lastKey = "";
@@ -1976,13 +2233,18 @@ async function waitForResponse(runtime, page, task, beforeCount) {
         throw new TaskRestart();
       }
     }
-    const [generating, count, text, images, files] = await page.evaluate(() => [
-      window.__nyx.isStillGenerating(),
-      window.__nyx.assistantCount(),
-      window.__nyx.extractResponse(),
-      window.__nyx.extractImages(),
-      window.__nyx.extractFiles(),
+    await installDomCore(page);
+    const [generating, count, text, images, files, errorCode, helperReady] = await page.evaluate(() => [
+      window.__nyx?.isStillGenerating(),
+      window.__nyx?.assistantCount(),
+      window.__nyx?.extractResponse(),
+      window.__nyx?.extractImages(),
+      window.__nyx?.extractFiles(),
+      window.__nyx?.errorCode(),
+      window.__nyx?.version === 2,
     ]);
+    if (!helperReady) continue;
+    if (errorCode) return recoverContentFailure(runtime, page, task, beforeCount, errorCode);
     const hasText = !!(text && text.length > 0);
     const hasImages = Array.isArray(images) && images.length > 0;
     const hasFiles = Array.isArray(files) && files.length > 0;
@@ -1992,7 +2254,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
     // there's no new answer yet — wedge guard bails if ChatGPT has stopped.
     if (count <= beforeCount && !hasImages && !hasFiles) {
       if (!generating && Date.now() - start >= NO_OUTPUT_IDLE_MS) {
-        throw new Error("no assistant output (idle timeout)");
+        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output");
       }
       continue;
     }
@@ -2004,7 +2266,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       // New turn settled but produced nothing extractable (e.g. an unrenderable
       // tool turn). Don't wedge — fail fast once the idle window elapses.
       if (Date.now() - start >= NO_OUTPUT_IDLE_MS) {
-        throw new Error("assistant turn produced no extractable content (idle timeout)");
+        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output");
       }
       stable = 0;
       continue;
@@ -2027,19 +2289,25 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       lastKey = key;
     }
   }
-  // Timed out. Only return content if a NEW assistant turn actually appeared
-  // since we sent the prompt; otherwise the latest message is stale (a previous
-  // turn), so return empty and let the server mark the task failed instead of
-  // handing back the wrong answer.
-  const [count, text, images, files] = await page.evaluate(() => [
-    window.__nyx.assistantCount(),
-    window.__nyx.extractResponse(),
-    window.__nyx.extractImages(),
-    window.__nyx.extractFiles(),
-  ]);
-  return count > beforeCount || images?.length || files?.length
-    ? { text: text || "", images: images || [], files: files || [] }
-    : { text: "", images: [], files: [] };
+  // Never return an empty or partial response on the maximum-generation deadline.
+  throw new TaskFailure('response_timeout');
+}
+
+async function recoverContentFailure(runtime, page, task, beforeCount, code) {
+  if (['usage_limit_reached', 'model_unavailable'].includes(code)) throw new TaskFailure(code);
+  if (runtime.state.current_task?.content_reload_attempted) throw new TaskFailure(code);
+  updateTaskState(runtime.state, { content_reload_attempted: true });
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+  await installDomCore(page);
+  await sleep(STABLE_INTERVAL_MS);
+  const snapshot = await transcriptSnapshot(page);
+  const decision = decidePromptResume({ phase: runtime.state.current_task?.phase, prompt: task.prompt,
+    turns: snapshot.turns, generating: snapshot.generating, transcriptReady: snapshot.ready,
+    baselineTurnCount: runtime.state.current_task?.baseline_turn_count || 0 });
+  if (snapshot.errorCode) throw new TaskFailure(snapshot.errorCode);
+  if (decision.action === 'complete') return { text: decision.response, images: snapshot.images, files: snapshot.files };
+  if (decision.action === 'wait' && snapshot.generating) return waitForResponse(runtime, page, task, beforeCount);
+  throw new TaskFailure(code);
 }
 
 async function fetchTrustedArtifact(page, source, kind) {
@@ -2136,6 +2404,7 @@ async function downloadImages(page, srcs, artifactBudget) {
       const ext = (mime.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "") || "png";
       out.push({ mime, name: `image_${out.length + 1}.${ext}`, data_base64: buffer.toString("base64") });
     } catch (e) {
+      if (stableErrorCode(e) === "page_crashed") throw e;
       log(`image download failed (${stableErrorCode(e)})`);
     }
   }
@@ -2191,6 +2460,7 @@ async function downloadFiles(page, sources, artifactBudget) {
         data_base64: buffer.toString("base64"),
       });
     } catch (e) {
+      if (stableErrorCode(e) === "page_crashed") throw e;
       log(`file download failed (${stableErrorCode(e)})`);
     }
   }
@@ -2432,7 +2702,8 @@ async function handleExtract(runtime, page, task) {
       const root = document.querySelector("main, article") || document.body;
       return ((root && root.innerText) || "").trim().slice(0, 200000);
     });
-    const response = content || "ERROR: empty extraction";
+    if (!content) throw new TaskFailure("empty_extraction");
+    const response = content;
     const res = await apiPost("/result", taskIdentity(runtime, task, {
       response,
       chatgpt_url: page.url(),
@@ -2440,19 +2711,16 @@ async function handleExtract(runtime, page, task) {
     }));
     log(`extract ${task_id} → ${res.status} (${content.length} chars)`);
   } catch (err) {
-    await apiPost("/result", taskIdentity(runtime, task, {
-      response: `ERROR: ${stableErrorCode(err)}`,
-      chatgpt_url: page.url(),
-      model: task.model,
-    }));
+    if (stableErrorCode(err) === 'page_crashed') throw err;
+    throw new TaskFailure(stableErrorCode(err));
   }
 }
 
 async function ack(runtime, task, phase, phaseDetail) {
+  updateTaskState(runtime.state, { last_phase: phase });
   const response = await apiPost("/ack", taskIdentity(runtime, task, {
     phase,
     phase_detail: phaseDetail,
-    page_url: runtime.page?.url(),
   }));
   return response.status === "cancelled";
 }
@@ -2533,10 +2801,11 @@ async function heartbeat(runtime) {
     instance_id: runtime.state.instance_id,
     platform: `${process.platform}-${process.arch}`,
     capabilities: CAPABILITIES,
+    cooldown_remaining_secs: cooldownRemaining(runtime.state.cooldown_until),
     logged_in: loggedIn,
     current_task_id: runtime.state.current_task?.task_id || null,
     chrome_alive: runtime.chromeAlive,
-    last_error: runtime.lastError || runtime.state.saved_login_error || null,
+    last_error: runtime.lastError || runtime.state.last_task_failure || runtime.state.saved_login_error || null,
     command_reports: reports,
   });
   if (reports.length) {
@@ -2915,10 +3184,22 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
 
 async function settleTaskFailure(runtime, task, code) {
   if (code === "cancelled") return;
+  const previousDetail = runtime.state.current_task?.failure_detail;
+  const detail = /^[a-z0-9_]{1,64}(@[a-z0-9_]{1,40})?$/.test(previousDetail || "") ? previousDetail
+    : failureDetail(code, runtime.state.current_task?.last_phase || runtime.state.current_task?.phase);
+  runtime.lastError = detail;
+  runtime.state.last_task_failure = detail;
+  saveState(runtime.state);
+  if (code === 'usage_limit_reached') {
+    runtime.state.cooldown_until = Date.now() + USAGE_COOLDOWN_MS;
+    saveState(runtime.state);
+  }
+  log(`task_failure code=${code} detail=${detail} probe=${JSON.stringify(await failureProbe(runtime.page))}`);
   await apiPost(
     "/result",
     taskIdentity(runtime, task, {
       response: `ERROR: ${code}`,
+      failure_detail: detail,
       chatgpt_url: runtime.page?.url(),
       model: task.model,
     })
@@ -2934,6 +3215,7 @@ async function executeTask(runtime, task, recovering) {
       if (task.kind === "scrape") await handleScrape(runtime, page, task);
       else if (task.kind === "extract") await handleExtract(runtime, page, task);
       else await handlePrompt(runtime, page, task, recovering);
+      runtime.state.last_task_failure = null;
       clearTaskState(runtime.state);
       runtime.lastError = null;
       return;
@@ -2944,6 +3226,8 @@ async function executeTask(runtime, task, recovering) {
       }
       if (error instanceof TaskFailure) {
         const code = stableErrorCode(error);
+        const underlying = ['prompt_delivery_uncertain', 'recovery_conversation_unknown'].includes(code) && runtime.state.current_task?.failure_detail;
+        updateTaskState(runtime.state, { failure_detail: underlying || failureDetail(code, runtime.state.current_task?.last_phase || runtime.state.current_task?.phase) });
         runtime.lastError = code === "cancelled" ? null : code;
         await settleTaskFailure(runtime, task, code);
         clearTaskState(runtime.state);
@@ -2954,13 +3238,19 @@ async function executeTask(runtime, task, recovering) {
         continue;
       }
       const failureCount = (runtime.state.current_task?.recovery_failures || 0) + 1;
-      updateTaskState(runtime.state, { recovery_failures: failureCount });
-      runtime.lastError = stableErrorCode(error);
+      const cause = runtime.pageCrashed ? "page_crashed" : stableErrorCode(error);
+      const detail = failureDetail(cause, runtime.state.current_task?.last_phase || runtime.state.current_task?.phase);
+      const shapeFailure = ['composer_not_found', 'send_button_not_found', 'composer_readback_failed', 'composer_unobstructed_failed'].includes(cause)
+        && (await failureProbe(runtime.page)).logged_in;
+      const shapeFailures = (runtime.state.current_task?.shape_failures || 0) + Number(shapeFailure);
+      updateTaskState(runtime.state, { recovery_failures: failureCount, failure_detail: detail, shape_failures: shapeFailures });
+      runtime.lastError = detail;
       log(`task ${task.task_id} browser failure ${failureCount}/${MAX_TASK_RECOVERY_FAILURES} (${runtime.lastError})`);
       const recovery = taskRecoveryDecision({
         kind: task.kind,
         phase: runtime.state.current_task?.phase,
         failureCount,
+        shapeFailures,
       });
       runtime.chromeAlive = false;
       if (recovery.action === "fail") {
@@ -2971,7 +3261,12 @@ async function executeTask(runtime, task, recovering) {
       }
       runtime.health.cdp += 1;
       log(`task ${task.task_id} paused for browser recovery (${runtime.lastError})`);
-      await recoverChrome(runtime, recovery.forceRelaunch);
+      if (cause === 'page_crashed' && runtime.context) {
+        runtime.pageCrashed = true;
+        await replaceCrashedPage(runtime, runtime.state.current_task?.conversation_url || task.conversation_url);
+      } else {
+        await recoverChrome(runtime, shapeFailure || recovery.forceRelaunch);
+      }
       recovering = true;
     }
   }
@@ -3284,7 +3579,7 @@ async function main() {
       if (Date.now() - runtime.lastPresenceAt >= PRESENCE_MS) await heartbeat(runtime);
       if (await processPendingCommand(runtime)) process.exit(75);
       await processSavedLogin(runtime);
-      if (runtime.state.draining && !runtime.state.current_task) {
+      if ((runtime.state.draining || cooldownRemaining(runtime.state.cooldown_until) > 0) && !runtime.state.current_task) {
         await sleep(POLL_MS);
         continue;
       }
@@ -3311,8 +3606,7 @@ async function main() {
       const response = await apiGet(
         `/task?worker=${encodeURIComponent(LABEL)}` +
           `&script_version=${encodeURIComponent(SCRIPT_VERSION)}` +
-          `&instance_id=${encodeURIComponent(state.instance_id)}` +
-          `&page_url=${encodeURIComponent(page.url())}`
+          `&instance_id=${encodeURIComponent(state.instance_id)}`
       );
       if (response.status === "idle") {
         if (state.current_task) clearTaskState(state);

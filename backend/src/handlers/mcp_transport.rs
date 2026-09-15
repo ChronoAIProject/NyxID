@@ -5127,6 +5127,12 @@ mod tests {
         use crate::models::oracle_task::{OracleFile, OracleTask, OracleTaskStatus};
         let now = chrono::Utc::now();
         let mut task = OracleTask {
+            failure_detail: None,
+            observed_model_switcher: None,
+            observed_model_effort: None,
+            require_model_match: true,
+            excluded_worker_ids: Vec::new(),
+            reroute_count: 0,
             id: "task-1".to_string(),
             pool_id: "pool-1".to_string(),
             submitter_user_id: "user-1".to_string(),

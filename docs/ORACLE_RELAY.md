@@ -284,6 +284,7 @@ bound based on the 512 KiB decoded envelope cap.
 {
   "prompt": "…",                 // required
   "model": "chatgpt-6-pro",    // optional; defaults to the pool's
+  "require_model_match": true, // optional; inherits the pool setting
   "tag": "bedc-deep",            // optional
   "conversation_id": "",         // omit = single-shot; "" = open session; id = continue
   "pdf_base64": "…",             // optional; worker uploads on turn 1
@@ -295,7 +296,10 @@ bound based on the 512 KiB decoded envelope cap.
 **Task poll** (`GET /tasks/{id}`): `status` is one of `queued`,
 `dispatched`, `completed`, `failed`, or `cancelled`. While queued,
 `queue_position` is 1-based. Every response carries `attempts`, `retry_count`,
-and `max_retries`. A completed task carries `response`. A failed task carries
+and `max_retries`, plus `reroute_count` and `require_model_match`. Failure
+attribution is retained as optional `failure_detail`, validated against
+`^[a-z0-9_]{1,64}(@[a-z0-9_]{1,40})?$` (e.g.
+`page_crashed@waiting_response`). A completed task carries `response`. A failed task carries
 `failure_reason`, such as `extraction_failure`, `empty_response`,
 `prompt_delivery_uncertain`, or `infrastructure_retry_exhausted`.
 
@@ -330,19 +334,46 @@ prompt and response after `ORACLE_TASK_RETENTION_DAYS`. File bodies and file
 names are private task content: logs and audit events contain counts and sizes
 only.
 
-### Reasoning level (model label)
+### Model family, tier, and reasoning effort
 
-A task's `model_label` (or the pool's `default_model_label`, e.g.
-`chatgpt-6-pro`) selects the ChatGPT reasoning level before the prompt is
-sent. The managed worker maps the label to the picker's levels: `-pro`,
-`extended`, or `扩展` -> **Pro** (where the picker splits Pro into Standard and
-Extended entries, a plain `-pro` label prefers Standard and `extended`/`扩展`
-prefers Extended); `extra high`/`ultra` -> Extra High; `high` ->
-High; `medium`/`balanced` -> Medium; `instant`/`fast` -> Instant; anything else
-is matched literally. Selection uses real pointer clicks (the picker ignores
-synthetic clicks). The completed task's `model_label` reports the level that
-was actually selected; if it differs from what you requested, the picker did
-not expose that level and the worker answered on the current one.
+New pools default to `chatgpt-6-pro`. Before typing, the CDP worker discovers
+the header model switcher and verifies **GPT-6 + Pro**, selecting a recognized
+entry when necessary. It then selects the composer effort level. Plain `-pro`
+and explicit `extended`/`扩展` prefer **Pro Extended** when Pro is split;
+`standard`/`标准` explicitly requests **Pro Standard**. The existing Extra High,
+High, Medium, and Instant effort aliases remain available. Unknown model
+families cannot pass strict verification.
+
+`require_model_match` defaults to `true` on pools, including legacy pool rows.
+A submit may override it; the effective value is frozen on the task and sent
+to workers. CLI `oracle pool create/update` and `oracle ask` accept
+`--require-model-match true|false`. With strict matching, an absent or
+unrecognized header, wrong family/tier, or unverifiable effort pill fails
+**before Send** with `model_unavailable`. A UI with no effort pill may verify
+through its header; a present pill must verify. Both controls are read again
+immediately before the durable Send fence. Explicitly opting out permits a
+best-effort selection and records what was observed.
+
+Each picker interaction uses a bounded cooperative deadline, real pointer
+clicks, and page-side identity tracking of menus that appeared after its own
+trigger. It prefers exact recognized entries before fuzzy ones, ignores
+pre-existing sidebar menus and arbitrary actions, and verifies the resulting
+control rather than trusting the clicked entry. Prompt typing and sending
+still require unobstructed, actionable controls and composer read-back.
+
+Completed results retain the requested `model_label` and add canonical
+`observed_model_switcher` (e.g. `gpt_6_pro`) and `observed_model_effort`
+(e.g. `pro_extended`). These appear in `nyxid oracle result`. They describe UI
+observations, not an upstream API attestation. Raw picker labels never enter
+presence or task diagnostics. Local logs include them only when explicitly
+enabled with `NYXID_ORACLE_LOG_PICKER_LABELS=1`.
+
+No live ChatGPT account was available for the 0.20.1 implementation. Chromium
+tests use synthetic DOM fixtures: they verify selector behavior and safety,
+not the current production DOM. The header test ID, semantic header/menu
+fallback, composer pill, unique composer/form-submit fallback, alert roles,
+and explicit streaming attributes all need validation against live UI when
+operators can access it. Missing or changed controls fail closed.
 
 ### Worker endpoints (pool worker token)
 
@@ -357,7 +388,7 @@ fields remain valid. New fields are additive.
 | `GET /task` | `?worker=worker_1&script_version=&page_url=&instance_id=` | Idle response, or a task with retry counters, optional `dispatch_attempt_id`, prompt, attachment, conversation URL, and project hint. |
 | `POST /heartbeat` | Presence, capabilities, health, current task, and command reports | `{status:"ok", command?, cancelled_command_ids?}`. The server leases at most one capability-compatible command and lists recently cancelled delivered ones so the worker drops them. |
 | `POST /ack` | Task identity, phase, optional `instance_id` and `dispatch_attempt_id` | `{status:"ok"}` or `{status:"cancelled"}`. |
-| `POST /result` | Task identity, response, optional images/files and attempt fences | `{status:"saved"\|"saved_failed"\|"requeued"\|"ignored"}`. `requeued` means a pre-send browser failure consumed an infrastructure retry. |
+| `POST /result` | Task identity, response, optional images/files and attempt fences | `{status:"saved"\|"saved_failed"\|"requeued"\|"ignored"}`. `requeued` means either an infrastructure retry or a separate capacity reroute. |
 | `POST /pin-conv-url` | Task identity, URL, optional attempt fences | `{status:"pinned"}`. |
 | `POST /transcript` | Task identity, turns, URL, optional attempt fences | `{status:"imported"\|"ignored", imported_pairs}`. |
 | `GET /bundle` | None | Worker-token-authenticated embedded worker source, version, SHA-256, and exact `playwright-core` version. |
@@ -397,6 +428,16 @@ a protocol shape they cannot parse.
   the same retry budget. If the next retry would exceed the budget, the server
   marks the task failed with `infrastructure_retry_exhausted` and starts its
   retention TTL. Model failures and content failures do not use this budget.
+- **Worker capacity**: `usage_limit_reached` and `model_unavailable` exclude the
+  reporting worker from this task's future FIFO claims. At most 20 reroutes
+  increment `reroute_count`; they never increment `retry_count`. An alternate
+  must have polled within `WORKER_RECENT_SECS` (120 seconds), be outside the
+  exclusions, and not be draining, logged out, unhealthy, or cooling down.
+  Without an eligible alternate, or at the bound, the original capacity code
+  becomes terminal. Claim/status also settle a queued reroute if its alternate
+  disappears. Account-pinned follow-ups retain affinity and fail terminally
+  rather than crossing accounts. Fresh sessions do not reuse the rejecting
+  account's conversation URL after rerouting.
 - **Visible attempts** increment `attempt_count` on each fresh dispatch.
   Idempotent reclaims by the current worker do not increment it.
 - **Idempotent reclaim** returns a worker's current leased task, including the
@@ -436,10 +477,30 @@ timeout, rate-limit, and server failures do not terminate the process. The
 worker tracks consecutive HTTP, CDP, tab, and task-recovery failures. It
 reconnects over CDP, replaces a crashed or navigated-away tab, restores the
 project URL, and relaunches Chrome with the configured executable, debug port,
-and profile after repeated failures. Task recovery stops after a bounded count.
+and profile after repeated failures. Task recovery stops after a bounded count. Authenticated pre-send composer or
+send-control shape failures permit one relaunch cycle. `page_crashed` replaces
+the tab. Generation detection uses the composer stop control and explicit live
+state on the latest assistant turn; persistent header/pill and collapsed
+reasoning text do not keep a task generating forever. DOM core installation is
+verified after navigation and restored when absent; probes tolerate its absence.
+An idle empty/unextractable turn or scoped error banner reloads the conversation
+once and reruns the recovery decision. Continued absence fails as
+`no_assistant_output` or `chatgpt_error_response`, without browser recovery or
+infrastructure retries. Maximum generation timeout is `response_timeout` and
+never returns an empty/partial success.
 A pre-send failure reports `browser_recovery_exhausted` for server retry. A
 post-send failure reports `prompt_delivery_uncertain` and cannot trigger a
-prompt replay.
+prompt replay. Each failed result includes the last underlying stable code and
+phase in `failure_detail`; infrastructure exhaustion and uncertain delivery do
+not replace that cause. Worker `last_error` and CLI result/status expose it.
+One structural probe line logs booleans/counts, a bounded host classification,
+and the latest turn role only. It contains no prompt, response, raw label,
+conversation URL, or upstream error message.
+
+After `usage_limit_reached`, the worker persists a cooldown (15 minutes by
+default; `NYXID_ORACLE_USAGE_COOLDOWN_SECS`, bounded to one day), reports
+`cooldown_remaining_secs` in heartbeats, and claims no new tasks until it
+expires. Presence exposes server-resolved `cooldown_until`.
 
 Prompt delivery uses a conservative recovery rule:
 
@@ -485,7 +546,10 @@ within the last 120 seconds, the same window `oracle status` uses) next to
 `Max tasks`, the pool's dispatch concurrency cap (`max_workers`). The two are
 unrelated: a pool can cap dispatch at 20 with a single worker online. The pool
 API responses carry this as `online_workers`. `worker show <pool> <label>` also shows the sanitized last error,
-platform, and recent command results.
+platform, cooldown, and recent command results. `oracle status <pool>` returns
+`bundle_version` and `outdated_workers`, counting online workers whose
+`script_version` differs (including missing versions). Worker list marks these
+rows `(outdated)` using `bundle_outdated`; no automatic upgrade occurs.
 
 Managers can queue these commands for any worker; eligible members can queue
 them for their own contributed workers:
@@ -708,6 +772,25 @@ NYXID_TEST_CHROME_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Goo
 CI installs the pinned Playwright Chromium and runs with
 `NYXID_TEST_BROWSER=1`. No real account, Chrome profile, or login state is needed.
 
+### Selector validation for 0.20.1
+
+“Verified by test” below means synthetic pages in real Chromium. No selector
+was verified against a live ChatGPT session during this change.
+
+| Selector / structure | Coverage |
+|---|---|
+| `button[data-testid="model-switcher-dropdown-button"]`; `header button[aria-haspopup="menu"]` | Verified by test: switching, read-back, wrong-family rejection, existing sidebar isolation |
+| `header button[aria-haspopup="listbox"]`; `[role="banner"] button[aria-haspopup]` | Assumed fallback; no dedicated fixture |
+| `button.__composer-pill[aria-haspopup="menu"]`; composer-local menu buttons | Verified by test: Extended preference, explicit Standard, strict failures, cancellation, deadlines |
+| `[role="menu"]`, `[role="listbox"]`, `[role="menuitemradio"]` | Verified by test: menu identity, nested selection, stale menus and read-back |
+| `[role="menuitem"]`, selectable `[role="option"]`; `composer-intelligence-pro-thinking-effort-trigger` | Assumed fallback; option exclusion is tested, selection through these variants is not |
+| `#prompt-textarea`, `[data-testid="prompt-textarea"]`, `[contenteditable="true"][role="textbox"]`, unique `main form textarea/[contenteditable="true"]` | Verified by test: uniqueness, fill and read-back |
+| `button[data-testid="send-button"]`; unique composer `button[type="submit"]` | Verified by test: actual clicks, guard, no duplicate Send |
+| Send buttons identified by English/Chinese `aria-label` | Assumed fallback; no dedicated fixture |
+| `[role="alert"]`, `[data-testid="error-message"]`, `[data-testid="conversation-error"]`, composer `[role="status"]` | Verified by test: scoped errors/caps and ordinary answer exclusion |
+| Latest-turn `button[data-testid="retry-button"]` | Assumed fallback; no dedicated fixture |
+| Composer stop button test ID and Stop generating/Stop streaming/停止生成 labels; latest-turn `data-is-streaming`, `data-state="streaming"`, `aria-busy`, `.result-streaming` | Verified by test: visible live state, hidden/old-turn exclusion |
+
 ## Bundle distribution and trust
 
 The backend embeds `integrations/oracle/cdp-worker/worker.mjs` at compile time.
@@ -809,7 +892,10 @@ Oracle errors occupy the **11000–11099** block (see
 
 ## Compatibility
 
-All added MongoDB fields use serde defaults or optional fields. Existing
+All added MongoDB fields use serde defaults or optional fields. Strict model
+selection is enforced by updated CDP workers. Older CDP workers and userscripts
+ignore the new fields and cannot provide that guarantee; use bundle drift
+visibility to identify installations needing upgrade. Existing
 `oracle_pool`, `oracle_task`, `oracle_session`, and `oracle_worker` rows remain
 valid. The new `oracle_worker_commands` and `oracle_login_snapshots` collections
 use UUID-string `_id` values and TTL indexes for terminal or expired rows.

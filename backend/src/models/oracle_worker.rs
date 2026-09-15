@@ -47,6 +47,10 @@ pub struct OracleWorker {
     pub chrome_alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub cooldown_until: Option<DateTime<Utc>>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub last_polled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -114,6 +118,8 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let worker = OracleWorker {
+            cooldown_until: None,
+            last_polled_at: None,
             id: worker_doc_id("pool-1", "tab_1"),
             pool_id: "pool-1".to_string(),
             worker_label: "tab_1".to_string(),

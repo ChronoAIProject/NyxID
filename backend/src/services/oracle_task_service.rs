@@ -63,6 +63,8 @@ const MAX_PHASE_LEN: usize = 80;
 const MAX_PHASE_DETAIL_LEN: usize = 500;
 const MAX_URL_LEN: usize = 2048;
 const MAX_WORKER_LABEL_LEN: usize = 64;
+const MAX_CAPACITY_REROUTES: u32 = 20;
+const WORKER_CAPACITY_FAILURES: &[&str] = &["usage_limit_reached", "model_unavailable"];
 const WORKER_INFRASTRUCTURE_FAILURES: &[&str] = &["browser_recovery_exhausted"];
 
 /// Workers polling within this window count as "active" in pool status.
@@ -83,6 +85,7 @@ pub struct SubmitterIdentity {
 pub struct SubmitTaskInput {
     pub prompt: String,
     pub model_label: Option<String>,
+    pub require_model_match: Option<bool>,
     pub project_url: Option<String>,
     pub tag: Option<String>,
     /// Three-state, mirroring the local oracle protocol:
@@ -289,6 +292,14 @@ pub async fn submit_task(
         };
 
     let task = OracleTask {
+        failure_detail: None,
+        observed_model_switcher: None,
+        observed_model_effort: None,
+        require_model_match: input
+            .require_model_match
+            .unwrap_or(pool.require_model_match),
+        excluded_worker_ids: Vec::new(),
+        reroute_count: 0,
         id: uuid::Uuid::new_v4().to_string(),
         pool_id: pool.id.clone(),
         submitter_user_id: submitter.user_id.clone(),
@@ -299,7 +310,9 @@ pub async fn submit_task(
         prompt: input.prompt,
         model_label: input
             .model_label
-            .or_else(|| pool.default_model_label.clone()),
+            .filter(|label| !label.trim().is_empty())
+            .or_else(|| pool.default_model_label.clone())
+            .or_else(|| Some("chatgpt-6-pro".to_string())),
         project_url: input.project_url,
         tag: input.tag,
         pdf_base64: input.pdf_base64,
@@ -551,6 +564,12 @@ pub async fn extract_url(
 
     let now = Utc::now();
     let task = OracleTask {
+        failure_detail: None,
+        observed_model_switcher: None,
+        observed_model_effort: None,
+        require_model_match: true,
+        excluded_worker_ids: Vec::new(),
+        reroute_count: 0,
         id: uuid::Uuid::new_v4().to_string(),
         pool_id: pool.id.clone(),
         submitter_user_id: submitter.user_id.clone(),
@@ -636,6 +655,12 @@ pub async fn attach_conversation(
         .await?;
 
     let task = OracleTask {
+        failure_detail: None,
+        observed_model_switcher: None,
+        observed_model_effort: None,
+        require_model_match: true,
+        excluded_worker_ids: Vec::new(),
+        reroute_count: 0,
         id: uuid::Uuid::new_v4().to_string(),
         pool_id: pool.id.clone(),
         submitter_user_id: submitter.user_id.clone(),
@@ -964,6 +989,8 @@ async fn release_stale_affinity(db: &mongodb::Database, pool: &OraclePool) -> Ap
 pub struct WorkerTaskPayload {
     pub task_id: String,
     pub attempts: u32,
+    pub require_model_match: bool,
+    pub reroute_count: u32,
     pub retry_count: u32,
     pub max_retries: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1002,17 +1029,23 @@ async fn worker_payload(
     worker_label: &str,
 ) -> AppResult<WorkerTaskPayload> {
     // Follow-ups navigate back to the pinned conversation URL.
-    let conversation_url = match &task.conversation_id {
-        Some(conv_id) => db
-            .collection::<OracleSession>(ORACLE_SESSIONS)
-            .find_one(doc! { "_id": conv_id })
-            .await?
-            .and_then(|s| s.chatgpt_url),
-        None => task.chatgpt_url.clone(),
+    let conversation_url = if task.reroute_count > 0 && !task.is_followup {
+        task.chatgpt_url.clone()
+    } else {
+        match &task.conversation_id {
+            Some(conv_id) => db
+                .collection::<OracleSession>(ORACLE_SESSIONS)
+                .find_one(doc! { "_id": conv_id })
+                .await?
+                .and_then(|s| s.chatgpt_url),
+            None => task.chatgpt_url.clone(),
+        }
     };
     Ok(WorkerTaskPayload {
         task_id: task.id.clone(),
         attempts: task.attempt_count,
+        require_model_match: task.require_model_match,
+        reroute_count: task.reroute_count,
         retry_count: task.retry_count,
         max_retries: task.max_retries,
         dispatch_attempt_id: task.dispatch_attempt_id.clone(),
@@ -1114,6 +1147,20 @@ pub async fn claim_task_with_retention(
         authorized_worker,
     )
     .await?;
+    let presence_filter = authorized_worker
+        .map(super::oracle_worker_enrollment_service::worker_filter)
+        .unwrap_or_else(|| doc! { "_id": worker_doc_id(&pool.id, worker_label) });
+    let polled = db
+        .collection::<Document>(ORACLE_WORKERS)
+        .update_one(
+            presence_filter,
+            doc! { "$set": { "last_polled_at": bson::DateTime::from_chrono(now) } },
+        )
+        .await?;
+    if authorized_worker.is_some() && polled.matched_count == 0 {
+        return Err(AppError::OracleWorkerTokenInvalid);
+    }
+    settle_unroutable_capacity_tasks(db, &pool.id, retention_days).await?;
     if !super::oracle_worker_service::accepts_new_tasks(db, &pool.id, worker_label).await? {
         return Ok(None);
     }
@@ -1136,6 +1183,7 @@ pub async fn claim_task_with_retention(
             doc! {
                 "pool_id": &pool.id,
                 "status": "queued",
+                "excluded_worker_ids": { "$ne": worker_label },
                 "$or": [
                     { "required_worker_label": null },
                     { "required_worker_label": worker_label },
@@ -1144,6 +1192,7 @@ pub async fn claim_task_with_retention(
             doc! {
                 "$set": {
                     "status": "dispatched",
+                    "failure_reason": bson::Bson::Null,
                     "assigned_worker_id": worker_label,
                     "dispatch_attempt_id": &dispatch_attempt_id,
                     "dispatched_at": bson::DateTime::from_chrono(now),
@@ -1411,6 +1460,9 @@ pub async fn worker_submit_result(
 }
 
 pub struct WorkerResultInput<'a> {
+    pub failure_detail: Option<&'a str>,
+    pub observed_model_switcher: Option<&'a str>,
+    pub observed_model_effort: Option<&'a str>,
     pub authorized_worker: Option<&'a OracleWorker>,
     pub response: &'a str,
     pub images: Vec<ResultImage>,
@@ -1432,6 +1484,113 @@ fn worker_error_code(response: &str) -> Option<&str> {
     .then_some(code)
 }
 
+/// Bounded metadata only: never accept error messages or URLs.
+pub(crate) fn valid_failure_detail(value: &str) -> bool {
+    let mut parts = value.split('@');
+    let valid = |s: &str, max| {
+        !s.is_empty()
+            && s.len() <= max
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    };
+    valid(parts.next().unwrap_or_default(), 64)
+        && parts.next().is_none_or(|phase| valid(phase, 40))
+        && parts.next().is_none()
+}
+
+fn validate_result_metadata(input: &WorkerResultInput<'_>) -> AppResult<()> {
+    if input
+        .failure_detail
+        .is_some_and(|v| !valid_failure_detail(v))
+    {
+        return Err(AppError::ValidationError(
+            "invalid failure_detail".to_string(),
+        ));
+    }
+    if input.observed_model_switcher.is_some_and(|v| {
+        !matches!(
+            v,
+            "gpt_6_pro" | "gpt_6" | "gpt_5_pro" | "gpt_5" | "unrecognized" | "absent"
+        )
+    }) || input.observed_model_effort.is_some_and(|v| {
+        !matches!(
+            v,
+            "pro"
+                | "pro_extended"
+                | "pro_standard"
+                | "extra_high"
+                | "high"
+                | "medium"
+                | "instant"
+                | "unrecognized"
+                | "absent"
+        )
+    }) {
+        return Err(AppError::ValidationError(
+            "invalid observed model metadata".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn record_failure_detail(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker_label: &str,
+    input: &WorkerResultInput<'_>,
+) -> AppResult<()> {
+    if let Some(detail) = input.failure_detail {
+        let filter = input
+            .authorized_worker
+            .map(super::oracle_worker_enrollment_service::worker_filter)
+            .unwrap_or_else(|| doc! { "_id": worker_doc_id(&pool.id, worker_label) });
+        db.collection::<Document>(ORACLE_WORKERS)
+            .update_one(filter, doc! { "$set": { "last_error": detail } })
+            .await?;
+    }
+    Ok(())
+}
+
+async fn has_capacity_alternative(
+    db: &mongodb::Database,
+    pool_id: &str,
+    excluded: &[String],
+) -> AppResult<bool> {
+    let now = Utc::now();
+    Ok(db.collection::<Document>(ORACLE_WORKERS).find_one(doc! {
+        "pool_id": pool_id, "worker_label": { "$nin": excluded },
+        "last_polled_at": { "$gte": bson::DateTime::from_chrono(now - Duration::seconds(WORKER_RECENT_SECS)) },
+        "desired_state": { "$ne": "draining" }, "logged_in": { "$ne": false }, "chrome_alive": { "$ne": false },
+        "$or": [{ "cooldown_until": null }, { "cooldown_until": { "$lte": bson::DateTime::from_chrono(now) } }],
+    }).await?.is_some())
+}
+
+// A worker may disappear after a reroute was queued. Recheck at the same lazy
+// claim/status boundaries as lease expiry so that capacity failures never park.
+async fn settle_unroutable_capacity_tasks(
+    db: &mongodb::Database,
+    pool_id: &str,
+    retention_days: u32,
+) -> AppResult<()> {
+    let tasks = db.collection::<OracleTask>(ORACLE_TASKS);
+    let mut cursor = tasks.find(doc! { "pool_id": pool_id, "status": "queued", "reroute_count": { "$gt": 0 }, "failure_reason": { "$in": WORKER_CAPACITY_FAILURES } }).await?;
+    while let Some(task) = cursor.try_next().await? {
+        if has_capacity_alternative(db, pool_id, &task.excluded_worker_ids).await? {
+            continue;
+        }
+        let code = task
+            .failure_reason
+            .as_deref()
+            .unwrap_or("model_unavailable");
+        tasks.update_one(doc! { "_id": &task.id, "status": "queued", "reroute_count": task.reroute_count }, doc! { "$set": {
+            "status": "failed", "response": format!("ERROR: {code}"), "phase": code,
+            "completed_at": bson::DateTime::from_chrono(Utc::now()), "expires_at": bson::DateTime::from_chrono(terminal_expiry(retention_days)),
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        } }).await?;
+    }
+    Ok(())
+}
+
 /// Stores a fenced worker result. Empty or `ERROR:` text fails unless valid
 /// images or files make the turn a successful artifact-only response.
 pub async fn worker_submit_result_fenced(
@@ -1439,17 +1598,19 @@ pub async fn worker_submit_result_fenced(
     pool: &OraclePool,
     worker_label: &str,
     task_id: &str,
-    input: WorkerResultInput<'_>,
+    mut input: WorkerResultInput<'_>,
 ) -> AppResult<ResultOutcome> {
     validate_worker_label(worker_label)?;
     if let Some(worker) = input.authorized_worker {
         super::oracle_worker_enrollment_service::ensure_current_worker(db, worker).await?;
     }
+    validate_result_metadata(&input)?;
     let now = Utc::now();
     let trimmed = input.response.trim();
     let mut artifact_total = 0usize;
-    let stored_images = decode_result_images(input.images, &mut artifact_total);
-    let stored_files = decode_result_files(input.files, &mut artifact_total);
+    let stored_images =
+        decode_result_images(std::mem::take(&mut input.images), &mut artifact_total);
+    let stored_files = decode_result_files(std::mem::take(&mut input.files), &mut artifact_total);
     let has_images = !stored_images.is_empty();
     let has_files = !stored_files.is_empty();
     let is_failure =
@@ -1466,6 +1627,46 @@ pub async fn worker_submit_result_fenced(
     };
     if let Some(attempt_id) = input.dispatch_attempt_id {
         live_dispatch.insert("dispatch_attempt_id", attempt_id);
+    }
+
+    if worker_error.is_some_and(|code| WORKER_CAPACITY_FAILURES.contains(&code)) {
+        let tasks = db.collection::<OracleTask>(ORACLE_TASKS);
+        let Some(task) = tasks.find_one(live_dispatch.clone()).await? else {
+            return Ok(ResultOutcome::Ignored);
+        };
+        let mut excluded = task.excluded_worker_ids.clone();
+        if !excluded.iter().any(|label| label == worker_label) {
+            excluded.push(worker_label.to_string());
+        }
+        // Account-pinned conversations cannot cross accounts. Preserve affinity.
+        let eligible = task.required_worker_label.is_none()
+            && task.reroute_count < MAX_CAPACITY_REROUTES
+            && has_capacity_alternative(db, &pool.id, &excluded).await?;
+        if eligible {
+            // CAS uses the same lease/attempt fences as every result path.
+            let result = tasks.update_one(live_dispatch.clone(), doc! {
+                "$set": { "status": "queued", "phase": "requeued_after_capacity_failure", "failure_detail": input.failure_detail, "failure_reason": worker_error,
+                    "excluded_worker_ids": &excluded, "updated_at": bson::DateTime::from_chrono(now) },
+                "$inc": { "reroute_count": 1_i64 },
+                "$unset": { "assigned_worker_id": "", "dispatched_at": "", "lease_expires_at": "", "dispatch_attempt_id": "", "chatgpt_url": "" },
+            }).await?;
+            if result.modified_count == 0 {
+                return Ok(ResultOutcome::Ignored);
+            }
+            upsert_worker_presence(
+                db,
+                pool,
+                worker_label,
+                None,
+                input.script_version,
+                None,
+                input.authorized_worker,
+            )
+            .await?;
+            record_failure_detail(db, pool, worker_label, &input).await?;
+            return Ok(ResultOutcome::Requeued);
+        }
+        // No alternate recent capacity, or bound reached: settle below with the original code.
     }
 
     if worker_error.is_some_and(|code| WORKER_INFRASTRUCTURE_FAILURES.contains(&code)) {
@@ -1487,6 +1688,7 @@ pub async fn worker_submit_result_fenced(
                     "$set": {
                         "status": "queued",
                         "phase": "requeued_after_browser_failure",
+                        "failure_detail": input.failure_detail,
                         "updated_at": bson::DateTime::from_chrono(now),
                     },
                     "$inc": { "retry_count": 1_i64 },
@@ -1515,6 +1717,7 @@ pub async fn worker_submit_result_fenced(
                 input.authorized_worker,
             )
             .await?;
+            record_failure_detail(db, pool, worker_label, &input).await?;
             return Ok(ResultOutcome::Requeued);
         }
 
@@ -1538,6 +1741,7 @@ pub async fn worker_submit_result_fenced(
                         "phase": "infrastructure_retry_exhausted",
                         "failure_reason": "infrastructure_retry_exhausted",
                         "response": exhausted_response,
+                        "failure_detail": input.failure_detail,
                         "response_chars": exhausted_response.len() as i64,
                         "completed_at": bson::DateTime::from_chrono(now),
                         "expires_at": bson::DateTime::from_chrono(terminal_expiry(input.retention_days)),
@@ -1567,6 +1771,9 @@ pub async fn worker_submit_result_fenced(
             input.authorized_worker,
         )
         .await?;
+        if exhausted.is_some() {
+            record_failure_detail(db, pool, worker_label, &input).await?;
+        }
         return Ok(if exhausted.is_some() {
             ResultOutcome::Failed
         } else {
@@ -1582,6 +1789,17 @@ pub async fn worker_submit_result_fenced(
         "expires_at": bson::DateTime::from_chrono(terminal_expiry(input.retention_days)),
         "updated_at": bson::DateTime::from_chrono(now),
     };
+    set.insert("failure_reason", bson::Bson::Null);
+    set.insert(
+        "failure_detail",
+        if is_failure {
+            input.failure_detail
+        } else {
+            None
+        },
+    );
+    set.insert("observed_model_switcher", input.observed_model_switcher);
+    set.insert("observed_model_effort", input.observed_model_effort);
     if has_images {
         // Store bytes as BSON Binary (compact) — keeps the doc under 16 MB.
         let arr: Vec<bson::Bson> = stored_images
@@ -1662,6 +1880,10 @@ pub async fn worker_submit_result_fenced(
     let Some(task) = updated else {
         return Ok(ResultOutcome::Ignored);
     };
+
+    if is_failure {
+        record_failure_detail(db, pool, worker_label, &input).await?;
+    }
 
     // Session bookkeeping: bump the turn and pin the conversation URL.
     if let Some(conv_id) = &task.conversation_id {
@@ -1852,6 +2074,12 @@ pub async fn worker_submit_transcript_fenced(
             let created_at = now - Duration::seconds((pair_count - i) as i64);
             let response_chars = assistant_text.chars().count() as u64;
             OracleTask {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
+                require_model_match: true,
+                excluded_worker_ids: Vec::new(),
+                reroute_count: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 pool_id: pool.id.clone(),
                 submitter_user_id: scrape_task.submitter_user_id.clone(),
@@ -1997,6 +2225,8 @@ pub async fn pin_conversation_url_fenced(
 
 #[derive(Debug, serde::Serialize)]
 pub struct PoolStatus {
+    pub bundle_version: String,
+    pub outdated_workers: u64,
     pub queued: u64,
     pub dispatched: u64,
     pub max_workers: u32,
@@ -2007,6 +2237,9 @@ pub struct PoolStatus {
 
 #[derive(Debug, serde::Serialize)]
 pub struct WorkerStatus {
+    pub last_error: Option<String>,
+    pub cooldown_until: Option<String>,
+    pub bundle_outdated: bool,
     pub worker_label: String,
     pub last_seen_secs_ago: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2027,6 +2260,7 @@ pub async fn pool_status_with_retention(
     retention_days: u32,
 ) -> AppResult<PoolStatus> {
     requeue_expired_leases(db, &pool.id, retention_days).await?;
+    settle_unroutable_capacity_tasks(db, &pool.id, retention_days).await?;
     let queued = count_tasks(db, doc! { "pool_id": &pool.id, "status": "queued" }).await?;
     let dispatched = count_tasks(db, doc! { "pool_id": &pool.id, "status": "dispatched" }).await?;
 
@@ -2044,6 +2278,11 @@ pub async fn pool_status_with_retention(
     let active_workers: Vec<WorkerStatus> = workers
         .into_iter()
         .map(|w| WorkerStatus {
+            bundle_outdated: super::oracle_worker_bundle_service::bundle_outdated(
+                w.script_version.as_deref(),
+            ),
+            last_error: w.last_error,
+            cooldown_until: w.cooldown_until.map(|t| t.to_rfc3339()),
             worker_label: w.worker_label,
             last_seen_secs_ago: (now - w.last_seen_at).num_seconds().max(0),
             current_task_id: w.current_task_id,
@@ -2060,6 +2299,10 @@ pub async fn pool_status_with_retention(
     };
 
     Ok(PoolStatus {
+        bundle_version: super::oracle_worker_bundle_service::current_bundle()
+            .version
+            .to_string(),
+        outdated_workers: active_workers.iter().filter(|w| w.bundle_outdated).count() as u64,
         queued,
         dispatched,
         max_workers: pool.max_workers,
@@ -2082,6 +2325,382 @@ mod tests {
         }
     }
 
+    fn result_input<'a>(
+        response: &'a str,
+        attempt: Option<&'a str>,
+        detail: Option<&'a str>,
+    ) -> WorkerResultInput<'a> {
+        WorkerResultInput {
+            response,
+            dispatch_attempt_id: attempt,
+            failure_detail: detail,
+            observed_model_switcher: None,
+            observed_model_effort: None,
+            authorized_worker: None,
+            images: vec![],
+            files: vec![],
+            chatgpt_url: None,
+            model: None,
+            script_version: None,
+            retention_days: 30,
+        }
+    }
+
+    #[test]
+    fn oracle_failure_metadata_validation() {
+        for value in [
+            "page_crashed@waiting_response",
+            "composer_not_found@page_ready",
+            "worker_error",
+        ] {
+            assert!(valid_failure_detail(value));
+        }
+        assert!(valid_failure_detail(&format!(
+            "{}@{}",
+            "a".repeat(64),
+            "b".repeat(40)
+        )));
+        for value in [
+            "",
+            "@phase",
+            "code@",
+            "code@phase@extra",
+            "Code",
+            "raw prompt",
+            "https://chatgpt.com/c/private",
+        ] {
+            assert!(!valid_failure_detail(value));
+        }
+        assert!(!valid_failure_detail(&"a".repeat(65)));
+        let mut input = result_input("answer", None, None);
+        input.observed_model_switcher = Some("raw private label");
+        assert!(validate_result_metadata(&input).is_err());
+        input.observed_model_switcher = Some("gpt_6_pro");
+        input.observed_model_effort = Some("pro_extended");
+        assert!(validate_result_metadata(&input).is_ok());
+    }
+
+    #[tokio::test]
+    async fn oracle_capacity_exclusion_fifo_and_failure_detail() {
+        let Some(db) = connect_test_database("oracle_capacity_fifo").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+        // Poll before enqueue: availability comes from polling, not mere installation.
+        assert!(
+            claim_task(&db, &pool, "alternate", None, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let first = submit_task(&db, &pool, &submitter(&owner), prompt_input("one"))
+            .await
+            .unwrap()
+            .task;
+        let second = submit_task(&db, &pool, &submitter(&owner), prompt_input("two"))
+            .await
+            .unwrap()
+            .task;
+        let claim = claim_task(&db, &pool, "limited", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.task_id, first.id);
+        let detail = "usage_limit_reached@waiting_response";
+        let input = result_input(
+            "ERROR: usage_limit_reached",
+            claim.dispatch_attempt_id.as_deref(),
+            Some(detail),
+        );
+        assert_eq!(
+            worker_submit_result(&db, &pool, "limited", &first.id, input)
+                .await
+                .unwrap(),
+            ResultOutcome::Requeued
+        );
+        let stored = db
+            .collection::<OracleTask>(ORACLE_TASKS)
+            .find_one(doc! { "_id": &first.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.retry_count, 0);
+        assert_eq!(stored.reroute_count, 1);
+        assert_eq!(stored.excluded_worker_ids, vec!["limited"]);
+        assert_eq!(stored.failure_detail.as_deref(), Some(detail));
+        let worker = db
+            .collection::<OracleWorker>(ORACLE_WORKERS)
+            .find_one(doc! { "_id": worker_doc_id(&pool.id, "limited") })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(worker.last_error.as_deref(), Some(detail));
+        // Stale same-label dispatch cannot consume another reroute or overwrite attribution.
+        assert_eq!(
+            worker_submit_result(
+                &db,
+                &pool,
+                "limited",
+                &first.id,
+                result_input(
+                    "ERROR: model_unavailable",
+                    claim.dispatch_attempt_id.as_deref(),
+                    Some("model_unavailable@selecting_model")
+                )
+            )
+            .await
+            .unwrap(),
+            ResultOutcome::Ignored
+        );
+        assert_eq!(
+            claim_task(&db, &pool, "limited", None, None)
+                .await
+                .unwrap()
+                .unwrap()
+                .task_id,
+            second.id
+        );
+        let alternate = claim_task(&db, &pool, "alternate", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(alternate.task_id, first.id);
+        let mut input = result_input("answer", alternate.dispatch_attempt_id.as_deref(), None);
+        input.observed_model_switcher = Some("gpt_6_pro");
+        input.observed_model_effort = Some("pro_extended");
+        assert_eq!(
+            worker_submit_result(&db, &pool, "alternate", &first.id, input)
+                .await
+                .unwrap(),
+            ResultOutcome::Completed
+        );
+        let completed = db
+            .collection::<OracleTask>(ORACLE_TASKS)
+            .find_one(doc! { "_id": &first.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            completed.observed_model_effort.as_deref(),
+            Some("pro_extended")
+        );
+        assert!(completed.failure_detail.is_none());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oracle_capacity_terminal_without_recent_eligible_poll_or_after_bound() {
+        let Some(db) = connect_test_database("oracle_capacity_terminal").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+        for scenario in ["absent", "stale", "cooldown", "draining", "pinned", "bound"] {
+            db.collection::<Document>(ORACLE_WORKERS)
+                .delete_many(doc! {})
+                .await
+                .unwrap();
+            if scenario != "absent" {
+                claim_task(&db, &pool, "alternate", None, None)
+                    .await
+                    .unwrap();
+                let set = match scenario {
+                    "stale" => {
+                        doc! { "last_polled_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(WORKER_RECENT_SECS + 1)) }
+                    }
+                    "cooldown" => {
+                        doc! { "cooldown_until": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(15)) }
+                    }
+                    "draining" => doc! { "desired_state": "draining" },
+                    _ => doc! { "logged_in": true },
+                };
+                db.collection::<Document>(ORACLE_WORKERS)
+                    .update_one(doc! { "worker_label": "alternate" }, doc! { "$set": set })
+                    .await
+                    .unwrap();
+            }
+            let task = submit_task(&db, &pool, &submitter(&owner), prompt_input("one"))
+                .await
+                .unwrap()
+                .task;
+            if scenario == "bound" {
+                db.collection::<Document>(ORACLE_TASKS)
+                    .update_one(
+                        doc! { "_id": &task.id },
+                        doc! { "$set": { "reroute_count": MAX_CAPACITY_REROUTES } },
+                    )
+                    .await
+                    .unwrap();
+            }
+            if scenario == "pinned" {
+                db.collection::<Document>(ORACLE_TASKS)
+                    .update_one(
+                        doc! { "_id": &task.id },
+                        doc! { "$set": { "required_worker_label": "limited" } },
+                    )
+                    .await
+                    .unwrap();
+            }
+            let claim = claim_task(&db, &pool, "limited", None, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let code = if scenario == "cooldown" {
+                "usage_limit_reached"
+            } else {
+                "model_unavailable"
+            };
+            let response = format!("ERROR: {code}");
+            let detail = format!("{code}@selecting_model");
+            assert_eq!(
+                worker_submit_result(
+                    &db,
+                    &pool,
+                    "limited",
+                    &task.id,
+                    result_input(
+                        &response,
+                        claim.dispatch_attempt_id.as_deref(),
+                        Some(&detail)
+                    )
+                )
+                .await
+                .unwrap(),
+                ResultOutcome::Failed,
+                "{scenario}"
+            );
+            let failed = db
+                .collection::<OracleTask>(ORACLE_TASKS)
+                .find_one(doc! { "_id": &task.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(failed.failure_reason.as_deref(), Some(code));
+            assert_eq!(failed.failure_detail.as_deref(), Some(detail.as_str()));
+            assert_eq!(failed.retry_count, 0);
+            assert!(failed.expires_at.is_some());
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oracle_bundle_drift_counts_only_online_workers() {
+        let Some(db) = connect_test_database("oracle_bundle_drift").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+        let version = super::super::oracle_worker_bundle_service::current_bundle().version;
+        for (label, version) in [
+            ("current", Some(version)),
+            ("old", Some("0.20.0+old")),
+            ("legacy", None),
+            ("offline", Some("old")),
+        ] {
+            claim_task(&db, &pool, label, version, None).await.unwrap();
+        }
+        db.collection::<Document>(ORACLE_WORKERS).update_one(doc! { "worker_label": "offline" }, doc! { "$set": { "last_seen_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(WORKER_RECENT_SECS + 1)) } }).await.unwrap();
+        let status = pool_status(&db, &pool).await.unwrap();
+        assert_eq!(status.active_workers.len(), 3);
+        assert_eq!(status.outdated_workers, 2);
+        assert_eq!(status.bundle_version, version);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oracle_reroute_does_not_park_when_alternate_disappears() {
+        let Some(db) = connect_test_database("oracle_capacity_gone").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+        claim_task(&db, &pool, "alternate", None, None)
+            .await
+            .unwrap();
+        let task = submit_task(&db, &pool, &submitter(&owner), prompt_input("one"))
+            .await
+            .unwrap()
+            .task;
+        let claim = claim_task(&db, &pool, "limited", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            worker_submit_result(
+                &db,
+                &pool,
+                "limited",
+                &task.id,
+                result_input(
+                    "ERROR: model_unavailable",
+                    claim.dispatch_attempt_id.as_deref(),
+                    Some("model_unavailable@selecting_model")
+                )
+            )
+            .await
+            .unwrap(),
+            ResultOutcome::Requeued
+        );
+        db.collection::<Document>(ORACLE_WORKERS)
+            .delete_one(doc! { "worker_label": "alternate" })
+            .await
+            .unwrap();
+        assert_eq!(pool_status(&db, &pool).await.unwrap().queued, 0);
+        let failed = db
+            .collection::<OracleTask>(ORACLE_TASKS)
+            .find_one(doc! { "_id": &task.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.status, OracleTaskStatus::Failed);
+        assert_eq!(failed.failure_reason.as_deref(), Some("model_unavailable"));
+        assert_eq!(
+            failed.failure_detail.as_deref(),
+            Some("model_unavailable@selecting_model")
+        );
+        assert_eq!(failed.retry_count, 0);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oracle_model_match_override_is_frozen_at_submission() {
+        let Some(db) = connect_test_database("oracle_model_override").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+        let strict = submit_task(&db, &pool, &submitter(&owner), prompt_input("strict"))
+            .await
+            .unwrap()
+            .task;
+        let mut input = prompt_input("permissive");
+        input.require_model_match = Some(false);
+        let permissive = submit_task(&db, &pool, &submitter(&owner), input)
+            .await
+            .unwrap()
+            .task;
+        pool.require_model_match = false;
+        let first = claim_task(&db, &pool, "one", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.task_id, strict.id);
+        assert!(first.require_model_match);
+        let second = claim_task(&db, &pool, "two", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.task_id, permissive.id);
+        assert!(!second.require_model_match);
+        db.drop().await.unwrap();
+    }
+
     fn prompt_input(prompt: &str) -> SubmitTaskInput {
         SubmitTaskInput {
             prompt: prompt.to_string(),
@@ -2092,6 +2711,7 @@ mod tests {
     fn test_pool(owner: &str) -> OraclePool {
         let now = Utc::now();
         OraclePool {
+            require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: owner.to_string(),
             slug: format!("pool-{}", &uuid::Uuid::new_v4().to_string()[..8]),
@@ -2467,6 +3087,9 @@ mod tests {
             "tab_1",
             &first.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "The answer is 42.",
                 images: vec![],
@@ -2495,6 +3118,9 @@ mod tests {
             "tab_2",
             &second.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "ERROR: Response too short or empty",
                 images: vec![],
@@ -2522,6 +3148,9 @@ mod tests {
             "tab_1",
             &first.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "stale",
                 images: vec![],
@@ -2557,6 +3186,9 @@ mod tests {
             "tab_1",
             &file_task.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "",
                 images: vec![],
@@ -2746,6 +3378,9 @@ mod tests {
             "tab_1",
             &old.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "from dead tab",
                 images: vec![],
@@ -2868,6 +3503,9 @@ mod tests {
             "tab_1",
             &submitted.task.id,
             WorkerResultInput {
+                failure_detail: Some("page_crashed@page_ready"),
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "ERROR: browser_recovery_exhausted",
                 images: vec![],
@@ -2887,6 +3525,10 @@ mod tests {
             .unwrap();
         assert_eq!(retrying.status, OracleTaskStatus::Queued);
         assert_eq!(retrying.retry_count, 1);
+        assert_eq!(
+            retrying.failure_detail.as_deref(),
+            Some("page_crashed@page_ready")
+        );
 
         let second = claim_task(&db, &pool, "tab_2", None, None)
             .await
@@ -2898,6 +3540,9 @@ mod tests {
             "tab_2",
             &submitted.task.id,
             WorkerResultInput {
+                failure_detail: Some("page_crashed@page_ready"),
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "ERROR: browser_recovery_exhausted",
                 images: vec![],
@@ -2918,6 +3563,10 @@ mod tests {
         assert_eq!(failed.status, OracleTaskStatus::Failed);
         assert_eq!(failed.attempt_count, 2);
         assert_eq!(failed.retry_count, 1);
+        assert_eq!(
+            failed.failure_detail.as_deref(),
+            Some("page_crashed@page_ready")
+        );
         assert_eq!(
             failed.failure_reason.as_deref(),
             Some("infrastructure_retry_exhausted")
@@ -2982,6 +3631,9 @@ mod tests {
             "stable-label",
             &submitted.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "stale answer",
                 images: vec![],
@@ -3066,6 +3718,9 @@ mod tests {
             "tab_1",
             &t1.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "turn one answer",
                 images: vec![],
@@ -3237,6 +3892,9 @@ mod tests {
             "tab_1",
             &t1.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "turn one answer",
                 images: vec![],
@@ -3335,6 +3993,9 @@ mod tests {
             "tab_1",
             &t1.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "turn one answer",
                 images: vec![],
@@ -3431,6 +4092,9 @@ mod tests {
             "tab_1",
             &t1.task.id,
             WorkerResultInput {
+                failure_detail: None,
+                observed_model_switcher: None,
+                observed_model_effort: None,
                 authorized_worker: None,
                 response: "ERROR: extraction failed",
                 images: vec![],
