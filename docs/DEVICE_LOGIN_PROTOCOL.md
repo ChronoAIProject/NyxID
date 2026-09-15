@@ -117,8 +117,11 @@ consent. New platform rows added later remain covered by the disclosed future gr
 
 A new draft prefills a connection only when exactly one eligible exact connection
 exists for that requested service. Broader/ambiguous connections require explicit
-choice. Detailed key settings remain available; the actual grant and all extras
-are shown before creation.
+choice in the same searchable dropdown as the permission filters. Selected
+connections and their actual permissions appear below the filters; no separate
+service-selection page is required. Keys with only NyxID account permissions
+need no service connection. Detailed key settings remain available; the actual
+grant and all extras are shown before creation.
 
 New web clients send `selection.permission_snapshot` for existing keys or
 `selection.connection_snapshots: [{service_id, permission_snapshot}]` for new keys.

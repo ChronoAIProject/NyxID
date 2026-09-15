@@ -596,45 +596,81 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
             className="space-y-4 rounded-xl border border-border bg-card p-4"
           >
             <h2 className="text-[15px] font-semibold">Choose access</h2>
-            {flow === "device" && (
-              <label className="flex items-start gap-3 rounded-xl border border-border p-3">
-                <input
-                  className="size-4 shrink-0 appearance-none rounded-full border border-muted-foreground/50 bg-transparent checked:border-primary checked:bg-primary checked:shadow-[inset_0_0_0_3px_var(--color-card)] focus-visible:outline-2 focus-visible:outline-primary"
-                  type="radio"
-                  name="login-access"
-                  value="full"
-                  checked={mode === "full"}
-                  disabled={blocked}
-                  onChange={() => setMode("full")}
-                />
-                <span className="text-[12px]">
-                  <strong>Full account access</strong>
-                  <span className="mt-1 block text-muted-foreground">
-                    An ordinary account session with your account and
-                    organization permissions.
+            <p className="text-[12px] text-muted-foreground">
+              Choose the access this device should receive.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {[
+                ...(flow === "device"
+                  ? [
+                      {
+                        value: "full" as const,
+                        title: "Full account access",
+                        description:
+                          "Your account and organization permissions.",
+                        detail: "For a device you trust with your account.",
+                        Icon: ShieldCheck,
+                      },
+                    ]
+                  : []),
+                ...(supportsRestricted
+                  ? [
+                      {
+                        value: "agent" as const,
+                        title: "Restricted Agent Key",
+                        description:
+                          "Only the access included in the key you choose.",
+                        detail: "Use an existing key or create a new one.",
+                        Icon: KeyRound,
+                      },
+                    ]
+                  : []),
+              ].map(({ value, title, description, detail, Icon }) => (
+                <label key={value} className="group relative cursor-pointer">
+                  <input
+                    type="radio"
+                    name="login-access"
+                    value={value}
+                    checked={mode === value}
+                    disabled={blocked}
+                    onChange={() => setMode(value)}
+                    className="peer absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+                  />
+                  <span className="flex h-full flex-col gap-3 rounded-xl border border-border bg-background/30 p-4 transition-colors group-hover:bg-white/[0.03] peer-checked:border-primary/70 peer-checked:bg-primary/5 peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-primary peer-disabled:cursor-not-allowed peer-disabled:opacity-60">
+                    <span className="flex items-center justify-between">
+                      <span
+                        className={`flex size-9 items-center justify-center rounded-lg border ${mode === value ? "border-primary/25 bg-primary/10 text-primary" : "border-border bg-muted/40 text-muted-foreground"}`}
+                      >
+                        <Icon
+                          aria-hidden="true"
+                          className="size-4"
+                          strokeWidth={1.75}
+                        />
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        className={`flex size-4 items-center justify-center rounded-full border ${mode === value ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/40"}`}
+                      >
+                        {mode === value && (
+                          <Check className="size-2.5" strokeWidth={3} />
+                        )}
+                      </span>
+                    </span>
+                    <span className="space-y-1">
+                      <strong className="block text-[13px] font-semibold">
+                        {title}
+                      </strong>
+                      <span className="block text-[12px] leading-relaxed text-muted-foreground">
+                        {description}
+                      </span>
+                    </span>
+                    <span className="mt-auto border-t border-border/50 pt-2 text-[11px] text-muted-foreground">
+                      {detail}
+                    </span>
                   </span>
-                </span>
-              </label>
-            )}
-            {supportsRestricted && (
-              <label className="flex items-start gap-3 rounded-xl border border-border p-3">
-                <input
-                  className="size-4 shrink-0 appearance-none rounded-full border border-muted-foreground/50 bg-transparent checked:border-primary checked:bg-primary checked:shadow-[inset_0_0_0_3px_var(--color-card)] focus-visible:outline-2 focus-visible:outline-primary"
-                  type="radio"
-                  name="login-access"
-                  value="agent"
-                  checked={mode === "agent"}
-                  disabled={blocked}
-                  onChange={() => setMode("agent")}
-                />
-                <span className="text-[12px]">
-                  <strong>Restricted Agent Key</strong>
-                  <span className="mt-1 block text-muted-foreground">
-                    Choose an existing key or create one with explicit access.
-                  </span>
-                </span>
-              </label>
-            )}
+                </label>
+              ))}
+            </div>
             {mode === "agent" && !supportsRestricted && (
               <p role="alert" className="text-[12px] text-warning">
                 This legacy request cannot receive an Agent Key. Start a capable
@@ -679,17 +715,19 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
             ) : (
               inventory && (
                 <>
-                  <LoginPermissionPicker
-                    options={permissionOptions(inventory)}
-                    value={requested}
-                    initial={hints}
-                    disabled={blocked}
-                    onChange={(next) => {
-                      setRequested(next);
-                      setChoice((v) => (v === "new" ? v : ""));
-                      setError(null);
-                    }}
-                  />
+                  {choice !== "new" && (
+                    <LoginPermissionPicker
+                      options={permissionOptions(inventory)}
+                      value={requested}
+                      initial={hints}
+                      disabled={blocked}
+                      onChange={(next) => {
+                        setRequested(next);
+                        setChoice((v) => (v === "new" ? v : ""));
+                        setError(null);
+                      }}
+                    />
+                  )}
                   {problems.length > 0 && (
                     <p role="alert" className="text-[12px] text-warning">
                       Unknown permissions or services: {problems.join(", ")}.
@@ -831,6 +869,8 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                           initial={draft}
                           inventory={inventory}
                           requested={requested}
+                          initialRequested={hints}
+                          onRequestedChange={setRequested}
                           actor={user?.id ?? ""}
                           disabled={blocked}
                           onDraft={setDraft}

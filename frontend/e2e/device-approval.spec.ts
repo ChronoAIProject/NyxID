@@ -125,6 +125,110 @@ async function restricted(page: Page) {
 const hints =
   "user_code=abcd%20efgh&login_type=agent&permissions=read,proxy&service_permissions=github::repo:read";
 
+test("one dropdown chooses permissions and an explicit connection when accounts are ambiguous", async ({
+  page,
+}, info) => {
+  const inventory = loginInventory();
+  const other = {
+    ...inventory.connections[0]!,
+    id: "work-github",
+    label: "GitHub work",
+    slug: "github-work",
+    permission_snapshot: "w".repeat(64),
+  };
+  inventory.connections.push(other);
+  inventory.options.connections = inventory.connections;
+  inventory.options.services.push({
+    id: other.id,
+    name: "GitHub work",
+    owner_id: "user",
+  });
+  inventory.catalog.push({
+    slug: "calendar",
+    name: "Calendar",
+    scope_catalog: [
+      {
+        scope: "calendar:read",
+        label: "Read calendar",
+        description: "Read events",
+      },
+    ],
+  });
+  const requests = await fixture(page, true, false, true, inventory);
+  await page.goto(`/login/device?${hints}&key_name=Build+agent&key_source=new`);
+  await restricted(page);
+  await page
+    .getByRole("button", { name: "Create new Agent Key", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Create & continue" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("region", { name: "Connections to grant" }),
+  ).toContainText("0 selected");
+  const search = page.getByRole("textbox", {
+    name: "Search permissions & connections",
+  });
+  await search.fill("GitHub");
+  await expect(
+    page.getByRole("checkbox", { name: "Grant connection GitHub personal" }),
+  ).not.toBeChecked();
+  await expect(
+    page.getByRole("checkbox", { name: "Grant connection GitHub work" }),
+  ).not.toBeChecked();
+  await page
+    .getByRole("checkbox", { name: "Grant connection GitHub work" })
+    .check();
+  await search.fill("Read calendar");
+  await expect(page.getByText("Not connected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("checkbox", { name: /Grant connection/ }),
+  ).toHaveCount(0);
+  await search.fill("github-work");
+  await expect(
+    page.getByRole("checkbox", { name: "Grant connection GitHub work" }),
+  ).toBeChecked();
+  expect(requests.filter((r) => r.path.includes("approve"))).toEqual([]);
+  for (const [width, height] of [
+    [1280, 900],
+    [390, 844],
+  ]) {
+    await page.setViewportSize({ width: width!, height: height! });
+    await search.scrollIntoViewIfNeeded();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: info.outputPath(`combined-picker-${width}.png`),
+      fullPage: true,
+    });
+  }
+  await search.press("Escape");
+  await expect(search).toBeFocused();
+  await expect(
+    page.getByRole("region", { name: "Connections to grant" }),
+  ).toContainText("1 selected");
+  await page.getByRole("button", { name: "Create & continue" }).click();
+  await expect(
+    page.getByText("Approved — return to the requesting device"),
+  ).toBeVisible();
+  expect(requests.filter((r) => r.path.includes("approve"))).toEqual([
+    {
+      path: "/api/v1/auth/device/approve-agent-key",
+      body: expect.objectContaining({
+        selection: expect.objectContaining({
+          allowed_service_ids: ["work-github"],
+          connection_snapshots: [
+            { service_id: "work-github", permission_snapshot: "w".repeat(64) },
+          ],
+        }),
+      }),
+    },
+  ]);
+});
+
 test("public preview preserves hints and identity login requires fresh explicit consent", async ({
   page,
   context,
@@ -172,8 +276,8 @@ test("public preview preserves hints and identity login requires fresh explicit 
     page.getByRole("button", { name: expiryLabel, exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("checkbox", { name: "Grant connection GitHub personal" }),
-  ).toBeChecked();
+    page.getByRole("button", { name: "Remove connection GitHub personal" }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Create & continue" }).click();
   await expect(
     page.getByText("Approved — return to the requesting device"),
@@ -344,8 +448,8 @@ for (const long of [false, true]) {
       "Social Agent",
     );
     await expect(
-      page.getByRole("checkbox", { name: "Grant connection GitHub personal" }),
-    ).toBeChecked();
+      page.getByRole("button", { name: "Remove connection GitHub personal" }),
+    ).toBeVisible();
     await page.getByRole("button", { name: "Create & continue" }).click();
     await expect(
       page.getByText("Approved — return to the requesting device"),
@@ -407,11 +511,11 @@ test("new platform grant discloses future access and binds only same-owner curre
     }),
   ).toBeVisible();
   await expect(
-    page.getByRole("checkbox", { name: "Grant connection Platform user" }),
-  ).toBeChecked();
+    page.getByRole("region", { name: "Connections to grant" }),
+  ).toContainText("Platform user");
   await expect(
-    page.getByRole("checkbox", { name: "Grant connection Platform org" }),
-  ).toHaveCount(0);
+    page.getByRole("region", { name: "Connections to grant" }),
+  ).not.toContainText("Platform org");
   expect(requests.filter((r) => r.path.includes("/approve"))).toEqual([]);
   expect(
     await page.evaluate(

@@ -106,3 +106,64 @@ test("mockup never interprets icon snapshot text as active HTML", async ({
     "1",
   );
 });
+
+test("mockup selects a connected account in the permission dropdown and completes the grant", async ({
+  page,
+}, info) => {
+  await openMockup(page);
+  await page.locator('[data-step="2"]').click();
+  await expect(page.locator('[data-mode="full"] svg')).toBeVisible();
+  await expect(page.locator('[data-mode="agent"] svg')).toBeVisible();
+  await page.screenshot({
+    path: info.outputPath("access-cards.png"),
+    fullPage: true,
+  });
+  await page.locator("#continueScope").click();
+  await page.locator("#createMatchingKey").click();
+  await expect(page.locator("#approveRestricted")).toBeDisabled();
+  await page.locator("#permissionSearch").fill("gmail");
+  const account = page.getByRole("option", {
+    name: "Grant connection api-google-gmail-2",
+    exact: true,
+  });
+  await expect(account).toHaveAttribute("aria-selected", "false");
+  await account.click();
+  await expect(account).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator("#serviceCount")).toHaveText("2 selected");
+  for (const [width, height] of [
+    [1280, 900],
+    [390, 844],
+  ]) {
+    await page.setViewportSize({ width: width!, height: height! });
+    await page.locator("#permissionSearch").scrollIntoViewIfNeeded();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: info.outputPath(`combined-access-${width}.png`),
+      fullPage: true,
+    });
+  }
+  await page.locator("#permissionSearch").press("Escape");
+  await expect(page.locator("#resourceList")).toContainText("Gmail");
+  await expect(page.locator("#resourceList [data-catalog-only]")).toHaveCount(
+    0,
+  );
+  await expect(page.locator("#approveRestricted")).toBeEnabled();
+  await page.locator("#permissionSearch").fill("gmail");
+  const sendPermission = page.locator(
+    '[data-permission="api-google-gmail::https://www.googleapis.com/auth/gmail.send"]',
+  );
+  await sendPermission.click();
+  await expect(page.locator("#resourceList")).toContainText(
+    "Missing requested permissions",
+  );
+  await expect(page.locator("#approveRestricted")).toBeDisabled();
+  await sendPermission.click();
+  await page.locator("#permissionSearch").press("Escape");
+  await expect(page.locator("#approveRestricted")).toBeEnabled();
+  await page.locator("#approveRestricted").click();
+  await expect(page.locator("#requestOutcome")).toBeVisible();
+});

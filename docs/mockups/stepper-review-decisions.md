@@ -1,7 +1,7 @@
 # Stepper and consent decisions for review
 
-This revision changes the local HTML mockup only. Application integration and
-the production query contract are still pending.
+The HTML reference and React approval page implement these decisions. See
+[the protocol](../DEVICE_LOGIN_PROTOCOL.md) for the query and approval contract.
 
 ## Request acknowledgement and header
 
@@ -27,9 +27,10 @@ is preview chrome and is not part of the proposed production header.
 
 Completed steps can be revisited without losing configuration. Final approval
 is available only in step 3. An existing key uses **Approve access with this
-key**. **Create new Agent Key** opens the service selector before name and
-settings. Its final action is **Create & continue**, with copy stating that
-this creates the key and approves the device with the shown access. There is
+key**. **Create new Agent Key** adds connection choices to the permission dropdown.
+Selected connections and their actual permissions appear below it, followed by
+the key name and settings. Its final action is **Create & continue**, with copy
+stating that this creates the key and approves the device with the shown access. There is
 no separate review step or repeated confirmation. Detailed key settings live
 in a disclosure; the final grant summary and extra access stay visible.
 

@@ -10,6 +10,11 @@ import {
   type PermissionOption,
 } from "@/lib/login-permissions";
 import type { RequestedPermissions } from "@/schemas/login-request";
+import {
+  LoginConnectionChoices,
+  SelectedLoginConnections,
+  type ConnectionSelection,
+} from "./login-connection-choices";
 
 export function PermissionIcon({ group }: { group: string }) {
   return group === "nyxid" ? (
@@ -25,12 +30,14 @@ export function LoginPermissionPicker({
   initial,
   onChange,
   disabled,
+  connections,
 }: {
   options: PermissionOption[];
   value: RequestedPermissions;
   initial: RequestedPermissions;
   onChange: (value: RequestedPermissions) => void;
   disabled: boolean;
+  connections?: ConnectionSelection;
 }) {
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
@@ -87,10 +94,18 @@ export function LoginPermissionPicker({
     .map(([id, items]) => ({
       id,
       items,
-      visible: items.filter((o) =>
-        `${o.service} ${o.label} ${o.description} ${o.value}`
-          .toLowerCase()
-          .includes(search.toLowerCase()),
+      visible: items.filter(
+        (o) =>
+          `${o.service} ${o.label} ${o.description} ${o.value}`
+            .toLowerCase()
+            .includes(search.toLowerCase()) ||
+          !!connections?.inventory.connections.some(
+            (c) =>
+              (c.catalog_service_slug ?? c.slug) === id &&
+              `${c.label} ${c.slug}`
+                .toLowerCase()
+                .includes(search.toLowerCase()),
+          ),
       ),
     }))
     .filter((g) => g.visible.length);
@@ -137,7 +152,9 @@ export function LoginPermissionPicker({
           htmlFor="login-permission-search"
           className="mb-2 block font-medium"
         >
-          Search permissions
+          {connections
+            ? "Search permissions & connections"
+            : "Search permissions"}
         </label>
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-2.5 size-3 text-muted-foreground" />
@@ -147,7 +164,11 @@ export function LoginPermissionPicker({
             value={search}
             disabled={disabled}
             className="pl-8 pr-10"
-            placeholder="Search services or permissions…"
+            placeholder={
+              connections
+                ? "Find a service, account, or permission…"
+                : "Search services or permissions…"
+            }
             aria-expanded={open}
             aria-controls="login-permission-options"
             onFocus={() => setOpen(true)}
@@ -184,7 +205,11 @@ export function LoginPermissionPicker({
             id="login-permission-options"
           >
             <div className="mb-2 flex justify-between text-[11px] text-muted-foreground">
-              <span>Available permissions</span>
+              <span>
+                {connections
+                  ? "Permissions and connected accounts"
+                  : "Available permissions"}
+              </span>
               <span>{total} selected</span>
             </div>
             <div
@@ -199,10 +224,18 @@ export function LoginPermissionPicker({
                     disabled={disabled}
                     className="mb-3 space-y-2"
                   >
-                    <legend className="mb-2 flex items-center gap-2 font-medium">
+                    <legend className="mb-2 flex w-full items-center gap-2 font-medium">
                       <PermissionIcon group={id} />
                       {items[0]!.service}
                     </legend>
+                    {connections && id !== "nyxid" && (
+                      <LoginConnectionChoices
+                        selection={connections}
+                        requested={selected}
+                        group={id}
+                        disabled={disabled}
+                      />
+                    )}
                     {items[0]!.field !== "services" && (
                       <label className="flex items-center gap-2 py-1">
                         <Checkbox
@@ -228,7 +261,9 @@ export function LoginPermissionPicker({
                       <label
                         key={option.id}
                         className="flex items-start gap-2 rounded-md py-1 pl-3 hover:bg-white/[0.03]"
-                        title={option.value}
+                        title={[option.value, option.description]
+                          .filter(Boolean)
+                          .join(" · ")}
                       >
                         <Checkbox
                           aria-label={`${option.service}: ${option.label}`}
@@ -237,7 +272,13 @@ export function LoginPermissionPicker({
                         />
                         <span className="min-w-0 break-words">
                           <span>{option.label}</span>
-                          <span className="block text-[11px] text-muted-foreground">
+                          <span
+                            className={
+                              connections
+                                ? "sr-only"
+                                : "block text-[11px] text-muted-foreground"
+                            }
+                          >
                             {option.description}
                           </span>
                         </span>
@@ -346,6 +387,13 @@ export function LoginPermissionPicker({
           </Button>
         </div>
       </section>
+      {connections && (
+        <SelectedLoginConnections
+          selection={connections}
+          requested={selected}
+          disabled={disabled}
+        />
+      )}
     </div>
   );
 }

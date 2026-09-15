@@ -18,6 +18,14 @@ not grant future permissions. Unhighlighted Enter never toggles the first item.
 Escape closes the menu and returns focus; pill removal stays in the selection
 panel. Selecting filters does not approve or change provider credentials.
 
+When creating a key, the same dropdown includes usable connections under each
+service. Search matches permission labels, service names, and connection labels
+or slugs. Connection choices show their actual permissions and match status.
+Catalog services without a connection are marked “Not connected”; their permission
+filters remain available. Selected connections appear in compact cards below the
+requested filters. There is no separate service-selection list. A key that needs
+only NyxID account permissions can be created without selecting a service.
+
 ## Hints and matching
 
 `permissions` contains supported NyxID API scopes; `services` contains catalog

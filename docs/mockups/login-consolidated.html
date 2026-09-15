@@ -2098,6 +2098,201 @@
         max-height: 270px;
         padding: 3px 2px;
       }
+
+      /* Combined access picker follows the compact NyxID component scale. */
+      .mode-grid {
+        gap: 12px;
+      }
+      .mode {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 16px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.015);
+      }
+      .mode.selected {
+        background: rgba(151, 117, 250, 0.055);
+        border-color: rgba(151, 117, 250, 0.7);
+        box-shadow: none;
+      }
+      .mode-top {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .mode-icon {
+        width: 36px;
+        height: 36px;
+        margin: 0;
+        border-radius: 8px;
+        display: grid;
+        place-items: center;
+        background: rgba(255, 255, 255, 0.035);
+      }
+      .mode-icon svg {
+        width: 18px;
+        height: 18px;
+      }
+      .mode b {
+        font-size: 13px;
+        margin: 0;
+      }
+      .mode small {
+        font-size: 12px;
+        line-height: 1.6;
+        margin: 0;
+      }
+      .mode-detail {
+        margin-top: auto;
+        padding-top: 10px;
+        border-top: 1px solid var(--line-soft);
+        font-size: 11px;
+        color: var(--muted);
+        width: 100%;
+      }
+      .mode-check {
+        width: 16px;
+        height: 16px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line-soft);
+        border-radius: 50%;
+        font-size: 10px;
+        color: transparent;
+      }
+      .mode.selected .mode-check {
+        color: #100d17;
+        background: var(--purple);
+        border-color: var(--purple);
+      }
+      .connection-summary-heading,
+      .connection-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .connection-summary-heading {
+        margin-bottom: 12px;
+        font-size: 12px;
+      }
+      #resourceList {
+        max-height: 320px;
+        overflow: auto;
+        display: grid;
+        gap: 8px;
+      }
+      .selected-connection-card {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 12px;
+        border: 1px solid var(--line-soft);
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.015);
+      }
+      .selected-connection-copy {
+        min-width: 0;
+        flex: 1;
+      }
+      .connection-title strong {
+        font-size: 12px;
+      }
+      .selected-connection-copy .helper {
+        font-size: 11px;
+        margin: 4px 0 8px;
+        overflow-wrap: anywhere;
+      }
+      .access-pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 6px;
+      }
+      .access-pill {
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        border: 1px solid var(--line-soft);
+        padding: 3px 6px;
+        border-radius: 5px;
+        font-size: 10px;
+        color: var(--text);
+        font-weight: 400;
+        line-height: 1.4;
+      }
+      .remove-connection {
+        flex-shrink: 0;
+        width: 24px;
+        height: 24px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .remove-connection:hover {
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+      }
+      .compact-permissions {
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .compact-permissions summary {
+        cursor: pointer;
+      }
+      .connection-permission-option {
+        margin: 6px 0;
+        border: 1px solid var(--line-soft);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.025);
+      }
+      .connection-permission-option[aria-selected="true"] {
+        border-color: rgba(151, 117, 250, 0.35);
+        background: rgba(151, 117, 250, 0.05);
+      }
+      .connection-permission-option[aria-disabled="true"] {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .connection-status {
+        margin-left: 8px;
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--muted);
+      }
+      .creating-key .permission-option-copy > small {
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
+      }
+      .creating-key
+        .permission-option:not(.connection-permission-option)
+        .permission-option-copy
+        > small {
+        display: none;
+      }
+      .creating-key .permission-option {
+        padding: 8px;
+      }
+      .creating-key .permission-group-heading {
+        margin-top: 10px;
+      }
+      .node-choice {
+        display: flex;
+        gap: 8px;
+        padding: 8px;
+        font-size: 12px;
+      }
+      #chooseConnections {
+        margin: 10px 0;
+      }
     </style>
   </head>
   <body>
@@ -2264,9 +2459,26 @@
                       type="button"
                       data-mode="full"
                     >
-                      <span class="mode-icon">◈</span><b>Full account session</b
-                      ><small
-                        >Normal account authority for a trusted device.</small
+                      <span class="mode-top"
+                        ><span class="mode-icon"
+                          ><svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.75"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z" />
+                            <path d="m9 12 2 2 4-4" /></svg></span
+                        ><span class="mode-check" aria-hidden="true"
+                          >✓</span
+                        ></span
+                      ><b>Full account access</b
+                      ><small>Your account and organization permissions.</small
+                      ><span class="mode-detail"
+                        >For a device you trust with your account.</span
                       ></button
                     ><button
                       aria-pressed="false"
@@ -2274,10 +2486,29 @@
                       type="button"
                       data-mode="agent"
                     >
-                      <span class="mode-icon">⌘</span><b>Restricted Agent Key</b
+                      <span class="mode-top"
+                        ><span class="mode-icon"
+                          ><svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.75"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            aria-hidden="true"
+                          >
+                            <circle cx="8" cy="8" r="5" />
+                            <path
+                              d="m12 12 9 9m-5-5 3-3m-6 0 3-3"
+                            /></svg></span
+                        ><span class="mode-check" aria-hidden="true"
+                          >✓</span
+                        ></span
+                      ><b>Restricted Agent Key</b
                       ><small
-                        >Choose an existing Agent Key or create a new key with
-                        specific permissions.</small
+                        >Only the access included in the key you choose.</small
+                      ><span class="mode-detail"
+                        >Use an existing key or create a new one.</span
                       >
                     </button>
                   </div>
@@ -2533,93 +2764,52 @@
                           Create a new Agent Key
                         </h2>
                         <p class="helper">
-                          Choose matching service connections below, then name
-                          your key. Any extra permissions remain part of its
-                          access.
+                          Choose permissions and connections together in the
+                          search above. Review the selected access, then name
+                          your key.
                         </p>
                       </div>
                       <section
                         class="resource-card"
-                        aria-label="Resource access"
+                        aria-label="Connections to grant"
                       >
-                        <div
-                          class="key-tabs"
-                          role="tablist"
-                          aria-label="Resource type"
-                        >
-                          <button
-                            class="key-tab"
-                            id="servicesTab"
-                            role="tab"
-                            aria-selected="true"
-                            aria-controls="resourcePanel"
-                            type="button"
+                        <div class="connection-summary-heading">
+                          <strong>Connections to grant</strong
+                          ><span class="selection-count" id="serviceCount"
+                            >0 selected</span
                           >
-                            Services
-                            <span class="count" id="serviceCount"
-                              >0 selected</span
-                            >
-                          </button>
-                          <button
-                            class="key-tab"
-                            id="nodesTab"
-                            role="tab"
-                            aria-selected="false"
-                            aria-controls="resourcePanel"
-                            tabindex="-1"
-                            type="button"
-                          >
-                            Nodes
-                            <span class="count" id="nodeCount">0 selected</span>
-                          </button>
                         </div>
-                        <div
-                          id="resourcePanel"
-                          role="tabpanel"
-                          aria-labelledby="servicesTab"
+                        <div class="resource-list" id="resourceList"></div>
+                        <button
+                          class="text-button"
+                          type="button"
+                          id="chooseConnections"
                         >
-                          <div class="catalog-toolbar" id="catalogToolbar">
-                            <label class="sr-only" for="resourceView"
-                              >Service list</label
-                            >
-                            <select id="resourceView" class="select">
-                              <option value="all">All services</option>
-                              <option value="connections">
-                                Your connections
-                              </option>
-                              <option value="catalog">Full catalog</option>
-                            </select>
-                            <input
-                              id="resourceSearch"
-                              type="search"
-                              class="input"
-                              aria-label="Search service cards"
-                              placeholder="Find a service or connection…"
-                            />
-                          </div>
-                          <p
-                            class="helper"
-                            id="resourceStats"
-                            aria-live="polite"
-                          ></p>
-                          <div
-                            class="selected-services"
-                            id="selectedServices"
-                            aria-label="Selected connections"
-                          ></div>
-                          <div class="resource-controls">
-                            <label
-                              ><input type="checkbox" id="selectedOnly" />
-                              Selected only</label
-                            ><label
-                              ><input type="checkbox" id="allowAll" /> Allow all
-                              services</label
-                            >
-                          </div>
-                          <p class="helper warning" id="allWarning" hidden></p>
-                          <div class="resource-list" id="resourceList"></div>
-                        </div>
+                          Choose in permission dropdown
+                        </button>
+                        <p class="helper">
+                          A key with only NyxID account permissions needs no
+                          service connection. Selected connections keep all
+                          their provider permissions.
+                        </p>
                       </section>
+                      <details class="compact-details" id="resourceAdvanced">
+                        <summary>
+                          <span>Broader access and nodes</span
+                          ><span id="nodeCount">0 nodes</span>
+                        </summary>
+                        <div class="resource-controls">
+                          <label
+                            ><input type="checkbox" id="allowAll" /> All current
+                            and future services</label
+                          ><label
+                            ><input type="checkbox" id="allowAllNodes" /> All
+                            current and future nodes</label
+                          >
+                        </div>
+                        <p class="helper warning" id="allWarning" hidden></p>
+                        <div id="nodeChoices"></div>
+                      </details>
                       <div class="field-grid">
                         <div class="field">
                           <label for="newName">Key name</label
@@ -5357,21 +5547,6 @@
         }),
         nodes: [],
       };
-      const catalogCards = catalog.map((entry) => ({
-        id: "catalog:" + entry.slug,
-        slug: entry.slug,
-        catalogSlug: entry.slug,
-        name: entry.name,
-        owner: "catalog",
-        ownerName: "Catalog",
-        catalogOnly: true,
-        ready: false,
-        kind: entry.provider_type || "none",
-        permissions: entry.scope_catalog || [],
-        permissionsReported: !!entry.scope_catalog?.length,
-        capabilities: entry.capabilities || {},
-        requiredPermissions: entry.required_permissions || [],
-      }));
       const actualKeys = [];
       const exampleConnections = ["api-google-gmail-2", "api-github"].map(
         (slug) =>
@@ -5745,7 +5920,6 @@
       let agentMode = false,
         source = "existing",
         selectedKeyId = null,
-        resourceKind = "services",
         verified = false;
       const draft = {
         services: new Set(),
@@ -5851,15 +6025,16 @@
           : "Full account session · Review before approving.";
         updateGrant();
       }
-      function activateTabs(ids, active) {
-        ids.forEach((id) => {
-          const chosen = id === active;
-          $("#" + id).setAttribute("aria-selected", String(chosen));
-          $("#" + id).tabIndex = chosen ? 0 : -1;
-        });
-      }
       function setSource(value) {
         source = value;
+        $(".permission-picker").classList.toggle(
+          "creating-key",
+          source === "new",
+        );
+        $(".filter-label").textContent =
+          source === "new"
+            ? "Search permissions & connections"
+            : "Search permissions";
         permissionMenuOpen = false;
         renderPermissionMenu();
         updateGrant();
@@ -5872,6 +6047,21 @@
               ? requestedPermissions
               : ["read", "proxy"],
           );
+          for (const [slug, requested] of requestedServiceGroups()) {
+            const candidates = resources.services.filter(
+              (item) =>
+                item.catalogSlug === slug &&
+                item.owner === $("#newOwner").value &&
+                canSelectConnection(item) &&
+                matchesServiceFilters(item),
+            );
+            if (
+              candidates.length === 1 &&
+              requested.length &&
+              connectionMatch(candidates[0]).exact
+            )
+              draft.services.add(candidates[0].id);
+          }
           draftInitialized = true;
         }
         renderScopeChoices();
@@ -5970,6 +6160,11 @@
               option.label,
               option.description,
               option.scope,
+              ...(source === "new"
+                ? resources.services
+                    .filter((item) => item.catalogSlug === option.service)
+                    .map((item) => item.name + " " + item.slug)
+                : []),
             ]
               .join(" ")
               .toLowerCase()
@@ -5998,7 +6193,40 @@
           }
           result.push(option);
         }
-        return result;
+        if (source !== "new") return result;
+        const combined = [];
+        for (const group of [
+          ...new Set(result.map((option) => option.group)),
+        ]) {
+          const items = result.filter((option) => option.group === group);
+          const service = items[0].service;
+          const connections = resources.services
+            .filter(
+              (item) =>
+                item.catalogSlug === service &&
+                item.owner === $("#newOwner").value,
+            )
+            .sort(
+              (a, b) =>
+                Number(canSelectConnection(b)) -
+                  Number(canSelectConnection(a)) ||
+                Number(connectionMatch(b).exact) -
+                  Number(connectionMatch(a).exact) ||
+                connectionMatch(a).extra.length -
+                  connectionMatch(b).extra.length,
+            );
+          combined.push(
+            ...connections.map((item) => ({
+              id: "connection:" + item.id,
+              kind: "connection",
+              group,
+              service,
+              item,
+            })),
+            ...items,
+          );
+        }
+        return combined;
       }
       function renderPermissionMenu() {
         const priorScroll = $("#permissionOptions").scrollTop;
@@ -6019,8 +6247,35 @@
             const count = resources.services.filter(
               (item) => item.catalogSlug === items[0].option.service,
             ).length;
-            return `<div role="group" aria-labelledby="permission-group-${groupIndex}"><div class="permission-group-heading" id="permission-group-${groupIndex}"><strong class="permission-group-brand">${serviceIcon(items[0].option.kind === "nyxid" ? "__nyxid__" : items[0].option.service)}${escapeHtml(name)}</strong><span>${name === "NyxID API" ? "Account & API access" : count ? count + " connections" : "Catalog"}</span></div>${items
+            return `<div role="group" aria-labelledby="permission-group-${groupIndex}"><div class="permission-group-heading" id="permission-group-${groupIndex}"><strong class="permission-group-brand">${serviceIcon(items[0].option.kind === "nyxid" ? "__nyxid__" : items[0].option.service)}${escapeHtml(name)}</strong><span>${name === "NyxID API" ? "Account & API access" : count ? count + " connections" : "Not connected"}</span></div>${items
               .map(({ option, index }) => {
+                if (option.kind === "connection") {
+                  const item = option.item,
+                    comparison = connectionMatch(item),
+                    checked = draft.services.has(item.id) || draft.allServices;
+                  const eligible = canSelectConnection(item),
+                    disabled = draft.allServices || (!eligible && !checked);
+                  const status = !eligible
+                    ? "Unavailable"
+                    : comparison.exact
+                      ? "Exact match"
+                      : comparison.constrained && matchesServiceFilters(item)
+                        ? "Matched + " + comparison.extra.length + " extras"
+                        : comparison.constrained
+                          ? "Missing requested permissions"
+                          : item.permissionsReported
+                            ? item.permissions.length + " permissions"
+                            : "Provider access not reported";
+                  return `<div class="permission-option connection-permission-option ${activePermission === index ? "active" : ""}" id="permission-option-${index}" role="option" aria-label="Grant connection ${escapeHtml(item.slug)}" aria-selected="${checked}" aria-disabled="${disabled}" data-permission="${escapeHtml(option.id)}"><span class="option-check" aria-hidden="true">✓</span><span class="permission-option-copy"><strong>Use ${escapeHtml(item.name)}<span class="connection-status">${escapeHtml(status)}</span></strong><small>${escapeHtml(item.slug)} · ${escapeHtml(item.ownerName || owners[item.owner])}</small><span class="access-pills">${item.permissions
+                    .slice(0, 3)
+                    .map(
+                      (p) =>
+                        `<span class="access-pill" title="${escapeHtml(p.scope)}">${escapeHtml(p.label)}</span>`,
+                    )
+                    .join(
+                      "",
+                    )}${item.permissions.length > 3 ? `<span class="helper">+${item.permissions.length - 3}</span>` : ""}</span></span></div>`;
+                }
                 const bulk = option.kind === "bulk",
                   checked = bulk
                     ? option.selection.all
@@ -6134,6 +6389,18 @@
       }
 
       function togglePermission(id) {
+        if (id.startsWith("connection:")) {
+          const item = resources.services.find(
+            (item) => item.id === id.slice(11),
+          );
+          if (source !== "new" || !item || draft.allServices) return;
+          if (draft.services.has(item.id)) draft.services.delete(item.id);
+          else if (canSelectConnection(item)) draft.services.add(item.id);
+          renderPermissionMenu();
+          renderResources();
+          updateGrant();
+          return;
+        }
         if (id.startsWith("all:")) {
           toggleGroupPermissions(id.slice(4));
           return;
@@ -6336,177 +6603,60 @@
           !item.catalogOnly && item.ready && item.owner === $("#newOwner").value
         );
       }
-      function serviceCard(item, selected, all = false) {
+      function selectedConnectionCard(item) {
         const comparison = connectionMatch(item);
-        const business = item.permissions.filter(
-          (permission) => !identityScopes.has(permission.scope),
-        );
-        const identity = item.permissions.filter((permission) =>
-          identityScopes.has(permission.scope),
-        );
-        const selectedScopes = [...serviceFilters].map((value) =>
-          value.includes("::") ? value.slice(value.indexOf("::") + 2) : value,
-        );
-        const sorted = [...business].sort(
-          (a, b) =>
-            Number(selectedScopes.includes(b.scope)) -
-            Number(selectedScopes.includes(a.scope)),
-        );
-        const rows = sorted.slice(0, 3);
-        const eligible = canSelectConnection(item);
-        const state = item.catalogOnly
-          ? "Catalog"
-          : !item.isActive
-            ? "Disabled"
-            : item.credentialMissing
-              ? "Credential missing"
-              : !item.ready
-                ? "Credential " +
-                  (item.credentialStatus !== "active"
-                    ? item.credentialStatus
-                    : item.connectionStatus || "unavailable"
-                  ).replaceAll("_", " ")
-                : "Connected";
-        const capabilityLabels = {
-          supports_proxy_read: "Proxy reads",
-          supports_proxy_write: "Proxy writes",
-          supports_proxy_binary_upload: "File uploads",
-          supports_websocket: "WebSocket",
-          supports_streaming: "Streaming",
-        };
-        const capabilities = Object.entries(item.capabilities)
-          .filter(([, enabled]) => enabled)
-          .map(([key]) => capabilityLabels[key])
-          .filter(Boolean);
-        return `<article class="service-permission-card ${selected ? "selected" : ""}" data-service-slug="${escapeHtml(item.slug)}" data-catalog-only="${item.catalogOnly ? "true" : "false"}" data-match="${comparison.exact ? "exact" : "extra"}">
-          <label class="service-card-select"><input type="checkbox" data-resource="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.name + " · " + item.slug)}" ${selected ? "checked" : ""} ${!eligible || all ? "disabled" : ""}>${serviceIcon(item.catalogSlug)}<span class="service-name"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.slug)}</small></span><span class="neutral-badge ${state === "Connected" ? "connected-badge" : ""}">${escapeHtml(state)}</span></label>
-          ${
-            !item.catalogOnly && comparison.constrained
-              ? `<div class="connection-match"><span class="match-badge ${comparison.exact ? "exact" : "extra"}">${comparison.exact ? "Exact match for " : `Matched + ${comparison.extra.length} ${comparison.extra.length === 1 ? "extra" : "extras"} for `}${escapeHtml(item.name)}</span>${comparisonRows(
-                  "Matched",
-                  comparison.matched.map((p) => p.label),
-                )}${comparisonRows(
-                  "Also grants — included with this connection",
-                  comparison.extra.map((p) => p.label),
-                  true,
-                )}</div>`
-              : ""
-          }
-          <div class="card-permission-heading"><span>${item.catalogOnly ? "Available permissions" : "Granted permissions"}${item.permissionsReported ? " · " + item.permissions.length : ""}</span>${!item.catalogOnly && item.owner === "org" ? `<span>${escapeHtml(item.ownerName)}</span>` : ""}</div>
-          <ul class="connection-permissions">${(comparison.constrained && !item.catalogOnly ? [] : rows).map((permission) => `<li><div><strong>${escapeHtml(permission.label)}</strong><p>${escapeHtml(permission.description || "No description published.")}</p></div></li>`).join("")}${!item.permissionsReported ? `<li class="permission-unreported">${item.catalogOnly ? "Individual permission choices are not published for this service." : item.kind === "none" ? "This service uses no upstream credential." : "Individual permissions are not reported by this connection."}</li>` : ""}</ul>
-          ${identity.length && (!comparison.constrained || item.catalogOnly) ? `<p class="identity-summary">Identity: ${identity.map((p) => escapeHtml(p.label)).join(" · ")}</p>` : ""}
-          ${!item.catalogOnly && item.name === "Gmail" && item.grantedScopes?.includes("https://www.googleapis.com/auth/gmail.readonly") && !item.grantedScopes.includes("https://www.googleapis.com/auth/gmail.send") ? '<p class="permission-limit">Sending email is not granted.</p>' : ""}
-          ${capabilities.length ? `<p class="identity-summary">Service supports: ${capabilities.join(" · ")}</p>` : ""}
-          ${item.requiredPermissions?.length ? `<details class="raw-scopes"><summary>Documented setup requirements</summary><p>These are service requirements, not permissions already granted to a connection.</p>${item.requiredPermissions.map((permission) => `<div><code>${escapeHtml(permission)}</code></div>`).join("")}</details>` : ""}
-          ${item.permissions.length ? `<details class="raw-scopes"><summary>${business.length > 3 ? "+" + (business.length - 3) + " more · " : ""}All ${item.permissions.length} ${item.catalogOnly ? "available" : "granted"} permissions</summary>${item.permissions.map((p) => `<div><strong>${escapeHtml(p.label)}</strong><p>${escapeHtml(p.description || "No description published.")}</p><code>${escapeHtml(p.scope)}</code></div>`).join("")}</details>` : ""}
-          ${item.catalogOnly ? '<p class="permission-limit">Connect this service before adding it to an Agent Key. Available permissions are not an existing grant.</p>' : item.owner === "org" ? `<p class="permission-limit">Organization connection · A ${escapeHtml(item.ownerName)} administrator must approve an organization key.</p>` : ""}
-        </article>`;
+        const status = !canSelectConnection(item)
+          ? "Unavailable"
+          : !item.permissionsReported
+            ? "Provider access not reported"
+            : comparison.exact
+              ? "Exact match"
+              : comparison.constrained && matchesServiceFilters(item)
+                ? "Matched + " +
+                  comparison.extra.length +
+                  " extra" +
+                  (comparison.extra.length === 1 ? "" : "s")
+                : comparison.constrained
+                  ? "Missing requested permissions"
+                  : item.permissions.length + " permissions";
+        const pills = (items) =>
+          items
+            .map(
+              (p) =>
+                `<span class="access-pill" title="${escapeHtml(p.scope + " · " + (p.description || ""))}">${escapeHtml(p.label)}</span>`,
+            )
+            .join("");
+        return `<article class="selected-connection-card" data-selected-connection="${escapeHtml(item.id)}">${serviceIcon(item.catalogSlug)}<div class="selected-connection-copy"><div class="connection-title"><strong>${escapeHtml(item.name)}</strong><span class="match-badge ${comparison.exact ? "exact" : "extra"}">${escapeHtml(status)}</span></div><p class="helper">${escapeHtml(item.slug)} · ${escapeHtml(item.ownerName || owners[item.owner])}</p><div class="access-pills">${pills(item.permissions.slice(0, 4))}</div>${item.permissions.length > 4 ? `<details class="compact-permissions"><summary>+${item.permissions.length - 4} more permissions</summary><div class="access-pills">${pills(item.permissions.slice(4))}</div></details>` : ""}</div>${draft.allServices ? '<span class="helper">Included</span>' : `<button type="button" class="remove-connection" data-remove-service="${escapeHtml(item.id)}" aria-label="Remove connection ${escapeHtml(item.slug)}">×</button>`}</article>`;
       }
       function renderResources() {
-        const kind = resourceKind,
-          all = draft[kind === "services" ? "allServices" : "allNodes"];
-        $("#catalogToolbar").hidden = kind !== "services";
-        const view = $("#resourceView").value;
-        let items =
-          kind === "nodes"
-            ? resources.nodes
-            : view === "catalog"
-              ? catalogCards
-              : view === "connections"
-                ? resources.services
-                : [
-                    ...resources.services,
-                    ...catalogCards.filter(
-                      (entry) =>
-                        !resources.services.some(
-                          (item) =>
-                            item.catalogSlug === entry.slug &&
-                            canSelectConnection(item) &&
-                            matchesServiceFilters(item),
-                        ),
-                    ),
-                  ];
-        const query = $("#resourceSearch").value.trim().toLowerCase();
-        const matches = items
-          .filter(
-            (item) =>
-              (kind !== "services" || matchesServiceFilters(item)) &&
-              [
-                item.name,
-                item.slug,
-                item.ownerName,
-                ...item.permissions.flatMap((p) => [
-                  p.scope,
-                  p.label,
-                  p.description,
-                ]),
-              ]
-                .join(" ")
-                .toLowerCase()
-                .includes(query) &&
-              (!$("#selectedOnly").checked ||
-                (all && canSelectConnection(item)) ||
-                draft[kind].has(item.id)),
-          )
-          .sort(
-            (a, b) =>
-              Number(canSelectConnection(b)) - Number(canSelectConnection(a)) ||
-              Number(connectionMatch(b).exact) -
-                Number(connectionMatch(a).exact) ||
-              (connectionMatch(a).constrained && connectionMatch(b).constrained
-                ? connectionMatch(a).extra.length -
-                  connectionMatch(b).extra.length
-                : 0) ||
-              Number(!!b.permissions.length) - Number(!!a.permissions.length) ||
-              a.name.localeCompare(b.name) ||
-              a.slug.localeCompare(b.slug),
-          );
-        $("#allowAll").checked = all;
-        $("#allowAll").parentElement.lastChild.textContent =
-          ` Allow all ${kind}`;
-        $("#resourcePanel").setAttribute(
-          "aria-labelledby",
-          kind === "services" ? "servicesTab" : "nodesTab",
+        const selected = resources.services.filter(
+          (item) =>
+            draft.services.has(item.id) ||
+            (draft.allServices && canSelectConnection(item)),
         );
-        activateTabs(
-          ["servicesTab", "nodesTab"],
-          kind === "services" ? "servicesTab" : "nodesTab",
-        );
-        $("#allWarning").hidden = !all;
-        $("#allWarning").textContent =
-          `All current and future ${kind} in the selected owner are included, beyond these filters. Unavailable connections still need setup.`;
-        $("#resourceList").innerHTML = matches.length
-          ? matches
-              .map((item) =>
-                serviceCard(
-                  item,
-                  (all && canSelectConnection(item)) ||
-                    draft[kind].has(item.id),
-                  all,
-                ),
-              )
-              .join("")
-          : `<p class="empty-state">${kind === "nodes" ? "Node connections have not been loaded into this preview." : "No connections or catalog services match all permissions selected for each service. Try another permission or clear the filters."}</p>`;
+        $("#resourceList").innerHTML = selected.length
+          ? selected.map(selectedConnectionCard).join("")
+          : '<p class="empty-state">No connections selected. Choose an account in the permission dropdown when this key needs service access.</p>';
         populateServiceIcons($("#resourceList"));
-        $("#resourceStats").textContent =
-          kind === "services"
-            ? `${matches.length} ${matches.length === 1 ? "result" : "results"} · ${resources.services.length} connections · ${catalog.length} catalog services`
-            : "";
         $("#serviceCount").textContent = draft.allServices
-          ? "All"
-          : `${draft.services.size} selected`;
+          ? "All services"
+          : selected.length + " selected";
         $("#nodeCount").textContent = draft.allNodes
-          ? "All"
-          : `${draft.nodes.size} selected`;
-        $("#selectedServices").innerHTML = resources.services
-          .filter((item) => draft.services.has(item.id))
-          .map(
-            (item) =>
-              `<span class="permission-token">${serviceIcon(item.catalogSlug)}<span>${escapeHtml(item.slug)}</span><button type="button" data-remove-service="${escapeHtml(item.id)}" aria-label="Remove ${escapeHtml(item.slug)} selection">×</button></span>`,
-          )
-          .join("");
-        populateServiceIcons($("#selectedServices"));
-        $("#selectedServices").hidden = !draft.services.size;
+          ? "All nodes"
+          : draft.nodes.size + " nodes";
+        $("#allowAll").checked = draft.allServices;
+        $("#allowAllNodes").checked = draft.allNodes;
+        $("#allWarning").hidden = !draft.allServices && !draft.allNodes;
+        $("#allWarning").textContent =
+          "This includes current and future resources beyond the requested filters.";
+        $("#nodeChoices").innerHTML =
+          resources.nodes
+            .map(
+              (item) =>
+                `<label class="node-choice"><input type="checkbox" data-node="${escapeHtml(item.id)}" ${draft.allNodes || draft.nodes.has(item.id) ? "checked" : ""} ${draft.allNodes || !canSelectConnection(item) ? "disabled" : ""}>${escapeHtml(item.name)}</label>`,
+            )
+            .join("") ||
+          '<p class="helper">No node connections in this preview.</p>';
       }
 
       function newGrant() {
@@ -6562,12 +6712,6 @@
             return "Enter a name for the new Agent Key.";
           if (!draft.scopes.size)
             return "Choose at least one NyxID permission.";
-          if (
-            draft.scopes.has("proxy") &&
-            !draft.allServices &&
-            !draft.services.size
-          )
-            return "Select at least one service for proxy access.";
           if (!matchesPermissions(grant))
             return "Include every requested permission and service, or edit the requested permissions above.";
           if (!$("#newRate").checkValidity() || !$("#newBurst").checkValidity())
@@ -6579,7 +6723,7 @@
         $("#permissionFilter").hidden = false;
         $("#permissionHelp").textContent =
           source === "new"
-            ? "Select matching connections below. Extra permissions are included when you use a connection."
+            ? "Choose permissions and their connected accounts in one dropdown. Extra access stays visible below."
             : "Choose an existing key below. Exact matches appear first; extra permissions stay part of the grant.";
         const grant = currentGrant();
         $("#existingPanel").hidden = source !== "existing";
@@ -6821,50 +6965,53 @@
           updateGrant();
         }
       });
-      for (const kind of ["services", "nodes"])
-        $("#" + kind + "Tab").addEventListener("click", () => {
-          resourceKind = kind;
-          $("#resourceSearch").value = "";
-          $("#selectedOnly").checked = false;
-          renderResources();
-        });
-      $("#resourceView").addEventListener("change", renderResources);
-      $("#selectedServices").addEventListener("click", (event) => {
+      $("#chooseConnections").addEventListener("click", () => {
+        $("#permissionSearch").value = "";
+        $("#permissionSearch").focus();
+        permissionMenuOpen = true;
+        renderPermissionMenu();
+        $("#permissionFilter").scrollIntoView({ block: "start" });
+      });
+      $("#resourceList").addEventListener("click", (event) => {
         const button = event.target.closest("[data-remove-service]");
         if (!button) return;
         draft.services.delete(button.dataset.removeService);
+        renderPermissionMenu();
         renderResources();
         updateGrant();
       });
-      $("#resourceSearch").addEventListener("input", renderResources);
-      $("#selectedOnly").addEventListener("change", renderResources);
       $("#allowAll").addEventListener("change", (event) => {
-        draft[resourceKind === "services" ? "allServices" : "allNodes"] =
-          event.target.checked;
-        if (event.target.checked) draft[resourceKind].clear();
+        draft.allServices = event.target.checked;
+        if (draft.allServices) draft.services.clear();
+        renderPermissionMenu();
         renderResources();
         updateGrant();
       });
-      $("#resourceList").addEventListener("change", (event) => {
-        const id = event.target.dataset.resource;
+      $("#allowAllNodes").addEventListener("change", (event) => {
+        draft.allNodes = event.target.checked;
+        if (draft.allNodes) draft.nodes.clear();
+        renderResources();
+        updateGrant();
+      });
+      $("#nodeChoices").addEventListener("change", (event) => {
+        const id = event.target.dataset.node;
         if (
-          id &&
-          resources[resourceKind].some(
+          !id ||
+          !resources.nodes.some(
             (item) => item.id === id && canSelectConnection(item),
           )
-        ) {
-          event.target.checked
-            ? draft[resourceKind].add(id)
-            : draft[resourceKind].delete(id);
-          renderResources();
-          updateGrant();
-        }
+        )
+          return;
+        event.target.checked ? draft.nodes.add(id) : draft.nodes.delete(id);
+        renderResources();
+        updateGrant();
       });
       $("#newOwner").addEventListener("change", () => {
         draft.services.clear();
         draft.nodes.clear();
         draft.allServices = false;
         draft.allNodes = false;
+        renderPermissionMenu();
         renderResources();
         updateGrant();
       });
@@ -6901,22 +7048,6 @@
         if (!agentMode || validationMessage(grant)) return;
         finishRequest("approved");
       });
-      for (const ids of [["servicesTab", "nodesTab"]])
-        ids.forEach((id, index) =>
-          $("#" + id).addEventListener("keydown", (event) => {
-            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))
-              return;
-            event.preventDefault();
-            const next =
-              event.key === "Home"
-                ? 0
-                : event.key === "End"
-                  ? ids.length - 1
-                  : (index + 1) % ids.length;
-            $("#" + ids[next]).click();
-            $("#" + ids[next]).focus();
-          }),
-        );
       $("#newName").value = keyNameHint;
       $("#newExpiry").value = keyExpiryHint;
       $("#newPlatform").value = platformHint;

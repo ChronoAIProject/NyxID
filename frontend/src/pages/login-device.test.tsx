@@ -118,6 +118,34 @@ async function scope(flow: "device" | "agent-key" = "device") {
 const approvals = () =>
   mocks.post.mock.calls.filter(([path]) => String(path).includes("/approve"));
 describe("three-step device approval", () => {
+  it("creates a NyxID account-permission key without any service selection", async () => {
+    mocks.query +=
+      "&login_type=agent&key_source=new&key_name=Account+reader&permissions=read";
+    await scope();
+    await click("Create new Agent Key");
+    expect(
+      screen.getByRole("region", { name: "Connections to grant" }),
+    ).toHaveTextContent("0 selected");
+    expect(
+      screen.getByRole("button", { name: "Create & continue" }),
+    ).toBeEnabled();
+    expect(approvals()).toEqual([]);
+    await click("Create & continue");
+    expect(approvals()).toEqual([
+      [
+        "/auth/device/approve-agent-key",
+        expect.objectContaining({
+          selection: expect.objectContaining({
+            name: "Account reader",
+            scopes: "read",
+            allowed_service_ids: [],
+            connection_snapshots: [],
+            allow_all_services: false,
+          }),
+        }),
+      ],
+    ]);
+  });
   it("previews explicitly, shows actual requester details, and approves full account once", async () => {
     mount();
     expect(mocks.preview).not.toHaveBeenCalled();
@@ -206,10 +234,10 @@ describe("three-step device approval", () => {
       screen.getByText(new Date("2026-01-31T23:59:59.000Z").toLocaleString()),
     ).toBeVisible();
     expect(
-      screen.getByRole("checkbox", {
-        name: "Grant connection GitHub personal",
+      screen.getByRole("button", {
+        name: "Remove connection GitHub personal",
       }),
-    ).toBeChecked();
+    ).toBeVisible();
     expect(approvals()).toEqual([]);
     await click("Create & continue");
     expect(approvals()[0]).toEqual([
@@ -273,11 +301,11 @@ describe("three-step device approval", () => {
       ),
     ).toBeVisible();
     expect(
-      screen.getByRole("checkbox", { name: "Grant connection Platform user" }),
-    ).toBeChecked();
+      screen.getByRole("region", { name: "Connections to grant" }),
+    ).toHaveTextContent("Platform user");
     expect(
-      screen.queryByRole("checkbox", { name: "Grant connection Platform org" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("region", { name: "Connections to grant" }),
+    ).not.toHaveTextContent("Platform org");
     expect(approvals()).toEqual([]);
     await click("Create & continue");
     expect(approvals()[0]).toEqual([

@@ -25,16 +25,14 @@ import type { RequestedPermissions } from "@/schemas/login-request";
 import {
   compareKey,
   draftSummary,
-  connectionReady,
-  connectionSlug,
-  connectionCovers,
-  requestedGroups,
   permissionOptions,
-  canonicalScope,
   type LoginInventory,
   type AccessEntry,
 } from "@/lib/login-permissions";
-import { PermissionIcon } from "./login-permission-picker";
+import {
+  LoginPermissionPicker,
+  PermissionIcon,
+} from "./login-permission-picker";
 import {
   AgentKeyPermissions,
   AgentKeyIssuanceNotice,
@@ -92,6 +90,8 @@ export function LoginKeyDraft({
   disabled,
   onDraft,
   onApprove,
+  initialRequested,
+  onRequestedChange,
 }: {
   initial: CreateApiKeyFormData;
   inventory: LoginInventory;
@@ -100,6 +100,8 @@ export function LoginKeyDraft({
   disabled: boolean;
   onDraft: (data: CreateApiKeyFormData) => void;
   onApprove: (data: CreateApiKeyFormData) => void;
+  initialRequested: RequestedPermissions;
+  onRequestedChange: (value: RequestedPermissions) => void;
 }) {
   const form = useAppForm<CreateApiKeyFormData>({
     resolver: zodResolver(createApiKeySchema),
@@ -126,141 +128,26 @@ export function LoginKeyDraft({
         ? selected.filter((v) => v !== id)
         : [...selected, id],
     );
-  const groups = requestedGroups(requested);
-  const displayOptions = permissionOptions(inventory);
-  const services = ownerServices
-    .map((service) => {
-      const connection = inventory.connections.find((c) => c.id === service.id);
-      const scopes = connection
-        ? groups.get(connectionSlug(connection))
-        : undefined;
-      const relevant =
-        scopes !== undefined ||
-        requested.service_permissions.some((p) => !p.includes("::"));
-      const covers =
-        !!connection && connectionCovers(connection, scopes ?? [], requested);
-      const required = [
-        ...(scopes ?? []),
-        ...requested.service_permissions.filter((p) => !p.includes("::")),
-      ];
-      const extras =
-        connection?.granted_scopes?.filter(
-          (p) =>
-            !required.includes(canonicalScope(connectionSlug(connection), p)),
-        ).length ?? Infinity;
-      return { service, relevant, covers, extras };
-    })
-    .filter(
-      ({ service, relevant, covers }) =>
-        selected.includes(service.id) ||
-        implied.includes(service.id) ||
-        (relevant && covers),
-    )
-    .sort(
-      (a, b) =>
-        a.extras - b.extras || a.service.name.localeCompare(b.service.name),
-    )
-    .map(({ service }) => service);
   return (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onApprove)} className="space-y-4">
         <fieldset disabled={disabled} className="space-y-4">
+          <LoginPermissionPicker
+            options={permissionOptions(inventory)}
+            value={requested}
+            initial={initialRequested}
+            disabled={disabled}
+            onChange={onRequestedChange}
+            connections={{
+              inventory,
+              organizationId: data.target_org_id,
+              selectedIds: selected,
+              impliedIds: implied,
+              allowAll: data.allow_all_services ?? false,
+              onToggle: toggleService,
+            }}
+          />
           <ApiKeyNameField form={form} />
-          <div className="space-y-2">
-            <h3 className="text-[12px] font-semibold">
-              Service connections · {summary.allowed_services.length} granted
-            </h3>
-            <p className="text-[11px] text-muted-foreground">
-              These connections determine the actual provider access. Requested
-              filters cannot remove their permissions.
-            </p>
-            <div className="max-h-56 space-y-2 overflow-y-auto rounded-xl border border-border p-3">
-              {services.map((service) => {
-                const connection = inventory.connections.find(
-                  (c) => c.id === service.id,
-                );
-                const ready = connection && connectionReady(connection);
-                return (
-                  <label
-                    key={service.id}
-                    className="flex items-start gap-2 rounded-lg border border-border/50 p-2 text-[12px]"
-                  >
-                    <Checkbox
-                      aria-label={`Grant connection ${service.name}`}
-                      disabled={
-                        !ready ||
-                        data.allow_all_services ||
-                        implied.includes(service.id)
-                      }
-                      checked={
-                        selected.includes(service.id) ||
-                        implied.includes(service.id)
-                      }
-                      onCheckedChange={(v) =>
-                        form.setValue(
-                          "allowed_service_ids",
-                          v
-                            ? [...selected, service.id]
-                            : selected.filter((id) => id !== service.id),
-                        )
-                      }
-                    />
-                    <div className="min-w-0 space-y-1">
-                      <span className="flex items-center gap-2">
-                        <PermissionIcon
-                          group={
-                            connection ? connectionSlug(connection) : "unknown"
-                          }
-                        />
-                        {service.name}
-                      </span>
-                      <div className="flex flex-wrap gap-1 text-[11px] text-muted-foreground">
-                        {connection?.granted_scopes?.length
-                          ? connection.granted_scopes.map((scope) => {
-                              const option = displayOptions.find(
-                                (o) =>
-                                  o.value ===
-                                  `${connectionSlug(connection)}::${canonicalScope(connectionSlug(connection), scope)}`,
-                              );
-                              return (
-                                <span
-                                  key={scope}
-                                  title={[scope, option?.description]
-                                    .filter(Boolean)
-                                    .join(" — ")}
-                                  className="rounded border border-border px-1.5 py-0.5"
-                                >
-                                  {option?.label ?? scope}
-                                </span>
-                              );
-                            })
-                          : "Provider access not reported"}
-                      </div>
-                      {connection?.node_id && (
-                        <p className="text-[11px] text-warning">
-                          Requires node access:{" "}
-                          {inventory.options.nodes.find(
-                            (n) => n.id === connection.node_id,
-                          )?.name ?? connection.node_id}
-                        </p>
-                      )}
-                      {!ready && (
-                        <p className="text-[11px] text-warning">
-                          Connection unavailable
-                        </p>
-                      )}
-                    </div>
-                  </label>
-                );
-              })}
-              {!services.length && (
-                <p className="text-[12px] text-muted-foreground">
-                  No matching connections. Edit the requested permissions or
-                  connect a service from AI Services.
-                </p>
-              )}
-            </div>
-          </div>
           <details className="rounded-xl border border-border p-3 text-[12px]">
             <summary className="cursor-pointer font-medium">
               Key settings and actual NyxID grant
