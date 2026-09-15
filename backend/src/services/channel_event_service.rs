@@ -751,6 +751,7 @@ mod tests {
             platform_sender_id: None,
             agent_api_key_id: "key-1".to_string(),
             default_agent: false,
+            allow_agent_initiated: false,
             is_active: true,
             last_message_at: None,
             created_at: Utc::now(),

@@ -87,8 +87,51 @@ pub struct InboundAttachment {
     pub size_bytes: Option<u64>,
 }
 
+/// What the native outbound transport actually preserves. Contract-tested in channel_adapters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct OutboundCapabilities {
+    /// Can deliver to a conversation without an inbound anchor.
+    pub initiated_send: bool,
+    /// Honors OutboundReply.reply_to_platform_message_id.
+    pub reply_to: bool,
+    /// Reads a thread key from metadata; adapter documentation names the keys.
+    pub thread: bool,
+    /// Implements edit_reply natively.
+    pub edit: bool,
+}
+
+impl OutboundCapabilities {
+    pub const NONE: Self = Self {
+        initiated_send: false,
+        reply_to: false,
+        thread: false,
+        edit: false,
+    };
+}
+
+/// Channel-owned classification of upstream refusals. Matched refusals expose only
+/// adapter-owned markers; other failures retain up to 200 characters of diagnostic detail.
+pub fn classify_upstream_refusal(
+    platform: &str,
+    description: &str,
+    markers: &[&str],
+) -> crate::errors::AppError {
+    let normalized = description.to_lowercase();
+    if let Some(marker) = markers
+        .iter()
+        .find(|marker| normalized.contains(&marker.to_lowercase()))
+    {
+        crate::errors::AppError::ChannelConversationNotReachable(format!("{platform}: {marker}"))
+    } else {
+        let description: String = description.chars().take(200).collect();
+        crate::errors::AppError::ChannelPlatformError(format!(
+            "{platform} send failed: {description}"
+        ))
+    }
+}
+
 /// A reply to send back to the chat platform.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OutboundReply {
     pub text: Option<String>,
     /// Platform message ID to reply to (for threading)
@@ -98,11 +141,27 @@ pub struct OutboundReply {
 }
 
 /// A previously-sent outbound message edit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OutboundEdit {
     pub text: Option<String>,
     /// Platform-specific metadata for edit operations (e.g. Lark cards).
     pub metadata: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for OutboundReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundReply")
+            .field("content", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for OutboundEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundEdit")
+            .field("content", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Decrypted, platform-specific webhook verification material prepared by the
@@ -179,6 +238,8 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 pub trait PlatformAdapter: Send + Sync {
     /// Platform identifier (e.g. "telegram", "discord", "lark", "feishu").
     fn platform_id(&self) -> &str;
+
+    fn outbound_capabilities(&self) -> OutboundCapabilities;
 
     fn ingestion(&self) -> Ingestion {
         Ingestion::Webhook
@@ -389,7 +450,8 @@ pub trait PlatformAdapter: Send + Sync {
     async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>>;
 
     /// Send a reply back to the platform conversation.
-    /// Returns the platform-assigned message ID of the sent reply, if available.
+    /// A returned ID proves platform acceptance, not that a recipient saw the message.
+    /// An adapter that cannot dispatch must return an explicit error, never Ok(None).
     async fn send_reply(
         &self,
         http: &reqwest::Client,

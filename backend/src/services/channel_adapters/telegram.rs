@@ -4,6 +4,14 @@
 //! the platform-agnostic [`InboundMessage`] format and send replies via the
 //! Telegram `sendMessage` endpoint.
 
+const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
+    "bot can't initiate conversation with a user",
+    "chat not found",
+    "bot was blocked by the user",
+    "bot was kicked",
+    "user is deactivated",
+];
+
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -270,8 +278,52 @@ fn parse_message(msg: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
 // PlatformAdapter implementation
 // ---------------------------------------------------------------------------
 
+fn build_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_json::Value {
+    let text = reply.text.as_deref().unwrap_or("");
+
+    let mut body = serde_json::json!({
+        "chat_id": conversation_id,
+        "text": text,
+        "parse_mode": "Markdown",
+    });
+
+    if let Some(ref reply_to_id) = reply.reply_to_platform_message_id
+        && let Ok(id) = reply_to_id.parse::<i64>()
+    {
+        body["reply_to_message_id"] = serde_json::json!(id);
+    }
+
+    // Honor `message_thread_id` from reply metadata when the original
+    // inbound message came from a forum topic. Without this, replies
+    // would fall back to the root chat. Accepted as either an integer
+    // or a string that parses as i64 (handlers/channel_relay.rs
+    // forwards it as a JSON string).
+    if let Some(md) = reply.metadata.as_ref()
+        && let Some(thread_val) = md.get("message_thread_id")
+    {
+        let parsed = thread_val
+            .as_i64()
+            .or_else(|| thread_val.as_str().and_then(|s| s.parse::<i64>().ok()));
+        if let Some(thread_id) = parsed {
+            body["message_thread_id"] = serde_json::json!(thread_id);
+        }
+    }
+
+    body
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for TelegramAdapter {
+    /// Thread metadata: message_thread_id.
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: true,
+            reply_to: true,
+            thread: true,
+            edit: false,
+        }
+    }
+
     fn platform_id(&self) -> &str {
         "telegram"
     }
@@ -360,35 +412,7 @@ impl PlatformAdapter for TelegramAdapter {
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
         let bot_token = credentials.token;
-        let text = reply.text.as_deref().unwrap_or("");
-
-        let mut body = serde_json::json!({
-            "chat_id": conversation_id,
-            "text": text,
-            "parse_mode": "Markdown",
-        });
-
-        if let Some(ref reply_to_id) = reply.reply_to_platform_message_id
-            && let Ok(id) = reply_to_id.parse::<i64>()
-        {
-            body["reply_to_message_id"] = serde_json::json!(id);
-        }
-
-        // Honor `message_thread_id` from reply metadata when the original
-        // inbound message came from a forum topic. Without this, replies
-        // would fall back to the root chat. Accepted as either an integer
-        // or a string that parses as i64 (handlers/channel_relay.rs
-        // forwards it as a JSON string).
-        if let Some(md) = reply.metadata.as_ref()
-            && let Some(thread_val) = md.get("message_thread_id")
-        {
-            let parsed = thread_val
-                .as_i64()
-                .or_else(|| thread_val.as_str().and_then(|s| s.parse::<i64>().ok()));
-            if let Some(thread_id) = parsed {
-                body["message_thread_id"] = serde_json::json!(thread_id);
-            }
-        }
+        let body = build_message_body(conversation_id, reply);
 
         let url = format!("{TELEGRAM_API_BASE}{bot_token}/sendMessage");
         let resp: serde_json::Value = http
@@ -416,9 +440,13 @@ impl PlatformAdapter for TelegramAdapter {
                 .get("description")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error");
-            return Err(AppError::ChannelPlatformError(format!(
-                "Telegram sendMessage failed: {description}"
-            )));
+            return Err(
+                crate::services::channel_platform::classify_upstream_refusal(
+                    "Telegram",
+                    description,
+                    UNREACHABLE_TARGET_MARKERS,
+                ),
+            );
         }
 
         let message_id = resp
@@ -960,5 +988,52 @@ mod tests {
 
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].thread_id.as_deref(), Some("42"));
+    }
+    #[test]
+    fn initiated_request_and_declared_reply_thread_capabilities() {
+        let mut reply = OutboundReply {
+            text: Some("hello".into()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        assert_eq!(
+            build_message_body("123", &reply),
+            serde_json::json!({ "chat_id": "123", "text": "hello", "parse_mode": "Markdown" })
+        );
+        reply.reply_to_platform_message_id = Some("42".into());
+        reply.metadata = Some(serde_json::json!({ "message_thread_id": "7" }));
+        let body = build_message_body("123", &reply);
+        assert_eq!(body["reply_to_message_id"], 42);
+        assert_eq!(body["message_thread_id"], 7);
+    }
+
+    #[test]
+    fn upstream_target_refusals_are_classified_and_other_diagnostics_are_bounded() {
+        for marker in UNREACHABLE_TARGET_MARKERS {
+            let description = format!("{marker}: private message content");
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "telegram",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            assert!(matches!(
+                error,
+                AppError::ChannelConversationNotReachable(_)
+            ));
+            assert!(!error.to_string().contains("private message content"));
+        }
+        for description in [
+            "can't parse entities: reserved character".to_string(),
+            "界".repeat(201),
+        ] {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "telegram",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            let expected: String = description.chars().take(200).collect();
+            assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                if detail == format!("telegram send failed: {expected}")));
+        }
     }
 }

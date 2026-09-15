@@ -98,6 +98,7 @@ export const createChannelConversationSchema = z.object({
   platform_conversation_type: conversationTypeSchema.optional(),
   platform_sender_id: z.string().max(256).optional(),
   default_agent: z.boolean().optional(),
+  allow_agent_initiated: z.boolean().optional(),
   /** When set, create this conversation under the given org (caller must be admin). */
   target_org_id: z.string().optional(),
 });
@@ -128,9 +129,25 @@ export type CreateDeviceConversationFormData = z.infer<
 export const updateChannelConversationSchema = z.object({
   agent_api_key_id: z.string().uuid("Invalid API key ID").optional(),
   default_agent: z.boolean().optional(),
+  allow_agent_initiated: z.boolean().optional(),
   is_active: z.boolean().optional(),
 });
 
 export type UpdateChannelConversationFormData = z.infer<
   typeof updateChannelConversationSchema
+>;
+
+export const channelInitiatedSettingsSchema = z.object({
+  allow_agent_initiated: z.boolean(),
+});
+
+export const channelTestMessageSchema = z.object({
+  text: z.string().trim().min(1, "Enter a message"),
+});
+
+export type ChannelInitiatedSettingsFormData = z.infer<
+  typeof channelInitiatedSettingsSchema
+>;
+export type ChannelTestMessageFormData = z.infer<
+  typeof channelTestMessageSchema
 >;

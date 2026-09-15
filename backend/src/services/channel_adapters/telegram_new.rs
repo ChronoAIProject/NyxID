@@ -36,6 +36,11 @@ pub fn credential_descriptor() -> PlatformCredentialDescriptor {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for TelegramNewAdapter {
+    /// Delegates message_thread_id and reply handling to the Telegram transport.
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        super::telegram::TelegramAdapter.outbound_capabilities()
+    }
+
     fn platform_id(&self) -> &str {
         PLATFORM
     }

@@ -143,3 +143,21 @@ From the bot's detail page, click **Delete**. NyxID deregisters the webhook on t
 :::warning
 If the org owns the bot, org deletion is blocked until the bot is deleted first.
 :::
+
+## Agent-initiated messages
+
+A human owner can enable **Allow unprompted messages** on a specific conversation's message page, then use **Send test message**. This permission defaults off and lets the assigned agent send alerts or scheduled updates without an incoming message. Catch-all routes, device channels, and unsupported adapters cannot initiate.
+
+Agents discover eligible routes through `GET /api/v1/channel-relay/conversations` and send with `POST /api/v1/channel-relay/send`:
+
+```json
+{ "conversation_id": "<route-uuid>", "message": { "text": "Your job finished" }, "idempotency_key": "job-123" }
+```
+
+Use the assigned API key; reply tokens are not accepted. Reusing a key with the same payload returns the original receipt, while changed payloads or in-flight sends return 409. Claims expire after 24 hours. A receipt means the platform accepted the message, not that someone read it. NyxID stores only routing metadata and never queues or automatically retries these messages.
+
+```bash
+nyxid channel-bot route update <ROUTE_ID> --allow-agent-initiated true
+nyxid channel-bot send --conversation <ROUTE_ID> --text 'Test notification'
+nyxid channel-bot route update <ROUTE_ID> --allow-agent-initiated false
+```
