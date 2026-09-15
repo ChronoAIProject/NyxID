@@ -5135,6 +5135,9 @@ pub enum OracleCommands {
         /// Model hint forwarded to the worker (defaults to the pool's)
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// ChatGPT Project URL for this prompt (overrides the pool default)
         #[arg(long)]
         project_url: Option<String>,
@@ -5501,6 +5504,9 @@ pub enum OraclePoolCommands {
         /// Default model hint recorded on tasks
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// Allow this pool to drive worker browsers to extract arbitrary URLs
         #[arg(long)]
         allow_extract: bool,
@@ -5552,6 +5558,9 @@ pub enum OraclePoolCommands {
         project_url: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// Enable or disable browser URL extraction for this pool
         #[arg(long, action = clap::ArgAction::Set)]
         allow_extract: Option<bool>,

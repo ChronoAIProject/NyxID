@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  PRE_SEND_ACTION_MS,
+  retryPresendModelRead,
+  usageCooldownConfig,
+  effortSelectionMismatch,
+  chooseSwitcherFamilyEntry,
   accountFingerprint,
   artifactBudgetDecision,
   artifactFileId,
@@ -537,7 +542,7 @@ test("model labels map to ChatGPT reasoning levels with Pro first", () => {
   assert.equal(modelLevelTargets("chatgpt-5.5-pro")[0], "Pro");
   assert.equal(modelLevelTargets("gpt-5.5-extended")[0], "Pro");
   assert.equal(modelLevelTargets("Pro 扩展")[0], "Pro");
-  assert.deepEqual(modelLevelTargets("chatgpt-6-pro"), ["Pro", "Pro Standard", "Pro 扩展", "扩展"]);
+  assert.deepEqual(modelLevelTargets("chatgpt-6-pro"), ["Pro", "Pro Extended", "Pro 扩展", "扩展"]);
   assert.deepEqual(modelLevelTargets("chatgpt-6-pro-extended"), ["Pro", "Pro Extended", "Pro 扩展", "扩展"]);
   assert.deepEqual(modelLevelTargets("Pro 扩展"), ["Pro", "Pro Extended", "Pro 扩展", "扩展"]);
   assert.equal(modelLevelTargets("extra high")[0], "Extra High");
@@ -629,13 +634,13 @@ test("nested entry choice prefers exact target, then fuzzy target, then a recogn
   const items = [{ text: "Instant", checked: true }, { text: "GPT-6 Pro" }, { text: "Pro" }];
   assert.equal(chooseNestedLevelEntry(items, targets), 2);
   assert.equal(chooseNestedLevelEntry(items.slice(0, 2), targets), 1);
-  assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets), 0);
+  assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets), -1);
   assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets, false), -1);
 });
 
-test("split Pro tiers choose Standard for a plain Pro label and Extended for an extended label", () => {
+test("split Pro tiers choose Extended by default and Standard only explicitly", () => {
   const tiers = [{ text: "Instant" }, { text: "Extra High" }, { text: "Pro Extended" }, { text: "Pro Standard" }];
-  assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("chatgpt-6-pro")), 3);
+  assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("chatgpt-6-pro")), 2);
   assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("chatgpt-6-pro-extended")), 2);
   assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("Pro 扩展")), 2);
   // A single "Pro" entry still wins exactly for both labels.
@@ -645,7 +650,7 @@ test("split Pro tiers choose Standard for a plain Pro label and Extended for an 
   // Only an Extended entry present: the plain label falls back to it fuzzily; never Instant.
   assert.equal(chooseNestedLevelEntry([{ text: "Instant" }, { text: "Pro Extended" }], modelLevelTargets("chatgpt-6-pro")), 1);
   for (const label of ["chatgpt-6-pro", "chatgpt-6-pro-extended"]) {
-    assert.equal(pillShowsLevel("GPT-6 Pro Standard", modelLevelTargets(label)), true, label);
+    assert.equal(pillShowsLevel("GPT-6 Pro Standard", modelLevelTargets(label)), false, label);
     assert.equal(pillShowsLevel("GPT-6 Pro Extended", modelLevelTargets(label)), true, label);
     assert.equal(modelSelectionDetail({ level: modelLevelTargets(label)[0], verified: true, reason: "selected" }), "selected=Pro");
   }
@@ -660,10 +665,10 @@ test("nested entry choice never picks an unchecked first item or a checked arbit
   assert.equal(chooseNestedLevelEntry([{ text: "Extra High" }], modelLevelTargets("high")), -1);
 });
 
-test("prompt result model reports only the observed pill, independently of verification", () => {
+test("prompt result retains the request; observations are separate canonical metadata", () => {
   for (const verified of [true, false]) {
-    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "GPT-6 Pro", verified }), "GPT-6 Pro");
-    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "自动", verified }), "自动");
+    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "GPT-6 Pro", verified }), "chatgpt-6-pro");
+    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "自动", verified }), "chatgpt-6-pro");
   }
   for (const model_selected of [undefined, null, ""]) {
     assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected, clicked: "Pro" }), "chatgpt-6-pro");
@@ -738,4 +743,210 @@ test("selection distinguishes the shared deadline from a shorter step timeout", 
   assert.equal(modelSelectionFailureReason(error, { deadline: 100, aborted: false }, 100), "timeout");
   assert.equal(modelSelectionFailureReason(error, { deadline: 100, aborted: true }, 50), "timeout");
   assert.equal(modelSelectionFailureReason({ code: "interaction_deadline" }, { deadline: 100, aborted: false }, 50), "interaction_deadline");
+});
+
+import { failureDetail, cooldownRemaining, classifyChatGptError, stableErrorCode,
+  switcherMetadata, switcherMatches, chooseSwitcherEntry, effortMetadata } from './worker.mjs';
+
+test('failure attribution is bounded metadata and classifies real crash messages', () => {
+  assert.equal(stableErrorCode(new Error('Target crashed')), 'page_crashed');
+  assert.equal(stableErrorCode(new Error('Page crashed')), 'page_crashed');
+  assert.equal(stableErrorCode(new Error('locator.waitFor: Timeout 60000ms exceeded')), 'operation_timeout');
+  assert.equal(failureDetail('composer_not_found', 'page_ready'), 'composer_not_found@page_ready');
+  assert.equal(failureDetail('page_crashed', 'waiting_response'), 'page_crashed@waiting_response');
+  for (const input of ['https://chatgpt.com/c/private', 'secret\nprompt', 'a'.repeat(65), 'Secret', 'cookie=value']) {
+    assert.equal(failureDetail(input, 'private url'), 'worker_error');
+  }
+  assert.equal(failureDetail('a'.repeat(64), 'b'.repeat(40)).length, 105);
+  assert.equal(failureDetail('ok', 'b'.repeat(41)), 'ok');
+});
+
+test('capacity cooldown is capped, durable-time based and expires', () => {
+  assert.equal(cooldownRemaining(901000, 1000), 900);
+  assert.equal(cooldownRemaining(1001, 1000), 1);
+  assert.equal(cooldownRemaining(null, 1000), 0);
+  assert.equal(cooldownRemaining(1000, 1001), 0);
+  assert.equal(cooldownRemaining(Infinity, 1), 86400);
+});
+
+test('UI error classification returns fixed content or capacity codes only', () => {
+  for (const text of ['Something went wrong', 'Network error', '发生错误']) assert.equal(classifyChatGptError(text), 'chatgpt_error_response');
+  for (const text of ["You've reached the limit for Pro", 'Usage limit reached', '已达到使用上限']) assert.equal(classifyChatGptError(text), 'usage_limit_reached');
+  assert.equal(classifyChatGptError('This model is unavailable'), 'model_unavailable');
+  assert.equal(classifyChatGptError('Regenerate'), null);
+  assert.equal(classifyChatGptError(''), null);
+});
+
+test('header target selection verifies family and tier, preferring exact known entries', () => {
+  assert.equal(switcherMetadata('GPT-6 Pro'), 'gpt_6_pro');
+  assert.equal(switcherMetadata('GPT-6 专业'), 'gpt_6_pro');
+  assert.equal(modelLevelTargets('专业')[0], 'Pro');
+  assert.equal(switcherMatches('GPT-6 专业', '专业'), true);
+  assert.equal(switcherMetadata('GPT-5 Pro'), 'gpt_5_pro');
+  assert.equal(switcherMetadata('GPT-6'), 'gpt_6');
+  for (const label of ['Try GPT-6 Pro', 'Profile', 'private label']) assert.equal(switcherMetadata(label), 'unrecognized');
+  assert.equal(switcherMetadata(null), 'absent');
+  assert.equal(switcherMatches('GPT-5 Pro', 'chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('GPT-6', 'chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('GPT-6 Pro', 'chatgpt-6-pro'), true);
+  assert.equal(switcherMatches('unknown', 'unknown'), false);
+  assert.equal(chooseSwitcherEntry([{text: 'GPT-6 Pro details'}, {text: 'GPT-6 Pro'}, {text: 'Delete'}], 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry([{text: 'GPT-5 Pro'}, {text: 'Delete'}], 'chatgpt-6-pro'), -1);
+  assert.equal(chooseSwitcherEntry([{text: 'ChatGPT-6 Pro details'}, {text: 'ChatGPT-6 Pro'}], 'chatgpt-6-pro'), 1);
+});
+
+test('effort observations are canonical and Standard is explicit', () => {
+  assert.equal(effortMetadata('GPT-6 Pro Extended'), 'pro_extended');
+  assert.equal(effortMetadata('Pro 扩展'), 'pro_extended');
+  assert.equal(effortMetadata('GPT-6 Pro Standard'), 'pro_standard');
+  assert.equal(effortMetadata('private label'), 'unrecognized');
+  assert.equal(effortMetadata('Extra High'), 'extra_high');
+  assert.equal(effortMetadata(null), 'absent');
+  const standard = modelLevelTargets('chatgpt-6-pro-standard');
+  assert.equal(chooseNestedLevelEntry([{text:'Pro Extended'}, {text:'Pro Standard'}], standard), 1);
+  assert.equal(pillShowsLevel('Pro Extended', standard), false);
+  assert.equal(pillShowsLevel('Pro Standard', standard), true);
+});
+
+test('an authenticated DOM-shape failure permits exactly one relaunch cycle', () => {
+  assert.deepEqual(taskRecoveryDecision({kind:'prompt', phase:'page_ready', failureCount:1, shapeFailures:1}), {action:'recover', forceRelaunch:true});
+  assert.deepEqual(taskRecoveryDecision({kind:'prompt', phase:'page_ready', failureCount:2, shapeFailures:2}), {action:'fail', code:'browser_recovery_exhausted'});
+  assert.equal(taskRecoveryDecision({kind:'prompt', phase:'send_attempted', failureCount:2, shapeFailures:2}).action, 'recover');
+});
+
+test('descriptions and account actions cannot masquerade as the requested Pro tier', () => {
+  for (const text of ['GPT-6 Instant\nUpgrade to Pro', 'GPT-6 Instant with Pro features']) {
+    assert.equal(switcherMatches(text, 'chatgpt-6-pro'), false);
+  }
+  for (const text of ['Upgrade to Pro', 'Pro plan', 'GPT-6 Instant\nPro capabilities']) {
+    assert.notEqual(detectPillLevel(text), 'Pro');
+    assert.equal(pillShowsLevel(text, modelLevelTargets('chatgpt-6-pro')), false);
+  }
+  assert.equal(switcherMatches('GPT-6 Pro', 'Pro 扩展'), true);
+  assert.equal(switcherMatches('GPT-5 Pro', 'Pro 扩展'), false);
+  assert.equal(switcherMatches('GPT-6 Pro', '扩展'), true);
+});
+
+test('split Pro preference ignores descriptions and refuses the lighter-only fallback', () => {
+  const target = modelLevelTargets('chatgpt-6-pro');
+  assert.equal(chooseNestedLevelEntry([{text:'Pro Standard'}, {text:'Pro Extended\nFor complex work'}, {text:'Pro'}], target), 1);
+  assert.equal(chooseNestedLevelEntry([{text:'Pro Standard', checked:true}], target), -1);
+});
+
+
+test('strict effort decisions require recognized evidence', () => {
+  const target = 'chatgpt-6-pro';
+  for (const observed of [null, 'Tools', '+', 'Pro']) {
+    assert.equal(effortSelectionMismatch({observed, verified:false}, target), false);
+  }
+  assert.equal(effortSelectionMismatch({observed:'High', verified:false}, target), true);
+  assert.equal(effortSelectionMismatch({observed:'Tools', verified:false, recognizedObservation:true}, target), true);
+  assert.equal(effortSelectionMismatch({observed:'Pro', verified:false, recognizedObservation:true}, target), false);
+  assert.equal(effortSelectionMismatch({observed:'Tools', verified:false, recognizedLevels:true}, target), true);
+  assert.equal(effortSelectionMismatch({observed:'Pro Extended', verified:true, recognizedLevels:true}, target), false);
+});
+
+test('generic GPT families compare a minor version only when both sides expose one', () => {
+  for (const [label, metadata] of [['GPT-6.1 Pro','gpt_6_1_pro'], ['ChatGPT 7 Pro','gpt_7_pro'], ['chatgpt-5.5-pro','gpt_5_5_pro']]) {
+    assert.equal(switcherMetadata(label), metadata);
+    assert.equal(switcherMatches(label, label), true);
+  }
+  assert.equal(switcherMatches('GPT-6.1 Pro','chatgpt-6-pro'), true);
+  assert.equal(switcherMatches('GPT-6 Pro','chatgpt-6.1-pro'), true);
+  assert.equal(switcherMatches('GPT-6.2 Pro','chatgpt-6.1-pro'), false);
+  assert.equal(switcherMatches('GPT-60 Pro','chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('Try GPT-6 Pro','chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('GPT-6 Instant','chatgpt-6-pro', true), true);
+  assert.equal(switcherMetadata('GPT-1000 Pro'), 'unrecognized');
+});
+
+test('tier-only and family submenu entries require recognized family context and exact first lines', () => {
+  const items = ['Auto', 'Instant', 'Thinking', 'Pro\nFor complex work'].map(text => ({text}));
+  assert.equal(chooseSwitcherEntry(items, 'chatgpt-6-pro', 'GPT-6'), 3);
+  assert.equal(chooseSwitcherEntry(items, 'chatgpt-6-pro', 'GPT-5 Pro'), -1);
+  assert.equal(chooseSwitcherEntry([{text:'专业'}], 'chatgpt-6-pro', 'GPT-6'), 0);
+  assert.equal(chooseSwitcherEntry([{text:'Upgrade to Pro'}], 'chatgpt-6-pro', 'GPT-6 Instant'), -1);
+  const families = ['Legacy models','Try GPT-6','GPT-60','GPT-6\nMore choices'].map(text => ({text}));
+  assert.equal(chooseSwitcherFamilyEntry(families, 'chatgpt-6-pro'), 3);
+  assert.equal(chooseSwitcherFamilyEntry([{text:'GPT-6 Pro'}], 'chatgpt-6-pro'), -1);
+});
+
+test('effort tokens recognize separators without accepting prose', () => {
+  for (const label of ['Pro · Extended', 'Thinking: Pro', 'Pro (Extended)', '专业 · 扩展', 'Pro — Extended', 'Pro|Extended', 'Pro/Extended', 'Pro-Extended']) {
+    assert.equal(detectPillLevel(label), 'Pro', label);
+    assert.equal(effortMetadata(label), label === 'Thinking: Pro' ? 'pro' : 'pro_extended', label);
+    assert.equal(chooseNestedLevelEntry([{text:'Pro Standard'}, {text:label}], modelLevelTargets('chatgpt-6-pro')), 1, label);
+    if (label !== 'Thinking: Pro') assert.equal(chooseNestedLevelEntry([{text:'Pro'}, {text:label}], modelLevelTargets('chatgpt-6-pro')), 1, label);
+  }
+  for (const label of ['Upgrade to Pro', 'Pro capabilities', 'Pro plan', 'Profile', 'propro']) {
+    assert.equal(detectPillLevel(label), null, label);
+    assert.equal(effortMetadata(label), 'unrecognized', label);
+  }
+});
+
+test('cooldown parsing defaults explicitly for invalid and below-minimum values', () => {
+  assert.deepEqual(usageCooldownConfig(undefined), {milliseconds:900000, invalid:false});
+  for (const value of ['0', '-1', '', 'invalid', 'NaN', 'Infinity', '0.5']) {
+    assert.deepEqual(usageCooldownConfig(value), {milliseconds:900000, invalid:true});
+  }
+  assert.deepEqual(usageCooldownConfig('1'), {milliseconds:1000, invalid:false});
+  assert.deepEqual(usageCooldownConfig('60'), {milliseconds:60000, invalid:false});
+  assert.deepEqual(usageCooldownConfig('100000'), {milliseconds:86400000, invalid:false});
+});
+
+
+test('pre-send read-back retries transient errors at most three times', async () => {
+  let attempts = 0;
+  const observed = {header: {metadata:'gpt_6_pro'}, pill: {observed:'Pro'}};
+  const result = await retryPresendModelRead(async () => {
+    if (++attempts < 3) throw Object.assign(new Error('read deadline'), {code:'interaction_deadline'});
+    return observed;
+  });
+  assert.equal(result, observed);
+  assert.equal(attempts, 3);
+  attempts = 0;
+  assert.equal(await retryPresendModelRead(async () => { attempts += 1; throw new TypeError('unreadable'); }), null);
+  assert.equal(attempts, 3);
+});
+
+test('pre-send read-back rethrows crashes and disconnects without retrying', async () => {
+  for (const code of ['page_crashed', 'cdp_disconnected']) {
+    let attempts = 0;
+    const error = Object.assign(new Error(code), {code});
+    await assert.rejects(retryPresendModelRead(async () => { attempts += 1; throw error; }), e => e === error);
+    assert.equal(attempts, 1);
+  }
+});
+
+test('pre-send read-back shares PRE_SEND_ACTION_MS across retries and rejects late results', async t => {
+  t.mock.timers.enable({apis:['Date', 'setTimeout'], now:10000});
+  let attempts = 0;
+  let settled = false;
+  const budgets = [];
+  const pending = retryPresendModelRead(budget => {
+    budgets.push(budget);
+    const attempt = ++attempts;
+    return new Promise((resolve, reject) => setTimeout(() => {
+      if (attempt < 3) reject(Object.assign(new Error('read deadline'), {code:'interaction_deadline'}));
+      else resolve('late observations');
+    }, 1800));
+  });
+  pending.then(() => { settled = true; });
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  for (let i = 0; i < 2; i += 1) {
+    t.mock.timers.tick(1800);
+    await flush();
+  }
+  assert.equal(attempts, 3);
+  assert.ok(budgets.every(b => b === budgets[0] && b.deadline === 10000 + PRE_SEND_ACTION_MS));
+  t.mock.timers.tick(PRE_SEND_ACTION_MS - 3600 - 1);
+  await flush();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  assert.equal(await pending, null);
+  assert.equal(Date.now(), 10000 + PRE_SEND_ACTION_MS);
+  assert.equal(budgets[0].controller.signal.aborted, true);
+  t.mock.timers.tick(PRE_SEND_ACTION_MS);
+  await flush();
+  assert.equal(attempts, 3);
 });

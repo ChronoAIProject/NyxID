@@ -90,6 +90,7 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 
     backfill_downstream_service_types(&db).await?;
     migrate_legacy_api_spec_url(&db).await?;
+    crate::services::oracle_pool_service::migrate_legacy_default_model_label(&db).await?;
     migrate_remove_org_scoped_feature_flag_overrides(&db).await?;
     backfill_onboarding_state(&db).await?;
 
