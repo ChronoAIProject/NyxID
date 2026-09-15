@@ -54,3 +54,12 @@ export const telegramNewBeginSchema = z.object({
 });
 
 export type TelegramNewRequest = z.infer<typeof telegramNewRequestSchema>;
+
+export const telegramClaimCodeSchema = z.string().max(64)
+  .transform((value) => value.replace(/[-\s]/g, "").toUpperCase())
+  .pipe(z.string().regex(/^[A-HJ-NP-Z2-9]{20}$/, "Enter the claim code from your private Telegram setup chat"));
+
+export const telegramClaimPreviewSchema = z.object({
+  bot_username: z.string(),
+  expires_at: z.string().datetime({ offset: true }),
+});

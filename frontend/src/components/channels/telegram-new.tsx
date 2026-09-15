@@ -168,7 +168,18 @@ export function TelegramNew({
   return (
     <div className="space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5">
       {error && <ErrorBanner message={error.message} />}
-      <ol aria-label="Telegram setup steps" className="space-y-4">
+      {(connecting && request?.auto_connect) || connected ? (
+        <div className="space-y-3">
+          <p role="status" className="flex items-center gap-2 text-sm">
+            {connected ? <Check className="size-3 text-success" /> : <Loader2 className="size-3 animate-spin" />}
+            {connected ? `@${request?.bot_username} is connected.` : `Connecting @${request?.bot_username}…`}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            You can close this page. NyxID will finish connecting your bot and send a message in the Telegram setup chat.
+          </p>
+          {request?.connection_error && <p role="status" className="text-xs text-muted-foreground">{request.connection_error}</p>}
+        </div>
+      ) : <ol aria-label="Telegram setup steps" className="space-y-4">
         <li className="flex gap-3">
           <span
             className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-xs"
@@ -254,7 +265,7 @@ export function TelegramNew({
             )}
           </div>
         </li>
-      </ol>
+      </ol>}
       {request && !request.auto_connect && !terminal && (
         <div className="space-y-2 rounded-lg border border-border p-3 text-xs">
           <p>

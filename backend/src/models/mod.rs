@@ -89,6 +89,7 @@ pub mod service_provider_requirement;
 pub mod session;
 pub mod ssh_auth_mode;
 pub mod startup_diagnostic;
+pub mod telegram_bot_claim;
 pub mod telegram_bot_request;
 pub mod telemetry_erasure_job;
 pub mod trigger;

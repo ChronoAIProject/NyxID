@@ -7833,6 +7833,8 @@ Routes below are relative to `/api/v1`. Creation routes require an authenticated
 | GET | `/channel-bots/telegram-new/requests/{id}` | Read the saved request |
 | POST | `/channel-bots/telegram-new/requests/{id}/launch` | Issue a fresh Telegram launch link |
 | DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning begins |
+| POST | `/channel-bots/telegram-new/claims/preview` | Human-only, non-mutating preview of `{code}`; returns `{bot_username, expires_at}` without provider calls |
+| POST | `/channel-bots/telegram-new/claims/redeem` | Human-only `{code, label, target_org_id?}`; atomically save the claim destination and return HTTP 202 with the connection request; worker completes setup |
 | POST | `/channel-bots/telegram-new/requests/{id}/connect` | Legacy completion: confirm `{telegram_bot_id, revision}` and connect or retry |
 | POST | `/webhooks/channel/telegram-new/manager` | Receive updates authenticated by the configured manager webhook secret |
 

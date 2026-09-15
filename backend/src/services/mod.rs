@@ -136,6 +136,7 @@ pub mod sse_parser;
 pub mod ssh_service;
 pub mod telegram_new_admin;
 pub mod telegram_new_api;
+pub mod telegram_new_claims;
 pub mod telegram_new_connect;
 pub mod telegram_new_service;
 #[cfg(test)]

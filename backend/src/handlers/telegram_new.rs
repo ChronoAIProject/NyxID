@@ -5,6 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
 };
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::models::telegram_bot_request::{TelegramBotRequest, TelegramRequestStatus as Status};
 use crate::services::{
@@ -39,14 +40,13 @@ fn human(auth: &AuthUser) -> AppResult<String> {
 }
 
 async fn limit(state: &AppState, actor: &str) -> AppResult<()> {
-    if !crate::mw::rate_limit::PerKeyRateLimiter::with_db(
-        state.db.clone(),
-        "telegram_new_creation",
-        5,
-        60,
-    )
-    .check_shared(actor)
-    .await?
+    limit_bucket(state, actor, "telegram_new_creation", 5).await
+}
+
+async fn limit_bucket(state: &AppState, actor: &str, bucket: &str, requests: u32) -> AppResult<()> {
+    if !crate::mw::rate_limit::PerKeyRateLimiter::with_db(state.db.clone(), bucket, requests, 60)
+        .check_shared(actor)
+        .await?
     {
         return Err(AppError::RateLimited);
     }
@@ -136,6 +136,63 @@ pub struct ConfirmRequest {
 pub struct LaunchResponse {
     pub request: RequestResponse,
     pub launch_url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimCodeRequest {
+    pub code: Zeroizing<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedeemClaimRequest {
+    pub code: Zeroizing<String>,
+    pub label: String,
+    pub target_org_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ClaimPreviewResponse {
+    pub bot_username: String,
+    pub expires_at: String,
+}
+
+pub async fn preview_claim(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<ClaimCodeRequest>,
+) -> AppResult<(HeaderMap, Json<ClaimPreviewResponse>)> {
+    let actor = human(&auth)?;
+    limit_bucket(&state, &actor, "telegram_new_claim_preview", 30).await?;
+    let claim = service(&state).preview_claim(&actor, &body.code).await?;
+    Ok((
+        private_headers(),
+        Json(ClaimPreviewResponse {
+            bot_username: claim.bot_username,
+            expires_at: claim.expires_at.to_rfc3339(),
+        }),
+    ))
+}
+
+pub async fn redeem_claim(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<RedeemClaimRequest>,
+) -> AppResult<(StatusCode, HeaderMap, Json<RequestResponse>)> {
+    let actor = human(&auth)?;
+    limit(&state, &actor).await?;
+    let owner =
+        super::channel_bots::resolve_create_owner(&state, &actor, body.target_org_id.as_deref())
+            .await?;
+    let request = service(&state)
+        .redeem_claim(&actor, &owner, &body.code, &body.label)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        private_headers(),
+        Json(request.into()),
+    ))
 }
 
 pub async fn configuration(

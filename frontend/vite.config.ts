@@ -9,6 +9,20 @@ import { allDocPages } from "./src/features/docs/manifest"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 
+// Match the production document header before Vite injects its asset requests.
+function telegramClaimReferrer(): Plugin {
+  return {
+    name: "telegram-claim-referrer",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (new URL(req.url ?? "/", "http://localhost").searchParams.has("claim"))
+          res.setHeader("Referrer-Policy", "no-referrer")
+        next()
+      })
+    },
+  }
+}
+
 // Backend CSRF middleware compares the request Origin against FRONTEND_URL.
 // When multiple worktrees run in parallel, Vite may pick a port other than
 // 3000 and the real Origin won't match — logout (and any other unsafe
@@ -226,7 +240,7 @@ function docsSync(): Plugin {
 const BUILD_ID = process.env.SOURCE_COMMIT || Date.now().toString(36)
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), docsSync()],
+  plugins: [telegramClaimReferrer(), react(), tailwindcss(), docsSync()],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
   },

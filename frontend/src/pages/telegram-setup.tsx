@@ -100,8 +100,8 @@ export function TelegramSetupPage() {
         Back to Channel Bots
       </Button>
       <PageHeader
-        title="Create a Telegram bot"
-        description="Continue in Telegram and create your bot. NyxID completes the connection automatically."
+        title={request && ["ready", "provisioning", "connected"].includes(request.status) ? "Connecting your Telegram bot" : "Create a Telegram bot"}
+        description={request && ["ready", "provisioning", "connected"].includes(request.status) ? "Your bot and destination are saved. NyxID is completing the connection." : "Continue in Telegram and create your bot. NyxID completes the connection automatically."}
       />
       <div className="space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5">
         <div className="space-y-2">
@@ -134,7 +134,9 @@ export function TelegramSetupPage() {
           />
           <p className="text-xs text-muted-foreground">
             {request
-              ? "These details are saved. To change them, choose Cancel setup below."
+              ? request.status === "provisioning" || request.status === "connected"
+                ? "These details are saved. You can manage the bot once it is connected."
+                : "These details are saved. To change them, choose Cancel setup below."
               : "Choose where the bot will appear in NyxID: your personal account or an organization you manage."}
           </p>
         </div>

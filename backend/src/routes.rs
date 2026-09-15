@@ -1829,6 +1829,14 @@ fn build_router_internal(
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .route(
+            "/channel-bots/telegram-new/claims/preview",
+            post(handlers::telegram_new::preview_claim),
+        )
+        .route(
+            "/channel-bots/telegram-new/claims/redeem",
+            post(handlers::telegram_new::redeem_claim),
+        )
+        .route(
             "/channel-bots/telegram-new",
             get(handlers::telegram_new::configuration).post(handlers::telegram_new::begin),
         )
