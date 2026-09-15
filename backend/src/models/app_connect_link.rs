@@ -30,6 +30,46 @@ pub struct AppConnectLink {
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub completed_at: Option<DateTime<Utc>>,
     pub failure_reason: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub webhook_event_reserved_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub webhook_event_id: Option<String>,
+    #[serde(default)]
+    pub webhook_event_status: Option<crate::models::connect_link::ConnectLinkWebhookStatus>,
+    #[serde(default)]
+    pub webhook_event_attempts: u32,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub webhook_event_delivered_at: Option<DateTime<Utc>>,
+    /// Safe metadata frozen at reservation; retries never reload mutable service slugs.
+    #[serde(default)]
+    pub webhook_event_data: Option<AppConnectWebhookData>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppConnectWebhookData {
+    pub user_id: String,
+    pub app_connect_link_id: String,
+    pub origin: AppConnectWebhookOrigin,
+    pub requirements_version: u32,
+    pub status: AppConnectStatus,
+    pub failure_reason: Option<String>,
+    pub grant_update_required: bool,
+    pub items: Vec<AppConnectWebhookItem>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppConnectWebhookOrigin {
+    App,
+    Authorize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppConnectWebhookItem {
+    pub requirement_id: String,
+    pub state: ItemState,
+    pub user_service_id: Option<String>,
+    pub slug: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

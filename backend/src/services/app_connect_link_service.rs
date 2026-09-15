@@ -177,6 +177,12 @@ async fn start_session(
         expires_at: now + Duration::minutes(30),
         completed_at: None,
         failure_reason: None,
+        webhook_event_reserved_at: None,
+        webhook_event_id: None,
+        webhook_event_status: None,
+        webhook_event_attempts: 0,
+        webhook_event_delivered_at: None,
+        webhook_event_data: None,
     };
     state
         .db
@@ -203,7 +209,7 @@ pub async fn load(state: &AppState, id: &str, subject: &str) -> AppResult<AppCon
         .ok_or(AppError::AppConnectLinkNotFound)?;
     enabled_client(state, &link.oauth_client_id).await?;
     if is_open(link.status) && link.expires_at <= Utc::now() {
-        expire(&state.db, id).await?;
+        expire(state, id).await?;
         link = state
             .db
             .collection::<AppConnectLink>(COLLECTION_NAME)
@@ -343,6 +349,12 @@ async fn persist(state: &AppState, link: &AppConnectLink) -> AppResult<bool> {
             "completed_at": link.completed_at.map(bson::DateTime::from_chrono), "failure_reason": &link.failure_reason },
             "$inc": { "revision": 1 } },
     ).await?;
+    if result.modified_count == 1
+        && super::app_connect_webhook_service::terminal_event_type(link.status).is_some()
+    {
+        super::app_connect_webhook_service::dispatch_terminal_webhook_if_needed(state, &link.id)
+            .await;
+    }
     Ok(result.modified_count == 1)
 }
 
@@ -1032,18 +1044,21 @@ async fn cancel_pending_children(db: &mongodb::Database, parent_id: &str, child_
     }
 }
 
-async fn expire(db: &mongodb::Database, id: &str) -> AppResult<()> {
+async fn expire(state: &AppState, id: &str) -> AppResult<()> {
+    let db = &state.db;
     let result = db.collection::<AppConnectLink>(COLLECTION_NAME).update_one(
         doc! { "_id": id, "status": { "$in": ["in_progress", "ready_for_consent"] }, "expires_at": { "$lte": bson::DateTime::now() } },
         doc! { "$set": { "status": "expired", "completed_at": bson::DateTime::now(), "items.$[].attempt_id": null }, "$inc": { "revision": 1 } },
     ).await?;
     if result.modified_count == 1 {
         cancel_pending_children(db, id, None).await;
+        super::app_connect_webhook_service::dispatch_terminal_webhook_if_needed(state, id).await;
     }
     Ok(())
 }
 
-pub async fn expire_sessions(db: &mongodb::Database) -> AppResult<()> {
+pub async fn expire_sessions(state: &AppState) -> AppResult<()> {
+    let db = &state.db;
     let mut due = db
         .collection::<AppConnectLink>(COLLECTION_NAME)
         .find(
@@ -1052,8 +1067,9 @@ pub async fn expire_sessions(db: &mongodb::Database) -> AppResult<()> {
         )
         .await?;
     while let Some(link) = due.try_next().await? {
-        expire(db, &link.id).await?;
+        expire(state, &link.id).await?;
     }
+    super::app_connect_webhook_service::redispatch_terminal_webhooks(state).await?;
     Ok(())
 }
 

@@ -1037,6 +1037,7 @@ async fn main() {
     // stopped polling. Disabled when the interval is 0.
     if config.connect_link_expiry_sweep_interval_secs > 0 {
         let connect_link_expiry_db = state.db.clone();
+        let app_link_expiry_state = state.clone();
         let connect_link_expiry_dispatcher = state.developer_webhook_dispatcher.clone();
         let connect_link_expiry_interval = config.connect_link_expiry_sweep_interval_secs;
         tokio::spawn(async move {
@@ -1046,7 +1047,7 @@ async fn main() {
             loop {
                 interval.tick().await;
                 if let Err(error) =
-                    services::app_connect_link_service::expire_sessions(&connect_link_expiry_db)
+                    services::app_connect_link_service::expire_sessions(&app_link_expiry_state)
                         .await
                 {
                     tracing::error!(%error, "failed to expire app connect links");

@@ -4572,6 +4572,14 @@ pub(crate) async fn ensure_app_connect_link_indexes(
                 .build(),
         )
         .await?;
+    links
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "webhook_event_status": 1,
+                "webhook_event_reserved_at": 1, "webhook_event_attempts": 1 })
+                .build(),
+        )
+        .await?;
     db.collection::<Document>(CONNECT_LINKS)
         .create_index(
             IndexModel::builder()

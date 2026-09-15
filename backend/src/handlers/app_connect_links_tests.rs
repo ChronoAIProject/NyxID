@@ -646,7 +646,7 @@ async fn app_connect_links_db_expiry_and_ttl_extensions_are_bounded() {
     assert_eq!(once.expires_at, twice.expires_at);
     assert!(twice.expires_at <= twice.created_at + chrono::Duration::hours(2));
     f.state.db.collection::<Document>(LINKS).update_one(doc! {"_id":&link.id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
-    links::expire_sessions(&f.state.db).await.unwrap();
+    links::expire_sessions(&f.state).await.unwrap();
     assert_eq!(
         links::load(&f.state, &link.id, &link.user_id)
             .await
@@ -1168,7 +1168,7 @@ async fn app_connect_links_db_parent_cancel_and_expiry_cancel_pending_children()
                 )
                 .await
                 .unwrap();
-            links::expire_sessions(&f.state.db).await.unwrap();
+            links::expire_sessions(&f.state).await.unwrap();
         } else {
             links::cancel(&f.state, &link.id, &link.user_id)
                 .await

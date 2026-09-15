@@ -11,6 +11,7 @@ pub mod api_key_validation;
 pub mod app_connect_authorize_service;
 pub mod app_connect_link_service;
 pub mod app_connect_rollout;
+pub mod app_connect_webhook_service;
 pub mod app_requirement_manifest_service;
 pub mod app_requirements_service;
 pub mod approval_policy;

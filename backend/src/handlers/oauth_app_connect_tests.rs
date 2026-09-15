@@ -460,7 +460,7 @@ async fn app_connect_authorize_db_denial_and_expiry_keep_original_callback_and_s
     assert_eq!(count(&f, CODES).await, 0);
     let expired = session(&f, &params(&f)).await;
     f.state.db.collection::<Document>(LINKS).update_one(doc! { "_id": &expired.id },doc! { "$set": { "expires_at": bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1)) } }).await.unwrap();
-    app_links::expire_sessions(&f.state.db).await.unwrap();
+    app_links::expire_sessions(&f.state).await.unwrap();
     let expired = app_links::load(&f.state, &expired.id, &expired.user_id)
         .await
         .unwrap();
@@ -1330,3 +1330,6 @@ async fn app_connect_authorize_db_api_mode_returns_checklist_consent_handoff() {
 
 #[path = "oauth_branding_tests.rs"]
 mod branding_tests;
+
+#[path = "oauth_app_connect_webhook_tests.rs"]
+mod webhook_tests;

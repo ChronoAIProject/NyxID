@@ -189,11 +189,13 @@ pub async fn recheck_authority(state: &AppState, link: &AppConnectLink) -> AppRe
 }
 
 pub async fn complete_with_code(
-    db: &mongodb::Database,
+    state: &AppState,
     link: &AppConnectLink,
     consent: &Consent,
     code: &AuthorizationCode,
 ) -> AppResult<()> {
+    let db = &state.db;
+    let link_id = link.id.clone();
     let tx_db = db.clone();
     let link = link.clone();
     let consent = consent.clone();
@@ -221,5 +223,7 @@ pub async fn complete_with_code(
             Ok(())
         }.await;
         super::api_key_mutation_service::transaction_result(operation)
-    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+    }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
+    super::app_connect_webhook_service::dispatch_terminal_webhook_if_needed(state, &link_id).await;
+    Ok(())
 }

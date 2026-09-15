@@ -3377,7 +3377,18 @@ Content-Type: application/json
 - `POST /api/v1/developer/oauth-clients/{client_id}/connection-webhook/rotate-secret` rotates and returns a new secret plus its non-secret `key_id`.
 - `DELETE /api/v1/developer/oauth-clients/{client_id}/connection-webhook` disables delivery and removes the stored encrypted secret.
 
-Events are `connect_link.completed`, `connect_link.cancelled`, `connect_link.expired`, and `connection.expired`. Only links created by the app produce connect-link events. Connection expiry routes through the `source_app_id` recorded when that link provisions its service.
+| Event | When it is emitted |
+| --- | --- |
+| `connect_link.completed` | An app-created single-service link completes. |
+| `connect_link.cancelled` | An app-created single-service link is cancelled. |
+| `connect_link.expired` | An app-created single-service link expires. |
+| `app_connect_link.completed` | A repair session completes, or an authorize session commits consent and code issuance. |
+| `app_connect_link.cancelled` | Either origin is cancelled, including consent denial. |
+| `app_connect_link.expired` | Either origin expires, including browser abandonment. |
+| `app_connect_link.failed` | Either origin reaches a terminal failure. |
+| `connection.expired` | A connection expires; recipient comes from the service's `source_app_id`. |
+
+App Connect Link events go only to that session's app while its rollout and capability are enabled. `ReadyForConsent` emits nothing. Disabling rollout suppresses and abandons pending events; re-enabling does not replay suppressed events.
 
 Abandoned app-bound links are expired by a background sweep, so `connect_link.expired` delivery does not require the app to poll or revisit the hosted page.
 
@@ -8137,7 +8148,29 @@ leave the previous item state and evidence intact. Cancelling or expiring a
 parent also cancels its pending child links. Starting over replaces an item's
 child link and cancels the previous pending child.
 
-Gate manifests enforce the authorize flow described above. No App Connect Link webhooks are emitted.
+Gate manifests enforce the authorize flow described above. Both origins emit terminal events through the app's existing `connection_webhook_url`, using the [connection webhook signing and delivery contract](#connection-lifecycle-webhooks). The envelope's `data` is:
+
+```json
+{
+  "user_id": "person-uuid",
+  "app_connect_link_id": "session-uuid",
+  "origin": "app",
+  "requirements_version": 1,
+  "status": "completed",
+  "failure_reason": null,
+  "grant_update_required": true,
+  "items": [{
+    "requirement_id": "source_code",
+    "state": "met",
+    "user_service_id": "service-uuid",
+    "slug": "personal-github"
+  }]
+}
+```
+
+`origin` is `app` or `authorize`; callbacks, capabilities, and authorize parameters are never included. Missing selections and unavailable stored slugs are `null`. Items are the terminal session's selections, and payload metadata is frozen at event reservation. Authorize completion emits only after the transaction that issues the code and commits consent; `ReadyForConsent` is non-terminal and emits nothing.
+
+The existing expiry sweep expires abandoned sessions and recovers terminal transitions whose process stopped before reservation. It redispatches stale reservations after 120 seconds, reusing the event ID and frozen payload, up to five delivery cycles, then abandons them with a metadata-only audit. Each cycle uses the shared per-app rate limit and up to three HTTP attempts. Delivery is bounded and may be duplicated or exhausted: deduplicate `event_id` and reconcile with the app-bound session read. Expiry needs no browser; browser callbacks remain separate. These events are terminal notifications, not readiness subscriptions; `connection.expired` gains no `requirement_id`.
 
 App owners can update text with
 `PATCH /api/v1/developer/oauth-clients/{client_id}/handoff`, body

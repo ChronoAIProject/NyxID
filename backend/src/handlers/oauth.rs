@@ -2172,7 +2172,7 @@ async fn issue_authorization_code(
 
     if let Some(link) = &bound {
         app_gate::recheck_authority(state, link).await?;
-        app_gate::complete_with_code(&state.db, link, consent, &code_record).await?;
+        app_gate::complete_with_code(state, link, consent, &code_record).await?;
     } else {
         oauth_service::store_authorization_code(&state.db, &code_record).await?;
     }
