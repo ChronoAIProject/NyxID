@@ -3,6 +3,7 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
 import { TelegramSetupPage } from "@/pages/telegram-setup";
+import { TelegramClaimPage } from "@/pages/telegram-claim";
 import { useTelegramNewConfiguration } from "@/hooks/use-telegram-new";
 import { useWatch } from "react-hook-form";
 import { useAppForm } from "@/components/ui/form";
@@ -1085,6 +1086,8 @@ function ChannelBotsList() {
 }
 
 export function ChannelBotsPage() {
-  const search = useSearch({ strict: false }) as { connect?: ChannelPlatform };
-  return search.connect === "telegram-new" ? <TelegramSetupPage /> : <ChannelBotsList />;
+  const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; claim_entry?: boolean };
+  return search.connect === "telegram-new"
+    ? search.claim_entry ? <TelegramClaimPage /> : <TelegramSetupPage />
+    : <ChannelBotsList />;
 }

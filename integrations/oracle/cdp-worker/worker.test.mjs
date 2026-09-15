@@ -746,7 +746,7 @@ test("selection distinguishes the shared deadline from a shorter step timeout", 
 });
 
 import { failureDetail, cooldownRemaining, classifyChatGptError, stableErrorCode,
-  switcherMetadata, switcherMatches, chooseSwitcherEntry, effortMetadata } from './worker.mjs';
+  switcherMetadata, switcherMatches, compactModelLabel, chooseSwitcherEntry, effortMetadata } from './worker.mjs';
 
 test('failure attribution is bounded metadata and classifies real crash messages', () => {
   assert.equal(stableErrorCode(new Error('Target crashed')), 'page_crashed');
@@ -793,6 +793,53 @@ test('header target selection verifies family and tier, preferring exact known e
   assert.equal(chooseSwitcherEntry([{text: 'GPT-6 Pro details'}, {text: 'GPT-6 Pro'}, {text: 'Delete'}], 'chatgpt-6-pro'), 1);
   assert.equal(chooseSwitcherEntry([{text: 'GPT-5 Pro'}, {text: 'Delete'}], 'chatgpt-6-pro'), -1);
   assert.equal(chooseSwitcherEntry([{text: 'ChatGPT-6 Pro details'}, {text: 'ChatGPT-6 Pro'}], 'chatgpt-6-pro'), 1);
+});
+
+test('compact numeric labels require adaptation for model matching and never imply effort', () => {
+  for (const label of ['6\nPro', '5.5 Pro', 'Pro', '6\nPro\nFor complex work']) {
+    assert.equal(switcherMetadata(label), 'unrecognized');
+    assert.equal(switcherMatches(label, 'chatgpt-6-pro'), false);
+  }
+  assert.equal(effortMetadata('6\nPro'), 'unrecognized');
+  assert.equal(effortMetadata('GPT 6 Pro'), 'pro');
+  assert.equal(chooseSwitcherEntry([{ text: '6\nPro' }], 'chatgpt-6-pro'), 0);
+  for (const label of ['6\nPro', '6\n专业', '6\nThinking', '6\n思考']) {
+    assert.equal(effortMetadata(label), 'unrecognized', label);
+  }
+});
+
+test('compact model labels accept only whole numeric family and known tier labels', () => {
+  for (const tier of ['Pro', '专业', 'Auto', 'Instant', 'Thinking', 'Medium', 'High', 'Extra High', '自动', '极速', '思考', '均衡', '高级', '超高']) {
+    const label = `6\n${tier}`;
+    const adapted = compactModelLabel(label);
+    assert.equal(adapted, `GPT 6 ${tier}`);
+    assert.equal(switcherMetadata(adapted), ['Pro', '专业'].includes(tier) ? 'gpt_6_pro' : 'gpt_6');
+    assert.equal(effortMetadata(label), 'unrecognized');
+  }
+  assert.equal(compactModelLabel(' 5.5\n pRo '), 'GPT 5.5 pRo');
+  assert.equal(compactModelLabel('6\nExtra  High'), 'GPT 6 Extra High');
+  assert.equal(compactModelLabel('999.999 Pro'), 'GPT 999.999 Pro');
+  for (const label of [null, '', 'Pro', '专业', '6', '1000 Pro', '6.1000 Pro', '6.1.2 Pro', '6_1 Pro', '6Pro',
+    '6\nPro\nFor complex work', '6 Pro plan', 'Try 6 Pro', '6\nPro Extended', '6\nPro Standard', '6\n扩展', '6\nTools']) {
+    assert.equal(compactModelLabel(label), null, label);
+    assert.equal(chooseSwitcherEntry([{ text: label }], 'chatgpt-6-pro'), -1, label);
+  }
+});
+
+test('compact picker entries share family and tier matching with exact entries preferred', () => {
+  const items = labels => labels.map(text => ({ text }));
+  assert.equal(chooseSwitcherEntry(items(['5.5\nPro', '6\nPro']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6\nThinking', '6\n专业']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6\nPro', '6\nThinking']), 'chatgpt-6-thinking'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6.2\nPro', '6.1\nPro']), 'chatgpt-6.1-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6.1\nPro', '6\nPro']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['GPT-6 Pro\nFor complex work', '6\nPro']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6.1\nPro', 'GPT-6 Pro']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['60\nPro', '6\nInstant']), 'chatgpt-6-pro'), -1);
+  assert.equal(chooseSwitcherEntry(items(['Pro']), 'chatgpt-6-pro', compactModelLabel('6\nThinking')), 0);
+  assert.equal(chooseSwitcherEntry(items(['专业']), 'chatgpt-6-pro', compactModelLabel('6\n思考')), 0);
+  assert.equal(chooseSwitcherEntry(items(['Pro']), 'chatgpt-6-pro', compactModelLabel('5.5\nThinking')), -1);
+  assert.equal(chooseSwitcherFamilyEntry(items(['6', '6\nPro', '6\nThinking']), 'chatgpt-6-pro'), -1);
 });
 
 test('effort observations are canonical and Standard is explicit', () => {

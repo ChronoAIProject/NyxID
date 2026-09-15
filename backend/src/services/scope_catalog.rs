@@ -127,6 +127,23 @@ pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
             "read:packages",
             "write:packages",
         ]),
+        // Shared X app supports posting, DMs and common reads. Moderation,
+        // social-graph mutations (follows/likes/lists/bookmarks), block/mute
+        // scopes and Spaces access stay BYO to limit shared-app authority.
+        // New upstream scopes are default-denied until explicitly reviewed.
+        "twitter" => Some(&[
+            "tweet.read",
+            "tweet.write",
+            "users.read",
+            "offline.access",
+            "media.write",
+            "dm.read",
+            "dm.write",
+            "like.read",
+            "follows.read",
+            "bookmark.read",
+            "list.read",
+        ]),
         _ => None,
     }
 }
@@ -1139,8 +1156,28 @@ mod tests {
     }
 
     #[test]
+    fn twitter_platform_allowlist_excludes_moderation_and_social_mutations() {
+        let allowed = platform_scope_allowlist("twitter").unwrap();
+        for scope in [
+            "tweet.moderate.write",
+            "follows.write",
+            "like.write",
+            "list.write",
+            "bookmark.write",
+            "block.read",
+            "block.write",
+            "mute.read",
+            "mute.write",
+            "space.read",
+            "future.scope",
+        ] {
+            assert!(!allowed.contains(&scope), "{scope} must use BYO");
+        }
+    }
+
+    #[test]
     fn platform_allowlist_absent_for_uncurated_providers() {
-        for slug in ["twitter", "slack", "discord", "openai-codex", "lark"] {
+        for slug in ["slack", "discord", "openai-codex", "lark"] {
             assert!(
                 platform_scope_allowlist(slug).is_none(),
                 "{slug} has no platform allowlist and must not be enforced"

@@ -71,7 +71,9 @@ impl BillingRouteContext {
             service_billing.filter(|b| b.byok_pricing.is_some() || b.platform_key_pricing.is_some())
         {
             let lane = match credential_class {
-                CredentialClass::UserOwned
+                // Shared-app OAuth tokens retain their existing user-token price lane.
+                CredentialClass::NyxidPlatformOauthApp
+                | CredentialClass::UserOwned
                 | CredentialClass::AgentOverrideUserOwned
                 | CredentialClass::NodeManaged => billing.byok_pricing.as_ref(),
                 CredentialClass::NyxidManagedMaster => billing.platform_key_pricing.as_ref(),
@@ -89,6 +91,15 @@ impl BillingRouteContext {
                 None => service_platform_billable = false,
                 Some(_) => {} // Unsynchronized matching lane retains legacy charging.
             }
+        }
+        // Apply the opt-in after lane selection so a BYOK lane cannot bypass it.
+        if service_billing.is_some_and(|billing| billing.platform_charge_nyxid_credentials_only)
+            && !matches!(
+                credential_class,
+                CredentialClass::NyxidManagedMaster | CredentialClass::NyxidPlatformOauthApp
+            )
+        {
+            service_platform_billable = false;
         }
         Self {
             ingress,
@@ -140,6 +151,7 @@ mod tests {
     fn context_for(credential_class: CredentialClass) -> BillingRouteContext {
         let billing = ServiceBilling {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
@@ -180,55 +192,70 @@ mod tests {
             sync_error: None,
         };
         for credential in [
+            CredentialClass::NyxidPlatformOauthApp,
             CredentialClass::UserOwned,
             CredentialClass::AgentOverrideUserOwned,
             CredentialClass::NodeManaged,
             CredentialClass::NyxidManagedMaster,
             CredentialClass::NoAuth,
         ] {
-            for byok in [false, true] {
-                for platform in [false, true] {
-                    let billing = ServiceBilling {
-                        platform_billable: true,
-                        byok_pricing: byok.then(|| lane(BillingMetric::Requests, "byok")),
-                        platform_key_pricing: platform.then(|| lane(BillingMetric::Tokens, "pk")),
-                        ..Default::default()
-                    };
-                    let ctx = BillingRouteContext::new(
-                        BillingIngress::Proxy,
-                        "req".into(),
-                        "owner".into(),
-                        "owner".into(),
-                        None,
-                        None,
-                        None,
-                        None,
-                        NodeIntent::Direct,
-                        "bearer".into(),
-                        credential,
-                        BillingMetric::Bytes,
-                        Some(&billing),
-                        false,
-                    );
-                    let expected = match credential {
-                        CredentialClass::NyxidManagedMaster if platform => {
-                            Some((BillingMetric::Tokens, "pk"))
+            for restricted in [false, true] {
+                for byok in [false, true] {
+                    for platform in [false, true] {
+                        let billing = ServiceBilling {
+                            platform_billable: true,
+                            platform_charge_nyxid_credentials_only: restricted,
+                            byok_pricing: byok.then(|| lane(BillingMetric::Requests, "byok")),
+                            platform_key_pricing: platform
+                                .then(|| lane(BillingMetric::Tokens, "pk")),
+                            ..Default::default()
+                        };
+                        let ctx = BillingRouteContext::new(
+                            BillingIngress::Proxy,
+                            "req".into(),
+                            "owner".into(),
+                            "owner".into(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            NodeIntent::Direct,
+                            "bearer".into(),
+                            credential,
+                            BillingMetric::Bytes,
+                            Some(&billing),
+                            false,
+                        );
+                        let expected = match credential {
+                            CredentialClass::NyxidManagedMaster if platform => {
+                                Some((BillingMetric::Tokens, "pk"))
+                            }
+                            CredentialClass::NyxidPlatformOauthApp
+                            | CredentialClass::UserOwned
+                            | CredentialClass::AgentOverrideUserOwned
+                            | CredentialClass::NodeManaged
+                                if byok =>
+                            {
+                                Some((BillingMetric::Requests, "byok"))
+                            }
+                            _ => None,
+                        };
+                        let eligible = !restricted
+                            || matches!(
+                                credential,
+                                CredentialClass::NyxidManagedMaster
+                                    | CredentialClass::NyxidPlatformOauthApp
+                            );
+                        if let Some((metric, code)) = expected {
+                            assert_eq!(ctx.service_platform_billable, eligible);
+                            assert_eq!(ctx.platform_metric, metric);
+                            assert_eq!(ctx.platform_lago_metric_code, code);
+                        } else {
+                            assert_eq!(
+                                ctx.service_platform_billable,
+                                !byok && !platform && eligible
+                            );
                         }
-                        CredentialClass::UserOwned
-                        | CredentialClass::AgentOverrideUserOwned
-                        | CredentialClass::NodeManaged
-                            if byok =>
-                        {
-                            Some((BillingMetric::Requests, "byok"))
-                        }
-                        _ => None,
-                    };
-                    if let Some((metric, code)) = expected {
-                        assert!(ctx.service_platform_billable);
-                        assert_eq!(ctx.platform_metric, metric);
-                        assert_eq!(ctx.platform_lago_metric_code, code);
-                    } else {
-                        assert_eq!(ctx.service_platform_billable, !byok && !platform);
                     }
                 }
             }
@@ -262,11 +289,63 @@ mod tests {
     }
 
     #[test]
+    fn platform_charge_restriction_is_opt_in_for_every_credential_class() {
+        for platform_billable in [false, true] {
+            for restricted in [false, true] {
+                for (class, nyxid_supplied) in [
+                    (CredentialClass::NyxidManagedMaster, true),
+                    (CredentialClass::NyxidPlatformOauthApp, true),
+                    (CredentialClass::UserOwned, false),
+                    (CredentialClass::AgentOverrideUserOwned, false),
+                    (CredentialClass::NodeManaged, false),
+                    (CredentialClass::NoAuth, false),
+                ] {
+                    let billing = ServiceBilling {
+                        platform_billable,
+                        platform_charge_nyxid_credentials_only: restricted,
+                        ..Default::default()
+                    };
+                    let ctx = BillingRouteContext::new(
+                        BillingIngress::Proxy,
+                        "request".into(),
+                        "owner".into(),
+                        "actor".into(),
+                        None,
+                        Some("service".into()),
+                        Some("catalog".into()),
+                        Some("api-twitter".into()),
+                        NodeIntent::Direct,
+                        "bearer".into(),
+                        class,
+                        BillingMetric::Requests,
+                        Some(&billing),
+                        true,
+                    );
+                    let expected = platform_billable && (!restricted || nyxid_supplied);
+                    assert_eq!(
+                        ctx.service_platform_billable, expected,
+                        "{class:?}, restricted={restricted}"
+                    );
+                    let ctx = ctx.with_platform_metering(expected);
+                    assert!(ctx.is_metered());
+                    assert_eq!(ctx.has_billable_layers(), expected);
+                    assert!(ctx.resale.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn resale_requires_final_nyxid_managed_master_credential() {
         assert!(
             context_for(CredentialClass::NyxidManagedMaster)
                 .resale
                 .is_some()
+        );
+        assert!(
+            context_for(CredentialClass::NyxidPlatformOauthApp)
+                .resale
+                .is_none()
         );
         assert!(context_for(CredentialClass::UserOwned).resale.is_none());
         assert!(
@@ -282,6 +361,7 @@ mod tests {
     fn resale_requires_operator_flag() {
         let billing = ServiceBilling {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,

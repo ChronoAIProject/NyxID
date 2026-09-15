@@ -20,6 +20,8 @@ export const telegramNewRequestSchema = z.object({
   telegram_bot_id: z.string().nullable(),
   bot_username: z.string().nullable(),
   channel_bot_id: z.string().nullable(),
+  auto_connect: z.boolean().optional(),
+  connection_error: z.string().nullable().optional(),
 });
 
 export const telegramNewConfigSchema = z.object({
@@ -48,6 +50,16 @@ export const telegramNewBeginSchema = z.object({
     .min(1, "Enter a label before creating your bot")
     .max(128),
   target_org_id: z.string().uuid().optional(),
+  auto_connect: z.boolean().optional(),
 });
 
 export type TelegramNewRequest = z.infer<typeof telegramNewRequestSchema>;
+
+export const telegramClaimCodeSchema = z.string().max(64)
+  .transform((value) => value.replace(/[-\s]/g, "").toUpperCase())
+  .pipe(z.string().regex(/^[A-HJ-NP-Z2-9]{20}$/, "Enter the claim code from your private Telegram setup chat"));
+
+export const telegramClaimPreviewSchema = z.object({
+  bot_username: z.string(),
+  expires_at: z.string().datetime({ offset: true }),
+});

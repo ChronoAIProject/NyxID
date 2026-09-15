@@ -315,6 +315,7 @@ export const updateServiceSchema = z
     forward_access_token: z.boolean().optional(),
     inject_delegation_token: z.boolean().optional(),
     platform_billable: z.boolean().optional(),
+    platform_charge_nyxid_credentials_only: z.boolean().optional(),
     platform_metric: z.enum(["auto", "tokens", "requests", "bytes"]).optional(),
     platform_price: z
       .string()

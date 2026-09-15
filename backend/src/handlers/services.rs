@@ -289,6 +289,13 @@ impl BillingUpdate {
         let Some(current) = current else {
             return;
         };
+        if !self
+            .present_fields
+            .contains("platform_charge_nyxid_credentials_only")
+        {
+            self.value.platform_charge_nyxid_credentials_only =
+                current.platform_charge_nyxid_credentials_only;
+        }
         if !self.byok_present {
             self.value.byok_pricing = current.byok_pricing.clone();
         }
@@ -1956,6 +1963,7 @@ pub async fn update_service(
         validate_service_billing(body.billing.as_deref())?;
         let next_billing = body.billing.clone().filter(|billing| {
             billing.platform_billable
+                || billing.platform_charge_nyxid_credentials_only
                 || billing.platform_metric.is_some()
                 || billing.platform_pricing.is_some()
                 || billing.platform_pricing_cleanup_metric_code.is_some()
@@ -3067,6 +3075,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credential_charge_restriction_survives_admin_update_without_charging_enabled() {
+        let db = connect_test_database("service_credential_charge")
+            .await
+            .expect("MongoDB required");
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let mut service = dummy_service();
+        service.created_by = admin_id.clone();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let request: UpdateServiceRequest = serde_json::from_value(serde_json::json!({
+            "billing": { "platform_charge_nyxid_credentials_only": true }
+        }))
+        .unwrap();
+        let Json(response) = update_service(
+            State(state),
+            test_auth_user(&admin_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(service.id.clone()),
+            Json(request),
+        )
+        .await
+        .unwrap();
+        let billing = response.billing.unwrap();
+        assert!(billing.platform_charge_nyxid_credentials_only);
+        assert!(!billing.platform_billable);
+        let saved = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": service.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.billing, Some(billing));
+    }
+
+    #[tokio::test]
     async fn clearing_only_price_retains_cleanup_marker_until_reconcile_removes_charge() {
         let Some(db) = connect_test_database("h_services_price_cleanup_marker").await else {
             return;
@@ -4064,6 +4110,7 @@ mod platform_key_request_tests {
     fn lane_only_update_preserves_legacy_fallback_and_resale() {
         let current = ServiceBilling {
             platform_billable: true,
+            platform_charge_nyxid_credentials_only: true,
             platform_metric: Some(BillingMetric::Tokens),
             resale_billable: true,
             lago_resale_metric_code: Some("resale_tokens".into()),
@@ -4073,6 +4120,7 @@ mod platform_key_request_tests {
         let billing = request.billing.as_mut().unwrap();
         billing.preserve_omitted_fields(Some(&current));
         assert!(billing.platform_billable && billing.resale_billable);
+        assert!(billing.platform_charge_nyxid_credentials_only);
         assert_eq!(billing.platform_metric, Some(BillingMetric::Tokens));
         assert_eq!(
             billing.lago_resale_metric_code.as_deref(),

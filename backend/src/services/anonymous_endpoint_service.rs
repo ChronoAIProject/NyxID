@@ -596,6 +596,7 @@ mod tests {
         let mut service = compatible_service();
         service.billing = Some(crate::models::service_billing::ServiceBilling {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,

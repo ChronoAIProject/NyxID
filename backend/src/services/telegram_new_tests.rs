@@ -126,7 +126,7 @@ async fn waiting_consent(
     let base = server.uri();
     let service = service(state, &base);
     let headers = headers(state).await;
-    let (request, link) = service.begin(actor, actor, "Support").await.unwrap();
+    let (request, link) = service.begin(actor, actor, "Support", false).await.unwrap();
     let challenge = reqwest::Url::parse(&link)
         .unwrap()
         .query_pairs()
@@ -401,7 +401,10 @@ async fn telegram_new_expired_request_releases_window_and_orphan_can_be_recovere
         service.get(&actor, &pending.id).await.unwrap().status,
         Status::Expired
     );
-    let (new, link) = service.begin(&actor, &actor, "Recovered").await.unwrap();
+    let (new, link) = service
+        .begin(&actor, &actor, "Recovered", false)
+        .await
+        .unwrap();
     let challenge = reqwest::Url::parse(&link)
         .unwrap()
         .query_pairs()
@@ -493,7 +496,12 @@ async fn telegram_new_rejects_bad_secret_and_other_actors_and_cancelled_consent(
     );
     assert!(
         service
-            .begin(&actor, &uuid::Uuid::new_v4().to_string(), "Wrong owner")
+            .begin(
+                &actor,
+                &uuid::Uuid::new_v4().to_string(),
+                "Wrong owner",
+                false
+            )
             .await
             .is_err()
     );
@@ -539,7 +547,7 @@ async fn telegram_new_same_telegram_account_conflict_is_acknowledged() {
     let base = server.uri();
     let service = service(&state, &base);
     let (second, link) = service
-        .begin(&other, &other, "Second account")
+        .begin(&other, &other, "Second account", false)
         .await
         .unwrap();
     let challenge = reqwest::Url::parse(&link)
@@ -598,7 +606,10 @@ async fn telegram_new_revoked_destination_releases_request_and_webhook_acks() {
         .unwrap();
     assert_eq!(cancelled.status, Status::Cancelled);
     assert!(!cancelled.active);
-    let (new, _) = service.begin(&actor, &actor, "New request").await.unwrap();
+    let (new, _) = service
+        .begin(&actor, &actor, "New request", false)
+        .await
+        .unwrap();
     state
         .db
         .collection::<TelegramBotRequest>(REQUESTS)
@@ -610,7 +621,10 @@ async fn telegram_new_revoked_destination_releases_request_and_webhook_acks() {
         .unwrap();
     service.cancel(&actor, &new.id).await.unwrap();
     assert!(service.current(&actor).await.unwrap().is_none());
-    let (new, _) = service.begin(&actor, &actor, "Read cleanup").await.unwrap();
+    let (new, _) = service
+        .begin(&actor, &actor, "Read cleanup", false)
+        .await
+        .unwrap();
     state
         .db
         .collection::<TelegramBotRequest>(REQUESTS)
@@ -621,7 +635,10 @@ async fn telegram_new_revoked_destination_releases_request_and_webhook_acks() {
         .await
         .unwrap();
     assert!(service.current(&actor).await.unwrap().is_none());
-    service.begin(&actor, &actor, "Recovered").await.unwrap();
+    service
+        .begin(&actor, &actor, "Recovered", false)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -829,7 +846,10 @@ async fn telegram_new_clear_deleted_manager_allows_recreated_username() {
         .await
         .unwrap();
 
-    let (request, launch_url) = service.begin(&actor, &actor, "Replacement").await.unwrap();
+    let (request, launch_url) = service
+        .begin(&actor, &actor, "Replacement", false)
+        .await
+        .unwrap();
     assert_eq!(request.manager_bot_id, 200);
     assert_ne!(request.observation_id, "test-observation");
     assert!(launch_url.starts_with("https://t.me/NyxSetupBot?start="));
@@ -902,7 +922,7 @@ async fn telegram_new_manager_configuration_preserves_secret_and_validates_webho
     );
     assert!(setup.get("drop_pending_updates").is_none());
     service
-        .begin(&actor, &actor, "Active request")
+        .begin(&actor, &actor, "Active request", false)
         .await
         .unwrap();
     server.reset().await;
@@ -1030,7 +1050,10 @@ async fn telegram_new_rejects_pre_observation_creation_without_stamping_provenan
     let (state, actor, server) = fixture().await;
     let base = server.uri();
     let service = service(&state, &base);
-    let (_, link) = service.begin(&actor, &actor, "Support").await.unwrap();
+    let (_, link) = service
+        .begin(&actor, &actor, "Support", false)
+        .await
+        .unwrap();
     let challenge = reqwest::Url::parse(&link)
         .unwrap()
         .query_pairs()
@@ -1058,4 +1081,1057 @@ async fn telegram_new_rejects_pre_observation_creation_without_stamping_provenan
             .unwrap(),
         0
     );
+}
+
+async fn automatic_request(
+    state: &crate::AppState,
+    actor: &str,
+    server: &MockServer,
+    management_first: bool,
+) -> TelegramBotRequest {
+    let base = server.uri();
+    let service = service(state, &base);
+    let headers = headers(state).await;
+    let (request, link) = service.begin(actor, actor, "Support", true).await.unwrap();
+    let challenge = reqwest::Url::parse(&link)
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "start")
+        .unwrap()
+        .1
+        .to_string();
+    webhook(
+        &service,
+        &headers,
+        message(json!({"text": format!("/start {challenge}")})),
+    )
+    .await;
+    if management_first {
+        webhook(&service, &headers, json!({"update_id": 2, "managed_bot": {"user": {"id": 700, "is_bot": false}, "bot": bot()}})).await;
+    }
+    let mut created = message(json!({"managed_bot_created": {"bot": bot()}}));
+    created["update_id"] = json!(3);
+    webhook(&service, &headers, created).await;
+    service.get(actor, &request.id).await.unwrap()
+}
+
+#[tokio::test]
+async fn telegram_new_creation_webhook_completes_without_consent_or_browser_connect() {
+    let (state, actor, server) = fixture().await;
+    let pending = automatic_request(&state, &actor, &server, true).await;
+    assert_eq!(pending.status, Status::Ready);
+    assert!(pending.consent_hash.is_none());
+    assert_eq!(pending.start_update_id, Some(1));
+    provider_connection(&server, &pending.id, 200).await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let (first, second) = tokio::join!(
+        service.complete_pending_creations(),
+        service.complete_pending_creations()
+    );
+    first.unwrap();
+    second.unwrap();
+    let connected = service.get(&actor, &pending.id).await.unwrap();
+    assert_eq!(connected.status, Status::Connected);
+    let saved = state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(doc! {"_id": &pending.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.user_id, actor);
+    assert_eq!(saved.status, "active");
+    assert!(saved.webhook_registered);
+    assert!(
+        !saved
+            .bot_token_encrypted
+            .windows(CHILD.len())
+            .any(|bytes| bytes == CHILD.as_bytes())
+    );
+    let mut repeated = message(json!({"managed_bot_created": {"bot": bot()}}));
+    repeated["update_id"] = json!(3);
+    webhook(&service, &headers(&state).await, repeated).await;
+    service.complete_pending_creations().await.unwrap();
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(
+        sent.iter()
+            .filter(|request| request.url.path().ends_with("getManagedBotToken"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|request| request.url.path().ends_with("setWebhook"))
+            .count(),
+        1
+    );
+    assert!(!sent.iter().any(|request| {
+        request
+            .body_json::<Value>()
+            .ok()
+            .is_some_and(|body| body.to_string().contains("Approve this bot"))
+    }));
+    let completion = sent
+        .iter()
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .find(|body| {
+            body["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Setup is complete"))
+        })
+        .expect("automatic connection should direct the creator to the new bot");
+    assert_eq!(completion["chat_id"], 700);
+    assert_eq!(
+        completion["reply_markup"]["inline_keyboard"][0][0],
+        json!({
+            "text": "Open your bot", "url": "https://t.me/CustomerBot",
+        })
+    );
+    assert_eq!(
+        completion["reply_markup"]["inline_keyboard"][1][0],
+        json!({
+            "text": "Bot settings", "url": format!("https://app.nyxid.test/channel-bots/{}", pending.id),
+        })
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_automatic_connection_waits_for_management_delivery() {
+    let (state, actor, server) = fixture().await;
+    let pending = automatic_request(&state, &actor, &server, false).await;
+    provider_connection(&server, &pending.id, 200).await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    service.complete_pending_creations().await.unwrap();
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path().ends_with("getManagedBotToken"))
+    );
+    webhook(&service, &headers(&state).await, json!({"update_id": 4, "managed_bot": {"user": {"id": 700, "is_bot": false}, "bot": bot()}})).await;
+    state
+        .db
+        .collection::<TelegramBotRequest>(REQUESTS)
+        .update_one(
+            doc! {"_id": &pending.id},
+            doc! {"$unset": {"next_connection_attempt_at": ""}},
+        )
+        .await
+        .unwrap();
+    service.complete_pending_creations().await.unwrap();
+    assert_eq!(
+        service.get(&actor, &pending.id).await.unwrap().status,
+        Status::Connected
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_automatic_retry_survives_browser_absence_and_request_expiry() {
+    let (state, actor, server) = fixture().await;
+    let pending = automatic_request(&state, &actor, &server, true).await;
+    provider_connection(&server, &pending.id, 500).await;
+    let base = server.uri();
+    service(&state, &base)
+        .complete_pending_creations()
+        .await
+        .unwrap();
+    let saved = state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(doc! {"_id": &pending.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        service(&state, &base)
+            .get(&actor, &pending.id)
+            .await
+            .unwrap()
+            .status,
+        Status::Provisioning
+    );
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{CHILD}/setWebhook")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": true})))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    state.db.collection::<TelegramBotRequest>(REQUESTS).update_one(doc! {"_id": &pending.id}, doc! {
+        "$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::minutes(1))},
+        "$unset": {"next_connection_attempt_at": ""},
+    }).await.unwrap();
+    service(&state, &base)
+        .complete_pending_creations()
+        .await
+        .unwrap();
+    let result = state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(doc! {"_id": &pending.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.status, "active");
+    assert_eq!(result.bot_token_encrypted, saved.bot_token_encrypted);
+    assert_eq!(result.webhook_secret_hash, saved.webhook_secret_hash);
+    assert_eq!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        service(&state, &base)
+            .get(&actor, &pending.id)
+            .await
+            .unwrap()
+            .connection_error
+            .is_none()
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_automatic_connection_rechecks_destination_access() {
+    let (state, actor, server) = fixture().await;
+    let pending = automatic_request(&state, &actor, &server, true).await;
+    provider_connection(&server, &pending.id, 200).await;
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .update_one(doc! {"_id": &actor}, doc! {"$set": {"is_active": false}})
+        .await
+        .unwrap();
+    let base = server.uri();
+    service(&state, &base)
+        .complete_pending_creations()
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path().ends_with("getManagedBotToken"))
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_automatic_creation_rejects_unbound_senders_and_earlier_updates() {
+    let (state, actor, server) = fixture().await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let (pending, link) = service
+        .begin(&actor, &actor, "Support", true)
+        .await
+        .unwrap();
+    let challenge = reqwest::Url::parse(&link)
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "start")
+        .unwrap()
+        .1
+        .to_string();
+    let mut start = message(json!({"text": format!("/start {challenge}")}));
+    start["update_id"] = json!(10);
+    webhook(&service, &headers(&state).await, start).await;
+    let mut earlier = message(json!({"managed_bot_created": {"bot": bot()}}));
+    earlier["update_id"] = json!(9);
+    webhook(&service, &headers(&state).await, earlier).await;
+    assert_eq!(
+        service.get(&actor, &pending.id).await.unwrap().status,
+        Status::WaitingBot
+    );
+    let mut old_date = message(json!({"managed_bot_created": {"bot": bot()}}));
+    old_date["update_id"] = json!(11);
+    old_date["message"]["date"] = json!(pending.created_at.timestamp() - 10);
+    webhook(&service, &headers(&state).await, old_date).await;
+    let mut recovery = message(json!({"text": "/recover @CustomerBot"}));
+    recovery["update_id"] = json!(12);
+    webhook(&service, &headers(&state).await, recovery).await;
+    assert_eq!(
+        service.get(&actor, &pending.id).await.unwrap().status,
+        Status::WaitingBot
+    );
+    let mut stranger = message(json!({"managed_bot_created": {"bot": bot()}}));
+    stranger["update_id"] = json!(11);
+    stranger["message"]["from"]["id"] = json!(701);
+    stranger["message"]["chat"]["id"] = json!(701);
+    webhook(&service, &headers(&state).await, stranger).await;
+    assert_eq!(
+        service.get(&actor, &pending.id).await.unwrap().status,
+        Status::WaitingBot
+    );
+    assert!(
+        service
+            .get(&uuid::Uuid::new_v4().to_string(), &pending.id)
+            .await
+            .is_err()
+    );
+    service.cancel(&actor, &pending.id).await.unwrap();
+    let mut late = message(json!({"managed_bot_created": {"bot": bot()}}));
+    late["update_id"] = json!(12);
+    webhook(&service, &headers(&state).await, late).await;
+    service.complete_pending_creations().await.unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_worker_never_upgrades_legacy_authorization() {
+    let (state, actor, server) = fixture().await;
+    let pending = waiting_consent(&state, &actor, &server).await;
+    let ready = approve(&state, &actor, &server, &pending.id, 700).await;
+    state.db.collection::<TelegramBotRequest>(REQUESTS).update_one(
+        doc! {"_id": &ready.id},
+        doc! {"$unset": {"auto_connect": "", "start_update_id": "", "connection_attempts": "", "next_connection_attempt_at": "", "connection_error": ""}},
+    ).await.unwrap();
+    let base = server.uri();
+    let service = service(&state, &base);
+    service.complete_pending_creations().await.unwrap();
+    let saved = service.get(&actor, &ready.id).await.unwrap();
+    assert_eq!(saved.status, Status::Ready);
+    assert!(!saved.auto_connect);
+    assert_eq!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path().ends_with("getManagedBotToken"))
+    );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_new_worker_does_not_resume_suspended_provisioning() {
+    let (state, actor, server) = fixture().await;
+    let pending = automatic_request(&state, &actor, &server, true).await;
+    provider_connection(&server, &pending.id, 500).await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    service.complete_pending_creations().await.unwrap();
+    webhook(&service, &headers(&state).await, json!({"update_id": 20, "managed_bot": {"user": {"id": 700, "is_bot": false}, "bot": bot()}})).await;
+    service.complete_pending_creations().await.unwrap();
+    assert_eq!(
+        service.get(&actor, &pending.id).await.unwrap().status,
+        Status::Suspended
+    );
+    let saved = state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(doc! {"_id": &pending.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.status, "suspended");
+    assert!(!saved.webhook_registered);
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path().ends_with("setWebhook"))
+            .count(),
+        1
+    );
+    state.db.drop().await.unwrap();
+}
+
+mod claims {
+    use super::*;
+    use crate::errors::AppError;
+    use crate::models::telegram_bot_claim::{
+        COLLECTION_NAME as CLAIMS, TelegramBotClaim, TelegramClaimStatus,
+    };
+    use crate::models::telegram_bot_request::MANAGED_BOTS;
+
+    async fn claim_code(server: &MockServer) -> String {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .rev()
+            .filter_map(|request| request.body_json::<Value>().ok())
+            .find_map(|body| {
+                let url = reqwest::Url::parse(
+                    body["reply_markup"]["inline_keyboard"][0][0]["url"].as_str()?,
+                )
+                .ok()?;
+                url.query_pairs()
+                    .find(|(key, _)| key == "claim")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .expect("private manager message must contain a claim link")
+    }
+
+    async fn mint(state: &crate::AppState, server: &MockServer, confirmed: bool) -> String {
+        let base = server.uri();
+        let service = service(state, &base);
+        let headers = headers(state).await;
+        if confirmed {
+            webhook(&service, &headers, json!({"update_id": 2, "managed_bot": {"user": {"id": 700, "is_bot": false}, "bot": bot()}})).await;
+        }
+        webhook(
+            &service,
+            &headers,
+            message(json!({"managed_bot_created": {"bot": bot()}})),
+        )
+        .await;
+        claim_code(server).await
+    }
+
+    async fn saved_claim(state: &crate::AppState) -> TelegramBotClaim {
+        state
+            .db
+            .collection::<TelegramBotClaim>(CLAIMS)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_starts_in_private_telegram_and_mints_before_confirmation() {
+        let (state, actor, server) = fixture().await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let headers = headers(&state).await;
+        webhook(
+            &service,
+            &headers,
+            message(json!({"chat": {"id": 700, "type": "group"}, "text": "/start"})),
+        )
+        .await;
+        assert!(server.received_requests().await.unwrap().is_empty());
+        webhook(&service, &headers, message(json!({"text": "/start"}))).await;
+        assert!(
+            server.received_requests().await.unwrap()[0]
+                .body_json::<Value>()
+                .unwrap()["reply_markup"]["keyboard"][0][0]["request_managed_bot"]
+                .is_object()
+        );
+        let code = mint(&state, &server, false).await;
+        let claim = saved_claim(&state).await;
+        assert_eq!(claim.status, TelegramClaimStatus::Pending);
+        assert!(!format!("{claim:?}").contains(&claim.code_hash));
+        assert!(
+            !bson::to_document(&claim)
+                .unwrap()
+                .to_string()
+                .contains(&code)
+        );
+        let before = server.received_requests().await.unwrap().len();
+        assert!(matches!(
+            service.preview_claim(&actor, &code).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            service.redeem_claim(&actor, &actor, &code, "Support").await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+        assert_eq!(
+            saved_claim(&state).await.status,
+            TelegramClaimStatus::Pending
+        );
+        webhook(&service, &headers, json!({"update_id": 2, "managed_bot": {"user": {"id": 700, "is_bot": false}, "bot": bot()}})).await;
+        let preview = service
+            .preview_claim(&actor, &code.to_lowercase().replace('-', " "))
+            .await
+            .unwrap();
+        let response = crate::handlers::telegram_new::ClaimPreviewResponse {
+            bot_username: preview.bot_username,
+            expires_at: preview.expires_at.to_rfc3339(),
+        };
+        let response = serde_json::to_string(&response).unwrap();
+        for secret in [&code, &claim.code_hash, MANAGER, CHILD] {
+            assert!(!response.contains(secret));
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_bearer_selects_own_account_and_is_permanently_single_use() {
+        let (state, other, server) = fixture().await;
+        let actor = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&actor, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let code = mint(&state, &server, true).await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        for invalid in ["", "AAAAA-BBBBB-CCCCC-DDDDD", "900:child-test-secret"] {
+            assert!(matches!(
+                service
+                    .redeem_claim(&actor, &actor, invalid, "Support")
+                    .await,
+                Err(AppError::NotFound(_))
+            ));
+        }
+        let ready = service
+            .redeem_claim(&actor, &actor, &code, "Support")
+            .await
+            .unwrap();
+        assert_eq!(ready.status, Status::Ready);
+        assert_eq!(ready.actor_user_id, actor);
+        assert_eq!(ready.owner_user_id, actor);
+        assert!(ready.auto_connect);
+        assert_eq!(
+            service
+                .redeem_claim(&actor, &actor, &code, "Support")
+                .await
+                .unwrap()
+                .id,
+            ready.id
+        );
+        assert!(matches!(
+            service
+                .redeem_claim(&actor, &actor, &code, "Different")
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            service.redeem_claim(&other, &other, &code, "Support").await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.url.path().ends_with("getManagedBotToken"))
+        );
+        provider_connection(&server, &ready.id, 200).await;
+        service.complete_pending_creations().await.unwrap();
+        let connected = service.get(&actor, &ready.id).await.unwrap();
+        assert_eq!(connected.status, Status::Connected);
+        let response = serde_json::to_string(
+            &crate::handlers::telegram_new::RequestResponse::from(connected),
+        )
+        .unwrap();
+        for secret in [&code, MANAGER, CHILD] {
+            assert!(!response.contains(secret));
+        }
+        assert!(matches!(
+            service.redeem_claim(&actor, &actor, &code, "Support").await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            service.redeem_claim(&other, &other, &code, "Support").await,
+            Err(AppError::NotFound(_))
+        ));
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(BOTS)
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("user_id")
+                .unwrap(),
+            actor
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_existing_setup_conflicts_without_consuming_code() {
+        let (state, actor, server) = fixture().await;
+        let code = mint(&state, &server, true).await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let (existing, _) = service
+            .begin(&actor, &actor, "Earlier", true)
+            .await
+            .unwrap();
+        for status in [
+            "waiting_telegram",
+            "waiting_bot",
+            "waiting_consent",
+            "ready",
+            "provisioning",
+        ] {
+            state
+                .db
+                .collection::<TelegramBotRequest>(REQUESTS)
+                .update_one(
+                    doc! {"_id": &existing.id},
+                    doc! {"$set": {"status": status}},
+                )
+                .await
+                .unwrap();
+            let err = service
+                .redeem_claim(&actor, &actor, &code, "New")
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AppError::Conflict(ref message) if message == "Finish or cancel your existing Telegram creation request first")
+            );
+            let claim = saved_claim(&state).await;
+            assert_eq!(claim.status, TelegramClaimStatus::Pending);
+            assert!(claim.actor_user_id.is_none());
+        }
+        state
+            .db
+            .collection::<TelegramBotRequest>(REQUESTS)
+            .update_one(
+                doc! {"_id": &existing.id},
+                doc! {"$set": {"status": "waiting_telegram"}},
+            )
+            .await
+            .unwrap();
+        service.cancel(&actor, &existing.id).await.unwrap();
+        assert!(
+            service
+                .redeem_claim(&actor, &actor, &code, "New")
+                .await
+                .is_ok()
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_expiry_lifecycle_and_observation_changes_fail_closed() {
+        let (state, actor, server) = fixture().await;
+        let code = mint(&state, &server, true).await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let claims = state.db.collection::<TelegramBotClaim>(CLAIMS);
+        let future = saved_claim(&state).await.expires_at;
+        claims.update_one(doc! {}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+        assert!(matches!(
+            service.redeem_claim(&actor, &actor, &code, "Support").await,
+            Err(AppError::NotFound(_))
+        ));
+        claims
+            .update_one(
+                doc! {},
+                doc! {"$set": {"expires_at": bson::DateTime::from_chrono(future)}},
+            )
+            .await
+            .unwrap();
+        for change in [
+            doc! {"revision": 2_i64},
+            doc! {"revision": 1_i64, "retired": true},
+            doc! {"retired": false, "observation_id": "another"},
+        ] {
+            state
+                .db
+                .collection::<bson::Document>(MANAGED_BOTS)
+                .update_one(doc! {}, doc! {"$set": change})
+                .await
+                .unwrap();
+            assert!(matches!(
+                service.preview_claim(&actor, &code).await,
+                Err(AppError::NotFound(_))
+            ));
+            assert!(matches!(
+                service.redeem_claim(&actor, &actor, &code, "Support").await,
+                Err(AppError::NotFound(_))
+            ));
+        }
+        assert_eq!(
+            saved_claim(&state).await.status,
+            TelegramClaimStatus::Pending
+        );
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.url.path().ends_with("getManagedBotToken"))
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_concurrent_redeemers_have_one_winner() {
+        let (state, actor, server) = fixture().await;
+        let other = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&other, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let code = mint(&state, &server, true).await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let (a, b) = tokio::join!(
+            service.redeem_claim(&actor, &actor, &code, "A"),
+            service.redeem_claim(&other, &other, &code, "B")
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+        let winner = a.or(b).unwrap();
+        assert_eq!(
+            state
+                .db
+                .collection::<TelegramBotRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            saved_claim(&state).await.request_id.as_deref(),
+            Some(winner.id.as_str())
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_recovery_rotates_only_on_creator_request_before_provisioning() {
+        let (state, actor, server) = fixture().await;
+        let code = mint(&state, &server, true).await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let headers = headers(&state).await;
+        webhook(
+            &service,
+            &headers,
+            message(json!({"managed_bot_created": {"bot": bot()}})),
+        )
+        .await;
+        assert_eq!(claim_code(&server).await, code);
+        webhook(
+            &service,
+            &headers,
+            message(json!({"text": "/recover @CustomerBot"})),
+        )
+        .await;
+        let replacement = claim_code(&server).await;
+        assert_ne!(code, replacement);
+        assert!(matches!(
+            service.preview_claim(&actor, &code).await,
+            Err(AppError::NotFound(_))
+        ));
+        let ready = service
+            .redeem_claim(&actor, &actor, &replacement, "Support")
+            .await
+            .unwrap();
+        service.cancel(&actor, &ready.id).await.unwrap();
+        webhook(
+            &service,
+            &headers,
+            message(json!({"text": "/recover @CustomerBot"})),
+        )
+        .await;
+        let renewed = claim_code(&server).await;
+        assert_ne!(renewed, replacement);
+        let ready = service
+            .redeem_claim(&actor, &actor, &renewed, "Support")
+            .await
+            .unwrap();
+        provider_connection(&server, &ready.id, 500).await;
+        service.complete_pending_creations().await.unwrap();
+        let saved = state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id": &ready.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            service.get(&actor, &ready.id).await.unwrap().status,
+            Status::Provisioning
+        );
+        assert!(
+            state
+                .db
+                .collection::<bson::Document>(MANAGED_BOTS)
+                .find_one(doc! {})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_bool("retired")
+                .unwrap()
+        );
+        webhook(
+            &service,
+            &headers,
+            message(json!({"text": "/recover @CustomerBot"})),
+        )
+        .await;
+        assert_eq!(claim_code(&server).await, renewed);
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{CHILD}/setWebhook")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": true})),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        state.db.collection::<TelegramBotRequest>(REQUESTS).update_one(doc! {"_id": &ready.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}, "$unset": {"next_connection_attempt_at": ""}}).await.unwrap();
+        state.db.collection::<TelegramBotClaim>(CLAIMS).update_one(doc! {}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+        service.complete_pending_creations().await.unwrap();
+        let connected = state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id": &ready.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(connected.bot_token_encrypted, saved.bot_token_encrypted);
+        assert_eq!(connected.status, "active");
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path().ends_with("getManagedBotToken"))
+                .count(),
+            1
+        );
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .delete_one(doc! {"_id": &ready.id})
+            .await
+            .unwrap();
+        webhook(
+            &service,
+            &headers,
+            message(json!({"text": "/recover @CustomerBot"})),
+        )
+        .await;
+        assert_eq!(claim_code(&server).await, renewed);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_org_destination_requires_live_write_access() {
+        use crate::models::org_membership::{MemberScopeSource, OrgRole};
+        let (state, actor, server) = fixture().await;
+        let org =
+            crate::services::org_service::create_org_user(&state.db, "Support team", None, None)
+                .await
+                .unwrap();
+        let code = mint(&state, &server, true).await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        assert!(
+            service
+                .redeem_claim(&actor, &org.id, &code, "Support")
+                .await
+                .is_err()
+        );
+        let member = crate::services::org_service::create_membership(
+            &state.db,
+            &org.id,
+            &actor,
+            OrgRole::Viewer,
+            MemberScopeSource::Inherit,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            service
+                .redeem_claim(&actor, &org.id, &code, "Support")
+                .await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert_eq!(
+            saved_claim(&state).await.status,
+            TelegramClaimStatus::Pending
+        );
+        state
+            .db
+            .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(doc! {"_id": &member.id}, doc! {"$set": {"role": "admin"}})
+            .await
+            .unwrap();
+        let ready = service
+            .redeem_claim(&actor, &org.id, &code, "Support")
+            .await
+            .unwrap();
+        assert_eq!(ready.owner_user_id, org.id);
+        state
+            .db
+            .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &member.id},
+                doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        provider_connection(&server, &ready.id, 200).await;
+        service.complete_pending_creations().await.unwrap();
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.url.path().ends_with("getManagedBotToken"))
+        );
+        assert_eq!(
+            saved_claim(&state).await.status,
+            TelegramClaimStatus::Redeemed
+        );
+        assert!(
+            service
+                .redeem_claim(&actor, &org.id, &code, "Support")
+                .await
+                .is_err()
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_creator_conflict_does_not_name_another_actors_setup_as_yours() {
+        let (state, actor, server) = fixture().await;
+        let other = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&other, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let code = mint(&state, &server, true).await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let (_, link) = service
+            .begin(&other, &other, "Other account setup", true)
+            .await
+            .unwrap();
+        let challenge = reqwest::Url::parse(&link)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "start")
+            .unwrap()
+            .1
+            .to_string();
+        webhook(
+            &service,
+            &headers(&state).await,
+            message(json!({"text": format!("/start {challenge}")})),
+        )
+        .await;
+        assert!(
+            matches!(service.redeem_claim(&actor, &actor, &code, "Support").await, Err(AppError::Conflict(ref text)) if text.starts_with("The bot creator has another Telegram setup"))
+        );
+        assert!(service.current(&actor).await.unwrap().is_none());
+        assert_eq!(
+            saved_claim(&state).await.status,
+            TelegramClaimStatus::Pending
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_redemption_gives_ready_request_time_to_retry_after_claim_expiry() {
+        let (state, actor, server) = fixture().await;
+        let code = mint(&state, &server, true).await;
+        state.db.collection::<TelegramBotClaim>(CLAIMS).update_one(doc! {}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(5))}}).await.unwrap();
+        let base = server.uri();
+        let service = service(&state, &base);
+        let ready = service
+            .redeem_claim(&actor, &actor, &code, "Support")
+            .await
+            .unwrap();
+        assert!(ready.expires_at > Utc::now() + Duration::minutes(14));
+        provider_connection(&server, &ready.id, 200).await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{MANAGER}/getManagedBotToken")))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        service.complete_pending_creations().await.unwrap();
+        assert_eq!(
+            service.get(&actor, &ready.id).await.unwrap().status,
+            Status::Ready
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<ChannelBot>(BOTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.collection::<TelegramBotClaim>(CLAIMS).update_one(doc! {}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+        state
+            .db
+            .collection::<TelegramBotRequest>(REQUESTS)
+            .update_one(
+                doc! {"_id": &ready.id},
+                doc! {"$unset": {"next_connection_attempt_at": ""}},
+            )
+            .await
+            .unwrap();
+        service.complete_pending_creations().await.unwrap();
+        assert_eq!(
+            service.get(&actor, &ready.id).await.unwrap().status,
+            Status::Connected
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_new_claim_never_minted_for_bound_website_request() {
+        let (state, actor, server) = fixture().await;
+        automatic_request(&state, &actor, &server, true).await;
+        assert_eq!(
+            state
+                .db
+                .collection::<TelegramBotClaim>(CLAIMS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
+    }
 }

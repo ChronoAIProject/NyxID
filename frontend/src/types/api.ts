@@ -349,6 +349,8 @@ export interface ServiceBilling {
   readonly platform_key_pricing?: LanePricingView | null;
   /** Admin opt-in: only platform_billable services charge wallet credits. */
   readonly platform_billable?: boolean;
+  /** Charge only NyxID master credentials and shared OAuth apps; default false. */
+  readonly platform_charge_nyxid_credentials_only?: boolean;
   /** Admin-selected metering unit; unset falls back to the slug heuristic. */
   readonly platform_metric?: string;
   /** NyxID-authored price and its synchronization state in Lago. */

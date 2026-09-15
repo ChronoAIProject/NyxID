@@ -337,8 +337,19 @@ only.
 ### Model family, tier, and reasoning effort
 
 New pools default to `chatgpt-6-pro`. Before typing, the CDP worker discovers
-the header model switcher and verifies **GPT-6 + Pro**, selecting a recognized
-entry when necessary. It then selects the composer effort level. Plain `-pro`
+the model switcher and verifies **GPT-6 + Pro**, selecting a recognized
+entry when necessary. The header test ID and semantic header candidates take
+priority. Only when both yield no candidates, the worker accepts a unique
+visible menu button inside the discovered composer's nearest form whose whole
+label is a numeric major/optional minor version plus one tier: Pro/专业,
+Auto/自动, Instant/极速, Thinking/思考, Medium/均衡, High/高级, or Extra High/超高.
+Whitespace may separate family and tier (e.g. `6` and `Thinking` on separate
+lines). Attachment buttons, ambiguous candidates, bare numbers/tiers, and
+trailing prose are rejected. The same whole-label adapter recognizes compact
+items in the opened model picker, using the usual family/tier matching and
+exact-entry preference. Raw trigger and item labels are retained for click
+revalidation. Compact labels supply family/tier evidence only; Pro is never
+proof of Pro Extended effort. The worker then selects the composer effort level. Plain `-pro`
 and explicit `extended`/`扩展` prefer **Pro Extended** when Pro is split;
 `standard`/`标准` explicitly requests **Pro Standard**. The existing Extra High,
 High, Medium, and Instant effort aliases remain available. Unknown model
@@ -348,13 +359,18 @@ Majors must match; minors must match only when both request and observation
 expose one (e.g. GPT-6 accepts GPT-6.1, but GPT-6.1 rejects GPT-6.2).
 GPT-60 never matches GPT-6, and prose such as “Try GPT-6 Pro” is unrecognized.
 
+The verified model switcher trigger is never an effort-pill candidate, so
+effort exposed only inside the compact model menu is neither selected nor
+verified and the task sends with the page's current effort (use
+`NYXID_ORACLE_LOG_PICKER_LABELS=1` to collect labels if that UI appears).
+
 `require_model_match` defaults to `true` on pools, including legacy pool rows.
 A submit may override it; the effective value is frozen on the task and sent
 to workers. CLI `oracle pool create/update` and `oracle ask` accept
 `--require-model-match true|false`. With strict matching, an absent or
-unrecognized header, wrong family/tier, or unverifiable effort pill fails
+unrecognized switcher, wrong family/tier, or unverifiable effort pill fails
 **before Send** with `model_unavailable`. A UI with no effort pill may verify
-through its header. Tools/attach controls whose labels and opened menu items
+through its model switcher. Tools/attach controls whose labels and opened menu items
 contain no recognized effort levels count as absent for verification. Effort
 fails strict verification when an observed recognized level mismatches, or a
 picker exposed recognized levels but selection/read-back could not verify the
