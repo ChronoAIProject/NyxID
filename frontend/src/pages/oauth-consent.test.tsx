@@ -595,6 +595,8 @@ it("binds required rows to the session display and keeps them selected", async (
     id: "bound-session",
     oauth_client_id: VALID.client_id,
     client_name: "Verified source app",
+    logo_url: "/api/v1/branding/assets/09d0abe0-6f31-4c48-a582-a1c2e3f06836",
+    verified: true,
     handoff_blurb: null,
     destination: "app.example.com",
     requirements_version: 3,
@@ -642,6 +644,9 @@ it("binds required rows to the session display and keeps them selected", async (
   );
   expect(hiddenInput("consent_request")?.value).toBe(VALID.consent_request);
   expect(hiddenInput("app_connect_result_id")).toBeNull();
+  expect(screen.getByRole("img", { name: "Verified source app logo" })).toBeInTheDocument();
+  expect(screen.getByText("Verified")).toBeInTheDocument();
+  expect(screen.getByText("Secured by NyxID · app.example.com")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Customize" }));
   expect(screen.getByRole("checkbox", { name: /My OpenAI/ })).toBeDisabled();
 });

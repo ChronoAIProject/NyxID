@@ -989,6 +989,10 @@ fn build_router_internal(
                 .patch(handlers::app_requirements::update_rollout),
         )
         .route(
+            "/oauth-clients/{client_id}/branding/verify",
+            post(handlers::oauth_branding::verify),
+        )
+        .route(
             "/oauth-clients/{client_id}/app-connect-capability",
             patch(handlers::app_requirements::update_capability),
         )
@@ -1034,6 +1038,14 @@ fn build_router_internal(
 
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))
+        .route(
+            "/authorize-context",
+            get(handlers::oauth_authorize_context::get),
+        )
+        .route(
+            "/authorize-context/resume",
+            get(handlers::oauth_authorize_context::resume),
+        )
         .route(
             "/authorize/decision",
             post(handlers::oauth::authorize_decision),
@@ -1533,6 +1545,11 @@ fn build_router_internal(
                 .delete(handlers::developer_apps::delete_my_oauth_client),
         )
         .route(
+            "/oauth-clients/{client_id}/branding/logo",
+            post(handlers::oauth_branding::upload_logo)
+                .layer(DefaultBodyLimit::max(256 * 1024 + 8192)),
+        )
+        .route(
             "/oauth-clients/{client_id}/handoff",
             patch(handlers::app_requirements::update_handoff),
         )
@@ -1587,6 +1604,10 @@ fn build_router_internal(
         Router::new().route("/redeem", post(handlers::devices::redeem_onboard_device));
 
     let api_v1_public = Router::new()
+        .route(
+            "/branding/assets/{id}",
+            get(handlers::oauth_branding::asset),
+        )
         .route(
             "/auth/agent-key/request",
             post(handlers::auth_agent_key::request),

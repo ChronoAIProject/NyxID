@@ -77,6 +77,7 @@ import {
   LoginDevicePage,
   LoginAgentKeyPage,
   AppConnectLinkPage,
+  AppConnectStartPage,
   ConnectLinkPage,
   ConnectLinkReturnPage,
   OAuthLaunchingPage,
@@ -270,6 +271,12 @@ const loginDeviceRoute = createRoute({
   getParentRoute: () => rootRoute,
   validateSearch: (): Record<string, never> => ({}),
   component: LoginDevicePage,
+});
+
+const appConnectStartRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/connect/app/start/$ctx",
+  component: AppConnectStartPage,
 });
 
 const appConnectLinkRoute = createRoute({
@@ -931,6 +938,7 @@ const routeTree = rootRoute.addChildren([
   loginDeviceRoute,
   loginAgentKeyRoute,
   appConnectLinkRoute,
+  appConnectStartRoute,
   connectLinkRoute,
   connectLinkReturnRoute,
   sshTerminalRoute,

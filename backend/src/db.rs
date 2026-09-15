@@ -105,6 +105,16 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     ensure_service_validation_indexes(db).await?;
     ensure_app_requirement_indexes(db).await?;
     ensure_app_connect_link_indexes(db).await?;
+    db.collection::<crate::models::oauth_authorize_context::OauthAuthorizeContext>(
+        crate::models::oauth_authorize_context::COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! { "expires_at": 1 })
+            .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+            .build(),
+    )
+    .await?;
 
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)

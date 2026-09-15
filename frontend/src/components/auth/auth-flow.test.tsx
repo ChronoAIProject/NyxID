@@ -380,3 +380,31 @@ describe("AuthFlow — register", () => {
     expect(toastFns.info).not.toHaveBeenCalled();
   });
 });
+
+describe("AuthFlow — embedded app login", () => {
+  it("keeps the signed context path while switching between login and registration", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(
+      {},
+      "",
+      "/connect/app/start/signed.context.token",
+    );
+    render(
+      <AuthFlow
+        initialPanel={0}
+        preservePath
+        returnTo={`${window.location.origin}/oauth/authorize-context/resume?ctx=signed.context.token`}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+    expect(await screen.findByRole("heading", { name: "Create your account" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe(
+      "/connect/app/start/signed.context.token",
+    );
+    await user.click(screen.getAllByRole("button", { name: "Sign in" })[0]!);
+    expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe(
+      "/connect/app/start/signed.context.token",
+    );
+  });
+});

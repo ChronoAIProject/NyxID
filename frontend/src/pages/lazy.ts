@@ -322,3 +322,7 @@ export const DocsIndexPage = lazy(() =>
 export const DocsPage = lazy(() =>
   import("@/features/docs/docs-page").then((m) => ({ default: m.DocsPage })),
 );
+
+export const AppConnectStartPage = lazy(() =>
+  import("@/pages/app-connect-start").then((m) => ({ default: m.AppConnectStartPage })),
+);

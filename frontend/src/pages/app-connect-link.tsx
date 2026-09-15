@@ -204,6 +204,8 @@ function RepairSession({
   return (
     <AppConnectShell
       name={link.client_name}
+      logoUrl={link.logo_url}
+      verified={link.verified}
       blurb={link.handoff_blurb}
       destination={link.destination}
     >

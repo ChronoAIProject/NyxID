@@ -8125,7 +8125,7 @@ use the existing per-IP completion limiter, and app polling shares the 30/min
 requirements status limit. Explicit checks also use the per-user validation
 limiter and phase-0 deployment/provider admission. Every App Connect Link route
 returns a not-found-shaped response when rollout is disabled or the app loses
-its capability/activation. Authorize and consent retain their existing behavior.
+its capability/activation. Repair sessions do not change authorize or consent.
 
 The hosted `/connect/app/{id}` page shows the app name and optional handoff text,
 with a fixed **Secured by NyxID · destination** footer. Unauthenticated visitors
@@ -8137,11 +8137,78 @@ leave the previous item state and evidence intact. Cancelling or expiring a
 parent also cancels its pending child links. Starting over replaces an item's
 child link and cancels the previous pending child.
 
-Gate manifests remain rejected. No App Connect Link webhooks are emitted.
+Gate manifests enforce the authorize flow described above. No App Connect Link webhooks are emitted.
 
 App owners can update text with
 `PATCH /api/v1/developer/oauth-clients/{client_id}/handoff`, body
 `{"handoff_blurb":"Connect the accounts this app needs."}`. Text is limited to
 160 characters; an empty string clears it. The rollout/capability and existing
-app-write ownership checks apply. App branding consists of the registered name
-and this text; the `Secured by NyxID · destination` footer is fixed.
+app-write ownership checks apply. The `Secured by NyxID · destination` footer is fixed.
+
+
+### App login context and white labeling
+
+For an active app with an enabled Gate manifest, an unauthenticated browser at
+`/oauth/authorize` is redirected to `/connect/app/start/{ctx}`. `ctx` is a signed
+reference valid for five minutes; the validated authorize parameters are stored
+in `oauth_authorize_contexts`. Non-gated clients keep the existing
+`/login?return_to=...` redirect. `prompt=none` never opens a login shell.
+PAR requests are consumed into the stored context before gated login, so the
+original state, redirect URI, PKCE challenge, and nonce survive login without
+reusing or reparsing the PAR request.
+
+`GET /oauth/authorize-context?ctx=<token>` is public and limited to 30 requests
+per minute per IP (shared across replicas). It returns `Cache-Control: no-store`
+and only this display metadata:
+
+```json
+{
+  "client_name": "Example app",
+  "handoff_blurb": "Connect the accounts this app needs.",
+  "logo_url": "/api/v1/branding/assets/09d0abe0-6f31-4c48-a582-a1c2e3f06836",
+  "homepage_url": "https://example.com/",
+  "verified": false,
+  "destination": "example.com"
+}
+```
+
+Optional metadata is `null` when unset. Invalid, expired, or tampered contexts,
+inactive clients, invalidated redirect URIs, and disabled rollout return 404.
+A raw `client_id` does not authorize this lookup. The hosted page embeds the
+existing password, social, device, and MFA login flows. Successful login resumes
+`/oauth/authorize-context/resume?ctx=<token>` on the same origin. That route
+requires a human session and continues only the stored parameters. For
+`prompt=login`, the session must have been created since the context was minted.
+Social-login errors return to the same app shell. A lost or expired context
+requires restarting from the app.
+
+Owners can upload a logo using
+`POST /api/v1/developer/oauth-clients/{client_id}/branding/logo`: multipart with
+exactly one `logo` file, PNG or WebP, at most **256 KiB** and **512 × 512 pixels**.
+NyxID decodes and re-encodes the pixels to PNG, removing metadata and rejecting
+SVG and non-images. It stores immutable UUID-addressed assets in GridFS and
+serves them publicly at `GET /api/v1/branding/assets/{id}` with `image/png`,
+`nosniff`, and `Cache-Control: public, max-age=31536000, immutable`. Replacing a
+logo creates a new asset URL; an old URL continues to serve its original pixels.
+The upload response contains `logo_asset_id`, `logo_url`, `homepage_url`,
+`branding_revision`, `branding_verified_revision`, and `verified`.
+
+The existing developer client update accepts `homepage_url` (HTTPS, public host,
+at most 2,048 characters; an empty string clears it). Homepage validation checks
+URL shape only: NyxID never resolves or fetches it. Upload and homepage edits
+require the existing personal/org app-write permission and enabled rollout.
+Developers cannot set verification fields.
+
+Any name, logo, blurb, or homepage change increments `branding_revision`.
+Unchanged values keep the revision. Platform admins alone can call
+`POST /api/v1/admin/oauth-clients/{client_id}/branding/verify` with
+`{"branding_revision": 3, "verified": true}` (or `false` to unverify). This
+compares the submitted revision with the current one before updating the mark;
+a concurrent branding change requires reloading and reviewing again.
+
+The login, checklist, and session-bound consent shells show the active app's
+name and logo regardless of verification. **Verified** is a chip shown only when
+`branding_verified_revision == branding_revision`; editing branding clears the
+chip until another admin review. The footer always identifies NyxID and the
+validated redirect's destination, or the registered desktop app for a custom
+scheme. Developers cannot replace that footer or supply HTML/CSS.

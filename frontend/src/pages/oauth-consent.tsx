@@ -11,6 +11,8 @@ import {
   scopeRiskBadgeVariant,
   scopeRiskLabel,
 } from "@/lib/constants";
+import { AppConnectShell } from "@/components/connect/app-connect-shell";
+import type { AppConnectLink } from "@/schemas/app-connect-links";
 import { useAppConnectConsent } from "@/hooks/use-app-connect-links";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
@@ -28,7 +30,25 @@ import { oauthConsentServiceAccessSchema } from "@/schemas/oauth-consent";
  * standalone page that doesn't paint its own canvas renders a light card on a
  * black void.
  */
-function ConsentShell({ children }: { readonly children: ReactNode }) {
+function ConsentShell({
+  children,
+  app,
+}: {
+  readonly children: ReactNode;
+  readonly app?: AppConnectLink;
+}) {
+  if (app)
+    return (
+      <AppConnectShell
+        name={app.client_name}
+        blurb={app.handoff_blurb}
+        destination={app.destination}
+        logoUrl={app.logo_url}
+        verified={app.verified}
+      >
+        {children}
+      </AppConnectShell>
+    );
   return (
     <main
       className="flex min-h-dvh items-start justify-center bg-background px-4 py-8 text-foreground sm:items-center sm:py-10"
@@ -347,7 +367,7 @@ export function OAuthConsentPage() {
   }
 
   return (
-    <ConsentShell>
+    <ConsentShell app={appConnect.data}>
       <header className="flex flex-col gap-2 text-center">
         <h1 className="text-[22px] font-bold leading-tight tracking-tight text-foreground sm:text-[28px]">
           {bindingReview

@@ -721,7 +721,16 @@ pub async fn authorize(
         }
     };
 
-    if params.request_uri.is_some() && opt_auth.0.is_none() {
+    let gated_par = if params.request_uri.is_some() && opt_auth.0.is_none() && is_browser_mode {
+        match oauth_client_service::get_client(&state.db, &params.client_id).await {
+            Ok(client) => app_gate::gate_manifest(&state, &client).await?.is_some(),
+            Err(AppError::NotFound(_)) => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
+    if params.request_uri.is_some() && opt_auth.0.is_none() && !gated_par {
         if is_browser_mode {
             let return_to = build_authorize_url(&state.config.frontend_url, &params);
             let login_url = format!(
@@ -1040,7 +1049,20 @@ fn params_from_session(link: &AppConnectLink) -> AppResult<AuthorizeQuery> {
     else {
         return Err(AppError::AppConnectResultMismatch);
     };
-    Ok(AuthorizeQuery {
+    let mut params = params_from_validated(p);
+    params.app_connect = Some(ConsentBinding {
+        result_id: link
+            .result_id
+            .clone()
+            .ok_or(AppError::AppConnectResultMismatch)?,
+        session_id: link.id.clone(),
+        nonce: consent_nonce.clone(),
+    });
+    Ok(params)
+}
+
+pub(super) fn params_from_validated(p: &ValidatedAuthorizeParams) -> AuthorizeQuery {
+    AuthorizeQuery {
         response_type: "code".into(),
         client_id: p.client_id.clone(),
         redirect_uri: p.redirect_uri.clone(),
@@ -1061,15 +1083,8 @@ fn params_from_session(link: &AppConnectLink) -> AppResult<AuthorizeQuery> {
             .map(|s| s.external_user_id.clone()),
         binding_grant_id: p.binding_grant_id.clone(),
         gate_service_ids: Vec::new(),
-        app_connect: Some(ConsentBinding {
-            result_id: link
-                .result_id
-                .clone()
-                .ok_or(AppError::AppConnectResultMismatch)?,
-            session_id: link.id.clone(),
-            nonce: consent_nonce.clone(),
-        }),
-    })
+        app_connect: None,
+    }
 }
 
 /// HTTP display hints are derived from the frozen server result; only the signed token binds consent.
@@ -1197,7 +1212,7 @@ async fn apply_app_gate(
     Ok(Some(created.connect_url))
 }
 
-async fn authorize_inner(
+pub(super) async fn authorize_inner(
     state: &AppState,
     opt_auth: OptionalAuthUser,
     params: &AuthorizeQuery,
@@ -1231,6 +1246,18 @@ async fn authorize_inner(
                         "User is not authenticated",
                     );
                     return Ok(redirect_302(&redirect_url));
+                }
+
+                if app_gate::gate_manifest(state, &client).await?.is_some() {
+                    let ctx = crate::services::oauth_authorize_context_service::mint(
+                        state,
+                        stored_authorize_params(params, &validated_scope)?,
+                    )
+                    .await?;
+                    return Ok(redirect_302(&format!(
+                        "{}/connect/app/start/{ctx}",
+                        state.config.frontend_url.trim_end_matches('/')
+                    )));
                 }
 
                 let mut login_params = params.clone();
@@ -1478,7 +1505,7 @@ async fn validate_authorize_request(
 /// Build a 302 Found response (RFC 6749 requires 302, not 307).
 /// Includes Referrer-Policy: no-referrer to prevent leaking the authorization
 /// code or other query parameters via the Referer header.
-fn redirect_302(uri: &str) -> Response {
+pub(super) fn redirect_302(uri: &str) -> Response {
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, uri)
@@ -3679,6 +3706,10 @@ mod tests {
             app_connect_capability_enabled: false,
             current_manifest_version: None,
             handoff_blurb: None,
+            logo_asset_id: None,
+            homepage_url: None,
+            branding_revision: 0,
+            branding_verified_revision: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -5635,6 +5666,10 @@ mod tests {
                 app_connect_capability_enabled: false,
                 current_manifest_version: None,
                 handoff_blurb: None,
+                logo_asset_id: None,
+                homepage_url: None,
+                branding_revision: 0,
+                branding_verified_revision: None,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -6032,6 +6067,10 @@ mod tests {
             app_connect_capability_enabled: false,
             current_manifest_version: None,
             handoff_blurb: None,
+            logo_asset_id: None,
+            homepage_url: None,
+            branding_revision: 0,
+            branding_verified_revision: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,

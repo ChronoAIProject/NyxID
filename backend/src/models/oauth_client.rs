@@ -57,9 +57,17 @@ pub struct OauthClient {
     pub app_connect_capability_enabled: bool,
     #[serde(default)]
     pub current_manifest_version: Option<u32>,
-    /// Plain text, at most 160 characters; no developer-controlled branding assets.
+    /// Plain text, at most 160 characters.
     #[serde(default)]
     pub handoff_blurb: Option<String>,
+    #[serde(default)]
+    pub logo_asset_id: Option<String>,
+    #[serde(default)]
+    pub homepage_url: Option<String>,
+    #[serde(default)]
+    pub branding_revision: u32,
+    #[serde(default)]
+    pub branding_verified_revision: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_webhook_url: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -173,6 +181,10 @@ mod tests {
             app_connect_capability_enabled: false,
             current_manifest_version: None,
             handoff_blurb: None,
+            logo_asset_id: None,
+            homepage_url: None,
+            branding_revision: 0,
+            branding_verified_revision: None,
             revocation_webhook_url: Some("https://client.example.com/cae".to_string()),
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: Some("https://client.example.com/connections".to_string()),
@@ -254,6 +266,10 @@ mod tests {
             app_connect_capability_enabled: false,
             current_manifest_version: None,
             handoff_blurb: None,
+            logo_asset_id: None,
+            homepage_url: None,
+            branding_revision: 0,
+            branding_verified_revision: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -294,6 +310,10 @@ mod tests {
             app_connect_capability_enabled: false,
             current_manifest_version: None,
             handoff_blurb: None,
+            logo_asset_id: None,
+            homepage_url: None,
+            branding_revision: 0,
+            branding_verified_revision: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -328,6 +348,10 @@ mod tests {
             app_connect_capability_enabled: false,
             current_manifest_version: None,
             handoff_blurb: None,
+            logo_asset_id: None,
+            homepage_url: None,
+            branding_revision: 0,
+            branding_verified_revision: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: None,

@@ -105,3 +105,5 @@ pub mod user_service_connection;
 pub mod ws_frame_injection;
 
 pub mod service_validation_record;
+
+pub mod oauth_authorize_context;

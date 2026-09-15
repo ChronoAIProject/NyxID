@@ -65,6 +65,7 @@ export function useCreateDeveloperApp() {
 }
 
 export interface UpdateDeveloperAppRequest {
+  readonly homepage_url?: string;
   readonly name?: string;
   readonly redirect_uris?: readonly string[];
   readonly delegation_scopes?: string;

@@ -110,6 +110,7 @@ pub struct CreateDeveloperOAuthClientRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateDeveloperOAuthClientRequest {
+    pub homepage_url: Option<String>,
     pub name: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
     /// Space-separated delegation scopes (empty = token exchange disabled).
@@ -126,6 +127,8 @@ pub struct UpdateDeveloperOAuthClientRequest {
 
 #[derive(Debug, Serialize)]
 pub struct DeveloperOAuthClientResponse {
+    #[serde(flatten)]
+    pub branding: super::oauth_branding::BrandingResponse,
     pub app_connect_capability_enabled: bool,
     pub app_connect_enabled: bool,
     pub current_manifest_version: Option<u32>,
@@ -210,6 +213,7 @@ async fn to_response(
     let app_connect_enabled =
         crate::services::app_connect_rollout::is_enabled_for(state, &c).await?;
     Ok(DeveloperOAuthClientResponse {
+        branding: (&c).into(),
         app_connect_enabled,
         app_connect_capability_enabled: c.app_connect_capability_enabled,
         current_manifest_version: c.current_manifest_version,
@@ -552,6 +556,9 @@ pub async fn update_my_oauth_client(
         None => None,
     };
 
+    if body.homepage_url.is_some() {
+        crate::services::app_connect_link_service::enabled_client(&state, &client_id).await?;
+    }
     let updated = oauth_client_service::update_client_for_creator(
         &state.db,
         &client_id,
@@ -564,6 +571,7 @@ pub async fn update_my_oauth_client(
         revocation_webhook_url,
         revocation_webhook_secret_encrypted,
         validated_default_slugs.as_deref(),
+        body.homepage_url.as_deref(),
     )
     .await?;
 
@@ -859,6 +867,7 @@ mod tests {
             auth,
             Path(created.id.clone()),
             Json(UpdateDeveloperOAuthClientRequest {
+                homepage_url: None,
                 name: Some("After Update".to_string()),
                 redirect_uris: None,
                 delegation_scopes: None,
@@ -910,6 +919,7 @@ mod tests {
             test_auth_user(&user_id),
             Path("client-id".to_string()),
             Json(UpdateDeveloperOAuthClientRequest {
+                homepage_url: None,
                 name: None,
                 redirect_uris: None,
                 delegation_scopes: Some("account:read".to_string()),
@@ -1173,6 +1183,7 @@ mod tests {
             auth,
             Path(created.id.clone()),
             Json(UpdateDeveloperOAuthClientRequest {
+                homepage_url: None,
                 name: None,
                 redirect_uris: None,
                 delegation_scopes: None,
@@ -1213,6 +1224,7 @@ mod tests {
             admin_auth,
             Path(admin_created.id),
             Json(UpdateDeveloperOAuthClientRequest {
+                homepage_url: None,
                 name: None,
                 redirect_uris: None,
                 delegation_scopes: None,
@@ -1265,6 +1277,7 @@ mod tests {
             auth,
             Path(created.id.clone()),
             Json(UpdateDeveloperOAuthClientRequest {
+                homepage_url: None,
                 name: None,
                 redirect_uris: None,
                 delegation_scopes: None,
@@ -1305,6 +1318,7 @@ mod tests {
             admin_auth,
             Path(admin_created.id),
             Json(UpdateDeveloperOAuthClientRequest {
+                homepage_url: None,
                 name: None,
                 redirect_uris: None,
                 delegation_scopes: None,
@@ -1361,6 +1375,7 @@ mod tests {
             auth,
             Path(created.id),
             Json(UpdateDeveloperOAuthClientRequest {
+                homepage_url: None,
                 name: None,
                 redirect_uris: None,
                 delegation_scopes: None,
@@ -1650,6 +1665,10 @@ mod tests {
             app_connect_capability_enabled: false,
             current_manifest_version: None,
             handoff_blurb: None,
+            logo_asset_id: None,
+            homepage_url: None,
+            branding_revision: 0,
+            branding_verified_revision: None,
             revocation_webhook_url: Some("https://ex.com/revoke".to_string()),
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -1691,6 +1710,10 @@ mod tests {
             app_connect_capability_enabled: false,
             current_manifest_version: None,
             handoff_blurb: None,
+            logo_asset_id: None,
+            homepage_url: None,
+            branding_revision: 0,
+            branding_verified_revision: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -1711,6 +1734,7 @@ mod tests {
     #[test]
     fn developer_oauth_client_response_serialization() {
         let resp = DeveloperOAuthClientResponse {
+            branding: Default::default(),
             app_connect_capability_enabled: false,
             app_connect_enabled: false,
             current_manifest_version: None,
@@ -1739,6 +1763,7 @@ mod tests {
     #[test]
     fn developer_oauth_client_response_includes_secret_when_present() {
         let resp = DeveloperOAuthClientResponse {
+            branding: Default::default(),
             app_connect_capability_enabled: false,
             app_connect_enabled: false,
             current_manifest_version: None,
@@ -1766,6 +1791,7 @@ mod tests {
     #[test]
     fn developer_app_authorization_projection_excludes_names_urls_and_secret() {
         let detail = DeveloperOAuthClientResponse {
+            branding: Default::default(),
             app_connect_capability_enabled: false,
             app_connect_enabled: false,
             current_manifest_version: None,

@@ -60,6 +60,7 @@ import {
   AppConnectRolloutPolicy,
   AppConnectCapabilitySwitch,
 } from "@/components/admin/app-connect-rollout";
+import { BrandingVerification } from "@/components/admin/branding-verification";
 import { Switch } from "@/components/ui/switch";
 import {
   Table,
@@ -655,6 +656,9 @@ export function AdminOAuthClientsPage() {
             >
               {client.id}
             </p>
+            {canWrite && client.app_connect_capability_enabled && (
+              <BrandingVerification client={client} />
+            )}
             {canWrite && (
               <AppConnectCapabilitySwitch
                 clientId={client.id}

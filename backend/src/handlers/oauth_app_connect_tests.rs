@@ -1327,3 +1327,6 @@ async fn app_connect_authorize_db_api_mode_returns_checklist_consent_handoff() {
     }
     assert_eq!(count(&f, LINKS).await, before);
 }
+
+#[path = "oauth_branding_tests.rs"]
+mod branding_tests;

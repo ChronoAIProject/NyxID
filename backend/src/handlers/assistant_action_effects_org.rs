@@ -2849,6 +2849,7 @@ async fn update_developer_app_action(
         auth_user,
         Path(id.clone()),
         Json(developer_apps::UpdateDeveloperOAuthClientRequest {
+            homepage_url: None,
             name: body.name,
             redirect_uris: body.redirect_uris,
             delegation_scopes: None,

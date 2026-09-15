@@ -44,6 +44,10 @@ vi.mock("@/components/shared/client-secret-dialog", () => ({
     open ? <div data-testid="client-secret-dialog" /> : null,
 }));
 
+vi.mock("./branding-card", () => ({
+  BrandingCard: () => <div data-testid="branding-card" />,
+}));
+
 vi.mock("./handoff-card", () => ({
   HandoffCard: () => <div data-testid="handoff-card" />,
 }));
@@ -127,6 +131,7 @@ describe("DeveloperAppDetail", () => {
       />,
     );
     expect(screen.queryByTestId("requirements-card")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("branding-card")).not.toBeInTheDocument();
   });
 
   it("shows requirements for enabled apps in the shared personal and org detail", () => {
@@ -144,6 +149,7 @@ describe("DeveloperAppDetail", () => {
         backTo={{ to: "/orgs/test/developer-apps", label: "Organization apps" }}
       />,
     );
+    expect(screen.getByTestId("branding-card")).toBeInTheDocument();
     expect(screen.getByTestId("requirements-card")).toHaveTextContent(
       "client-1",
     );

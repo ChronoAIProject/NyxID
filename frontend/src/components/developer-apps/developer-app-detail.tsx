@@ -33,6 +33,7 @@ import { ApiError } from "@/lib/api-client";
 import { toast } from "sonner";
 import { useCatalog } from "@/hooks/use-keys";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
+import { BrandingCard } from "./branding-card";
 import { HandoffCard } from "./handoff-card";
 import { RequirementsCard } from "./requirements-card";
 import { ConnectionWebhookSection } from "./connection-webhook-section";
@@ -330,6 +331,7 @@ export function DeveloperAppDetail({
       {app.app_connect_enabled && (
         <>
           <RequirementsCard clientId={app.id} />
+          <BrandingCard app={app} />
           <HandoffCard clientId={app.id} blurb={app.handoff_blurb ?? null} />
         </>
       )}

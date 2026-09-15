@@ -263,6 +263,10 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         app_connect_capability_enabled: false,
         current_manifest_version: None,
         handoff_blurb: None,
+        logo_asset_id: None,
+        homepage_url: None,
+        branding_revision: 0,
+        branding_verified_revision: None,
         revocation_webhook_url: None,
         revocation_webhook_secret_encrypted: None,
         connection_webhook_url: None,
@@ -439,6 +443,10 @@ pub async fn create_client_with_id(
         app_connect_capability_enabled: false,
         current_manifest_version: None,
         handoff_blurb: None,
+        logo_asset_id: None,
+        homepage_url: None,
+        branding_revision: 0,
+        branding_verified_revision: None,
         revocation_webhook_url: revocation_webhook_url.map(str::to_string),
         revocation_webhook_secret_encrypted,
         connection_webhook_url: None,
@@ -1229,11 +1237,18 @@ pub async fn update_client_for_creator(
     revocation_webhook_url: Option<&str>,
     revocation_webhook_secret_encrypted: Option<Vec<u8>>,
     default_service_catalog_slugs: Option<&[String]>,
+    homepage_url: Option<&str>,
 ) -> AppResult<OauthClient> {
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
 
+    if let Some(url) = homepage_url {
+        set_doc.insert(
+            "homepage_url",
+            super::oauth_branding_service::validate_homepage(url)?,
+        );
+    }
     if let Some(name) = client_name {
         set_doc.insert("client_name", name);
     }
@@ -1288,7 +1303,7 @@ pub async fn update_client_for_creator(
         .collection::<OauthClient>(OAUTH_CLIENTS)
         .update_one(
             doc! { "_id": client_id, "created_by": created_by, "is_active": true },
-            doc! { "$set": set_doc },
+            super::oauth_branding_service::update_pipeline(set_doc),
         )
         .await?;
 
@@ -1350,7 +1365,10 @@ pub async fn admin_update_client(
 
     let result = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
-        .update_one(doc! { "_id": client_id }, doc! { "$set": set_doc })
+        .update_one(
+            doc! { "_id": client_id },
+            super::oauth_branding_service::update_pipeline(set_doc),
+        )
         .await?;
 
     if result.matched_count == 0 {
@@ -1490,7 +1508,7 @@ pub async fn update_handoff_blurb(
     let blurb = (!text.is_empty()).then(|| text.to_string());
     let result = db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(
         doc! { "_id": id, "created_by": owner, "app_connect_capability_enabled": true, "is_active": true },
-        doc! { "$set": { "handoff_blurb": &blurb, "updated_at": bson::DateTime::from_chrono(Utc::now()) } },
+        super::oauth_branding_service::update_pipeline(doc! { "handoff_blurb": &blurb, "updated_at": bson::DateTime::from_chrono(Utc::now()) }),
     ).await?;
     if result.matched_count == 0 {
         return Err(AppError::AppConnectLinkNotFound);
@@ -2517,6 +2535,10 @@ mod tests {
                 app_connect_capability_enabled: false,
                 current_manifest_version: None,
                 handoff_blurb: None,
+                logo_asset_id: None,
+                homepage_url: None,
+                branding_revision: 0,
+                branding_verified_revision: None,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -2591,6 +2613,10 @@ mod tests {
                 app_connect_capability_enabled: false,
                 current_manifest_version: None,
                 handoff_blurb: None,
+                logo_asset_id: None,
+                homepage_url: None,
+                branding_revision: 0,
+                branding_verified_revision: None,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -3124,6 +3150,10 @@ mod tests {
                     app_connect_capability_enabled: false,
                     current_manifest_version: None,
                     handoff_blurb: None,
+                    logo_asset_id: None,
+                    homepage_url: None,
+                    branding_revision: 0,
+                    branding_verified_revision: None,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
                     connection_webhook_url: None,
@@ -3382,6 +3412,10 @@ mod tests {
                     app_connect_capability_enabled: false,
                     current_manifest_version: None,
                     handoff_blurb: None,
+                    logo_asset_id: None,
+                    homepage_url: None,
+                    branding_revision: 0,
+                    branding_verified_revision: None,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
                     connection_webhook_url: None,

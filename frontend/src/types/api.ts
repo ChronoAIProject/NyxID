@@ -191,6 +191,10 @@ export interface ApiKeyUsageListResponse {
 }
 
 export interface OAuthClient {
+  readonly logo_url?: string | null;
+  readonly homepage_url?: string | null;
+  readonly branding_revision?: number;
+  readonly branding_verified_revision?: number | null;
   readonly app_connect_capability_enabled?: boolean;
   readonly app_connect_enabled?: boolean;
   readonly handoff_blurb?: string | null;

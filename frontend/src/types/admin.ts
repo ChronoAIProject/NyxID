@@ -245,6 +245,11 @@ export interface AdminAuditLogSearchState {
 // ── Admin OAuth clients / broker rollout settings ──
 
 export interface AdminOAuthClient {
+  readonly handoff_blurb?: string | null;
+  readonly logo_url?: string | null;
+  readonly homepage_url?: string | null;
+  readonly branding_revision?: number;
+  readonly branding_verified_revision?: number | null;
   readonly app_connect_capability_enabled?: boolean;
   readonly current_manifest_version?: number | null;
   readonly id: string;

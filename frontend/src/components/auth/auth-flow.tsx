@@ -125,6 +125,7 @@ type AuthPanel = 0 | 1 | 2;
 
 interface AuthFlowProps {
   readonly initialPanel?: AuthPanel;
+  readonly preservePath?: boolean;
   readonly returnTo?: string;
   readonly socialError?: string;
   readonly initialInviteCode?: string;
@@ -132,6 +133,7 @@ interface AuthFlowProps {
 
 export function AuthFlow({
   initialPanel = 0,
+  preservePath = false,
   returnTo,
   socialError,
   initialInviteCode,
@@ -205,16 +207,18 @@ export function AuthFlow({
       setFadeOpacity(0);
       setTimeout(() => {
         setPanel(target);
-        const path = target === 0 ? "/login" : "/register";
-        const nextParams = new URLSearchParams();
-        if (returnTo) nextParams.set("return_to", returnTo);
-        if (initialInviteCode) nextParams.set("code", initialInviteCode);
-        const qs = nextParams.toString();
-        window.history.replaceState(
-          null,
-          "",
-          `${path}${qs ? `?${qs}` : ""}`,
-        );
+        if (!preservePath) {
+          const path = target === 0 ? "/login" : "/register";
+          const nextParams = new URLSearchParams();
+          if (returnTo) nextParams.set("return_to", returnTo);
+          if (initialInviteCode) nextParams.set("code", initialInviteCode);
+          const qs = nextParams.toString();
+          window.history.replaceState(
+            null,
+            "",
+            `${path}${qs ? `?${qs}` : ""}`,
+          );
+        }
         // Small delay for React to render new content before fading in
         requestAnimationFrame(() => {
           setFadeOpacity(1);

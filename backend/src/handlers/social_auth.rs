@@ -1189,6 +1189,31 @@ fn build_success_redirect_url(
     }
 }
 
+/// Only the same-origin context resume URL can return an error to the branded shell.
+fn app_connect_login_error_url(frontend: &str, return_to: &str, error: &str) -> Option<String> {
+    let base = url::Url::parse(frontend).ok()?;
+    let resume = url::Url::parse(return_to).ok()?;
+    if resume.origin() != base.origin() || resume.path() != "/oauth/authorize-context/resume" {
+        return None;
+    }
+    let ctx = resume
+        .query_pairs()
+        .find(|(key, _)| key == "ctx")?
+        .1
+        .into_owned();
+    if ctx.is_empty()
+        || ctx.len() > 4096
+        || !ctx
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return None;
+    }
+    let mut start = base.join(&format!("/connect/app/start/{ctx}")).ok()?;
+    start.query_pairs_mut().append_pair("error", error);
+    Some(start.into())
+}
+
 /// Build an error redirect response that clears social flow cookies.
 fn redirect_with_error(
     target: &SocialRedirectTarget,
@@ -1196,13 +1221,18 @@ fn redirect_with_error(
     secure: bool,
     domain: Option<&str>,
 ) -> (StatusCode, HeaderMap, ()) {
-    let mut headers = HeaderMap::new();
     let url = match target {
         SocialRedirectTarget::Web {
             frontend_url,
             return_to,
         } => {
             let base = frontend_url.trim_end_matches('/');
+            if let Some(start) = return_to
+                .as_deref()
+                .and_then(|url| app_connect_login_error_url(base, url, error))
+            {
+                return redirect_with_location_and_clear_cookies(start, secure, domain);
+            }
             let mut url = format!("{}/login?error={}", base, urlencoding::encode(error));
             if let Some(return_to) = return_to {
                 url.push_str(&format!("&return_to={}", urlencoding::encode(return_to)));
@@ -1219,6 +1249,15 @@ fn redirect_with_error(
             )
         }
     };
+    redirect_with_location_and_clear_cookies(url, secure, domain)
+}
+
+fn redirect_with_location_and_clear_cookies(
+    url: String,
+    secure: bool,
+    domain: Option<&str>,
+) -> (StatusCode, HeaderMap, ()) {
+    let mut headers = HeaderMap::new();
     if let Ok(location) = url.parse() {
         headers.insert(header::LOCATION, location);
     }
@@ -1677,5 +1716,31 @@ mod tests {
     fn nonce_matches_cookie_hash_empty_strings_fail() {
         assert!(!nonce_matches_cookie_hash(Some(""), Some("hash")));
         assert!(!nonce_matches_cookie_hash(Some("nonce"), Some("")));
+    }
+}
+
+#[cfg(test)]
+mod app_connect_login_tests {
+    use super::*;
+    #[test]
+    fn social_failure_returns_only_trusted_contexts_to_the_branded_shell() {
+        assert_eq!(
+            app_connect_login_error_url(
+                "https://nyxid.example",
+                "https://nyxid.example/oauth/authorize-context/resume?ctx=header.payload.signature",
+                "access_denied"
+            )
+            .as_deref(),
+            Some(
+                "https://nyxid.example/connect/app/start/header.payload.signature?error=access_denied"
+            )
+        );
+        for url in [
+            "https://evil.example/oauth/authorize-context/resume?ctx=token",
+            "https://nyxid.example/dashboard",
+            "https://nyxid.example/oauth/authorize-context/resume?ctx=../login",
+        ] {
+            assert!(app_connect_login_error_url("https://nyxid.example", url, "denied").is_none());
+        }
     }
 }

@@ -18,7 +18,8 @@ name = "nyxid-server"
 path = "src/main.rs"
 
 [dependencies]
-axum = { workspace = true }
+image = { version = "0.25.9", default-features = false, features = ["png", "webp"] }
+axum = { workspace = true, features = ["multipart"] }
 tower = "0.5.3"
 tower-http = { version = "0.6.8", features = ["cors", "trace", "request-id"] }
 tokio = { workspace = true }

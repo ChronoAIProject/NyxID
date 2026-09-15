@@ -50,6 +50,8 @@ export const appConnectLinkSchema = z.object({
   id: z.string(),
   oauth_client_id: z.string(),
   client_name: z.string(),
+  logo_url: z.string().nullable().optional(),
+  verified: z.boolean().optional(),
   handoff_blurb: z.string().nullable(),
   destination: z.string(),
   requirements_version: z.number().int(),

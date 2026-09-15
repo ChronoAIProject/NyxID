@@ -1559,6 +1559,9 @@ impl OAuthClientListQuery {
 
 #[derive(Debug, Serialize)]
 pub struct OAuthClientResponse {
+    pub handoff_blurb: Option<String>,
+    #[serde(flatten)]
+    pub branding: super::oauth_branding::BrandingResponse,
     pub id: String,
     pub client_name: String,
     pub client_type: String,
@@ -1711,6 +1714,8 @@ fn oauth_client_response(
         !matches!(broker_capability_source, BrokerCapabilitySource::None);
 
     OAuthClientResponse {
+        branding: (&client).into(),
+        handoff_blurb: client.handoff_blurb.clone(),
         app_connect_capability_enabled: client.app_connect_capability_enabled,
         current_manifest_version: client.current_manifest_version,
         id: client.id,
@@ -3066,6 +3071,10 @@ mod operator_route_tests {
             app_connect_capability_enabled: false,
             current_manifest_version: None,
             handoff_blurb: None,
+            logo_asset_id: None,
+            homepage_url: None,
+            branding_revision: 0,
+            branding_verified_revision: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,

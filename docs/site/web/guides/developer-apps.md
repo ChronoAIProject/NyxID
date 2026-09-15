@@ -241,3 +241,25 @@ read status using the same app/user token; another app or user cannot read it.
 There are no repair webhooks in this phase. Links start with 30 minutes and can
 extend as requirements are satisfied, up to two hours. App owners can edit a
 plain-text handoff blurb of up to 160 characters on the developer app page.
+
+
+### Brand the app login handoff
+
+For apps with an enabled Gate manifest, NyxID presents your app identity while
+the user signs in, connects accounts, and reviews consent. The developer app's
+**White labeling** card accepts a PNG or WebP logo (up to 256 KiB, 512 × 512
+pixels) and an HTTPS homepage. NyxID re-encodes uploaded images to remove
+metadata; it never fetches homepage URLs. The handoff text remains plain text
+and is limited to 160 characters.
+
+The app name and logo appear for active apps whether or not an admin has
+verified them. A platform admin can add a **Verified** chip for the current
+branding revision. Changing the name, logo, homepage, or handoff text removes
+the chip until the new revision is reviewed. The fixed **Secured by NyxID ·
+destination** footer always identifies NyxID and your validated callback host.
+
+The login shell gets this metadata through a five-minute signed authorize
+context, never a raw client ID. Password, social, device, and MFA login resume
+the original server-stored authorize request. If the context expires, the user
+must restart sign-in from your app. Apps without an enabled Gate manifest keep
+the generic NyxID login page.
