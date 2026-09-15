@@ -1,3 +1,4 @@
+import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
 import {
@@ -377,7 +378,7 @@ const assistantApprovalsRoute = createRoute({
 const dashboardLayout = createRoute({
   id: "dashboard",
   getParentRoute: () => rootRoute,
-  beforeLoad: async () => {
+  beforeLoad: async ({ location }) => {
     if (import.meta.env.DEV) {
       const { isMockMode, getMockUser } = await import("./lib/mock-data");
       if (isMockMode()) {
@@ -395,7 +396,8 @@ const dashboardLayout = createRoute({
       // social-login `return_to` cookie both accept an absolute URL on
       // this origin. For plain `/dashboard` there's nothing useful to
       // preserve, so fall through to the bare redirect.
-      const returnPath = `${window.location.pathname}${window.location.search}`;
+      preserveTelegramClaimForLogin();
+      const returnPath = `${location.pathname}${location.searchStr}`;
       if (returnPath !== "/" && returnPath !== "/dashboard") {
         const returnTo = `${window.location.origin}${returnPath}`;
         window.location.assign(
@@ -738,7 +740,13 @@ const apiKeyDetailRoute = createRoute({
 
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
-  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string } => ({ connect: managedConnectPlatform(search.connect), label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined, target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined }),
+  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string; request_id?: string; claim_entry?: boolean } => ({
+    connect: managedConnectPlatform(search.connect),
+    claim_entry: search.claim_entry === true || search.claim_entry === "true" ? true : undefined,
+    label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined,
+    target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined,
+    request_id: typeof search.request_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.request_id) ? search.request_id : undefined,
+  }),
   getParentRoute: () => dashboardLayout,
   component: ChannelBotsPage,
 });

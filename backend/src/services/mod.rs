@@ -137,10 +137,12 @@ pub mod sse_parser;
 pub mod ssh_service;
 pub mod telegram_new_admin;
 pub mod telegram_new_api;
+pub mod telegram_new_claims;
 pub mod telegram_new_connect;
 pub mod telegram_new_service;
 #[cfg(test)]
 mod telegram_new_tests;
+pub mod telegram_new_worker;
 pub mod telegram_poller;
 pub mod telegram_service;
 pub mod telemetry_erasure_service;

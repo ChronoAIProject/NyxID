@@ -19,10 +19,15 @@ export function TelegramSetupPage() {
   const search = useSearch({ strict: false }) as {
     label?: string;
     target_org_id?: string;
+    request_id?: string;
   };
   const actor = useAuthStore((state) => state.user?.id);
-  const configuration = useTelegramNewConfiguration();
-  const request = configuration.data?.request;
+  const configuration = useTelegramNewConfiguration(search.request_id);
+  const saved = configuration.data?.request;
+  const request =
+    saved && !["cancelled", "expired"].includes(saved.status)
+      ? saved
+      : undefined;
   const savedOrgId =
     request && request.owner_user_id !== actor
       ? request.owner_user_id
@@ -44,7 +49,10 @@ export function TelegramSetupPage() {
   useEffect(() => {
     if (
       !request ||
-      (search.label === request.label && search.target_org_id === savedOrgId)
+      request.status === "connected" ||
+      (search.label === request.label &&
+        search.target_org_id === savedOrgId &&
+        search.request_id === request.id)
     )
       return;
     void navigate({
@@ -53,10 +61,18 @@ export function TelegramSetupPage() {
         connect: "telegram-new",
         label: request.label,
         target_org_id: savedOrgId,
+        request_id: request.id,
       },
       replace: true,
     });
-  }, [request, savedOrgId, search.label, search.target_org_id, navigate]);
+  }, [
+    request,
+    savedOrgId,
+    search.label,
+    search.target_org_id,
+    search.request_id,
+    navigate,
+  ]);
 
   function saveDraft(nextLabel: string, nextOrgId: string | undefined) {
     void navigate({
@@ -84,8 +100,8 @@ export function TelegramSetupPage() {
         Back to Channel Bots
       </Button>
       <PageHeader
-        title="Create a Telegram bot"
-        description="Create a bot in Telegram, then connect it to an AI agent in NyxID."
+        title={request && ["ready", "provisioning", "connected"].includes(request.status) ? "Connecting your Telegram bot" : "Create a Telegram bot"}
+        description={request && ["ready", "provisioning", "connected"].includes(request.status) ? "Your bot and destination are saved. NyxID is completing the connection." : "Continue in Telegram and create your bot. NyxID completes the connection automatically."}
       />
       <div className="space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5">
         <div className="space-y-2">
@@ -118,7 +134,9 @@ export function TelegramSetupPage() {
           />
           <p className="text-xs text-muted-foreground">
             {request
-              ? "These details are saved. To change them, choose Cancel setup below."
+              ? request.status === "provisioning" || request.status === "connected"
+                ? "These details are saved. You can manage the bot once it is connected."
+                : "These details are saved. To change them, choose Cancel setup below."
               : "Choose where the bot will appear in NyxID: your personal account or an organization you manage."}
           </p>
         </div>
@@ -127,6 +145,26 @@ export function TelegramSetupPage() {
         key={actor}
         label={label}
         orgId={orgId ?? null}
+        requestId={search.request_id}
+        onStarted={async (id) => {
+          await navigate({
+            to: "/channel-bots",
+            search: {
+              connect: "telegram-new",
+              label,
+              target_org_id: orgId,
+              request_id: id,
+            },
+            replace: true,
+          });
+        }}
+        onCancelled={async () => {
+          await navigate({
+            to: "/channel-bots",
+            search: { connect: "telegram-new", label, target_org_id: orgId },
+            replace: true,
+          });
+        }}
         onConnected={(id) => {
           void navigate({
             to: "/channel-bots/$botId",
