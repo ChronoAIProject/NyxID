@@ -1337,16 +1337,8 @@
         font-weight: 400;
         text-align: right;
       }
-      #resourceList {
-        max-height: 480px;
-        gap: 10px;
-        padding: 2px 3px 2px 0;
-      }
-      #newPanel .resource-card {
-        padding: 0;
-        border: 0;
-        margin-top: 16px;
-      }
+
+
       .service-permission-card {
         border: 1px solid var(--line);
         border-radius: 10px;
@@ -1608,10 +1600,7 @@
       #permissionFilter .filter-actions {
         margin-top: 8px;
       }
-      #resourceList {
-        max-height: 480px;
-        overscroll-behavior: contain;
-      }
+
       .service-permission-card {
         min-width: 0;
       }
@@ -1895,35 +1884,13 @@
       .key-option .match-permissions {
         margin-top: 8px;
       }
-      #grantAccessDetails > summary {
-        color: var(--muted);
-        font-size: 11px;
-        align-items: center;
-        flex-wrap: wrap;
-        justify-content: flex-start;
-      }
-      #grantAccessDetails > summary::after {
-        content: "⌄";
-        margin-left: auto;
-      }
-      #grantAccessDetails[open] > summary::after {
-        transform: rotate(180deg);
-      }
-      #grantAccessDetails > summary:focus-visible {
-        outline: 2px solid var(--purple);
-        outline-offset: 3px;
-      }
-      #grantAccessDetails > summary #grantMatch {
-        color: var(--amber);
-        text-align: left;
-      }
-      #createKeyTitle:focus {
-        outline: none;
-      }
-      #createKeyTitle:focus-visible {
-        outline: 2px solid var(--purple);
-        outline-offset: 4px;
-      }
+
+
+
+
+
+
+
       .permission-filter-heading {
         display: flex;
         align-items: center;
@@ -2197,12 +2164,7 @@
         margin-bottom: 12px;
         font-size: 12px;
       }
-      #resourceList {
-        max-height: 320px;
-        overflow: auto;
-        display: grid;
-        gap: 8px;
-      }
+
       .selected-connection-card {
         display: flex;
         align-items: flex-start;
@@ -2308,17 +2270,178 @@
         padding: 8px;
         font-size: 12px;
       }
-      #chooseConnections {
-        margin: 10px 0;
-      }
+
       .connection-access-group {
         margin-top: 10px;
       }
       .connection-access-group > .helper {
         margin-bottom: 4px;
       }
-      #newKeyIntro {
-        margin-bottom: 16px;
+
+
+      .authorization-card {
+        display: grid;
+        gap: 16px;
+      }
+      .authorization-card > .text-button {
+        justify-self: start;
+      }
+      .authorization-heading {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+      }
+      .authorization-heading > div {
+        min-width: 0;
+        flex: 1;
+      }
+      .authorization-icon {
+        width: 36px;
+        height: 36px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        flex-shrink: 0;
+      }
+      .authorization-icon svg {
+        width: 18px;
+        height: 18px;
+        color: var(--muted);
+      }
+      .authorization-title {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .authorization-title h2 {
+        font-size: 15px;
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      .authorization-caption {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: space-between;
+        font-size: 11px;
+      }
+      .authorization-rows {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .authorization-row + .authorization-row,
+      #serviceAccessRows > .authorization-row {
+        border-top: 1px solid var(--line);
+      }
+      .authorization-row > summary {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        list-style: none;
+        cursor: pointer;
+        padding: 12px;
+      }
+      .authorization-row > summary::-webkit-details-marker {
+        display: none;
+      }
+      .authorization-row-copy {
+        min-width: 0;
+        flex: 1;
+      }
+      .authorization-row-copy strong {
+        display: block;
+        font-size: 12px;
+      }
+      .authorization-row-copy small {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+      .access-status {
+        font-size: 10px;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+      .access-status.warning {
+        color: var(--amber);
+      }
+      .row-chevron {
+        color: var(--muted);
+        transition: transform 0.15s;
+      }
+      .authorization-row[open] > summary .row-chevron {
+        transform: rotate(90deg);
+      }
+      .authorization-row-body {
+        padding: 12px;
+        border-top: 1px solid var(--line);
+        display: grid;
+        gap: 12px;
+      }
+      .authorization-account {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .authorization-account > span {
+        min-width: 0;
+        flex: 1;
+      }
+      .authorization-account strong {
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      .authorization-account input {
+        accent-color: var(--purple);
+        margin-top: 3px;
+      }
+      .authorization-account .helper {
+        margin: 3px 0;
+        overflow-wrap: anywhere;
+      }
+      #grantCustomize {
+        margin: 0;
+        border-width: 1px 0 0;
+        border-radius: 0;
+        padding: 0;
+      }
+      #grantCustomize > summary {
+        padding: 12px 0;
+      }
+      #grantCustomize[open] > div {
+        margin: 0 0 16px;
+      }
+      #grantCustomize #newPanel {
+        margin: 0;
+      }
+      .authorization-card > .step-actions {
+        margin: 0;
+        padding: 0;
+        border: 0;
+        justify-content: flex-end;
+      }
+      .authorization-card > .validation-hint {
+        margin: 0;
+      }
+      #nyxidAccess .nyxid-service-icon {
+        display: flex;
+      }
+      #agentScope:has(#grantCard:not([hidden])) {
+        margin-top: 0;
+      }
+      #agentScope:has(#grantCard:not([hidden])) ~ * {
+        margin-top: 0;
+      }
+      #scopeStep:has(#grantCard:not([hidden])) > .step-card-heading {
+        display: none;
       }
     </style>
   </head>
@@ -2616,389 +2739,379 @@
                       Change to restricted access
                     </button>
                   </div>
-                  <div id="agentScope" hidden>
-                    <div class="new-key-heading" id="newKeyIntro" hidden>
-                      <button class="text-button" id="backToKeys" type="button">
-                        ← Back to matching keys
-                      </button>
-                      <h2 tabindex="-1" id="createKeyTitle">New Agent Key · Draft</h2>
-                      <p class="helper">
-                        Configure one Agent Key for this device. Service access is optional; the key
-                        is created when you select Create &amp; continue.
-                      </p>
+                  <div id="agentScope" hidden="">
+                    <div id="filterHome">
+                      <div class="permission-filter" id="permissionFilter">
+                        <label class="filter-label" for="permissionSearch"
+                          >Search permissions</label
+                        >
+                        <div class="permission-picker">
+                          <div class="permission-input" id="permissionInput">
+                            <svg
+                              class="permission-search-icon"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              aria-hidden="true"
+                            >
+                              <circle cx="10.5" cy="10.5" r="6.5"></circle>
+                              <path d="m16 16 4.5 4.5"></path>
+                            </svg>
+                            <input
+                              id="permissionSearch"
+                              type="text"
+                              role="combobox"
+                              aria-autocomplete="list"
+                              aria-haspopup="listbox"
+                              aria-controls="permissionOptions"
+                              aria-expanded="false"
+                              aria-describedby="permissionHelp permissionSelectedCount"
+                              autocomplete="off"
+                              placeholder="Type a permission, e.g. read or proxy"
+                            />
+                            <button
+                              class="filter-toggle"
+                              id="togglePermissions"
+                              type="button"
+                              aria-label="Show permission options"
+                              aria-controls="permissionOptions"
+                              aria-expanded="false"
+                            >
+                              ⌄
+                            </button>
+                          </div>
+                          <div
+                            class="permission-menu"
+                            id="permissionMenu"
+                            hidden=""
+                          >
+                            <div class="menu-caption">
+                              <span id="permissionInventory"></span>
+                              <span
+                                id="menuSelectedCount"
+                                class="selection-count"
+                              ></span>
+                            </div>
+                            <div
+                              id="permissionOptions"
+                              role="listbox"
+                              aria-label="Available permissions"
+                              aria-multiselectable="true"
+                            ></div>
+                            <p id="permissionEmpty" class="helper" hidden="">
+                              No matching service or permission. Try Slack,
+                              repositories, calendar, or a scope name.
+                            </p>
+                          </div>
+                        </div>
+                        <section
+                          class="selected-permissions-panel"
+                          id="selectedPermissionsPanel"
+                          aria-labelledby="selectedPermissionsTitle"
+                        >
+                          <div class="permission-filter-heading">
+                            <h3 id="selectedPermissionsTitle" tabindex="-1">
+                              Requested permissions
+                            </h3>
+                            <span
+                              class="selection-count"
+                              id="permissionSelectedCount"
+                              role="status"
+                              aria-live="polite"
+                              aria-atomic="true"
+                              >0 selected</span
+                            >
+                          </div>
+                          <p class="helper" id="linkFiltersNote" hidden="">
+                            Suggested by the request link · Editable
+                          </p>
+                          <div
+                            id="permissionChips"
+                            class="permission-chips"
+                          ></div>
+                          <p class="helper" id="emptyPermissionSelection">
+                            No permissions selected. Search above to add them.
+                          </p>
+                          <p
+                            class="helper warning"
+                            id="filterError"
+                            role="status"
+                            hidden=""
+                          ></p>
+                          <div class="filter-actions">
+                            <button
+                              class="text-button"
+                              id="resetLinkFilters"
+                              type="button"
+                              hidden=""
+                            >
+                              Reset to link filters</button
+                            ><button
+                              class="text-button"
+                              id="clearFilters"
+                              type="button"
+                            >
+                              Clear filters
+                            </button>
+                          </div>
+                        </section>
+                        <p class="helper" id="permissionHelp">
+                          Find an Agent Key with this access. Exact matches
+                          appear first; additional access is listed on each
+                          card.
+                        </p>
+                      </div>
                     </div>
-                    <div class="permission-filter" id="permissionFilter">
-                      <label class="filter-label" for="permissionSearch"
-                        >Search permissions</label
-                      >
-                      <div class="permission-picker">
-                        <div class="permission-input" id="permissionInput">
-                          <svg
-                            class="permission-search-icon"
+                    <div id="keyChoices">
+                      <div id="existingPanel">
+                        <div class="list-heading">
+                          <strong>Choose an existing Agent Key</strong>
+                          <span id="keyCount" aria-live="polite"
+                            >0 keys available</span
+                          >
+                        </div>
+                        <fieldset
+                          class="key-list"
+                          id="keyList"
+                          aria-label="Matching Agent Keys"
+                        >
+                          <legend class="sr-only">
+                            Select an existing Agent Key
+                          </legend>
+                        </fieldset>
+                        <div id="noKeyMatch" class="no-key-match" hidden="">
+                          <strong id="noKeyTitle">No matching Agent Key</strong>
+                          <p id="noKeyDescription" class="helper">
+                            Create a key with these permissions and choose its
+                            services.
+                          </p>
+                        </div>
+                        <div class="create-key-row">
+                          <div>
+                            <strong>Need a different scope?</strong>
+                            <p class="helper">
+                              Create a new Agent Key using the permissions
+                              above.
+                            </p>
+                          </div>
+                          <button
+                            class="btn primary"
+                            id="createMatchingKey"
+                            type="button"
+                          >
+                            Create new Agent Key →
+                          </button>
+                        </div>
+                        <p
+                          class="helper"
+                          id="selectionNotice"
+                          aria-live="polite"
+                          hidden=""
+                        ></p>
+                      </div>
+                    </div>
+                    <section
+                      id="grantCard"
+                      class="authorization-card"
+                      aria-label="Authorize access"
+                      hidden=""
+                    >
+                      <button class="text-button" id="backToKeys" type="button">
+                        ← Change key
+                      </button>
+                      <header class="authorization-heading">
+                        <span class="authorization-icon" aria-hidden="true"
+                          ><svg
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="currentColor"
-                            stroke-width="2"
-                            aria-hidden="true"
+                            stroke-width="1.7"
                           >
-                            <circle cx="10.5" cy="10.5" r="6.5" />
-                            <path d="m16 16 4.5 4.5" />
-                          </svg>
-                          <input
-                            id="permissionSearch"
-                            type="text"
-                            role="combobox"
-                            aria-autocomplete="list"
-                            aria-haspopup="listbox"
-                            aria-controls="permissionOptions"
-                            aria-expanded="false"
-                            aria-describedby="permissionHelp permissionSelectedCount"
-                            autocomplete="off"
-                            placeholder="Type a permission, e.g. read or proxy"
-                          />
-                          <button
-                            class="filter-toggle"
-                            id="togglePermissions"
-                            type="button"
-                            aria-label="Show permission options"
-                            aria-controls="permissionOptions"
-                            aria-expanded="false"
-                          >
-                            ⌄
-                          </button>
-                        </div>
-                        <div class="permission-menu" id="permissionMenu" hidden>
-                          <div class="menu-caption">
-                            <span id="permissionInventory"></span>
-                            <span
-                              id="menuSelectedCount"
-                              class="selection-count"
-                            ></span>
-                          </div>
-                          <div
-                            id="permissionOptions"
-                            role="listbox"
-                            aria-label="Available permissions"
-                            aria-multiselectable="true"
-                          ></div>
-                          <p id="permissionEmpty" class="helper" hidden>
-                            No matching service or permission. Try Slack,
-                            repositories, calendar, or a scope name.
-                          </p>
-                        </div>
-                      </div>
-                      <section
-                        class="selected-permissions-panel"
-                        id="selectedPermissionsPanel"
-                        aria-labelledby="selectedPermissionsTitle"
-                      >
-                        <div class="permission-filter-heading">
-                          <h3 id="selectedPermissionsTitle" tabindex="-1">
-                            Requested permissions
-                          </h3>
-                          <span
-                            class="selection-count"
-                            id="permissionSelectedCount"
-                            role="status"
-                            aria-live="polite"
-                            aria-atomic="true"
-                            >0 selected</span
-                          >
-                        </div>
-                        <p class="helper" id="linkFiltersNote" hidden>
-                          Suggested by the request link · Editable
-                        </p>
-                        <div
-                          id="permissionChips"
-                          class="permission-chips"
-                        ></div>
-                        <p class="helper" id="emptyPermissionSelection">
-                          No permissions selected. Search above to add them.
-                        </p>
-                        <p
-                          class="helper warning"
-                          id="filterError"
-                          role="status"
-                          hidden
-                        ></p>
-                        <div class="filter-actions">
-                          <button
-                            class="text-button"
-                            id="resetLinkFilters"
-                            type="button"
-                            hidden
-                          >
-                            Reset to link filters</button
-                          ><button
-                            class="text-button"
-                            id="clearFilters"
-                            type="button"
-                          >
-                            Clear filters
-                          </button>
-                        </div>
-                      </section>
-                      <p class="helper" id="permissionHelp">
-                        Find an Agent Key with this access. Exact matches appear
-                        first; additional access is listed on each card.
-                      </p>
-                    </div>
-                    <div id="existingPanel">
-                      <div class="list-heading">
-                        <strong>Choose an existing Agent Key</strong>
-                        <span id="keyCount" aria-live="polite"
-                          >0 keys available</span
-                        >
-                      </div>
-                      <fieldset
-                        class="key-list"
-                        id="keyList"
-                        aria-label="Matching Agent Keys"
-                      >
-                        <legend class="sr-only">
-                          Select an existing Agent Key
-                        </legend>
-                      </fieldset>
-                      <div id="noKeyMatch" class="no-key-match" hidden>
-                        <strong id="noKeyTitle">No matching Agent Key</strong>
-                        <p id="noKeyDescription" class="helper">
-                          Create a key with these permissions and choose its
-                          services.
-                        </p>
-                      </div>
-                      <div class="create-key-row">
+                            <circle cx="8" cy="8" r="4"></circle>
+                            <path d="m11 11 9 9m-4-4 3-3m-6 0 3-3"></path></svg
+                        ></span>
                         <div>
-                          <strong>Need a different scope?</strong>
+                          <div class="authorization-title">
+                            <h2 id="grantName" tabindex="-1"></h2>
+                            <span class="neutral-badge" id="grantKind"></span>
+                          </div>
                           <p class="helper">
-                            Create a new Agent Key using the permissions above.
+                            <span id="grantOwner"></span> ·
+                            <span id="grantExpiry"></span>
                           </p>
                         </div>
-                        <button
-                          class="btn primary"
-                          id="createMatchingKey"
-                          type="button"
-                        >
-                          Create new Agent Key →
-                        </button>
+                      </header>
+                      <div class="authorization-caption">
+                        <strong>Allow this device to access</strong
+                        ><span class="warning" id="grantMatch"></span>
                       </div>
-                      <p
-                        class="helper"
-                        id="selectionNotice"
-                        aria-live="polite"
-                        hidden
-                      ></p>
-                    </div>
-                    <div id="newPanel" hidden>
-                      <section
-                        class="resource-card"
-                        aria-label="Services this key can use"
-                      >
-                        <div class="connection-summary-heading">
-                          <strong>Services this key can use</strong
-                          ><span class="selection-count" id="serviceCount"
-                            >0 connections selected</span
-                          >
-                        </div>
-                        <p class="helper">Choose existing connected accounts to include in this key's access.</p>
-                        <button class="btn" type="button" id="chooseConnections">
-                          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-                          Add service
-                        </button>
-                        <div class="resource-list" id="resourceList"></div>
-                        <p class="helper">
-                          Optional for account-only keys. Selected connections
-                          keep all their provider permissions.
-                        </p>
-                      </section>
-                      <details class="compact-details" id="resourceAdvanced">
-                        <summary>
-                          <span>Broader access and nodes</span
-                          ><span id="nodeCount">0 nodes</span>
-                        </summary>
-                        <div class="resource-controls">
-                          <label
-                            ><input type="checkbox" id="allowAll" /> All current
-                            and future services</label
-                          ><label
-                            ><input type="checkbox" id="allowAllNodes" /> All
-                            current and future nodes</label
-                          >
-                        </div>
-                        <p class="helper warning" id="allWarning" hidden></p>
-                        <div id="nodeChoices"></div>
-                      </details>
-                      <div class="field-grid">
-                        <div class="field">
-                          <label for="newName">Key name</label
-                          ><input
-                            class="input"
-                            id="newName"
-                            placeholder="e.g. CLI development"
-                            maxlength="64"
-                            required
-                          />
-                        </div>
-                        <div class="field">
-                          <label for="newOwner">Owner</label
-                          ><select class="select" id="newOwner">
-                            <option value="personal">Personal</option>
-                          </select>
-                        </div>
-                      </div>
-                      <details
-                        class="compact-details"
-                        id="keyPermissionDetails"
-                      >
-                        <summary>
-                          <span>NyxID permissions</span
-                          ><span id="newScopeSummary"></span>
-                        </summary>
-                        <fieldset class="permissions-picker">
-                          <legend class="sr-only">NyxID permissions</legend>
-                          <div class="chips" id="scopeChoices"></div>
-                        </fieldset>
-                        <p class="helper">
-                          These permissions apply to the NyxID API. Service
-                          connections below keep their existing provider
-                          permissions.
-                        </p>
-                      </details>
-                      <details class="compact-details" id="newKeySettings">
-                        <summary>
-                          <span>Expiry and limits</span
-                          ><span>90 days · Default limits</span>
-                        </summary>
-                        <div class="field-grid">
-                          <div class="field">
-                            <label for="newExpiry">Key expiry</label
-                            ><select class="select" id="newExpiry">
-                              <option value="7">7 days</option>
-                              <option value="30">30 days</option>
-                              <option value="90" selected>90 days</option>
-                              <option value="365">365 days</option>
-                              <option value="none">No expiry</option>
-                            </select>
-                          </div>
-                          <div class="field">
-                            <label for="newPlatform">Platform</label
-                            ><select class="select" id="newPlatform">
-                              <option value="generic">Generic</option>
-                              <option value="codex">Codex</option>
-                              <option value="claude-code">Claude Code</option>
-                              <option value="openclaw">OpenClaw</option>
-                            </select>
-                          </div>
-                        </div>
-                        <div class="field-grid">
-                          <div class="field">
-                            <label for="newRate">Requests per second</label
-                            ><input
-                              class="input"
-                              id="newRate"
-                              type="number"
-                              min="1"
-                              max="4294967295"
-                              step="1"
-                              placeholder="Default"
-                            />
-                          </div>
-                          <div class="field">
-                            <label for="newBurst">Burst</label
-                            ><input
-                              class="input"
-                              id="newBurst"
-                              type="number"
-                              min="1"
-                              max="4294967295"
-                              step="1"
-                              placeholder="Default"
-                            />
-                          </div>
-                        </div>
-                      </details>
-                    </div>
-                    <div class="scope-card" id="grantCard" hidden>
-                      <div class="scope-head">
-                        <strong>Final access review</strong
-                        ><span id="grantKind">Awaiting selection</span>
-                      </div>
-                      <p class="helper" id="grantOutcome"></p>
-                      <div id="grantDetails" hidden>
-                        <div class="grant-key">
-                          <strong id="grantName"></strong
-                          ><span class="neutral-badge" id="grantOwner"></span>
-                        </div>
-                        <div class="grant-preview">
-                          <div>
-                            <b>This device will receive</b
-                            ><span id="grantPreview" aria-live="polite"></span>
-                          </div>
-                        </div>
+                      <div id="grantRows" class="authorization-rows">
                         <details
-                          class="compact-details"
-                          id="grantAccessDetails"
+                          id="nyxidAccess"
+                          class="authorization-row"
+                          data-access-group="__nyxid__"
                         >
                           <summary>
-                            <span>View permissions and service access</span
-                            ><span id="grantMatch" hidden></span>
+                            <span class="nyxid-service-icon"></span
+                            ><span class="authorization-row-copy"
+                              ><strong>NyxID</strong
+                              ><small id="nyxidAccessSummary"></small></span
+                            ><span class="access-status" id="nyxidMatch"></span
+                            ><span class="row-chevron" aria-hidden="true"
+                              >›</span
+                            >
                           </summary>
-                          <div id="grantSettings">
-                            <dl class="grant-rows">
-                              <div>
-                                <dt>Effective permissions</dt>
-                                <dd id="grantEffective"></dd>
-                              </div>
-                              <div>
-                                <dt>Configured scopes</dt>
-                                <dd id="grantScopes" class="chips"></dd>
-                              </div>
-                              <div>
-                                <dt>Services</dt>
-                                <dd
-                                  id="grantServices"
-                                  class="resource-summary"
-                                ></dd>
-                              </div>
-                              <div>
-                                <dt>Nodes</dt>
-                                <dd
-                                  id="grantNodes"
-                                  class="resource-summary"
-                                ></dd>
-                              </div>
-                              <div>
-                                <dt>Key expiry</dt>
-                                <dd id="grantExpiry"></dd>
-                              </div>
-                              <div>
-                                <dt>Rate limit</dt>
-                                <dd id="grantRate"></dd>
-                              </div>
-                              <div>
-                                <dt>Platform</dt>
-                                <dd id="grantPlatform"></dd>
-                              </div>
-                            </dl>
-                            <div
-                              id="grantedServiceCards"
-                              class="granted-service-cards"
-                            ></div>
-                            <div class="field expiry-field">
-                              <label for="credentialExpiry"
-                                >Login credential expiry</label
-                              ><select class="select" id="credentialExpiry">
-                                <option value="parent">Use key expiry</option>
-                                <option value="1">1 day</option>
-                                <option value="7">7 days</option>
-                                <option value="30">30 days</option>
-                                <option value="90">90 days</option>
-                              </select>
-                              <p class="helper" id="expiryHint"></p>
+                          <div class="authorization-row-body">
+                            <div id="nyxidIncluded"></div>
+                            <div id="nyxidEditor">
+                              <fieldset class="permissions-picker">
+                                <legend>NyxID permissions</legend>
+                                <div class="chips" id="scopeChoices"></div>
+                              </fieldset>
                             </div>
                           </div>
-                          <p class="helper warning" id="grantBroad" hidden></p>
-                          <div id="grantRequested"></div>
-                          <div id="grantExtra" hidden></div>
+                        </details>
+                        <div id="serviceAccessRows"></div>
+                      </div>
+                      <p class="helper warning" id="grantBroad" hidden=""></p>
+                      <details class="compact-details" id="grantCustomize">
+                        <summary>
+                          <span>Customize</span
+                          ><span aria-hidden="true">⌄</span>
+                        </summary>
+                        <div id="filterSlot"></div>
+                        <div id="newSettingsSlot">
+                          <div id="newPanel" hidden="">
+                            <details
+                              class="compact-details"
+                              id="resourceAdvanced"
+                            >
+                              <summary>
+                                <span>Broader access and nodes</span
+                                ><span id="nodeCount">0 nodes</span>
+                              </summary>
+                              <div class="resource-controls">
+                                <label
+                                  ><input type="checkbox" id="allowAll" /> All
+                                  current and future services</label
+                                ><label
+                                  ><input type="checkbox" id="allowAllNodes" />
+                                  All current and future nodes</label
+                                >
+                              </div>
+                              <p
+                                class="helper warning"
+                                id="allWarning"
+                                hidden=""
+                              ></p>
+                              <div id="nodeChoices"></div>
+                            </details>
+                            <div class="field-grid">
+                              <div class="field">
+                                <label for="newName">Key name</label
+                                ><input
+                                  class="input"
+                                  id="newName"
+                                  placeholder="e.g. CLI development"
+                                  maxlength="64"
+                                  required=""
+                                />
+                              </div>
+                              <div class="field">
+                                <label for="newOwner">Owner</label
+                                ><select class="select" id="newOwner">
+                                  <option value="personal">Personal</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            <details
+                              class="compact-details"
+                              id="newKeySettings"
+                            >
+                              <summary>
+                                <span>Expiry and limits</span
+                                ><span>90 days · Default limits</span>
+                              </summary>
+                              <div class="field-grid">
+                                <div class="field">
+                                  <label for="newExpiry">Key expiry</label
+                                  ><select class="select" id="newExpiry">
+                                    <option value="7">7 days</option>
+                                    <option value="30">30 days</option>
+                                    <option value="90" selected="">
+                                      90 days
+                                    </option>
+                                    <option value="365">365 days</option>
+                                    <option value="none">No expiry</option>
+                                  </select>
+                                </div>
+                                <div class="field">
+                                  <label for="newPlatform">Platform</label
+                                  ><select class="select" id="newPlatform">
+                                    <option value="generic">Generic</option>
+                                    <option value="codex">Codex</option>
+                                    <option value="claude-code">
+                                      Claude Code
+                                    </option>
+                                    <option value="openclaw">OpenClaw</option>
+                                  </select>
+                                </div>
+                              </div>
+                              <div class="field-grid">
+                                <div class="field">
+                                  <label for="newRate"
+                                    >Requests per second</label
+                                  ><input
+                                    class="input"
+                                    id="newRate"
+                                    type="number"
+                                    min="1"
+                                    max="4294967295"
+                                    step="1"
+                                    placeholder="Default"
+                                  />
+                                </div>
+                                <div class="field">
+                                  <label for="newBurst">Burst</label
+                                  ><input
+                                    class="input"
+                                    id="newBurst"
+                                    type="number"
+                                    min="1"
+                                    max="4294967295"
+                                    step="1"
+                                    placeholder="Default"
+                                  />
+                                </div>
+                              </div>
+                            </details>
+                          </div>
+                        </div>
+                        <div id="existingSettings">
+                          <dl class="grant-rows">
+                            <div>
+                              <dt>Rate limit</dt>
+                              <dd id="grantRate"></dd>
+                            </div>
+                            <div>
+                              <dt>Platform</dt>
+                              <dd id="grantPlatform"></dd>
+                            </div>
+                          </dl>
+                          <div class="field expiry-field">
+                            <label for="credentialExpiry"
+                              >Login credential expiry</label
+                            ><select class="select" id="credentialExpiry">
+                              <option value="parent">Use key expiry</option>
+                              <option value="1">1 day</option>
+                              <option value="7">7 days</option>
+                              <option value="30">30 days</option>
+                              <option value="90">90 days</option>
+                            </select>
+                            <p class="helper" id="expiryHint"></p>
+                          </div>
                           <div id="existingNote">
                             <p class="helper">
                               Approval issues a login credential with this key’s
@@ -3012,34 +3125,27 @@
                               Customize as a new key →
                             </button>
                           </div>
-                        </details>
+                        </div>
+                      </details>
+                      <p
+                        class="validation-hint"
+                        id="validationHint"
+                        aria-live="polite"
+                        hidden=""
+                      ></p>
+                      <div class="step-actions">
+                        <button class="btn reject" type="button" data-deny="">
+                          Deny request</button
+                        ><button
+                          class="btn approve"
+                          id="approveRestricted"
+                          type="button"
+                          disabled=""
+                        >
+                          Approve access with this key
+                        </button>
                       </div>
-                    </div>
-                    <p
-                      class="validation-hint"
-                      id="validationHint"
-                      aria-live="polite"
-                    >
-                      Select an Agent Key before approving restricted access.
-                    </p>
-                    <p class="consent-copy" id="restrictedConsent" hidden>
-                      Approving issues a login credential with the access shown
-                      above. You can deny this request instead.
-                    </p>
-                    <div class="step-actions">
-                      <button class="btn" type="button" data-back="2">
-                        Back</button
-                      ><button class="btn reject" type="button" data-deny>
-                        Deny request</button
-                      ><button
-                        class="btn approve"
-                        id="approveRestricted"
-                        type="button"
-                        disabled
-                      >
-                        Approve selected key
-                      </button>
-                    </div>
+                    </section>
                   </div>
                 </div>
               </section>
@@ -6094,8 +6200,8 @@
         renderScopeChoices();
         renderResources();
         setSource("new");
-        $("#createKeyTitle").focus({ preventScroll: true });
-        $("#permissionFilter").scrollIntoView({ block: "start" });
+        $("#grantName").focus({ preventScroll: true });
+        $("#grantCard").scrollIntoView({ block: "start" });
       }
       function availablePermissions(key) {
         return [...new Set([...key.scopes, ...effectivePermissions(key)])];
@@ -6291,7 +6397,10 @@
                         : comparison.constrained
                           ? "Missing requested permissions"
                           : item.permissionsReported
-                            ? item.permissions.length + (item.permissions.length === 1 ? " permission" : " permissions")
+                            ? item.permissions.length +
+                              (item.permissions.length === 1
+                                ? " permission"
+                                : " permissions")
                             : "Provider access not reported";
                   return `<div class="permission-option connection-permission-option ${activePermission === index ? "active" : ""}" id="permission-option-${index}" role="option" aria-label="Grant connection ${escapeHtml(item.slug)}" aria-selected="${checked}" aria-disabled="${disabled}" data-permission="${escapeHtml(option.id)}"><span class="option-check" aria-hidden="true">✓</span><span class="permission-option-copy"><strong>Use ${escapeHtml(item.name)}<span class="connection-status">${escapeHtml(status)}</span></strong><small>${escapeHtml(item.slug)} · ${escapeHtml(item.ownerName || owners[item.owner])}</small><span class="access-pills">${item.permissions
                     .slice(0, 3)
@@ -6629,83 +6738,172 @@
           !item.catalogOnly && item.ready && item.owner === $("#newOwner").value
         );
       }
-      function selectedConnectionCard(item) {
-        const comparison = connectionMatch(item);
-        const status = !canSelectConnection(item)
-          ? "Unavailable"
-          : !item.permissionsReported
-            ? "Provider access not reported"
-            : comparison.exact
-              ? "Exact match"
-              : comparison.constrained && matchesServiceFilters(item)
-                ? "Matched + " +
-                  comparison.extra.length +
-                  " extra" +
-                  (comparison.extra.length === 1 ? "" : "s")
-                : comparison.constrained
-                  ? "Missing requested permissions"
-                  : item.permissions.length + (item.permissions.length === 1 ? " permission" : " permissions");
-        const pills = (items) =>
-          items
-            .map(
-              (p) =>
-                `<span class="access-pill" title="${escapeHtml(p.scope + " · " + (p.description || ""))}">${escapeHtml(p.label)}</span>`,
-            )
-            .join("");
-        return `<article class="selected-connection-card" data-selected-connection="${escapeHtml(item.id)}">${serviceIcon(item.catalogSlug)}<div class="selected-connection-copy"><div class="connection-title"><strong>${escapeHtml(item.name)}</strong><span class="match-badge ${comparison.exact ? "exact" : "extra"}">${escapeHtml(status)}</span></div><p class="helper">${escapeHtml(item.slug)} · ${escapeHtml(item.ownerName || owners[item.owner])}</p>${[
-          {
-            label: comparison.constrained
-              ? "Requested permissions"
-              : "Permissions included",
-            items: comparison.constrained ? comparison.matched : item.permissions,
-            extra: false,
-          },
-          {
-            label: "Extra permissions included",
-            items: comparison.constrained ? comparison.extra : [],
-            extra: true,
-          },
-        ]
-          .filter((group) => group.items.length)
-          .map(
-            (group) =>
-              `<div class="connection-access-group"><p class="helper ${group.extra ? "warning" : ""}">${group.label} · ${group.items.length}</p><div class="access-pills">${pills(group.items.slice(0, 4))}</div>${group.items.length > 4 ? `<details class="compact-permissions"><summary>+${group.items.length - 4} more permissions</summary><div class="access-pills">${pills(group.items.slice(4))}</div></details>` : ""}</div>`,
-          )
-          .join(
-            "",
-          )}</div>${draft.allServices ? '<span class="helper">Included</span>' : `<button type="button" class="remove-connection" data-remove-service="${escapeHtml(item.id)}" aria-label="Remove connection ${escapeHtml(item.slug)}">×</button>`}</article>`;
-      }
       function renderResources() {
-        const selected = resources.services.filter(
-          (item) =>
-            draft.services.has(item.id) ||
-            (draft.allServices && canSelectConnection(item)),
-        );
-        $("#resourceList").innerHTML = selected.length
-          ? selected.map(selectedConnectionCard).join("")
-          : '<p class="empty-state">No connections selected. Use Add service when this key needs access to a connected service.</p>';
-        populateServiceIcons($("#resourceList"));
-        $("#serviceCount").textContent = draft.allServices
-          ? "All services"
-          : selected.length +
-            (selected.length === 1
-              ? " connection selected"
-              : " connections selected");
+        $("#allowAll").checked = draft.allServices;
+        $("#allowAllNodes").checked = draft.allNodes;
         $("#nodeCount").textContent = draft.allNodes
           ? "All nodes"
           : draft.nodes.size + " nodes";
-        $("#allowAll").checked = draft.allServices;
-        $("#allowAllNodes").checked = draft.allNodes;
         $("#allWarning").hidden = !draft.allServices && !draft.allNodes;
         $("#allWarning").textContent =
-          "This includes current and future resources beyond the requested filters.";
+          "Includes current and future resources beyond the requested filters.";
         $("#nodeChoices").innerHTML =
           resources.nodes
             .map(
               (item) =>
                 `<label class="node-choice"><input type="checkbox" data-node="${escapeHtml(item.id)}" ${draft.allNodes || draft.nodes.has(item.id) ? "checked" : ""} ${draft.allNodes || !canSelectConnection(item) ? "disabled" : ""}>${escapeHtml(item.name)}</label>`,
             )
-            .join("") || '<p class="helper">No node connections in this preview.</p>';
+            .join("") ||
+          '<p class="helper">No node connections in this preview.</p>';
+      }
+      function renderAccessRows(grant) {
+        const open = new Set(
+          $$("#serviceAccessRows details[open]").map(
+            (row) => row.dataset.accessGroup,
+          ),
+        );
+        const focused = document.activeElement?.dataset.account;
+        const requested = requestedServiceGroups();
+        const selected = resources.services.filter(
+          (item) =>
+            item.owner === grant.owner &&
+            (grant.allServices || grant.services.includes(item.id)),
+        );
+        const slugs = [
+          ...new Set([
+            ...requested.keys(),
+            ...selected.map((item) => item.catalogSlug),
+          ]),
+        ];
+        $("#nyxidAccessSummary").textContent =
+          effectivePermissions(grant).join(", ");
+        const extraNyxid = availablePermissions(grant).filter(
+          (scope) => !requestedPermissions.has(scope),
+        );
+        const missingNyxid = [...requestedPermissions].some(
+          (scope) => !availablePermissions(grant).includes(scope),
+        );
+        $("#nyxidMatch").textContent = missingNyxid
+          ? "Choose permissions"
+          : extraNyxid.length
+            ? "+ " + extraNyxid.length + " extras"
+            : effectivePermissions(grant).length + " selected";
+        $("#nyxidMatch").classList.toggle(
+          "warning",
+          missingNyxid || extraNyxid.length > 0,
+        );
+        $("#nyxidEditor").hidden = source !== "new";
+        $("#nyxidIncluded").innerHTML = comparisonRows(
+          "Included permissions",
+          availablePermissions(grant).map((scope) => "NyxID · " + scope),
+        );
+        $("#nyxidAccess .nyxid-service-icon").innerHTML =
+          serviceIcon("__nyxid__");
+        populateServiceIcons($("#nyxidAccess"));
+        $("#serviceAccessRows").innerHTML = slugs
+          .map((slug) => {
+            const name =
+              groups.find((group) => group.slug === slug)?.name || slug;
+            const accounts = selected.filter(
+              (item) => item.catalogSlug === slug,
+            );
+            const missing =
+              requested.has(slug) &&
+              !accounts.some(
+                (item) =>
+                  matchesServiceFilters(item) &&
+                  item.ready &&
+                  !item.catalogOnly,
+              );
+            const extra = accounts.reduce(
+              (n, item) =>
+                n +
+                connectionMatch(item).extra.length +
+                (requested.has(slug) ? 0 : 1) +
+                (item.permissionsReported ? 0 : 1),
+              0,
+            );
+            const status = missing
+              ? accounts.length
+                ? "Check access"
+                : "Choose account"
+              : extra
+                ? (requested.has(slug) ? "Matched + " : "+ ") +
+                  extra +
+                  " extra" +
+                  (extra === 1 ? "" : "s")
+                : accounts.reduce((n, item) => n + item.permissions.length, 0) +
+                  " selected";
+            const pills = (items) =>
+              items
+                .map(
+                  (p) =>
+                    `<span class="access-pill" title="${escapeHtml(p.scope || "")}">${escapeHtml(p.label)}</span>`,
+                )
+                .join("");
+            const requestedLabels = (requested.get(slug) || []).map(
+              (scope) => ({
+                scope,
+                label:
+                  groups
+                    .find((group) => group.slug === slug)
+                    ?.permissions.find(
+                      (p) => canonicalScope(slug, p.scope) === scope,
+                    )?.label || scope,
+              }),
+            );
+            const candidates =
+              source === "new"
+                ? resources.services.filter(
+                    (item) =>
+                      item.catalogSlug === slug && item.owner === grant.owner,
+                  )
+                : accounts;
+            const content = candidates
+              .map((item) => {
+                const checked = accounts.some(
+                  (account) => account.id === item.id,
+                );
+                const match = connectionMatch(item);
+                const disabled =
+                  grant.allServices || (!canSelectConnection(item) && !checked);
+                const accountStatus =
+                  !item.ready || item.catalogOnly
+                    ? "Unavailable"
+                    : !item.permissionsReported
+                      ? "Provider access not reported"
+                      : match.exact
+                        ? "Exact match"
+                        : requested.has(slug) && !matchesServiceFilters(item)
+                          ? "Missing requested permissions"
+                          : match.extra.length
+                            ? "Matched + " +
+                              match.extra.length +
+                              " extra" +
+                              (match.extra.length === 1 ? "" : "s")
+                            : item.permissions.length + " permissions";
+                return `<${source === "new" ? "label" : "div"} class="authorization-account">${source === "new" ? `<input type="checkbox" data-account="${escapeHtml(item.id)}" aria-label="Grant connection ${escapeHtml(item.slug)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}>` : ""}<span><strong>${escapeHtml(item.name)}</strong><p class="helper">${escapeHtml(item.slug)} · ${escapeHtml(accountStatus)}</p><div class="access-pills">${pills(item.permissions)}</div></span></${source === "new" ? "label" : "div"}>`;
+              })
+              .join("");
+            return `<details class="authorization-row" data-access-group="${escapeHtml(slug)}" ${open.has(slug) ? "open" : ""}><summary>${serviceIcon(slug)}<span class="authorization-row-copy"><strong>${escapeHtml(name)}</strong><small>${accounts.length ? accounts.map((item) => escapeHtml(item.slug)).join(", ") : requestedLabels.length + " requested permission" + (requestedLabels.length === 1 ? "" : "s")}</small></span><span class="access-status ${missing || extra ? "warning" : ""}">${escapeHtml(status)}</span><span class="row-chevron" aria-hidden="true">›</span></summary><div class="authorization-row-body">${requestedLabels.length ? '<strong>Requested</strong><div class="access-pills">' + pills(requestedLabels) + "</div>" : ""}${content || '<p class="helper">Connect an account in AI Services to grant this access, or edit the requested filters in Customize.</p>'}${accounts.length ? '<p class="helper">The selected accounts keep all their provider permissions.</p>' : ""}</div></details>`;
+          })
+          .join("");
+        if (grant.allNodes || grant.nodes.length)
+          $("#serviceAccessRows").insertAdjacentHTML(
+            "beforeend",
+            '<details class="authorization-row" data-access-group="nodes"><summary><span class="authorization-row-copy"><strong>Nodes</strong><small>' +
+              (grant.allNodes
+                ? "All current and future nodes"
+                : grant.nodes.length + " selected") +
+              '</small></span><span class="row-chevron" aria-hidden="true">›</span></summary><div class="authorization-row-body">' +
+              resourceSummary("nodes", grant) +
+              "</div></details>",
+          );
+        populateServiceIcons($("#serviceAccessRows"));
+        if (focused)
+          Array.from($("#serviceAccessRows").querySelectorAll("[data-account]"))
+            .find((input) => input.dataset.account === focused)
+            ?.focus({ preventScroll: true });
       }
 
       function newGrant() {
@@ -6762,118 +6960,71 @@
           if (!draft.scopes.size)
             return "Choose at least one NyxID permission.";
           if (!matchesPermissions(grant))
-            return "Include every requested permission and service, or edit the requested permissions above.";
+            return "Complete the highlighted access selections, or edit the filters in Customize.";
           if (!$("#newRate").checkValidity() || !$("#newBurst").checkValidity())
             return "Rate limits must be whole numbers from 1 to 4,294,967,295, or blank for defaults.";
         }
         return "";
       }
       function updateGrant() {
-        $("#permissionFilter").hidden = false;
-        $("#permissionHelp").textContent =
-          source === "new"
-            ? "Choose permissions and their connected accounts in one dropdown. Extra access stays visible below."
-            : "Choose an existing key below. Exact matches appear first; extra permissions stay part of the grant.";
         const grant = currentGrant();
-        $("#existingPanel").hidden = source !== "existing";
-        $("#newKeyIntro").hidden = source !== "new";
+        const filterSlot = grant ? $("#filterSlot") : $("#filterHome");
+        if ($("#permissionFilter").parentElement !== filterSlot)
+          filterSlot.append($("#permissionFilter"));
+        $("#permissionHelp").textContent =
+          "These filters describe requested access. Selected accounts and existing keys keep all their permissions.";
+        $("#existingPanel").hidden = source !== "existing" || !!grant;
         $("#newPanel").hidden = source !== "new";
         $("#grantCard").hidden = !grant;
-        $("#grantDetails").hidden = !grant;
-        $("#newScopeSummary").textContent =
-          [...draft.scopes].join(", ") || "Choose permissions";
-        $("#newKeySettings summary span:last-child").textContent =
-          ($("#newExpiry").value === "none"
-            ? "No expiry"
-            : $("#newExpiry").value + " days") +
-          " · " +
-          ($("#newRate").value
-            ? $("#newRate").value + " req/s"
-            : "Default limits");
-        $("#grantKind").textContent = grant
-          ? source === "new"
-            ? "Creates new key"
-            : "Existing key"
-          : "Awaiting selection";
-        $("#grantOutcome").textContent =
-          source === "new"
-            ? "This draft will create one Agent Key when you approve."
-            : "This approval uses the selected key; its existing secret is unchanged.";
-        $("#existingNote").hidden = source !== "existing";
+        $("#existingSettings").hidden = source !== "existing";
         $("#approveRestricted").textContent =
           source === "new"
             ? "Create & continue"
             : "Approve access with this key";
+        $("#approveRestricted").classList.toggle("primary", source === "new");
+        $("#approveRestricted").classList.toggle("approve", source !== "new");
         const invalid = validationMessage(grant);
-        $("#approveRestricted").hidden = !grant;
         $("#approveRestricted").disabled = !agentMode || !!invalid;
         $("#approveFull").disabled =
           !verified || !canProceed() || currentStep !== 3 || agentMode;
-        $("#restrictedConsent").hidden = !grant;
-        $("#restrictedConsent").textContent =
-          source === "new"
-            ? "Create & continue grants this device the access shown above. Selected services use your existing connected accounts."
-            : "Approving grants this device the selected key’s access, including any extras.";
-        updateStepper();
         $("#validationHint").textContent = invalid;
         $("#validationHint").hidden = !invalid || !grant;
         $("#scopeSummary").textContent = !agentMode
           ? "Review full account access before approving."
           : grant
-            ? `${grant.name} · ${effectivePermissions(grant).join(", ")}`
-            : "Choose an Agent Key, or create one for specific services.";
+            ? grant.name
+            : "Choose an Agent Key, or create one.";
+        updateStepper();
         if (!grant) return;
         $("#grantName").textContent = grant.name;
+        $("#grantKind").textContent =
+          source === "new" ? "Creates new key" : "Existing key";
         $("#grantOwner").textContent = owners[grant.owner];
-        $("#grantEffective").textContent =
-          effectivePermissions(grant).join(", ");
-        $("#grantScopes").innerHTML =
-          grant.scopes
-            .map((scope) => `<span class="scope-token">${scope}</span>`)
-            .join("") || "None selected";
-        $("#grantServices").innerHTML = resourceSummary("services", grant);
-        $("#grantNodes").innerHTML = resourceSummary("nodes", grant);
-        $("#grantedServiceCards").innerHTML = resources.services
-          .filter(
-            (item) =>
-              (grant.allServices && item.owner === grant.owner) ||
-              grant.services.includes(item.id),
-          )
-          .map(
-            (item) =>
-              `<div class="review-service"><strong class="review-service-name">${serviceIcon(item.catalogSlug)}${escapeHtml(item.name)} <span class="mono">${escapeHtml(item.slug)}</span></strong><p>${item.permissionsReported ? item.permissions.map((permission) => escapeHtml(permission.label)).join(" · ") : "Provider permissions are not reported."}</p></div>`,
-          )
-          .join("");
-        populateServiceIcons($("#grantedServiceCards"));
-        $("#grantExpiry").textContent = dateText(grant.expiry);
+        const expiry =
+          source === "new" ? grant.expiry : credentialExpiry(grant);
+        $("#grantExpiry").textContent =
+          expiry == null ? "No expiry" : "Expires " + dateText(expiry);
         $("#grantRate").textContent =
-          `${grant.rate == null ? "Default" : grant.rate + " requests/s"} · burst ${grant.burst ?? "default"}`;
+          (grant.rate == null ? "Default" : grant.rate + " requests/s") +
+          " · burst " +
+          (grant.burst ?? "default");
         $("#grantPlatform").textContent = grant.platform;
+        $("#expiryHint").textContent = "The login cannot outlast the key.";
         $("#grantBroad").hidden = !grant.allServices && !grant.allNodes;
-        $("#grantBroad").textContent =
-          "This key includes future resources in each “All” selection.";
-        const comparison = keyComparison(grant);
-        const extra = comparison.extra;
-        $("#grantRequested").innerHTML = comparisonRows(
-          "Requested access",
-          comparison.matched,
-        );
-        $("#grantExtra").hidden = extra.length === 0;
-        $("#grantExtra").innerHTML = comparisonRows(
-          "Access beyond the requested filters",
-          extra,
-          true,
-        );
-        populateServiceIcons($("#grantRequested"));
-        populateServiceIcons($("#grantExtra"));
-        $("#grantMatch").hidden = extra.length === 0;
-        $("#grantMatch").textContent =
-          `${matchesPermissions(grant) ? "Matched + " : "+ "}${extra.length} extra${extra.length === 1 ? "" : "s"}`;
-        const expiry = credentialExpiry(grant);
-        $("#expiryHint").textContent =
-          `${expiry == null ? "No expiry." : "Effective login expiry: " + dateText(expiry) + "."} The login cannot outlast the key.`;
-        $("#grantPreview").textContent =
-          `${effectivePermissions(grant).join(", ")} · ${grant.allServices ? "all current and future services" : grant.services.length + (grant.services.length === 1 ? " service" : " services")} · ${grant.allNodes ? "all current and future nodes" : grant.nodes.length + (grant.nodes.length === 1 ? " node" : " nodes")} · ${expiry == null ? "no expiry" : "expires " + dateText(expiry)}`;
+        $("#grantBroad").textContent = [
+          grant.allServices ? "All current and future services." : "",
+          grant.allNodes ? "All current and future nodes." : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const comparison = keyComparison(grant),
+          extra = comparison.extra.length;
+        $("#grantMatch").textContent = !matchesPermissions(grant)
+          ? "Selection needed"
+          : extra
+            ? "Matched + " + extra + " extras"
+            : "Exact match";
+        renderAccessRows(grant);
       }
       $$("[data-next]").forEach((button) =>
         button.addEventListener("click", () => {
@@ -6913,7 +7064,11 @@
         openStep(2);
       });
       $("#createMatchingKey").addEventListener("click", beginNewKey);
-      $("#backToKeys").addEventListener("click", () => setSource("existing"));
+      $("#backToKeys").addEventListener("click", () => {
+        selectedKeyId = null;
+        setSource("existing");
+        $("#permissionSearch").focus();
+      });
       $("#permissionSearch").addEventListener("focus", () => {
         permissionMenuOpen = true;
         renderPermissionMenu();
@@ -7016,6 +7171,7 @@
           selectionCleared = false;
           renderKeys();
           updateGrant();
+          $("#grantName").focus({ preventScroll: true });
         }
       });
       $("#scopeChoices").addEventListener("change", (event) => {
@@ -7027,19 +7183,20 @@
           updateGrant();
         }
       });
-      $("#chooseConnections").addEventListener("click", () => {
-        $("#permissionSearch").value = "";
-        $("#permissionSearch").focus();
-        permissionMenuOpen = true;
+      $("#serviceAccessRows").addEventListener("change", (event) => {
+        const id = event.target.dataset.account;
+        const item = resources.services.find((item) => item.id === id);
+        if (
+          source !== "new" ||
+          !item ||
+          draft.allServices ||
+          (!canSelectConnection(item) && !draft.services.has(id))
+        )
+          return;
+        event.target.checked
+          ? draft.services.add(id)
+          : draft.services.delete(id);
         renderPermissionMenu();
-        $("#permissionFilter").scrollIntoView({ block: "start" });
-      });
-      $("#resourceList").addEventListener("click", (event) => {
-        const button = event.target.closest("[data-remove-service]");
-        if (!button) return;
-        draft.services.delete(button.dataset.removeService);
-        renderPermissionMenu();
-        renderResources();
         updateGrant();
       });
       $("#allowAll").addEventListener("change", (event) => {
@@ -7103,6 +7260,7 @@
         renderScopeChoices();
         renderResources();
         setSource("new");
+        $("#grantCustomize").open = true;
         $("#newName").focus();
       });
       $("#approveRestricted").addEventListener("click", () => {

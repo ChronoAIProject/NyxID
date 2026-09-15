@@ -164,12 +164,29 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
     page.getByRole("button", { name: "Create & continue" }),
   ).toBeDisabled();
   await expect(
-    page.getByRole("region", { name: "Services this key can use" }),
-  ).toContainText("0 connections selected");
+    page.locator('details[aria-label="GitHub access"] summary'),
+  ).toContainText("Choose account");
+  const inlineAccount = page.locator('details[aria-label="GitHub access"]');
+  await inlineAccount.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  const workAccount = inlineAccount.getByRole("checkbox", {
+    name: "Grant connection GitHub work",
+  });
+  await workAccount.check();
+  await expect(
+    page.getByRole("button", { name: "Create & continue" }),
+  ).toBeEnabled();
+  await expect(workAccount).toBeFocused();
+  await workAccount.uncheck();
+  await inlineAccount.locator("summary").click();
+  await expect(
+    page.getByRole("button", { name: "Create & continue" }),
+  ).toBeDisabled();
+  expect(requests.filter((r) => r.path.includes("approve"))).toEqual([]);
   const search = page.getByRole("textbox", {
     name: "Search permissions & connections",
   });
-  const settings = page.getByText("Key settings and actual NyxID grant", {
+  const settings = page.getByText("Customize", {
     exact: true,
   });
   await settings.click();
@@ -188,7 +205,6 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
   ).toBeFocused();
   await page.keyboard.press("Escape");
   await allConnections.uncheck();
-  await settings.click();
   await search.fill("GitHub");
   await expect(
     page.getByRole("checkbox", { name: "Grant connection GitHub personal" }),
@@ -228,8 +244,8 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
   await search.press("Escape");
   await expect(search).toBeFocused();
   await expect(
-    page.getByRole("region", { name: "Services this key can use" }),
-  ).toContainText("1 connection selected");
+    page.locator('details[aria-label="GitHub access"] summary'),
+  ).toContainText("GitHub work");
   await page.getByRole("button", { name: "Create & continue" }).click();
   await expect(
     page.getByText("Approved — return to the requesting device"),
@@ -284,50 +300,50 @@ test("adding another service changes the new key draft without creating a servic
   });
   await page.goto(`/login/device?${hints}&key_name=Build+agent&key_source=new`);
   await restricted(page);
+  await page.getByRole("button", { name: "Reader", exact: true }).click();
+  await page.getByText("Customize", { exact: true }).click();
+  const previousExpiry = new Date(Date.now() + 86400000)
+    .toISOString()
+    .slice(0, 16);
+  await page
+    .getByLabel("Login credential expiry (optional)")
+    .fill(previousExpiry);
+  await page.getByRole("button", { name: "Change key", exact: true }).click();
   await page
     .getByRole("button", { name: "Create new Agent Key", exact: true })
     .click();
   await expect(
-    page.getByRole("heading", { name: "New Agent Key Draft" }),
+    page.getByRole("heading", { name: "Build agent" }),
   ).toBeVisible();
   const search = page.getByRole("textbox", {
     name: "Search permissions & connections",
   });
-  await search.fill("GitHub");
-  await search.press("Escape");
-  await page.getByRole("button", { name: "Add service", exact: true }).click();
-  await expect(search).toBeFocused();
-  await expect(search).toHaveValue("");
+  await page.getByText("Customize", { exact: true }).click();
   await search.fill("Slack");
   await page
     .getByRole("checkbox", { name: "Grant connection Slack workspace" })
     .check();
   await search.press("Escape");
-  const services = page.getByRole("region", {
-    name: "Services this key can use",
-  });
-  await expect(services).toContainText("2 connections selected");
-  await expect(services).toContainText("Slack workspace");
-  const review = page.getByRole("region", { name: "Final access review" });
+  await page.getByText("Customize", { exact: true }).click();
+  const review = page.getByRole("region", { name: "Authorize access" });
+  await expect(
+    review.locator('details[aria-label="Slack access"] summary'),
+  ).toContainText("Slack workspace");
   await expect(
     review.getByText("Creates new key", { exact: true }),
   ).toBeVisible();
-  await expect(review.locator("details")).not.toHaveAttribute("open");
+  await expect(review.locator("details[open]")).toHaveCount(0);
   await expect(
     review.getByText("Matched + 2 extras", { exact: true }),
   ).toBeVisible();
+  const slackRow = review.locator('details[aria-label="Slack access"]');
+  await slackRow.locator("summary").click();
   await expect(
-    review.getByText("Effective permissions", { exact: true }),
-  ).toBeHidden();
-  await page
-    .getByText("View permissions and service access", { exact: true })
-    .click();
-  await expect(
-    page.getByRole("heading", { name: "Access beyond the requested filters" }),
+    slackRow.getByRole("heading", { name: "Extra access included" }),
   ).toBeVisible();
-  await review.locator("summary").click();
+  await slackRow.locator("summary").click();
   await expect(
-    review.getByText("Effective permissions", { exact: true }),
+    slackRow.getByRole("heading", { name: "Extra access included" }),
   ).toBeHidden();
   expect(writes).toEqual([]);
   for (const [width, height] of [
@@ -344,6 +360,7 @@ test("adding another service changes the new key draft without creating a servic
       path: info.outputPath(`additional-service-${width}.png`),
       fullPage: true,
     });
+    expect((await review.boundingBox())!.height).toBeLessThan(600);
     await review.screenshot({
       path: info.outputPath(`compact-review-${width}.png`),
     });
@@ -396,6 +413,9 @@ test("public preview preserves hints and identity login requires fresh explicit 
   await page.getByRole("button", { name: /Verify/i }).click();
   await expect(page).toHaveURL(/\/login\/device\?/);
   expect(new URL(page.url()).searchParams.get("key_name")).toBe("Build agent");
+  expect(
+    requests.find((r) => r.path.includes("approve"))?.body,
+  ).not.toHaveProperty("credential_expires_at");
   expect(requests.filter((r) => r.path.includes("approve"))).toEqual([]);
   await restricted(page);
   await page.getByRole("button", { name: "Create new Agent Key" }).click();
@@ -409,15 +429,13 @@ test("public preview preserves hints and identity login requires fresh explicit 
     "en-US",
     { month: "long", day: "numeric", year: "numeric" },
   );
-  await page
-    .getByText("Key settings and actual NyxID grant", { exact: true })
-    .click();
+  await page.getByText("Customize", { exact: true }).click();
   await expect(
     page.getByRole("button", { name: expiryLabel, exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Remove connection GitHub personal" }),
-  ).toBeVisible();
+    page.locator('details[aria-label="GitHub access"] summary'),
+  ).toContainText("GitHub personal");
   await page.getByRole("button", { name: "Create & continue" }).click();
   await expect(
     page.getByText("Approved — return to the requesting device"),
@@ -454,17 +472,27 @@ for (const grant of ["account", "agent-key"] as const) {
     await page.getByRole("button", { name: "Continue to approval" }).click();
     if (grant === "agent-key") {
       await expect(page.getByText("Exact match")).toBeVisible();
-      await page.getByRole("radio", { name: "Reader", exact: true }).check();
-      const review = page.getByRole("region", { name: "Final access review" });
+      await page.getByRole("button", { name: "Reader", exact: true }).click();
+      const review = page.getByRole("region", { name: "Authorize access" });
       await expect(review).toHaveCount(1);
+      await expect(
+        review.getByRole("heading", { name: "Reader", exact: true }),
+      ).toBeFocused();
+      await page
+        .getByRole("button", { name: "Change key", exact: true })
+        .click();
+      await expect(
+        page.getByRole("heading", { name: "Choose an existing Agent Key" }),
+      ).toBeFocused();
+      await page.getByRole("button", { name: "Reader", exact: true }).click();
       await expect(
         review.getByText("Existing key", { exact: true }),
       ).toBeVisible();
-      await expect(review.locator("details")).not.toHaveAttribute("open");
+      await expect(review.locator("details[open]")).toHaveCount(0);
       await expect(
         review.getByText("Effective permissions", { exact: true }),
       ).toBeHidden();
-      await review.locator("summary").focus();
+      await review.getByText("Customize", { exact: true }).focus();
       await page.keyboard.press("Enter");
       await expect(
         review.getByText("Effective permissions", { exact: true }),
@@ -481,7 +509,7 @@ for (const grant of ["account", "agent-key"] as const) {
           loginExpiry,
         ),
       );
-      await review.locator("summary").click();
+      await review.getByText("Customize", { exact: true }).click();
       await expect(
         review.getByText("Effective permissions", { exact: true }),
       ).toBeHidden();
@@ -618,8 +646,8 @@ for (const long of [false, true]) {
       "Social Agent",
     );
     await expect(
-      page.getByRole("button", { name: "Remove connection GitHub personal" }),
-    ).toBeVisible();
+      page.locator('details[aria-label="GitHub access"] summary'),
+    ).toContainText("GitHub personal");
     await page.getByRole("button", { name: "Create & continue" }).click();
     await expect(
       page.getByText("Approved — return to the requesting device"),
@@ -667,31 +695,21 @@ test("new platform grant discloses future access and binds only same-owner curre
   await page
     .getByRole("button", { name: "Create new Agent Key", exact: true })
     .click();
-  await page
-    .getByText("Key settings and actual NyxID grant", { exact: true })
-    .click();
+  await page.getByText("Customize", { exact: true }).click();
   await page
     .getByRole("checkbox", {
       name: "Allow all auto-connected platform services (includes ones added later)",
     })
     .check();
   await expect(
-    page.getByText("Includes future platform services", { exact: true }),
+    page.getByText("Includes future platform services.", { exact: true }),
   ).toBeVisible();
-  await page
-    .getByText("View permissions and service access", { exact: true })
-    .click();
-  await expect(
-    page.getByText("All current and future auto-connected platform services", {
-      exact: true,
-    }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("region", { name: "Services this key can use" }),
-  ).toContainText("Platform user");
-  await expect(
-    page.getByRole("region", { name: "Services this key can use" }),
-  ).not.toContainText("Platform org");
+  await page.getByText("Customize", { exact: true }).click();
+  const platformRow = page.locator('details[aria-label="Platform access"]');
+  await expect(platformRow.locator("summary")).toContainText("Platform user");
+  await expect(platformRow.locator("summary")).not.toContainText(
+    "Platform org",
+  );
   expect(requests.filter((r) => r.path.includes("/approve"))).toEqual([]);
   expect(
     await page.evaluate(

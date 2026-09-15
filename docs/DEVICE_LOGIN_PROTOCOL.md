@@ -27,10 +27,14 @@ for HTTP response shapes.
   permits it. Step 3 shows requested filters, matching keys and the actual grant,
   and requires a final explicit approval or “Create & continue”. Denial is terminal.
   The approving account is visible and can be signed out.
-  Existing and new keys share a compact final review: key, owner, permissions,
-  service/node count, login expiry and any extra-access count. Detailed grants
-  and credential settings expand on demand; current/future resource authority
-  remains visible in the summary. Collapsing details does not alter the grant.
+  Existing and new keys share one authorization card with the key, owner and
+  login expiry above service rows. Each row shows its selected accounts and
+  extra-access count; expand it to inspect permissions or choose a connection
+  for a new key. Missing accounts are labelled “Choose account” in that row.
+  “Customize” contains requested filters and secondary key settings. Selection
+  and review use the same rows; there is no separate review appended below the
+  editor. Current/future resource authority remains visible when details are
+  closed. Expanding, collapsing and selecting do not approve the request.
 - Human authorization and resource/organization eligibility remain server-owned.
   Existing-key approval issues an independent child credential, without revealing
   or rotating the parent's secret. New-key creation and approval are transactional.

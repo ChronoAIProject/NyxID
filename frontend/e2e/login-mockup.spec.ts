@@ -75,21 +75,22 @@ test("mockup preserves service glyphs and preloaded permission choices", async (
   await page.keyboard.press("Escape");
   await page.locator('#keyList input[name="existing-key"]').first().check();
   await expect(page.locator("#grantKind")).toHaveText("Existing key");
-  await expect(page.locator("#grantAccessDetails")).not.toHaveAttribute("open");
-  await expect(page.locator("#grantEffective")).toBeHidden();
-  await expect(page.locator("#keyList .match-permissions")).toHaveCount(0);
-  await expect(page.locator("#grantRequested")).toBeHidden();
-  await page.locator("#grantAccessDetails summary").focus();
+  await expect(page.locator("#grantCustomize")).not.toHaveAttribute("open");
+  await expect(page.locator("#existingPanel")).toBeHidden();
+  await expect(page.locator("#serviceAccessRows details[open]")).toHaveCount(0);
+  await page.locator("#serviceAccessRows summary").first().focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator("#grantEffective")).toBeVisible();
-  await expect(page.locator("#grantRequested")).toContainText(
-    "Requested access",
-  );
-  await page.locator("#grantAccessDetails summary").click();
-  await expect(page.locator("#grantEffective")).toBeHidden();
+  await expect(
+    page.locator("#serviceAccessRows .authorization-row-body").first(),
+  ).toBeVisible();
+  await page.locator("#serviceAccessRows summary").first().click();
+  await expect(
+    page.locator("#serviceAccessRows .authorization-row-body").first(),
+  ).toBeHidden();
+  await page.locator("#backToKeys").click();
   await page.locator("#createMatchingKey").click();
   await expect(
-    page.locator("#resourceList .service-glyph svg").first(),
+    page.locator("#serviceAccessRows .service-glyph svg").first(),
   ).toBeVisible();
   await page.screenshot({
     path: test.info().outputPath("mockup-scopes.png"),
@@ -113,7 +114,7 @@ test("mockup never interprets icon snapshot text as active HTML", async ({
   );
   await page.locator("#createMatchingKey").click();
   await expect(
-    page.locator("#resourceList .service-glyph").first(),
+    page.locator("#serviceAccessRows .service-glyph").first(),
   ).toContainText("<img");
   await expect(page.locator("body")).not.toHaveAttribute(
     "data-icon-executed",
@@ -135,86 +136,69 @@ test("mockup selects a connected account in the permission dropdown and complete
   await page.locator("#continueScope").click();
   await page.locator("#createMatchingKey").click();
   await expect(page.locator("#approveRestricted")).toBeDisabled();
+  await expect(page.locator("#grantCustomize")).not.toHaveAttribute("open");
+  const gmail = page.locator('details[data-access-group="api-google-gmail"]');
+  await expect(gmail.locator("summary")).toContainText("Choose account");
+  await gmail.locator("summary").click();
+  await gmail
+    .getByRole("checkbox", {
+      name: "Grant connection api-google-gmail-2",
+      exact: true,
+    })
+    .check();
+  await expect(gmail.locator("summary")).toContainText("api-google-gmail-2");
+  await gmail.locator("summary").click();
+  await expect(page.locator("#approveRestricted")).toBeEnabled();
+  await page.locator("#grantCustomize > summary").click();
   await page.locator("#permissionSearch").fill("gmail");
-  const account = page.getByRole("option", {
-    name: "Grant connection api-google-gmail-2",
+  const extra = page.getByRole("option", {
+    name: "Grant connection api-google-gmail-3",
     exact: true,
   });
-  await expect(account).toHaveAttribute("aria-selected", "false");
-  await account.click();
-  await expect(account).toHaveAttribute("aria-selected", "true");
-  await expect(page.locator("#serviceCount")).toHaveText(
-    "2 connections selected",
-  );
+  await extra.click();
+  await expect(extra).toHaveAttribute("aria-selected", "true");
   await page.locator("#permissionSearch").press("Escape");
-  await page.getByRole("button", { name: "Add service", exact: true }).click();
-  await expect(page.locator("#permissionSearch")).toBeFocused();
-  await expect(page.locator("#permissionSearch")).toHaveValue("");
-  await page.locator("#permissionSearch").fill("gmail");
-  await page
-    .getByRole("option", {
+  await page.locator("#grantCustomize > summary").click();
+  await expect(gmail.locator("summary")).toContainText("Matched + 1 extra");
+  await gmail.locator("summary").click();
+  await gmail
+    .getByRole("checkbox", {
       name: "Grant connection api-google-gmail-3",
       exact: true,
     })
-    .click();
-  await page.locator("#permissionSearch").press("Escape");
-  await expect(page.locator("#serviceCount")).toHaveText(
-    "3 connections selected",
-  );
-  await expect(page.locator("#resourceList")).toContainText(
-    "Extra permissions included · 1",
-  );
-  await page
-    .getByRole("button", {
-      name: "Remove connection api-google-gmail-3",
-      exact: true,
-    })
-    .click();
-  await expect(page.locator("#serviceCount")).toHaveText(
-    "2 connections selected",
-  );
-  await page.locator("#permissionSearch").fill("gmail");
+    .uncheck();
+  await gmail.locator("summary").click();
+  await expect(page.locator("#grantCustomize")).not.toHaveAttribute("open");
+  await expect(page.locator("#serviceAccessRows details[open]")).toHaveCount(0);
   for (const [width, height] of [
     [1280, 900],
     [390, 844],
   ]) {
     await page.setViewportSize({ width: width!, height: height! });
-    await page.locator("#permissionSearch").scrollIntoViewIfNeeded();
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBe(true);
+    const card = await page.locator("#grantCard").boundingBox();
+    expect(card!.height).toBeLessThan(600);
     await page.screenshot({
-      path: info.outputPath(`combined-access-${width}.png`),
+      path: info.outputPath(`authorization-${width}.png`),
       fullPage: true,
     });
   }
-  await page.locator("#permissionSearch").press("Escape");
-  await expect(page.locator("#resourceList")).toContainText("Gmail");
-  await expect(page.locator("#resourceList [data-catalog-only]")).toHaveCount(
-    0,
-  );
-  await expect(page.locator("#approveRestricted")).toBeEnabled();
   await expect(page.locator("#grantKind")).toHaveText("Creates new key");
-  await expect(page.locator("#grantAccessDetails")).not.toHaveAttribute("open");
-  await expect(page.locator("#grantPreview")).toBeVisible();
-  await expect(page.locator("#grantEffective")).toBeHidden();
-  await page.locator("#grantAccessDetails summary").click();
-  await expect(page.locator("#grantEffective")).toBeVisible();
-  await page.locator("#grantAccessDetails summary").click();
-  await expect(page.locator("#grantEffective")).toBeHidden();
+  await page.locator("#grantCustomize > summary").click();
   await page.locator("#permissionSearch").fill("gmail");
   const sendPermission = page.locator(
     '[data-permission="api-google-gmail::https://www.googleapis.com/auth/gmail.send"]',
   );
   await sendPermission.click();
-  await expect(page.locator("#resourceList")).toContainText(
-    "Missing requested permissions",
-  );
+  await expect(gmail.locator("summary")).toContainText("Check access");
   await expect(page.locator("#approveRestricted")).toBeDisabled();
   await sendPermission.click();
   await page.locator("#permissionSearch").press("Escape");
+  await page.locator("#grantCustomize > summary").click();
   await expect(page.locator("#approveRestricted")).toBeEnabled();
   await page.locator("#approveRestricted").click();
   await expect(page.locator("#requestOutcome")).toBeVisible();

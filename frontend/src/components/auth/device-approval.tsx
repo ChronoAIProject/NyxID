@@ -12,6 +12,8 @@ import {
 } from "./login-request-preview";
 import { LoginPermissionPicker } from "./login-permission-picker";
 import { LoginKeyDraft } from "./login-key-draft";
+import { LoginAccessRows } from "./login-access-rows";
+import { AgentKeyPermissions } from "./agent-key-permissions";
 import { LoginGrantReview } from "./login-grant-review";
 import { useAuthStore } from "@/stores/auth-store";
 import {
@@ -327,6 +329,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
   }
   function beginNew() {
     if (!inventory) return;
+    setCredentialExpiry("");
     if (!draft)
       setDraft({
         name: hints.key_name || context?.client_label || "Agent Key",
@@ -364,7 +367,18 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
             a.key.name.localeCompare(b.key.name),
         )
     : [];
+  const keyChoiceTitle = useRef<HTMLHeadingElement>(null);
+  const changeKey = () => {
+    setCredentialExpiry("");
+    setChoice("");
+    requestAnimationFrame(() => keyChoiceTitle.current?.focus());
+  };
   const chosen = comparisons.find((c) => c.key.id === choice);
+  const denyRequest = () =>
+    void run(async () => {
+      await deny.mutateAsync(code);
+      finish("denied");
+    });
   const problems = inventory ? requestedProblems(requested, inventory) : [];
   const identityReturn = validCode.success
     ? new URL(
@@ -688,14 +702,18 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
             hidden={step !== 3}
             className="space-y-4 rounded-xl border border-border bg-card p-4"
           >
-            <h2 className="text-[15px] font-semibold">Scope &amp; approval</h2>
-            <p className="text-[11px] text-muted-foreground">
-              {mode === "full"
-                ? "Full account access · No scope configuration needed."
-                : choice === "new"
-                  ? "Scope optional · Configure the Agent Key to create."
-                  : "Scope optional · Select permissions to find a matching key."}
-            </p>
+            {((!chosen && choice !== "new") || mode === "full") && (
+              <>
+                <h2 className="text-[15px] font-semibold">
+                  Scope &amp; approval
+                </h2>
+                <p className="text-[11px] text-muted-foreground">
+                  {mode === "full"
+                    ? "Full account access · No scope configuration needed."
+                    : "Scope optional · Select permissions to find a matching key."}
+                </p>
+              </>
+            )}
             {mode === "full" ? (
               <>
                 <p className="text-[12px] text-muted-foreground">
@@ -715,7 +733,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
             ) : (
               inventory && (
                 <>
-                  {choice !== "new" && (
+                  {choice !== "new" && !chosen && (
                     <LoginPermissionPicker
                       options={permissionOptions(inventory)}
                       value={requested}
@@ -736,122 +754,156 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                   )}
                   {choice !== "new" ? (
                     <>
-                      <div className="flex justify-between text-[12px]">
-                        <h3 className="font-semibold">
-                          Choose an existing Agent Key
-                        </h3>
-                        <span>
-                          {comparisons.length}{" "}
-                          {comparisons.length === 1 ? "match" : "matches"}
-                        </span>
-                      </div>
-                      <fieldset
-                        disabled={blocked}
-                        aria-label="Matching Agent Keys"
-                        className="max-h-96 space-y-3 overflow-y-auto"
-                      >
-                        {comparisons.map(({ key, comparison }) => (
-                          <div
-                            key={key.id}
-                            className={`space-y-3 rounded-xl border p-3 ${choice === key.id ? "border-primary/40" : "border-border"}`}
-                          >
-                            <label className="flex items-center gap-2 text-[12px]">
-                              <input
-                                className="size-4 shrink-0 appearance-none rounded-full border border-muted-foreground/50 bg-transparent checked:border-primary checked:bg-primary checked:shadow-[inset_0_0_0_3px_var(--color-card)] focus-visible:outline-2 focus-visible:outline-primary"
-                                type="radio"
-                                name="existing-key"
-                                checked={choice === key.id}
-                                onChange={() => setChoice(key.id)}
-                                aria-label={key.name}
-                              />
-                              <KeyRound
-                                className="size-3 shrink-0"
-                                aria-hidden="true"
-                              />
-                              <strong className="min-w-0 flex-1 break-words">
-                                {key.name}
-                              </strong>
-                              <span
-                                className={`ml-auto shrink-0 text-[10px] ${comparison.exact ? "text-success" : "text-warning"}`}
-                              >
-                                {comparison.exact
-                                  ? "Exact match"
-                                  : `Matched + ${comparison.extras.length} extra${comparison.extras.length === 1 ? "" : "s"}`}
-                              </span>
-                            </label>
-                            <p className="break-words pl-6 text-[11px] text-muted-foreground">
-                              {key.owner_name} ·{" "}
-                              {effectivePermissions(key.scopes)} ·{" "}
-                              {key.allow_all_services
-                                ? "All services"
-                                : `${key.allowed_services.length} ${key.allowed_services.length === 1 ? "service" : "services"}`}
-                            </p>
+                      {!chosen && (
+                        <>
+                          <div className="flex justify-between text-[12px]">
+                            <h3
+                              ref={keyChoiceTitle}
+                              tabIndex={-1}
+                              className="font-semibold outline-none"
+                            >
+                              Choose an existing Agent Key
+                            </h3>
+                            <span>
+                              {comparisons.length}{" "}
+                              {comparisons.length === 1 ? "match" : "matches"}
+                            </span>
                           </div>
-                        ))}
-                      </fieldset>
-                      {!comparisons.length && (
-                        <p className="text-[12px] text-muted-foreground">
-                          No matching Agent Key. Create one with the requested
-                          access or edit the filters.
-                        </p>
-                      )}
-                      <Button
-                        disabled={blocked || !!problems.length}
-                        onClick={beginNew}
-                      >
-                        Create new Agent Key
-                      </Button>
-                      {hints.key_source === "new" && (
-                        <p className="text-[11px] text-muted-foreground">
-                          The requester suggested creating a new key. You can
-                          also choose a matching existing key.
-                        </p>
+                          <fieldset
+                            disabled={blocked}
+                            aria-label="Matching Agent Keys"
+                            className="max-h-96 space-y-3 overflow-y-auto"
+                          >
+                            {comparisons.map(({ key, comparison }) => (
+                              <button
+                                type="button"
+                                key={key.id}
+                                disabled={blocked}
+                                onClick={() => setChoice(key.id)}
+                                aria-label={key.name}
+                                className="w-full space-y-2 rounded-xl border border-border p-3 text-left hover:bg-muted/30 focus-visible:outline-2 focus-visible:outline-primary"
+                              >
+                                <span className="flex items-center gap-2 text-[12px]">
+                                  <KeyRound
+                                    className="size-3 shrink-0"
+                                    aria-hidden="true"
+                                  />
+                                  <strong className="min-w-0 flex-1 break-words">
+                                    {key.name}
+                                  </strong>
+                                  <span
+                                    className={`ml-auto shrink-0 text-[10px] ${comparison.exact ? "text-success" : "text-warning"}`}
+                                  >
+                                    {comparison.exact
+                                      ? "Exact match"
+                                      : `Matched + ${comparison.extras.length} extra${comparison.extras.length === 1 ? "" : "s"}`}
+                                  </span>
+                                </span>
+                                <span className="block break-words pl-6 text-[11px] text-muted-foreground">
+                                  {key.owner_name} ·{" "}
+                                  {effectivePermissions(key.scopes)} ·{" "}
+                                  {key.allow_all_services
+                                    ? "All services"
+                                    : `${key.allowed_services.length} ${key.allowed_services.length === 1 ? "service" : "services"}`}
+                                </span>
+                              </button>
+                            ))}
+                          </fieldset>
+                          {!comparisons.length && (
+                            <p className="text-[12px] text-muted-foreground">
+                              No matching Agent Key. Create one with the
+                              requested access or edit the filters.
+                            </p>
+                          )}
+                          <Button
+                            disabled={blocked || !!problems.length}
+                            onClick={beginNew}
+                          >
+                            Create new Agent Key
+                          </Button>
+                          {hints.key_source === "new" && (
+                            <p className="text-[11px] text-muted-foreground">
+                              The requester suggested creating a new key. You
+                              can also choose a matching existing key.
+                            </p>
+                          )}
+                        </>
                       )}
                       {chosen && (
                         <>
+                          <Button
+                            variant="link"
+                            disabled={blocked}
+                            onClick={changeKey}
+                          >
+                            Change key
+                          </Button>
                           <LoginGrantReview
                             key={chosen.key.id}
                             apiKey={chosen.key}
                             comparison={chosen.comparison}
                             kind="existing"
                             credentialExpiresAt={credentialExpiry}
+                            customize={
+                              <>
+                                <AgentKeyPermissions apiKey={chosen.key} />
+                                <label className="block space-y-2 text-[12px]">
+                                  Login credential expiry (optional)
+                                  <Input
+                                    type="datetime-local"
+                                    aria-label="Login credential expiry (optional)"
+                                    value={credentialExpiry}
+                                    disabled={blocked}
+                                    onChange={(e) =>
+                                      setCredentialExpiry(e.target.value)
+                                    }
+                                  />
+                                </label>
+                              </>
+                            }
+                            actions={
+                              <div className="flex flex-wrap justify-end gap-2">
+                                <Button
+                                  variant="destructive"
+                                  disabled={busy}
+                                  onClick={denyRequest}
+                                >
+                                  Deny request
+                                </Button>
+                                <Button
+                                  className="border-success/30 bg-success/10 text-success hover:bg-success/20"
+                                  disabled={
+                                    blocked ||
+                                    (!!credentialExpiry &&
+                                      (!Number.isFinite(
+                                        Date.parse(credentialExpiry),
+                                      ) ||
+                                        Date.parse(credentialExpiry) <= now ||
+                                        (!!chosen.key.expires_at &&
+                                          Date.parse(credentialExpiry) >
+                                            Date.parse(chosen.key.expires_at))))
+                                  }
+                                  isLoading={busy}
+                                  onClick={() =>
+                                    void decide({
+                                      kind: "existing",
+                                      api_key_id: chosen.key.id,
+                                    })
+                                  }
+                                >
+                                  Approve access with this key
+                                </Button>
+                              </div>
+                            }
                           >
-                            <label className="block space-y-2 text-[12px]">
-                              Login credential expiry (optional)
-                              <Input
-                                type="datetime-local"
-                                aria-label="Login credential expiry (optional)"
-                                value={credentialExpiry}
-                                disabled={blocked}
-                                onChange={(e) =>
-                                  setCredentialExpiry(e.target.value)
-                                }
-                              />
-                            </label>
+                            <LoginAccessRows
+                              apiKey={chosen.key}
+                              comparison={chosen.comparison}
+                              inventory={inventory}
+                              requested={requested}
+                              disabled={blocked}
+                            />
                           </LoginGrantReview>
-                          <Button
-                            className="border-success/30 bg-success/10 text-success hover:bg-success/20"
-                            disabled={
-                              blocked ||
-                              (!!credentialExpiry &&
-                                (!Number.isFinite(
-                                  Date.parse(credentialExpiry),
-                                ) ||
-                                  Date.parse(credentialExpiry) <= now ||
-                                  (!!chosen.key.expires_at &&
-                                    Date.parse(credentialExpiry) >
-                                      Date.parse(chosen.key.expires_at))))
-                            }
-                            isLoading={busy}
-                            onClick={() =>
-                              void decide({
-                                kind: "existing",
-                                api_key_id: chosen.key.id,
-                              })
-                            }
-                          >
-                            Approve access with this key
-                          </Button>
                         </>
                       )}
                     </>
@@ -861,11 +913,12 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         <Button
                           variant="link"
                           disabled={blocked}
-                          onClick={() => setChoice("")}
+                          onClick={changeKey}
                         >
                           Back to matching keys
                         </Button>
                         <LoginKeyDraft
+                          onDeny={denyRequest}
                           initial={draft}
                           inventory={inventory}
                           requested={requested}
@@ -891,22 +944,26 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
               )
             )}
           </section>
-          {context && isAuthenticated && (
-            <div className="flex justify-end">
-              <Button
-                variant="destructive"
-                disabled={busy}
-                onClick={() =>
-                  void run(async () => {
-                    await deny.mutateAsync(code);
-                    finish("denied");
-                  })
-                }
-              >
-                Deny request
-              </Button>
-            </div>
-          )}
+          {context &&
+            isAuthenticated &&
+            (step !== 3 ||
+              mode === "full" ||
+              (!chosen && choice !== "new")) && (
+              <div className="flex justify-end">
+                <Button
+                  variant="destructive"
+                  disabled={busy}
+                  onClick={() =>
+                    void run(async () => {
+                      await deny.mutateAsync(code);
+                      finish("denied");
+                    })
+                  }
+                >
+                  Deny request
+                </Button>
+              </div>
+            )}
         </>
       )}
     </LoginDeviceShell>

@@ -124,8 +124,9 @@ describe("three-step device approval", () => {
     await scope();
     await click("Create new Agent Key");
     expect(
-      screen.getByRole("region", { name: "Services this key can use" }),
-    ).toHaveTextContent("0 connections selected");
+      screen.getByRole("region", { name: "Authorize access" }),
+    ).toHaveTextContent("Account reader");
+    expect(screen.queryByLabelText("GitHub access")).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Create & continue" }),
     ).toBeEnabled();
@@ -203,7 +204,7 @@ describe("three-step device approval", () => {
         "&login_type=agent&permissions=read,proxy&service_permissions=github::repo:read";
       await scope(flow);
       expect(screen.getByText("Exact match")).toBeVisible();
-      fireEvent.click(screen.getByRole("radio", { name: "Reader" }));
+      fireEvent.click(screen.getByRole("button", { name: "Reader" }));
       await click("Approve access with this key");
       expect(approvals()).toEqual([
         [
@@ -226,19 +227,21 @@ describe("three-step device approval", () => {
     await scope();
     await click("Create new Agent Key");
     expect(screen.getByLabelText("Name")).toHaveValue("Build agent");
-    fireEvent.click(screen.getByText("Key settings and actual NyxID grant"));
-    fireEvent.click(screen.getByText("View permissions and service access"));
+    fireEvent.click(screen.getByText("Customize"));
     expect(
       screen.getByRole("button", { name: "January 31, 2026" }),
     ).toBeVisible();
     expect(
       screen.getByText(new Date("2026-01-31T23:59:59.000Z").toLocaleString()),
     ).toBeVisible();
+    fireEvent.click(
+      screen.getByLabelText("GitHub access").querySelector("summary")!,
+    );
     expect(
-      screen.getByRole("button", {
-        name: "Remove connection GitHub personal",
+      screen.getByRole("checkbox", {
+        name: "Grant connection GitHub personal",
       }),
-    ).toBeVisible();
+    ).toBeChecked();
     expect(approvals()).toEqual([]);
     await click("Create & continue");
     expect(approvals()[0]).toEqual([
@@ -257,7 +260,7 @@ describe("three-step device approval", () => {
   });
   it("requires new review if connection scopes change before approval", async () => {
     await scope();
-    fireEvent.click(screen.getByRole("radio", { name: "Reader" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reader" }));
     inventory.connections[0]!.granted_scopes!.push("repo:write");
     await click("Approve access with this key");
     expect(
@@ -290,23 +293,22 @@ describe("three-step device approval", () => {
       "&login_type=agent&key_source=new&key_name=Platform+agent&permissions=read,proxy&service_permissions=github::repo:read";
     await scope();
     await click("Create new Agent Key");
-    fireEvent.click(screen.getByText("Key settings and actual NyxID grant"));
-    fireEvent.click(screen.getByText("View permissions and service access"));
+    fireEvent.click(screen.getByText("Customize"));
     fireEvent.click(
       screen.getByRole("checkbox", {
         name: "Allow all auto-connected platform services (includes ones added later)",
       }),
     );
     expect(
-      screen.getByText(
-        "All current and future auto-connected platform services",
-      ),
+      screen.getByText("Includes future platform services."),
     ).toBeVisible();
     expect(
-      screen.getByRole("region", { name: "Services this key can use" }),
+      screen.getByRole("region", { name: "Authorize access" }),
     ).toHaveTextContent("Platform user");
     expect(
-      screen.getByRole("region", { name: "Services this key can use" }),
+      screen
+        .getByRole("region", { name: "Authorize access" })
+        .querySelector('details[aria-label="Platform access"] summary'),
     ).not.toHaveTextContent("Platform org");
     expect(approvals()).toEqual([]);
     await click("Create & continue");
@@ -336,7 +338,7 @@ describe("three-step device approval", () => {
       screen.queryByRole("radio", { name: "Reader" }),
     ).not.toBeInTheDocument();
     await click("Clear filters");
-    expect(screen.getByRole("radio", { name: "Reader" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Reader" })).toBeVisible();
   });
   it("denial is terminal even if an older poll returns pending", async () => {
     mount();

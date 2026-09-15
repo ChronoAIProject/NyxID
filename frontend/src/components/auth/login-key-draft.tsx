@@ -1,6 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
-import { KeyRound } from "lucide-react";
 import { Form, useAppForm } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,6 +29,7 @@ import {
   type LoginInventory,
 } from "@/lib/login-permissions";
 import { LoginPermissionPicker } from "./login-permission-picker";
+import { LoginAccessRows } from "./login-access-rows";
 import { LoginGrantReview } from "./login-grant-review";
 
 export function LoginKeyDraft({
@@ -42,7 +42,9 @@ export function LoginKeyDraft({
   onApprove,
   initialRequested,
   onRequestedChange,
+  onDeny,
 }: {
+  onDeny: () => void;
   initial: CreateApiKeyFormData;
   inventory: LoginInventory;
   requested: RequestedPermissions;
@@ -82,226 +84,240 @@ export function LoginKeyDraft({
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onApprove)} className="space-y-4">
         <fieldset disabled={disabled} className="space-y-4">
-          <div className="space-y-1">
-            <h3 className="flex items-center gap-2 text-[13px] font-semibold">
-              <KeyRound
-                aria-hidden="true"
-                className="size-4 text-muted-foreground"
-              />
-              New Agent Key
-              <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">
-                Draft
-              </span>
-            </h3>
-            <p className="text-[12px] text-muted-foreground">
-              Configure one Agent Key for this device. Service access is
-              optional; the key is created when you select Create &amp;
-              continue.
-            </p>
-          </div>
-          <LoginPermissionPicker
-            options={permissionOptions(inventory)}
-            value={requested}
-            initial={initialRequested}
-            disabled={disabled}
-            onChange={onRequestedChange}
-            connections={{
-              inventory,
-              organizationId: data.target_org_id,
-              selectedIds: selected,
-              impliedIds: implied,
-              allowAll: data.allow_all_services ?? false,
-              onToggle: toggleService,
-            }}
-          />
-          <ApiKeyNameField form={form} />
-          <details className="rounded-xl border border-border p-3 text-[12px]">
-            <summary className="cursor-pointer font-medium">
-              Key settings and actual NyxID grant
-            </summary>
-            <div className="mt-3 space-y-4">
-              {inventory.options.orgs.length > 0 && (
-                <label className="block space-y-2">
-                  Owner
-                  <Select
-                    disabled={disabled}
-                    value={data.target_org_id ?? "personal"}
-                    onValueChange={(value) => {
-                      form.setValue(
-                        "target_org_id",
-                        value === "personal" ? undefined : value,
-                      );
-                      form.setValue("allowed_service_ids", []);
-                      form.setValue("allowed_node_ids", []);
-                      form.setValue("allow_all_services", false);
-                      form.setValue("allow_auto_connected_services", false);
-                      form.setValue("allow_all_nodes", false);
-                    }}
-                  >
-                    <SelectTrigger aria-label="Owner">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="personal">Personal</SelectItem>
-                      {inventory.options.orgs.map((org) => (
-                        <SelectItem key={org.id} value={org.id}>
-                          {org.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </label>
-              )}
-              <PlatformServiceScope
-                services={ownerServices.map((s) => ({
-                  ...s,
-                  platform_grant_eligible: s.owner_id === summary.owner_id,
-                }))}
-                selectedIds={selected}
-                allowAll={data.allow_auto_connected_services}
-                onAllowAllChange={(value) =>
-                  form.setValue("allow_auto_connected_services", value)
-                }
-                onToggle={toggleService}
-                orgOwned={!!data.target_org_id}
-                disabled={disabled || data.allow_all_services}
-              />
-              <ApiKeyScopesField form={form} />
-              <ApiKeyExpiryField form={form} />
-              <p className="text-[11px] text-muted-foreground">
-                Dates expire at the end of the selected day (23:59:59 UTC).
-              </p>
-              <label className="block space-y-2">
-                Platform
-                <Select
-                  disabled={disabled}
-                  value={data.platform ?? "generic"}
-                  onValueChange={(value) => form.setValue("platform", value)}
-                >
-                  <SelectTrigger aria-label="Platform">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {["generic", "codex", "claude-code", "openclaw"].map(
-                      (p) => (
-                        <SelectItem key={p} value={p}>
-                          {p}
-                        </SelectItem>
-                      ),
-                    )}
-                  </SelectContent>
-                </Select>
-              </label>
-              <label className="flex items-center gap-2">
-                <Checkbox
-                  checked={data.allow_all_services}
-                  onCheckedChange={(v) => {
-                    form.setValue("allow_all_services", v === true);
-                    form.setValue("allowed_service_ids", []);
-                  }}
-                />
-                All current and future services
-              </label>
-              <label className="flex items-center gap-2">
-                <Checkbox
-                  checked={data.allow_all_nodes}
-                  onCheckedChange={(v) => {
-                    form.setValue("allow_all_nodes", v === true);
-                    form.setValue("allowed_node_ids", []);
-                  }}
-                />
-                All current and future nodes
-              </label>
-              {inventory.options.nodes
-                .filter(
-                  (n) =>
-                    !data.target_org_id || n.owner_id === data.target_org_id,
-                )
-                .map((node) => (
-                  <label key={node.id} className="flex items-center gap-2">
-                    <Checkbox
-                      aria-label={`Grant node ${node.name}`}
-                      disabled={data.allow_all_nodes}
-                      checked={data.allowed_node_ids?.includes(node.id)}
-                      onCheckedChange={(v) =>
-                        form.setValue(
-                          "allowed_node_ids",
-                          v
-                            ? [...(data.allowed_node_ids ?? []), node.id]
-                            : data.allowed_node_ids?.filter(
-                                (id) => id !== node.id,
-                              ),
-                        )
-                      }
-                    />
-                    {node.name}
-                  </label>
-                ))}
-              {(["rate_limit_per_second", "rate_limit_burst"] as const).map(
-                (name) => (
-                  <label key={name} className="block">
-                    {name === "rate_limit_burst"
-                      ? "Burst"
-                      : "Requests per second"}
-                    <Input
-                      aria-label={
-                        name === "rate_limit_burst"
-                          ? "Burst"
-                          : "Requests per second"
-                      }
-                      className="mt-2 block h-8 w-full rounded-lg border border-input bg-background px-3"
-                      type="number"
-                      min="1"
-                      max="4294967295"
-                      placeholder="Default"
-                      value={data[name] ?? ""}
-                      onChange={(e) =>
-                        form.setValue(
-                          name,
-                          e.target.value === ""
-                            ? undefined
-                            : Number(e.target.value),
-                        )
-                      }
-                    />
-                    {form.formState.errors[name] && (
-                      <span className="text-destructive">
-                        {form.formState.errors[name]?.message}
-                      </span>
-                    )}
-                  </label>
-                ),
-              )}
-            </div>
-          </details>
           <LoginGrantReview
             apiKey={summary}
             comparison={comparison}
             kind="new"
-          />
-          {!comparison.matches && (
-            <p role="alert" className="text-[12px] text-warning">
-              {comparison.missing.join(". ")}. Choose connections/permissions or
-              edit the requested filters.
-            </p>
-          )}
-          <p className="text-[12px] text-muted-foreground">
-            Create &amp; continue grants this device the access shown above.
-            Selected services use your existing connected accounts.
-          </p>
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={
-              disabled ||
-              !data.name.trim() ||
-              !comparison.matches ||
-              !createApiKeySchema.safeParse(data).success
+            customize={
+              <>
+                <h4 className="text-[12px] font-semibold">
+                  Requested access filters
+                </h4>
+                <LoginPermissionPicker
+                  options={permissionOptions(inventory)}
+                  value={requested}
+                  initial={initialRequested}
+                  disabled={disabled}
+                  onChange={onRequestedChange}
+                  connections={{
+                    inventory,
+                    organizationId: data.target_org_id,
+                    selectedIds: selected,
+                    impliedIds: implied,
+                    allowAll: data.allow_all_services ?? false,
+                    onToggle: toggleService,
+                  }}
+                />
+                <ApiKeyNameField form={form} />
+                {inventory.options.orgs.length > 0 && (
+                  <label className="block space-y-2">
+                    Owner
+                    <Select
+                      disabled={disabled}
+                      value={data.target_org_id ?? "personal"}
+                      onValueChange={(value) => {
+                        form.setValue(
+                          "target_org_id",
+                          value === "personal" ? undefined : value,
+                        );
+                        form.setValue("allowed_service_ids", []);
+                        form.setValue("allowed_node_ids", []);
+                        form.setValue("allow_all_services", false);
+                        form.setValue("allow_auto_connected_services", false);
+                        form.setValue("allow_all_nodes", false);
+                      }}
+                    >
+                      <SelectTrigger aria-label="Owner">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="personal">Personal</SelectItem>
+                        {inventory.options.orgs.map((org) => (
+                          <SelectItem key={org.id} value={org.id}>
+                            {org.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </label>
+                )}
+                <PlatformServiceScope
+                  services={ownerServices.map((s) => ({
+                    ...s,
+                    platform_grant_eligible: s.owner_id === summary.owner_id,
+                  }))}
+                  selectedIds={selected}
+                  allowAll={data.allow_auto_connected_services}
+                  onAllowAllChange={(value) =>
+                    form.setValue("allow_auto_connected_services", value)
+                  }
+                  onToggle={toggleService}
+                  orgOwned={!!data.target_org_id}
+                  disabled={disabled || data.allow_all_services}
+                />
+                <ApiKeyExpiryField form={form} />
+                <p className="text-[11px] text-muted-foreground">
+                  Dates expire at the end of the selected day (23:59:59 UTC).
+                  {summary.expires_at && (
+                    <span className="block">
+                      {new Date(summary.expires_at).toLocaleString()}
+                    </span>
+                  )}
+                </p>
+                <label className="block space-y-2">
+                  Platform
+                  <Select
+                    disabled={disabled}
+                    value={data.platform ?? "generic"}
+                    onValueChange={(value) => form.setValue("platform", value)}
+                  >
+                    <SelectTrigger aria-label="Platform">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {["generic", "codex", "claude-code", "openclaw"].map(
+                        (p) => (
+                          <SelectItem key={p} value={p}>
+                            {p}
+                          </SelectItem>
+                        ),
+                      )}
+                    </SelectContent>
+                  </Select>
+                </label>
+                <label className="flex items-center gap-2">
+                  <Checkbox
+                    checked={data.allow_all_services}
+                    onCheckedChange={(v) => {
+                      form.setValue("allow_all_services", v === true);
+                      form.setValue("allowed_service_ids", []);
+                    }}
+                  />
+                  All current and future services
+                </label>
+                <label className="flex items-center gap-2">
+                  <Checkbox
+                    checked={data.allow_all_nodes}
+                    onCheckedChange={(v) => {
+                      form.setValue("allow_all_nodes", v === true);
+                      form.setValue("allowed_node_ids", []);
+                    }}
+                  />
+                  All current and future nodes
+                </label>
+                {inventory.options.nodes
+                  .filter(
+                    (n) =>
+                      !data.target_org_id || n.owner_id === data.target_org_id,
+                  )
+                  .map((node) => (
+                    <label key={node.id} className="flex items-center gap-2">
+                      <Checkbox
+                        aria-label={`Grant node ${node.name}`}
+                        disabled={data.allow_all_nodes}
+                        checked={data.allowed_node_ids?.includes(node.id)}
+                        onCheckedChange={(v) =>
+                          form.setValue(
+                            "allowed_node_ids",
+                            v
+                              ? [...(data.allowed_node_ids ?? []), node.id]
+                              : data.allowed_node_ids?.filter(
+                                  (id) => id !== node.id,
+                                ),
+                          )
+                        }
+                      />
+                      {node.name}
+                    </label>
+                  ))}
+                {(["rate_limit_per_second", "rate_limit_burst"] as const).map(
+                  (name) => (
+                    <label key={name} className="block">
+                      {name === "rate_limit_burst"
+                        ? "Burst"
+                        : "Requests per second"}
+                      <Input
+                        aria-label={
+                          name === "rate_limit_burst"
+                            ? "Burst"
+                            : "Requests per second"
+                        }
+                        className="mt-2 block h-8 w-full rounded-lg border border-input bg-background px-3"
+                        type="number"
+                        min="1"
+                        max="4294967295"
+                        placeholder="Default"
+                        value={data[name] ?? ""}
+                        onChange={(e) =>
+                          form.setValue(
+                            name,
+                            e.target.value === ""
+                              ? undefined
+                              : Number(e.target.value),
+                          )
+                        }
+                      />
+                      {form.formState.errors[name] && (
+                        <span className="text-destructive">
+                          {form.formState.errors[name]?.message}
+                        </span>
+                      )}
+                    </label>
+                  ),
+                )}
+              </>
             }
-            isLoading={disabled}
+            actions={
+              <div className="space-y-3">
+                {!comparison.matches && (
+                  <p role="alert" className="text-[12px] text-warning">
+                    Complete the highlighted access selections, or edit the
+                    filters in Customize.
+                  </p>
+                )}
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    onClick={onDeny}
+                    disabled={disabled}
+                  >
+                    Deny request
+                  </Button>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    disabled={
+                      disabled ||
+                      !data.name.trim() ||
+                      !comparison.matches ||
+                      !createApiKeySchema.safeParse(data).success
+                    }
+                    isLoading={disabled}
+                  >
+                    Create &amp; continue
+                  </Button>
+                </div>
+              </div>
+            }
           >
-            Create &amp; continue
-          </Button>
+            <LoginAccessRows
+              apiKey={summary}
+              comparison={comparison}
+              requested={requested}
+              inventory={inventory}
+              disabled={disabled}
+              scopes={<ApiKeyScopesField form={form} />}
+              selection={{
+                inventory,
+                organizationId: data.target_org_id,
+                selectedIds: selected,
+                impliedIds: implied,
+                allowAll: data.allow_all_services ?? false,
+                onToggle: toggleService,
+              }}
+            />
+          </LoginGrantReview>
         </fieldset>
       </form>
     </Form>

@@ -12,7 +12,6 @@ import {
 import type { RequestedPermissions } from "@/schemas/login-request";
 import {
   LoginConnectionChoices,
-  SelectedLoginConnections,
   type ConnectionSelection,
 } from "./login-connection-choices";
 
@@ -389,18 +388,6 @@ export function LoginPermissionPicker({
           </Button>
         </div>
       </section>
-      {connections && (
-        <SelectedLoginConnections
-          selection={connections}
-          requested={selected}
-          disabled={disabled}
-          onAddService={() => {
-            setSearch("");
-            setOpen(true);
-            searchInput.current?.focus();
-          }}
-        />
-      )}
     </div>
   );
 }
