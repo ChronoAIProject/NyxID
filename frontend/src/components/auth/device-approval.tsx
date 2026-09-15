@@ -764,17 +764,22 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 onChange={() => setChoice(key.id)}
                                 aria-label={key.name}
                               />
-                              <KeyRound className="size-3" />
-                              <strong>{key.name}</strong>
+                              <KeyRound
+                                className="size-3 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <strong className="min-w-0 flex-1 break-words">
+                                {key.name}
+                              </strong>
                               <span
-                                className={`ml-auto text-[10px] ${comparison.exact ? "text-success" : "text-warning"}`}
+                                className={`ml-auto shrink-0 text-[10px] ${comparison.exact ? "text-success" : "text-warning"}`}
                               >
                                 {comparison.exact
                                   ? "Exact match"
                                   : `Matched + ${comparison.extras.length} extra${comparison.extras.length === 1 ? "" : "s"}`}
                               </span>
                             </label>
-                            <p className="pl-6 text-[11px] text-muted-foreground">
+                            <p className="break-words pl-6 text-[11px] text-muted-foreground">
                               {key.owner_name} ·{" "}
                               {effectivePermissions(key.scopes)} ·{" "}
                               {key.allow_all_services

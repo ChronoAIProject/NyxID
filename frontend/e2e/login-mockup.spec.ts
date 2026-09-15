@@ -77,9 +77,14 @@ test("mockup preserves service glyphs and preloaded permission choices", async (
   await expect(page.locator("#grantKind")).toHaveText("Existing key");
   await expect(page.locator("#grantAccessDetails")).not.toHaveAttribute("open");
   await expect(page.locator("#grantEffective")).toBeHidden();
+  await expect(page.locator("#keyList .match-permissions")).toHaveCount(0);
+  await expect(page.locator("#grantRequested")).toBeHidden();
   await page.locator("#grantAccessDetails summary").focus();
   await page.keyboard.press("Enter");
   await expect(page.locator("#grantEffective")).toBeVisible();
+  await expect(page.locator("#grantRequested")).toContainText(
+    "Requested access",
+  );
   await page.locator("#grantAccessDetails summary").click();
   await expect(page.locator("#grantEffective")).toBeHidden();
   await page.locator("#createMatchingKey").click();

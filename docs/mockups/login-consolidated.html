@@ -2997,7 +2997,8 @@
                             </div>
                           </div>
                           <p class="helper warning" id="grantBroad" hidden></p>
-                          <p class="helper warning" id="grantExtra" hidden></p>
+                          <div id="grantRequested"></div>
+                          <div id="grantExtra" hidden></div>
                           <div id="existingNote">
                             <p class="helper">
                               Approval issues a login credential with this key’s
@@ -6590,10 +6591,9 @@
               `<label class="key-option" data-key-id="${escapeHtml(key.id)}" data-match="${comparison.exact ? "exact" : "extra"}">
             <input type="radio" name="existing-key" value="${escapeHtml(key.id)}" aria-label="${escapeHtml(key.name)}" ${key.id === selectedKeyId ? "checked" : ""}>
             <span class="key-copy"><span class="key-title-line"><strong>${escapeHtml(key.name)}</strong><span class="match-badge ${comparison.exact ? "exact" : "extra"}">${!selectedFilterOptions().length ? "Review access" : comparison.exact ? "Exact match" : `Matched + ${comparison.extra.length} ${comparison.extra.length === 1 ? "extra" : "extras"}`}</span></span>
-            <span class="key-meta">${escapeHtml(owners[key.owner])} · ${key.sample ? "Sample key · " : ""}${key.services.length} services · ${escapeHtml(dateText(key.expiry))}</span>
-            ${comparisonRows("Matched permissions", comparison.matched)}
-            ${comparisonRows(comparison.matched.length ? "Also grants — included with this key" : "Grants", comparison.extra, true)}
-            ${comparison.exact ? '<span class="match-footnote">No extra permissions or resources.</span>' : ""}
+            <span class="key-meta">${escapeHtml(owners[key.owner])} · ${key.sample ? "Sample key · " : ""}${key.allServices ? "All services" : key.services.length + (key.services.length === 1 ? " service" : " services")} · ${escapeHtml(dateText(key.expiry))}</span>
+            <span class="key-meta">${escapeHtml(effectivePermissions(key).join(", "))}</span>
+            <span class="chips">${[...new Set(resources.services.filter((item) => item.owner === key.owner && (key.allServices || key.services.includes(item.id))).map((item) => item.catalogSlug))].slice(0, 4).map(serviceIcon).join("")}</span>
             </span></label>`
             );
           })
@@ -6852,12 +6852,20 @@
         $("#grantBroad").hidden = !grant.allServices && !grant.allNodes;
         $("#grantBroad").textContent =
           "This key includes future resources in each “All” selection.";
-        const extra = selectedFilterOptions().length
-          ? keyComparison(grant).extra
-          : [];
+        const comparison = keyComparison(grant);
+        const extra = comparison.extra;
+        $("#grantRequested").innerHTML = comparisonRows(
+          "Requested access",
+          comparison.matched,
+        );
         $("#grantExtra").hidden = extra.length === 0;
-        $("#grantExtra").textContent =
-          "Access beyond the requested filters: " + extra.join("; ") + ".";
+        $("#grantExtra").innerHTML = comparisonRows(
+          "Access beyond the requested filters",
+          extra,
+          true,
+        );
+        populateServiceIcons($("#grantRequested"));
+        populateServiceIcons($("#grantExtra"));
         $("#grantMatch").hidden = extra.length === 0;
         $("#grantMatch").textContent =
           `${matchesPermissions(grant) ? "Matched + " : "+ "}${extra.length} extra${extra.length === 1 ? "" : "s"}`;

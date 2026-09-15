@@ -94,7 +94,7 @@ export function LoginGrantReview({
           <strong className="min-w-0 break-words text-[12px]">
             {apiKey.name}
           </strong>
-          <span className="text-[11px] text-muted-foreground">
+          <span className="min-w-0 break-words text-[11px] text-muted-foreground">
             {apiKey.owner_name}
           </span>
         </div>
