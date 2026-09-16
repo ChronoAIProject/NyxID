@@ -182,6 +182,8 @@ pub struct McpToolService {
     /// service: the instance's `UserEndpoint.recommended_skills` when set,
     /// else the catalog template's `DownstreamService.recommended_skills`.
     pub recommended_skills: Vec<String>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: Option<i64>,
     /// Catalog operation policy copied into the immutable execution catalog.
     pub proxy_operation_policy: Option<ProxyOperationPolicy>,
 }
@@ -1215,6 +1217,16 @@ async fn load_user_tools_inner(
         })
         .collect();
 
+    let catalog_refs_by_id: HashMap<_, _> = valid_platform_services
+        .iter()
+        .map(|(svc, _)| {
+            (
+                svc.id.as_str(),
+                (svc.recommended_skill_refs.clone(), svc.skills_revision),
+            )
+        })
+        .collect();
+
     // 4a. User-managed services
     for r in &all_user_services {
         let us = &r.service;
@@ -1292,7 +1304,20 @@ async fn load_user_tools_inner(
             })
             .unwrap_or_default();
 
+        let (recommended_skill_refs, skills_revision) =
+            if user_endpoint.is_some_and(|ep| ep.recommended_skills.is_some()) {
+                (None, None)
+            } else {
+                us.catalog_service_id
+                    .as_deref()
+                    .and_then(|id| catalog_refs_by_id.get(id))
+                    .map(|(refs, revision)| (refs.clone(), Some(*revision)))
+                    .unwrap_or_default()
+            };
+
         result.push(McpToolService {
+            recommended_skill_refs,
+            skills_revision,
             service_id: us.id.clone(),
             service_name: endpoint_label.to_string(),
             service_slug: us.slug.clone(),
@@ -1331,6 +1356,8 @@ async fn load_user_tools_inner(
         let durable_endpoint_metadata = service_endpoint_durable_metadata(&endpoint_rows);
 
         result.push(McpToolService {
+            recommended_skill_refs: svc.recommended_skill_refs.clone(),
+            skills_revision: Some(svc.skills_revision),
             service_id: svc.id.clone(),
             service_name: svc.name.clone(),
             service_slug: svc.slug.clone(),
@@ -2418,6 +2445,8 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
         }
 
         public_services.push(McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: svc.id.clone(),
             service_name: svc.name.clone(),
             service_slug: format!("public__{}", sanitize_tool_segment(&svc.slug)),
@@ -4619,6 +4648,29 @@ pub async fn connect_service(
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Separate from the stable operation catalog digest used by existing clients.
+pub fn skills_manifest_digest(services: &[McpToolService]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut entries: Vec<_> = services
+        .iter()
+        .map(|s| {
+            (
+                &s.service_id,
+                &s.recommended_skills,
+                &s.recommended_skill_refs,
+            )
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    format!(
+        "v1:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&("nyxid.mcp-skills-manifest.v1", entries))
+                .expect("skill manifest serializes")
+        ))
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4663,6 +4715,8 @@ mod tests {
             })
             .collect();
         McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: id.to_string(),
             service_name: name.to_string(),
             service_slug: slug.to_string(),
@@ -4678,6 +4732,138 @@ mod tests {
             is_generic_proxy: false,
             invalid_openapi_contract: false,
             proxy_operation_policy: None,
+        }
+    }
+
+    #[test]
+    fn curation_refs_change_only_separate_digest_while_names_keep_legacy_digest() {
+        let mut service = make_service(
+            "svc",
+            "Service",
+            "service",
+            vec![make_endpoint("list", "List")],
+        );
+        service.recommended_skills = vec!["manual".into()];
+        let original = operation_catalog_digest(std::slice::from_ref(&service));
+        service.recommended_skill_refs = Some(vec![
+            crate::models::catalog_skill_revision::SkillReference {
+                source: "ornn".into(),
+                skill_id: "immutable-id".into(),
+                name: "manual".into(),
+                version: "1.0".into(),
+                sha256: "a".repeat(64),
+                dependencies: vec![],
+            },
+        ]);
+        service.skills_revision = Some(3);
+        assert_eq!(
+            operation_catalog_digest(std::slice::from_ref(&service)),
+            original
+        );
+        let manifest = skills_manifest_digest(std::slice::from_ref(&service));
+        service.recommended_skill_refs.as_mut().unwrap()[0].version = "1.1".into();
+        service.skills_revision = Some(4);
+        assert_eq!(
+            operation_catalog_digest(std::slice::from_ref(&service)),
+            original
+        );
+        assert_ne!(
+            skills_manifest_digest(std::slice::from_ref(&service)),
+            manifest
+        );
+        service.recommended_skills = vec!["replacement".into()];
+        assert_ne!(operation_catalog_digest(&[service]), original);
+    }
+
+    #[tokio::test]
+    async fn curation_instance_name_override_suppresses_inherited_refs() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("curation_mcp_override").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut catalog = dummy_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = "pinned-service".into();
+        catalog.recommended_skills = Some(vec!["manual".into()]);
+        catalog.skills_revision = 4;
+        catalog.recommended_skill_refs = Some(vec![
+            crate::models::catalog_skill_revision::SkillReference {
+                source: "ornn".into(),
+                skill_id: "immutable".into(),
+                name: "manual".into(),
+                version: "1.0".into(),
+                sha256: "b".repeat(64),
+                dependencies: vec![],
+            },
+        ]);
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: owner.clone(),
+                service_id: catalog.id.clone(),
+                credential_encrypted: None,
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: true,
+                state_version: 0,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let endpoint = test_user_endpoint(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            "Instance",
+            "https://instance.test",
+            None,
+            Some(&catalog.id),
+        );
+        let instance = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            &catalog.slug,
+            &endpoint.id,
+            Some(&catalog.id),
+            None,
+        );
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(&endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&instance)
+            .await
+            .unwrap();
+        let manager = NodeWsManager::new(30, 100);
+        let load = || load_user_tools_all_scoped(&db, &manager, &owner, NodeScope::Unrestricted);
+        let inherited = load().await.unwrap();
+        let inherited = inherited
+            .iter()
+            .find(|s| s.service_id == instance.id)
+            .unwrap();
+        assert_eq!(
+            inherited.recommended_skill_refs,
+            catalog.recommended_skill_refs
+        );
+        assert_eq!(inherited.skills_revision, Some(4));
+        for names in [vec!["local"], vec![]] {
+            db.collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+                .update_one(
+                    doc! {"_id":&endpoint.id},
+                    doc! {"$set":{"recommended_skills":&names}},
+                )
+                .await
+                .unwrap();
+            let loaded = load().await.unwrap();
+            let actual = loaded.iter().find(|s| s.service_id == instance.id).unwrap();
+            assert_eq!(actual.recommended_skills, names);
+            assert!(actual.recommended_skill_refs.is_none());
+            assert!(actual.skills_revision.is_none());
         }
     }
 
@@ -8502,6 +8688,8 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 name: format!("Service {slug}"),
                 slug: slug.to_string(),

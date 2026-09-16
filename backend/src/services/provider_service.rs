@@ -3863,6 +3863,8 @@ pub async fn seed_default_services(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: service_id.clone(),
             name: seed.service_name.to_string(),
             slug: seed.service_slug.to_string(),

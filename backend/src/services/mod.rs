@@ -139,3 +139,6 @@ pub mod user_service_service;
 pub mod user_token_service;
 pub mod webhook_delivery_service;
 pub mod ws_frame_injector;
+
+pub mod catalog_skill_service;
+pub mod curation_grant_service;

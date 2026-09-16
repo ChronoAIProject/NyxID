@@ -294,6 +294,36 @@ pub fn scope_allows_llm_proxy(scopes: &str) -> bool {
     scope_allows_rest_proxy(scopes) || scope_contains(scopes, LLM_PROXY_SCOPE)
 }
 
+fn ensure_service_account_purpose_route(
+    sa: &ServiceAccount,
+    scope: &str,
+    path: &str,
+    websocket: bool,
+) -> Result<(), AppError> {
+    use crate::models::service_account::ServiceAccountPurpose;
+    use crate::services::curation_grant_service::{live_grant, require_scope};
+    if sa.purpose == ServiceAccountPurpose::General {
+        return Ok(());
+    }
+    let grant = live_grant(sa)?;
+    if !websocket {
+        if path_matches_prefix(path, "/api/v1/catalog-curation") {
+            return Ok(());
+        }
+        if let Some(target) = &grant.ornn_proxy_service_id {
+            let prefix = format!("/api/v1/proxy/{target}");
+            if path_matches_prefix(path, &prefix) {
+                require_scope(sa, scope, "proxy")?;
+                return Ok(());
+            }
+        }
+    }
+    Err(AppError::Forbidden(
+        "Curation accounts can only curate granted services and use their exact Ornn HTTP proxy"
+            .into(),
+    ))
+}
+
 fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
     if api_key.purpose != ApiKeyPurpose::ScheduledInvocation {
         return Ok(());
@@ -422,6 +452,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "channel-conversations"
                 | "connect-links"
                 | "platform-ops"
+                | "catalog-curation"
         )
     ) {
         return true;
@@ -706,13 +737,22 @@ impl FromRequestParts<AppState> for AuthUser {
                                 AppError::Internal(format!("SA token lookup failed: {e}"))
                             })?;
 
-                        if let Some(record) = token_record
-                            && record.revoked
-                        {
-                            return Err(AppError::Unauthorized(
-                                "Token has been revoked".to_string(),
-                            ));
-                        }
+                        let record = token_record.ok_or_else(|| {
+                            AppError::Unauthorized("Service account token not found".into())
+                        })?;
+                        crate::services::service_account_service::validate_token_record(
+                            &sa, &claims, &record,
+                        )?;
+                        let request_path = parts
+                            .extensions
+                            .get::<OriginalUri>()
+                            .map_or_else(|| parts.uri.path(), |uri| uri.path());
+                        ensure_service_account_purpose_route(
+                            &sa,
+                            &claims.scope,
+                            request_path,
+                            is_websocket_upgrade(&parts.headers),
+                        )?;
 
                         let sa_uuid = Uuid::parse_str(&sa_id).map_err(|_| {
                             AppError::Unauthorized("Invalid service account ID".to_string())
@@ -724,7 +764,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             scope: claims.scope.clone(),
                             acting_client_id: None,
                             oauth_client_id: None,
-                            token_jti: None,
+                            token_jti: Some(claims.jti.clone()),
                             approval_owner_user_id: Some(sa.effective_owner_user_id().to_string()),
                             auth_method: AuthMethod::ServiceAccount,
                             allow_all_services: true,
@@ -1736,6 +1776,7 @@ mod tests {
             }),
             delegated: Some(true),
             sa: None,
+            sgen: None,
             cnf: None,
             relay: None,
             relay_api_key_id: None,
@@ -3485,5 +3526,38 @@ mod tests {
             &Method::GET,
             "/api/v1/api-keys"
         ));
+    }
+}
+
+#[cfg(test)]
+mod curation_purpose_regressions {
+    use super::*;
+
+    #[test]
+    fn general_service_accounts_keep_the_existing_purpose_route_projection() {
+        let sa: ServiceAccount = bson::from_document(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),"name":"General","client_id":"sa_test","client_secret_hash":"test-only-hash","secret_prefix":"sas_test",
+            "allowed_scopes":"proxy","is_active":true,"created_by":uuid::Uuid::new_v4().to_string(),"role_ids":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        }).unwrap();
+        for path in [
+            "/api/v1/proxy/s/slug/path",
+            "/api/v1/proxy/services",
+            "/api/v1/llm/status",
+            "/api/v1/llm/openai/v1/models",
+            "/api/v1/providers",
+            "/api/v1/connections",
+            "/api/v1/nodes",
+            "/api/v1/oracle/pools",
+            "/api/v1/triggers",
+        ] {
+            assert!(
+                ensure_service_account_purpose_route(&sa, "proxy", path, false).is_ok(),
+                "{path}"
+            );
+            assert!(
+                ensure_service_account_purpose_route(&sa, "proxy", path, true).is_ok(),
+                "{path}"
+            );
+        }
     }
 }

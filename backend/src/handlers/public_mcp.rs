@@ -205,6 +205,8 @@ mod tests {
 
     fn safe_anonymous_service() -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: Uuid::new_v4().to_string(),
             name: "Public Catalog".to_string(),
             slug: "public-catalog".to_string(),

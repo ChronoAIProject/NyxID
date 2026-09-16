@@ -92,6 +92,9 @@ pub struct CatalogEntry {
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: i64,
+    pub skills_manifest_digest: String,
     /// Declared credential fields for `token_exchange` services. When set,
     /// clients should render one input per field (text vs password per the
     /// `secret` flag) and compose a JSON object from the values before
@@ -122,6 +125,9 @@ fn build_catalog_entry(
     let requires_credential =
         svc.requires_user_credential || svc.auth_method != "none" || spr.is_some();
     let platform_client_id_present = oauth_client_id.is_some();
+    let skills_manifest_digest = crate::services::catalog_skill_service::manifest_digest(
+        &crate::services::catalog_skill_service::state(&svc),
+    );
     CatalogEntry {
         service_type: svc.service_type.clone(),
         ssh_host: svc.ssh_config.as_ref().map(|c| c.host.clone()),
@@ -212,6 +218,9 @@ fn build_catalog_entry(
         required_permissions: svc.required_permissions,
         examples_url: svc.examples_url,
         recommended_skills: svc.recommended_skills,
+        recommended_skill_refs: svc.recommended_skill_refs,
+        skills_revision: svc.skills_revision,
+        skills_manifest_digest,
         token_exchange_credential_fields: svc.token_exchange_config.map(|c| c.credential_fields),
         default_request_headers: svc.default_request_headers,
     }
@@ -894,6 +903,8 @@ mod tests {
 
     fn make_catalog_service(slug: &str, name: &str, user_id: &str) -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             slug: slug.to_string(),
             name: name.to_string(),

@@ -101,3 +101,8 @@ pub mod user_services_handler;
 pub mod user_tokens;
 pub mod users;
 pub mod webhooks;
+
+pub mod catalog_curation;
+
+#[cfg(test)]
+mod curation_tests;

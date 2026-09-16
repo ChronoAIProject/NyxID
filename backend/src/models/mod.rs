@@ -100,3 +100,5 @@ pub mod user_provider_token;
 pub mod user_service;
 pub mod user_service_connection;
 pub mod ws_frame_injection;
+
+pub mod catalog_skill_revision;

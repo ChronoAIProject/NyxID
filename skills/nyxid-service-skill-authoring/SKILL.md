@@ -1,7 +1,7 @@
 ---
 name: nyxid-service-skill-authoring
 description: Find or author an agent skill for a NyxID proxy service that has no OpenAPI spec or typed operations. Use when a NyxID service only exposes the generic proxy tool, `nyxid catalog endpoints` returns nothing for the slug, or you would otherwise have to guess endpoint paths. Searches Ornn for an existing skill bound to the service; if none exists, creates one — researching the official OpenAPI spec on the web for public services, or collecting the contract from the user for private/custom services (never fabricate endpoints) — then uploads it to Ornn, binds it to the service, and records it locally.
-version: "1.2"
+version: "1.3"
 metadata:
   category: plain
   tag:
@@ -31,6 +31,18 @@ nyxid proxy request ornn-api "/api/v1/skills/ornn-agent-manual-cli/json" \
 
 All Ornn calls below assume that manual is loaded; it defines
 authentication, response shapes, and error handling.
+
+## Dedicated catalog curators
+
+A protected Curation service account uses a different authority boundary from the user/agent-key workflow below. Discover only through `GET /api/v1/catalog-curation/services`, then read `/services/{catalog_id}/skills`. Replace the complete names/refs list with `PUT /skills`, the observed `base_revision`, and a stable UUID `request_id`; use a new ID after resolving a 409 against freshly read state. Remove one name by sending the remaining list, or clear with `[]`. Existing refs (including an empty refs list) require replacement refs or explicit `clear_refs: true` for name changes. Do not silently retain stale pins.
+
+History and restore are available under `/skills/history` and `/skills/restore`; restore creates a new revision. Identical committed retries reuse the same complete request and ID. Pure no-ops spend no budget and create no receipt. Recommendation changes need no per-change human approval within the standing grant.
+
+For Ornn calls, use only ordinary HTTP `/api/v1/proxy/{grant.ornn_proxy_service_id}/...` with the separately attached SA Ornn credential. The slug forms, `/keys`, generic `/catalog`, provider self-management, and spec/routing changes described below are not available to Curation tokens. Do not use the creator's credentials or ask for broad Ornn admin authority to bypass a denied request.
+
+NyxID recommendation management does not edit package bytes. Actual package create/read/update must use Ornn's verified scoped content API; retain immutable versions and deny package/history deletion. Load the deployed Ornn contract and verify the resource/action boundary before claiming content CRU is delivered. Names are advisory; supplied exact refs are pins, not evidence of content approval. Consumers see changed defaults on their next fetch; installed copies require their own update, and restoring instructions cannot undo past external effects.
+
+Grant administration, limits, request examples, credential rotation, and mandatory upgrade-all-before-enable ordering are documented in [`docs/SERVICE_ACCOUNTS.md`](../../docs/SERVICE_ACCOUNTS.md#catalog-skill-curation). The user/agent-key workflow below remains for account-owned instances and must not be substituted for catalog curation authority.
 
 ## No shell? Every step works over plain HTTP
 

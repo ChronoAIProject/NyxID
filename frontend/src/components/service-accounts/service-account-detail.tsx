@@ -51,6 +51,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { CurationGrantSection } from "./curation-grant-section";
 
 type ConfirmAction = "delete" | "revoke-tokens" | null;
 
@@ -311,6 +312,8 @@ export function ServiceAccountDetail({
       </DetailSection>
 
       <Separator />
+
+      {showProviderSections && <CurationGrantSection account={sa} />}
 
       {showProviderSections ? (
         <SaConnectedServices saId={saId} />

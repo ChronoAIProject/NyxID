@@ -352,6 +352,7 @@ export const updateServiceSchema = z
       .or(z.literal("")),
     examples_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
     recommended_skills: z.string().max(2000, "Must be at most 2000 characters").optional().or(z.literal("")),
+    clear_skill_refs: z.boolean().optional(),
     // Developer app scoping (admin-only, private services)
     developer_app_ids: z.array(z.string()).optional(),
     supports_proxy_read: z.boolean().optional(),

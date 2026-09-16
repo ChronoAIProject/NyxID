@@ -13,11 +13,12 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::{Map, Value};
 
 use crate::api::ApiClient;
-use crate::cli::{OutputFormat, ServiceAccountCommands};
+use crate::cli::{CurationGrantCommands, OutputFormat, ServiceAccountCommands};
 use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: ServiceAccountCommands) -> Result<()> {
     match command {
+        ServiceAccountCommands::CurationGrant { command } => run_curation_grant(command).await,
         ServiceAccountCommands::Create {
             name,
             scopes,
@@ -348,6 +349,53 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
     }
 }
 
+async fn run_curation_grant(command: CurationGrantCommands) -> Result<()> {
+    let (result, output) = match command {
+        CurationGrantCommands::Issue {
+            id,
+            service_ids,
+            ornn_proxy_service_id,
+            expires_at,
+            max_writes,
+            window_seconds,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let mut body = serde_json::json!({ "service_ids": service_ids, "max_writes": max_writes, "window_seconds": window_seconds });
+            if let Some(target) = ornn_proxy_service_id {
+                body["ornn_proxy_service_id"] = Value::String(target);
+            }
+            if let Some(expiry) = expires_at {
+                body["expires_at"] = Value::String(expiry);
+            }
+            let result: Value = api
+                .post(
+                    &format!("/admin/service-accounts/{id}/curation-grant"),
+                    &body,
+                )
+                .await?;
+            (result, auth.output)
+        }
+        CurationGrantCommands::Show { id, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api.get(&format!("/admin/service-accounts/{id}")).await?;
+            (result, auth.output)
+        }
+        CurationGrantCommands::Revoke { id, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .delete(&format!("/admin/service-accounts/{id}/curation-grant"))
+                .await?;
+            (result, auth.output)
+        }
+    };
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+        OutputFormat::Table => print_sa_detail(&result),
+    }
+    Ok(())
+}
+
 fn print_sa_detail(sa: &Value) {
     let id = sa["id"].as_str().unwrap_or("-");
     let name = sa["name"].as_str().unwrap_or("-");
@@ -382,6 +430,21 @@ fn print_sa_detail(sa: &Value) {
     eprintln!("Client ID:       {client_id}");
     eprintln!("Secret prefix:   {prefix}");
     eprintln!("Scopes:          {scopes}");
+    eprintln!(
+        "Purpose:         {}",
+        sa["purpose"].as_str().unwrap_or("general")
+    );
+    eprintln!(
+        "Protected:       {}",
+        sa["platform_protected"].as_bool().unwrap_or(false)
+    );
+    eprintln!(
+        "Generation:      {}",
+        sa["credential_generation"].as_u64().unwrap_or(0)
+    );
+    if let Some(grant) = sa.get("curation_grant").filter(|g| !g.is_null()) {
+        eprintln!("Curation grant:  {grant}");
+    }
     eprintln!("Roles:           {roles}");
     eprintln!("Active:          {active}");
     eprintln!("Rate limit:      {rate_limit}");
@@ -411,6 +474,61 @@ mod tests {
     // A literal UUID — resolve_org_id returns it directly without an HTTP
     // call, so the request body should carry it verbatim as target_org_id.
     const ORG_UUID: &str = "11111111-1111-1111-1111-111111111111";
+
+    #[tokio::test]
+    async fn curation_grant_uses_dedicated_admin_routes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/admin/service-accounts/sa-1/curation-grant"))
+            .and(body_json(serde_json::json!({"service_ids": [ORG_UUID], "max_writes": 10, "window_seconds": 3600, "ornn_proxy_service_id": ORG_UUID, "expires_at": "2030-01-01T00:00:00Z"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"purpose": "curation", "platform_protected": true}))).expect(1).mount(&server).await;
+        run(ServiceAccountCommands::CurationGrant {
+            command: CurationGrantCommands::Issue {
+                id: "sa-1".into(),
+                service_ids: vec![ORG_UUID.into()],
+                ornn_proxy_service_id: Some(ORG_UUID.into()),
+                expires_at: Some("2030-01-01T00:00:00Z".into()),
+                max_writes: 10,
+                window_seconds: 3600,
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .unwrap();
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/admin/service-accounts/sa-1/curation-grant"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"purpose": "curation", "curation_grant": null}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(ServiceAccountCommands::CurationGrant {
+            command: CurationGrantCommands::Revoke {
+                id: "sa-1".into(),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/admin/service-accounts/sa-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"purpose": "curation", "platform_protected": true}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(ServiceAccountCommands::CurationGrant {
+            command: CurationGrantCommands::Show {
+                id: "sa-1".into(),
+                auth: mock_auth(server.uri()),
+            },
+        })
+        .await
+        .unwrap();
+    }
 
     // --- Create (scripted path; --terminal bypasses the browser wizard) ---
 

@@ -111,7 +111,7 @@ Content-Type: application/json
 }
 ```
 
-Scope changes take effect on the next token issuance. Existing tokens retain their original scopes until they expire or are revoked.
+Scope changes affect future token issuance. Curation additionally checks the live account scopes and grant on every request, so removing a curation scope immediately removes that authority from existing tokens.
 
 ### Rotating the Secret
 
@@ -134,7 +134,7 @@ Response:
 
 This immediately:
 1. Generates a new client secret
-2. **Revokes all existing tokens** for this service account
+2. Atomically advances `credential_generation` with the new secret hash, then **revokes all existing token rows** for this service account. A token issued late from an older validated secret is rejected even if its row was inserted after the revocation sweep.
 3. The old secret can no longer authenticate
 
 ### Deactivating and Deleting
@@ -390,7 +390,7 @@ GET /api/v1/proxy/<service_id>/items?query=test HTTP/1.1
 Authorization: Bearer <sa_access_token>
 ```
 
-Requires `proxy:*` or `proxy:<service_id>` scope.
+Requires `proxy` or `proxy:*`. General service accounts resolve the effective owner's service connections. There is no implemented `proxy:<service_id>` scope. Curation accounts use the stricter purpose and exact catalog target boundary described below.
 
 ### Provider Management
 
@@ -487,8 +487,9 @@ class NyxIDClient:
 
 | Scope | Access |
 |-------|--------|
-| `proxy:*` | All proxy endpoints |
-| `proxy:<service_id>` | Specific service proxy only |
+| `proxy` or `proxy:*` | General proxy access; also admits the LLM gateway for General accounts |
+| `catalog:skills:read` | Granted curation discovery, skills, and history |
+| `catalog:skills:write` | Granted recommendation changes and restore |
 | `llm:proxy` | LLM gateway proxy requests |
 | `llm:status` | LLM status endpoint |
 | `connections:read` | List service connections |
@@ -503,7 +504,7 @@ class NyxIDClient:
 | `ANY /api/v1/llm/{provider}/v1/*` | `llm:proxy` |
 | `ANY /api/v1/llm/gateway/v1/*` | `llm:proxy` |
 | `GET /api/v1/llm/status` | `llm:status` |
-| `ANY /api/v1/proxy/{service_id}/*` | `proxy:*` or `proxy:{service_id}` |
+| `ANY /api/v1/proxy/{service_id}/*` | `proxy` or `proxy:*`; Curation additionally requires its exact live Ornn target |
 | `GET /api/v1/connections` | `connections:read` |
 | `POST /api/v1/connections` | `connections:write` |
 | `GET /api/v1/providers` | `providers:read` |
@@ -638,3 +639,134 @@ All service account operations are logged:
 |--------|------|-------------|
 | `POST` | `/oauth/token` | Authenticate (`grant_type=client_credentials`) |
 | `POST` | `/oauth/revoke` | Revoke a specific token |
+
+
+## Catalog skill curation
+
+A dedicated service account can autonomously assign, replace, remove, clear, and restore recommended skills for exact permitted catalog services. The account has one embedded live grant and a persisted write budget shared by all backend replicas. There is no per-change approval or semantic review gate.
+
+NyxID stores recommendation names and optional immutable references. **Ornn owns package content create/read/update and its retained immutable versions.** NyxID does not store, fetch, validate, publish, or delete package bytes. Configuring an Ornn proxy target here does not prove that Ornn accepts the machine identity or restricts it to the intended resources/actions. That integration requires executable verification in Ornn and Aevatar before describing this feature as complete content CRU. Package and version deletion must remain denied there.
+
+### Upgrade order and rollback
+
+Upgrade **all backend replicas that authenticate tokens, proxy requests, or serve MCP** before issuing, enabling, or delivering any Curation credentials. Older replicas ignore purpose and credential generation: a proxy-scoped token can regain General account behavior on an old replica, and the rotation fence does not protect requests authenticated there. The additive recommendation fields and separate digest support consumer compatibility; they do not make mixed-version authorization safe.
+
+Before rolling back to a backend without these checks, disable the Curation accounts and revoke their tokens. Do not deliver or re-enable their credentials while any old replica remains. No live account provisioning or deployment is performed by the implementation itself.
+
+### Platform administration
+
+Create the account with `catalog:skills:read catalog:skills:write`. If it also needs Ornn content authoring, include `proxy` and configure exactly one Ornn catalog UUID when issuing the grant. The grant endpoint rejects other scopes and org-owned accounts. For an existing protected account with a live grant, scope updates must stay within this set. After revocation, metadata updates and disable remain available to platform admins.
+
+Use the existing Admin → Service Accounts detail page, or:
+
+```sh
+nyxid service-account curation-grant issue "$SA_ID" \
+  --service-id "$CATALOG_SERVICE_ID" \
+  --service-id "$SECOND_CATALOG_SERVICE_ID" \
+  --ornn-proxy-service-id "$ORNN_CATALOG_ID" \
+  --max-writes 100 --window-seconds 3600 \
+  --expires-at 2026-12-31T23:59:59Z
+nyxid service-account curation-grant show "$SA_ID"
+nyxid service-account curation-grant revoke "$SA_ID"
+```
+
+The dedicated routes are `POST` and `DELETE /api/v1/admin/service-accounts/{id}/curation-grant`; inspection uses the normal account detail `GET`. Issuance accepts `service_ids` (1–100 distinct existing catalog UUIDs), optional `ornn_proxy_service_id`, optional future `expires_at`, `max_writes` (1–10000), and `window_seconds` (60–86400). Issuing/replacing a grant starts a fresh budget window. Ordinary account create/update requests reject grant, purpose, protection, and generation fields.
+
+Issuance permanently sets `purpose=curation` and `platform_protected=true`. Revocation removes the live grant while both fields remain. Expiry and revocation fail closed for curation reads, writes, and Ornn proxy requests. Protected metadata, scope/role changes, disable, rotation, and provider/connection management require platform admin; direct owner or org-admin status is insufficient. Service-account role IDs stay under platform-admin control for downstream assertions and do not become NyxID platform-admin privileges.
+
+Grant and history responses contain no credentials or secret hashes. The original issuer's later demotion does not revoke a standing workload grant. During offboarding, rotate any client secret or Ornn credential a former administrator could retain, and revoke the grant or disable the account when the workload itself should stop.
+
+### Runtime confinement and token revocation
+
+A Curation bearer may use only `/api/v1/catalog-curation/...` and ordinary HTTP `/api/v1/proxy/{ornn_proxy_service_id}/...`. The grant and token/live scopes must authorize the request. Generic catalog/services listing, other proxy IDs, slug routing, `_nyxid_via` instance selection, WebSocket upgrades, MCP, LLM/OpenAI routes, provider/connection self-management, nodes, oracle, and triggers are unavailable.
+
+The Ornn proxy uses the granted catalog URL and the service account's own connection or delegated provider credential. It never inherits its creator's UserService, endpoint override, gateway URL, node, or broad credential, and does not fall back to a catalog master credential. Explicitly disconnecting the SA connection blocks execution. A platform admin attaches the separately scoped Ornn credential using the existing SA provider/connection management surface. General-purpose account routing keeps its existing behavior.
+
+Every SA access token must have a live token row matching its account, JWT ID, exact scope, expiry, revocation state, and current credential generation. SA JWTs carry `sgen`; missing legacy generations count as zero only while the current account is generation zero. Rotation advances generation atomically with replacing the secret, including when old-secret issuance finishes after rotation. MCP bearer authentication and OAuth introspection use the same validation. Curation cannot use a General-era MCP session as a fallback.
+
+### Machine recommendation API
+
+Acquire a token through the existing client-credentials flow. For example, with the client secret already supplied by your secret store:
+
+```sh
+curl --fail-with-body "$NYXID_URL/oauth/token" \
+  --data-urlencode grant_type=client_credentials \
+  --data-urlencode "client_id=$NYXID_CLIENT_ID" \
+  --data-urlencode "client_secret=$NYXID_CLIENT_SECRET" \
+  --data-urlencode 'scope=catalog:skills:read catalog:skills:write'
+```
+
+Use the returned access token as `$CURATION_TOKEN`:
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
+  "$NYXID_URL/api/v1/catalog-curation/services"
+curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
+  "$NYXID_URL/api/v1/catalog-curation/services/$CATALOG_SERVICE_ID/skills"
+```
+
+Only grant-listed catalog services appear. Each skill response contains `service_id`, `recommended_skills`, optional `recommended_skill_refs`, `skills_revision`, and the separately versioned `skills_manifest_digest`. Disallowed service IDs return 404 without disclosing their content or history. API keys, delegated/relay tokens, and human session/access tokens cannot use this router.
+
+Replace the entire list with an observed revision and a fresh UUID `request_id`:
+
+```http
+PUT /api/v1/catalog-curation/services/{catalog_uuid}/skills
+Authorization: Bearer <curation_token>
+Content-Type: application/json
+
+{
+  "base_revision": 0,
+  "request_id": "f53bba8b-c55f-4b73-9eaf-e4aec599f6d7",
+  "recommended_skills": ["other-publisher/setup", "operations/manual"]
+}
+```
+
+The same operation assigns new defaults or reassigns existing ones. To unassign one recommendation, submit the remaining names; to clear all, submit `recommended_skills: []`. If refs are present (including an empty refs array), a name change requires replacement refs or `clear_refs: true`. Explicit clearing drops refs and keeps the supplied advisory names. Advisory names are not an assertion of immutable package contents.
+
+An immutable reference has this shape:
+
+```json
+{
+  "source": "ornn",
+  "skill_id": "immutable-skill-id",
+  "name": "operations/manual",
+  "version": "1.5",
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "dependencies": []
+}
+```
+
+`recommended_skill_refs` derives the legacy names in order; if names are also supplied, they must match. Exact versions use numeric release versions (two or three components, optional prerelease/build suffix), never `latest` or mutable tags. SHA-256 is 64 lowercase hex characters. Lists allow at most 50 distinct names/refs and 50 dependency pins per ref; source/ID/name fields are 1–256 bytes and version is at most 128 bytes. The skill input is capped at 64 KiB. Dependencies use the same pin fields. NyxID validates this shape without fetching package bytes or proving the claimed hash.
+
+A changed request atomically validates live authority, reserves persisted budget, changes the service, increments revision, and records history plus an actor/request receipt in one MongoDB transaction. Single-token revocation and live account/grant changes conflict with an in-flight writer. Transaction abort rolls back all effects. The history has no deletion route or short TTL.
+
+On a lost response, resend the identical entire request with the same ID. Committed replays resolve before budget checks, but always require current authorization. Reusing a committed ID with another target or different request returns 409. A stale base revision returns 409: fetch the current state and decide a new complete list, then submit it with a new ID and that revision. Do not automatically retry stale editor values. Exhausted budget returns 429 until the persisted window resets.
+
+A pure no-op at the current revision does not consume budget, increment revision, write history or a receipt, or trigger post-commit side effects. Its ID therefore makes no durable replay claim. Human mixed metadata/skills changes share this transaction path: changed metadata with identical skills receives a durable receipt but no skill revision/history. Full request semantics, including omitted versus explicitly cleared headers, determine retry identity. Legacy human skill updates that omit `skills_revision` mean expected revision zero. The admin editor sends its observed revision only when skills change.
+
+### History and recovery
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
+  "$NYXID_URL/api/v1/catalog-curation/services/$CATALOG_SERVICE_ID/skills/history?limit=20"
+```
+
+History is newest first. Follow `next_before_revision` using `before_revision`; `limit` is bounded to 1–100. Entries include before/after states, actor/grant/request attribution, revision, and timestamp. Restore with:
+
+```http
+POST /api/v1/catalog-curation/services/{catalog_uuid}/skills/restore
+Authorization: Bearer <curation_token>
+Content-Type: application/json
+
+{
+  "revision": 0,
+  "base_revision": 3,
+  "request_id": "9c5d004c-4c59-42b4-958f-016cb4b1f9a3"
+}
+```
+
+Revision zero restores the exact legacy baseline captured before the first edit, including absent refs. Restore appends a new revision under the same authority, budget, and compare-and-swap rules; it deletes neither history nor packages. Restoring instructions cannot undo external actions a consumer already executed.
+
+Catalog/MCP/key read surfaces expose optional refs and revision. An instance name override suppresses catalog refs, including when that override is an empty list. The existing name-based `catalog_digest` algorithm is unchanged; ref-only changes affect a separate `skills_manifest_digest` with a `v1:` prefix. Consumers see updates on their next fetch. Locally installed/copied skills do not update automatically.
+
+Human metadata side effects remain after commit. Idempotent retries complete OIDC redirect and billing work from the current committed desired state and re-dispatch eligible endpoint discovery, without reapplying older request values over later edits. Identity propagation uses its durable reconciliation marker; unresolved reconciliation returns a conflict directing a platform admin to identity resync.

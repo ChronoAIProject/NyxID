@@ -66,6 +66,9 @@ pub struct Claims {
     /// True if this token was issued to a service account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sgen: Option<i64>,
     /// RFC 7800 confirmation claim for sender-constrained access tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<Cnf>,
@@ -452,6 +455,7 @@ fn generate_access_token_for_client(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf,
         relay: None,
         relay_api_key_id: None,
@@ -536,6 +540,7 @@ pub fn generate_assistant_forward_access_token(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -605,6 +610,7 @@ pub fn generate_relay_access_token(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf: None,
         relay: Some(true),
         relay_api_key_id: Some(agent_scope.api_key_id.clone()),
@@ -717,6 +723,7 @@ pub fn generate_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -771,6 +778,7 @@ pub fn reissue_refresh_token(
         act: None,
         delegated: None,
         sa: None,
+        sgen: None,
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -867,6 +875,7 @@ pub fn generate_delegated_access_token_for_client(
         }),
         delegated: Some(true),
         sa: None,
+        sgen: None,
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -992,6 +1001,7 @@ pub fn generate_service_account_token(
     service_account_id: &str,
     scope: &str,
     ttl_secs: i64,
+    credential_generation: i64,
 ) -> Result<(String, String), AppError> {
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
@@ -1013,6 +1023,7 @@ pub fn generate_service_account_token(
         act: None,
         delegated: None,
         sa: Some(true),
+        sgen: Some(credential_generation),
         cnf: None,
         relay: None,
         relay_api_key_id: None,
@@ -1658,6 +1669,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            sgen: None,
             cnf: None,
             relay: None,
             relay_api_key_id: None,
@@ -1776,6 +1788,7 @@ mod tests {
             act: None,
             delegated: None,
             sa: None,
+            sgen: None,
             cnf: None,
             relay: None,
             relay_api_key_id: None,
@@ -1986,7 +1999,7 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let sa_id = Uuid::new_v4().to_string();
         let (token, jti) =
-            generate_service_account_token(&keys, &config, &sa_id, "proxy:* llm:proxy", 3600)
+            generate_service_account_token(&keys, &config, &sa_id, "proxy:* llm:proxy", 3600, 0)
                 .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
@@ -2007,7 +2020,7 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let sa_id = Uuid::new_v4().to_string();
         let (token, _) =
-            generate_service_account_token(&keys, &config, &sa_id, "proxy:*", 120).unwrap();
+            generate_service_account_token(&keys, &config, &sa_id, "proxy:*", 120, 0).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         let ttl = claims.exp - claims.iat;

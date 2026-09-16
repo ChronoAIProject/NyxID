@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useService, useUpdateService } from "@/hooks/use-services";
@@ -52,12 +52,20 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
+import type { DownstreamService, UpdateServicePayload } from "@/types/api";
+import {
+  serviceSkillUpdate,
+  skillRequestIdentity,
+  type SkillRequestIdentity,
+} from "@/lib/service-skill-update";
 
 export function ServiceEditPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
   const { data: service, isLoading, error, refetch } = useService(serviceId);
   const updateMutation = useUpdateService();
+  const [observed, setObserved] = useState<DownstreamService | null>(null);
+  const requestIdentity = useRef<SkillRequestIdentity | undefined>(undefined);
   const user = useAuthStore((s) => s.user);
   const { data: appsData } = useDeveloperApps();
   const developerApps = appsData?.clients?.filter((c) => c.is_active) ?? [];
@@ -109,7 +117,8 @@ export function ServiceEditPage() {
   });
 
   useEffect(() => {
-    if (service) {
+    if (service && (observed?.id !== service.id || !form.formState.isDirty)) {
+      setObserved(service);
       form.reset({
         service_type: service.service_type === "ssh" ? "ssh" : "http",
         visibility: service.visibility === "private" ? "private" : "public",
@@ -130,7 +139,8 @@ export function ServiceEditPage() {
         inject_delegation_token: service.inject_delegation_token ?? false,
         platform_billable: service.billing?.platform_billable ?? false,
         platform_metric:
-          (service.billing?.platform_metric as UpdateServiceFormData["platform_metric"]) ??
+          (service.billing
+            ?.platform_metric as UpdateServiceFormData["platform_metric"]) ??
           "auto",
         platform_price:
           service.billing?.platform_pricing?.credits_per_unit ?? "",
@@ -143,12 +153,17 @@ export function ServiceEditPage() {
         required_permissions: service.required_permissions?.join(", ") ?? "",
         examples_url: service.examples_url ?? "",
         recommended_skills: service.recommended_skills?.join(", ") ?? "",
+        clear_skill_refs: false,
         developer_app_ids: [...(service.developer_app_ids ?? [])],
         supports_proxy_read: service.capabilities?.supports_proxy_read ?? false,
-        supports_proxy_write: service.capabilities?.supports_proxy_write ?? false,
-        supports_proxy_binary_upload: service.capabilities?.supports_proxy_binary_upload ?? false,
-        supports_direct_downstream_auth: service.capabilities?.supports_direct_downstream_auth ?? false,
-        supports_authoring_via_nyx: service.capabilities?.supports_authoring_via_nyx ?? false,
+        supports_proxy_write:
+          service.capabilities?.supports_proxy_write ?? false,
+        supports_proxy_binary_upload:
+          service.capabilities?.supports_proxy_binary_upload ?? false,
+        supports_direct_downstream_auth:
+          service.capabilities?.supports_direct_downstream_auth ?? false,
+        supports_authoring_via_nyx:
+          service.capabilities?.supports_authoring_via_nyx ?? false,
         supports_websocket: service.capabilities?.supports_websocket ?? false,
         supports_streaming: service.capabilities?.supports_streaming ?? false,
         host: service.ssh_config?.host ?? "",
@@ -172,7 +187,8 @@ export function ServiceEditPage() {
   }, [service]);
 
   async function onSubmit(data: UpdateServiceFormData) {
-    if (!service) return;
+    if (!observed) return;
+    const service = observed;
     // NyxID#356 tri-state encoding: only send `default_request_headers`
     // when the user actually changed the list. Omitting the field tells
     // the backend to leave it unchanged. `null` explicitly clears.
@@ -190,102 +206,117 @@ export function ServiceEditPage() {
           prev.sensitive !== curr.sensitive
         );
       });
-    const defaultRequestHeadersPayload: null | DefaultRequestHeader[] | undefined =
-      headersChanged
-        ? nextHeaders.length === 0
-          ? null
-          : nextHeaders.map((h) => ({ ...h }))
-        : undefined;
+    const defaultRequestHeadersPayload:
+      | null
+      | DefaultRequestHeader[]
+      | undefined = headersChanged
+      ? nextHeaders.length === 0
+        ? null
+        : nextHeaders.map((h) => ({ ...h }))
+      : undefined;
 
     try {
+      const skills = serviceSkillUpdate(
+        service,
+        data.recommended_skills,
+        data.clear_skill_refs,
+      );
+      let payload: UpdateServicePayload =
+        service.service_type === "ssh"
+          ? {
+              name: data.name,
+              description: data.description || "",
+              visibility: data.visibility,
+              ssh_config: {
+                host: (data.host ?? "").trim(),
+                port: Number(data.port),
+                certificate_auth_enabled:
+                  data.certificate_auth_enabled ?? false,
+                certificate_ttl_minutes: Number(
+                  data.certificate_ttl_minutes || "30",
+                ),
+                allowed_principals: parseAllowedPrincipals(
+                  data.allowed_principals,
+                ),
+              },
+            }
+          : {
+              name: data.name,
+              description: data.description || "",
+              visibility: data.visibility,
+              base_url: data.base_url || "",
+              openapi_spec_url: data.openapi_spec_url || "",
+              asyncapi_spec_url: data.asyncapi_spec_url || "",
+              identity_propagation_mode: data.identity_propagation_mode,
+              identity_include_user_id: data.identity_include_user_id,
+              identity_include_email: data.identity_include_email,
+              identity_include_name: data.identity_include_name,
+              identity_jwt_audience: data.identity_jwt_audience || "",
+              forward_access_token: data.forward_access_token,
+              inject_delegation_token: data.inject_delegation_token,
+              delegation_token_scope: data.delegation_token_scope || "",
+              homepage_url: data.homepage_url || "",
+              repository_url: data.repository_url || "",
+              issues_url: data.issues_url || "",
+              auth_notes: data.auth_notes || "",
+              known_limitations: data.known_limitations || "",
+              required_permissions: (data.required_permissions || "")
+                .split(/[,\n]/)
+                .map((s) => s.trim())
+                .filter(Boolean),
+              examples_url: data.examples_url || "",
+              ...skills,
+              developer_app_ids: data.developer_app_ids ?? [],
+              capabilities: {
+                supports_proxy_read: data.supports_proxy_read ?? false,
+                supports_proxy_write: data.supports_proxy_write ?? false,
+                supports_proxy_binary_upload:
+                  data.supports_proxy_binary_upload ?? false,
+                supports_direct_downstream_auth:
+                  data.supports_direct_downstream_auth ?? false,
+                supports_authoring_via_nyx:
+                  data.supports_authoring_via_nyx ?? false,
+                supports_websocket: data.supports_websocket ?? false,
+                supports_streaming: data.supports_streaming ?? false,
+              },
+              // Preserve resale config; the toggle only controls the
+              // platform-layer opt-in.
+              billing: {
+                ...(service?.billing ?? {}),
+                platform_billable: data.platform_billable ?? false,
+                platform_metric:
+                  data.platform_metric && data.platform_metric !== "auto"
+                    ? data.platform_metric
+                    : undefined,
+                platform_pricing: data.platform_price?.trim()
+                  ? {
+                      credits_per_unit: data.platform_price.trim(),
+                      lago_metric_code:
+                        service.billing?.platform_pricing?.lago_metric_code ??
+                        "",
+                      sync_status:
+                        service.billing?.platform_pricing?.sync_status ??
+                        "pending",
+                      sync_error:
+                        service.billing?.platform_pricing?.sync_error ?? null,
+                    }
+                  : undefined,
+              },
+              ws_frame_injections: data.ws_frame_injections ?? [],
+              ...(defaultRequestHeadersPayload !== undefined
+                ? { default_request_headers: defaultRequestHeadersPayload }
+                : {}),
+            };
+      if ("skills_revision" in payload) {
+        requestIdentity.current = skillRequestIdentity(
+          { serviceId: service.id, payload },
+          requestIdentity.current,
+        );
+        payload = { ...payload, skills_request_id: requestIdentity.current.id };
+      }
       await updateMutation.mutateAsync({
         serviceId: service.id,
-        data:
-          service.service_type === "ssh"
-            ? {
-                name: data.name,
-                description: data.description || "",
-                visibility: data.visibility,
-                ssh_config: {
-                  host: (data.host ?? "").trim(),
-                  port: Number(data.port),
-                  certificate_auth_enabled:
-                    data.certificate_auth_enabled ?? false,
-                  certificate_ttl_minutes: Number(
-                    data.certificate_ttl_minutes || "30",
-                  ),
-                  allowed_principals: parseAllowedPrincipals(
-                    data.allowed_principals,
-                  ),
-                },
-              }
-            : {
-                name: data.name,
-                description: data.description || "",
-                visibility: data.visibility,
-                base_url: data.base_url || "",
-                openapi_spec_url: data.openapi_spec_url || "",
-                asyncapi_spec_url: data.asyncapi_spec_url || "",
-                identity_propagation_mode: data.identity_propagation_mode,
-                identity_include_user_id: data.identity_include_user_id,
-                identity_include_email: data.identity_include_email,
-                identity_include_name: data.identity_include_name,
-                identity_jwt_audience: data.identity_jwt_audience || "",
-                forward_access_token: data.forward_access_token,
-                inject_delegation_token: data.inject_delegation_token,
-                delegation_token_scope: data.delegation_token_scope || "",
-                homepage_url: data.homepage_url || "",
-                repository_url: data.repository_url || "",
-                issues_url: data.issues_url || "",
-                auth_notes: data.auth_notes || "",
-                known_limitations: data.known_limitations || "",
-                required_permissions: (data.required_permissions || "")
-                  .split(/[,\n]/)
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-                examples_url: data.examples_url || "",
-                recommended_skills: (data.recommended_skills || "")
-                  .split(/[,\n]/)
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-                developer_app_ids: data.developer_app_ids ?? [],
-                capabilities: {
-                  supports_proxy_read: data.supports_proxy_read ?? false,
-                  supports_proxy_write: data.supports_proxy_write ?? false,
-                  supports_proxy_binary_upload: data.supports_proxy_binary_upload ?? false,
-                  supports_direct_downstream_auth: data.supports_direct_downstream_auth ?? false,
-                  supports_authoring_via_nyx: data.supports_authoring_via_nyx ?? false,
-                  supports_websocket: data.supports_websocket ?? false,
-                  supports_streaming: data.supports_streaming ?? false,
-                },
-                // Preserve resale config; the toggle only controls the
-                // platform-layer opt-in.
-                billing: {
-                  ...(service?.billing ?? {}),
-                  platform_billable: data.platform_billable ?? false,
-                  platform_metric:
-                    data.platform_metric && data.platform_metric !== "auto"
-                      ? data.platform_metric
-                      : undefined,
-                  platform_pricing: data.platform_price?.trim()
-                    ? {
-                        credits_per_unit: data.platform_price.trim(),
-                        lago_metric_code:
-                          service.billing?.platform_pricing?.lago_metric_code ??
-                          "",
-                        sync_status:
-                          service.billing?.platform_pricing?.sync_status ??
-                          "pending",
-                        sync_error:
-                          service.billing?.platform_pricing?.sync_error ?? null,
-                      }
-                    : undefined,
-                },
-                ws_frame_injections: data.ws_frame_injections ?? [],
-                ...(defaultRequestHeadersPayload !== undefined
-                  ? { default_request_headers: defaultRequestHeadersPayload }
-                  : {}),
-              },
+        data: payload,
       });
       toast.success("Service updated");
       void navigate({
@@ -297,7 +328,10 @@ export function ServiceEditPage() {
         form.setError("root", { message: err.message });
         toast.error(err.message);
       } else {
-        toast.error("Failed to update service");
+        const message =
+          err instanceof Error ? err.message : "Failed to update service";
+        form.setError("root", { message });
+        toast.error(message);
       }
     }
   }
@@ -316,7 +350,11 @@ export function ServiceEditPage() {
       <div className="space-y-8">
         <PageHeader title="Service Not Found" />
         <ErrorBanner
-          message={error instanceof ApiError ? error.message : "The service you are trying to edit does not exist or has been deleted."}
+          message={
+            error instanceof ApiError
+              ? error.message
+              : "The service you are trying to edit does not exist or has been deleted."
+          }
           onRetry={refetch}
         />
       </div>
@@ -336,9 +374,7 @@ export function ServiceEditPage() {
 
   return (
     <div className="space-y-8">
-      <PageHeader
-        title={`Edit ${service.name}`}
-      />
+      <PageHeader title={`Edit ${service.name}`} />
 
       <div className="max-w-2xl">
         <Form {...form}>
@@ -427,7 +463,9 @@ export function ServiceEditPage() {
               user?.is_admin &&
               developerApps.length > 0 && (
                 <div className="space-y-2">
-                  <p className="text-[12px] font-medium">Developer App Scoping</p>
+                  <p className="text-[12px] font-medium">
+                    Developer App Scoping
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     Select which developer apps grant access to this service.
                     Users who log in through a selected app will have this
@@ -435,8 +473,7 @@ export function ServiceEditPage() {
                   </p>
                   <div className="space-y-2">
                     {developerApps.map((app) => {
-                      const selected =
-                        form.watch("developer_app_ids") ?? [];
+                      const selected = form.watch("developer_app_ids") ?? [];
                       const checked = selected.includes(app.id);
                       return (
                         <div
@@ -463,7 +500,10 @@ export function ServiceEditPage() {
                           >
                             {app.client_name}
                           </Label>
-                          <Badge variant="secondary" className="ml-auto text-xs">
+                          <Badge
+                            variant="secondary"
+                            className="ml-auto text-xs"
+                          >
                             {app.client_type}
                           </Badge>
                         </div>
@@ -842,6 +882,36 @@ export function ServiceEditPage() {
                         )}
                       />
 
+                      {observed?.recommended_skill_refs != null && (
+                        <div className="space-y-2 text-[12px]">
+                          <p className="text-muted-foreground">
+                            Revision {observed.skills_revision ?? 0}:{" "}
+                            {observed.recommended_skill_refs
+                              .map((ref) => `${ref.name}@${ref.version}`)
+                              .join(", ")}
+                          </p>
+                          <FormField
+                            control={form.control}
+                            name="clear_skill_refs"
+                            render={({ field }) => (
+                              <FormItem className="flex items-center gap-2 space-y-0">
+                                <FormControl>
+                                  <Checkbox
+                                    checked={field.value ?? false}
+                                    onCheckedChange={(value) =>
+                                      field.onChange(value === true)
+                                    }
+                                  />
+                                </FormControl>
+                                <FormLabel>
+                                  Clear pinned references and use advisory names
+                                </FormLabel>
+                              </FormItem>
+                            )}
+                          />
+                        </div>
+                      )}
+
                       <Separator className="my-2" />
                       <div className="space-y-2">
                         <div className="space-y-1">
@@ -852,10 +922,9 @@ export function ServiceEditPage() {
                             Headers NyxID injects on every proxied request for
                             this service. Non-overridable headers replace
                             caller-supplied values; overridable ones yield to
-                            them. Sensitive is a UI redaction flag only —
-                            values are stored plaintext in v1, so do not place
-                            real secrets here (use the service auth method
-                            instead).
+                            them. Sensitive is a UI redaction flag only — values
+                            are stored plaintext in v1, so do not place real
+                            secrets here (use the service auth method instead).
                           </p>
                         </div>
                         <FormField
@@ -896,8 +965,14 @@ export function ServiceEditPage() {
                               ["supports_proxy_read", "Proxy Read"],
                               ["supports_proxy_write", "Proxy Write"],
                               ["supports_proxy_binary_upload", "Binary Upload"],
-                              ["supports_direct_downstream_auth", "Direct Downstream Auth"],
-                              ["supports_authoring_via_nyx", "Authoring via NyxID"],
+                              [
+                                "supports_direct_downstream_auth",
+                                "Direct Downstream Auth",
+                              ],
+                              [
+                                "supports_authoring_via_nyx",
+                                "Authoring via NyxID",
+                              ],
                               ["supports_websocket", "WebSocket"],
                               ["supports_streaming", "Streaming"],
                             ] as const
@@ -915,9 +990,7 @@ export function ServiceEditPage() {
                               <Switch
                                 id={`cap-${key}`}
                                 checked={form.watch(key) ?? false}
-                                onCheckedChange={(v) =>
-                                  form.setValue(key, v)
-                                }
+                                onCheckedChange={(v) => form.setValue(key, v)}
                               />
                             </div>
                           ))}
@@ -946,9 +1019,7 @@ export function ServiceEditPage() {
                         </Label>
                         <Switch
                           id="forward-access-token"
-                          checked={
-                            form.watch("forward_access_token") ?? false
-                          }
+                          checked={form.watch("forward_access_token") ?? false}
                           onCheckedChange={(v) =>
                             form.setValue("forward_access_token", v)
                           }
@@ -964,8 +1035,8 @@ export function ServiceEditPage() {
                           Services are free by default: usage is metered for
                           observability but never charged. Enable platform
                           billing to reserve and charge wallet credits for
-                          requests to this service at the plan&apos;s
-                          platform rates.
+                          requests to this service at the plan&apos;s platform
+                          rates.
                         </p>
                       </div>
 
@@ -1057,9 +1128,9 @@ export function ServiceEditPage() {
                         </p>
                       )}
                       <p className="text-xs text-muted-foreground">
-                        Auto meters tokens for llm- services, bytes for SSH
-                        and WebSocket connections, and requests otherwise. An
-                        empty price keeps the Lago-authored plan rate.
+                        Auto meters tokens for llm- services, bytes for SSH and
+                        WebSocket connections, and requests otherwise. An empty
+                        price keeps the Lago-authored plan rate.
                       </p>
                     </div>
 
@@ -1125,7 +1196,12 @@ export function ServiceEditPage() {
 
             <FormSubmitErrors className="pt-2 text-right" />
             <div className="flex items-center justify-end gap-3 pt-4">
-              <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
+              <Button
+                variant="primary"
+                type="submit"
+                isLoading={updateMutation.isPending}
+                disabled={!form.formState.isDirty}
+              >
                 Save Changes
               </Button>
               <Button
