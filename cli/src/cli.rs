@@ -4433,7 +4433,7 @@ pub enum ServiceAccountCommands {
         /// Human-readable name for this service account
         #[arg(long)]
         name: String,
-        /// Space-separated OAuth scopes the SA may request (e.g. "openid profile")
+        /// Space-separated service-account scopes (e.g. "llm:proxy roles" or "custom:read")
         #[arg(long)]
         scopes: String,
         /// Optional description

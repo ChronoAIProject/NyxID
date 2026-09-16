@@ -949,6 +949,12 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
     sa.create_index(IndexModel::builder().keys(doc! { "created_by": 1 }).build())
         .await?;
+    sa.create_index(
+        IndexModel::builder()
+            .keys(doc! { "owner_user_id": 1 })
+            .build(),
+    )
+    .await?;
 
     // ── service_account_tokens ──
     let sat = db.collection::<mongodb::bson::Document>("service_account_tokens");

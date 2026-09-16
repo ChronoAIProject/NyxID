@@ -36,6 +36,18 @@ vi.mock("@/hooks/use-service-accounts", () => ({
 vi.mock("@/components/dashboard/sa-connected-services", () => ({
   SaConnectedServices: () => null,
 }));
+vi.mock("@/hooks/use-options", () => ({
+  useOptions: () => ({
+    data: { pages: [{ items: [] }] },
+    hasNextPage: false,
+    isFetching: false,
+    isFetchingNextPage: false,
+    isError: false,
+    error: null,
+    fetchNextPage: vi.fn(),
+    retainPartialData: false,
+  }),
+}));
 it("does not restore revoked permissions after a refresh when renaming an account", async () => {
   const user = userEvent.setup();
   const element = (
