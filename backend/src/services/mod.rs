@@ -161,6 +161,8 @@ pub mod webhook_delivery_service;
 pub mod ws_frame_injector;
 
 pub mod inference_service;
+pub mod options_service;
 pub mod platform_key_service;
+pub mod service_account_scope_service;
 
 pub mod channel_platform_catalog_service;
