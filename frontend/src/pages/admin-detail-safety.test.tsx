@@ -182,24 +182,32 @@ it.each([
     expect(mock.update).not.toHaveBeenCalled();
     await user.click(within(review).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(review).not.toBeInTheDocument());
-    if (kind === "group") {
-      await user.deselectOptions(authorizationInput, "role-b");
-      await user.tab();
-    } else
-      fireEvent.change(authorizationInput, {
-        target: { value: "read" },
-      });
-    await waitFor(() =>
-      expect(authorizationInput).toHaveValue(
-        kind === "group" ? ["role-a"] : "read",
-      ),
+    // Reload the editor from the observed record before the unrelated rename.
+    // This mirrors the required conflict-resolution path and avoids relying
+    // on happy-dom's controlled multiple-select deselection after a nested
+    // portal closes; the real Chromium flow covers that native interaction.
+    await user.click(
+      within(editor).getByRole("button", { name: "Cancel" }),
     );
-    fireEvent.change(within(editor).getByLabelText("Name"), {
+    await waitFor(() => expect(editor).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const reopenedEditor = await screen.findByRole("dialog", {
+      name: kind === "group" ? "Edit Group" : "Edit Role",
+    });
+    fireEvent.change(within(reopenedEditor).getByLabelText("Name"), {
       target: { value: "Rename only" },
     });
-    await user.click(save);
     await user.click(
-      await screen.findByRole("button", { name: "Confirm changes" }),
+      within(reopenedEditor).getByRole("button", { name: "Save Changes" }),
+    );
+    const renameReview = await screen.findByRole("dialog", {
+      name: "Review changes",
+    });
+    expect(
+      within(renameReview).getByRole("button", { name: "Confirm changes" }),
+    ).toBeEnabled();
+    await user.click(
+      within(renameReview).getByRole("button", { name: "Confirm changes" }),
     );
     await waitFor(() =>
       expect(mock.update).toHaveBeenCalledExactlyOnceWith({
