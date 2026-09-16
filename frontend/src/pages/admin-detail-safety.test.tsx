@@ -224,7 +224,7 @@ it.each([
     await user.click(within(review).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(review).not.toBeInTheDocument());
     // Reload the editor from the observed record before the unrelated rename.
-    // This mirrors the required conflict-resolution path and avoids relying
+    // This mirrors a supported conflict-resolution path and avoids relying
     // on happy-dom's controlled multiple-select deselection after a nested
     // portal closes; the real Chromium flow covers that native interaction.
     await user.click(
