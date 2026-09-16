@@ -76,7 +76,10 @@ Selected IDs remain visible and removable when outside current search results,
 inactive, or unavailable. Known user names/emails, service names, and group role
 names remain the display fallback before raw IDs. SSH mode is explicit, the
 legacy certificate flag follows it, and leaving node_key warns that node-local
-keys remain until pruned.
+keys remain until pruned. Service-account scope suggestions are optional: saved
+custom scopes remain visible and editable when suggestions fail. A name-only
+update omits scopes, and a custom scope typed without pressing Enter is included
+in the reviewed scope update.
 
 Hooks that publish saved operation, credential, metadata, rollout, or anonymous
 rule responses cancel outstanding reads before publication. A pre-save delayed
@@ -104,7 +107,8 @@ Astra and Fable review corrections. Both reviews closed with no known unresolved
 finding in the audited scope.
 
 - Both final full frontend runs under Node 22 (normal and coverage) passed
-  3,284 tests in 329 files. Measured line coverage was 68.87%.
+  3,310 tests in 330 files after integrating the upstream dynamic scope picker.
+  Measured line coverage was 69%.
   Regressions exercise populated saved values, selections that become inactive
   or unavailable, exact sparse bodies, cancellation, source switches, edited
   authorization conflicts, unrelated renames after revocation, structured
@@ -121,20 +125,21 @@ finding in the audited scope.
   credential-accept build, and the mock-footprint assertion. Full ESLint passed
   with 27 existing warnings outside the change; lint also passed on the final
   changed frontend files.
-- Eleven Chromium checks passed: six credential scenarios, four role/group
-  editor checks at desktop and mobile widths, and successful credential deletion
-  followed by a failed read and read-only retry. They verify redaction,
+- Thirteen Chromium checks passed: six credential scenarios, four role/group
+  editor checks at desktop and mobile widths, successful credential deletion
+  followed by a failed read and read-only retry, and two service-account checks
+  after integration of the dynamic scope picker. They verify redaction,
   confirmation before writes, cancellation preserving drafts, exact sparse
   requests, and a DELETE count of one through recovery. The group checks also
   observe a remote role revocation, block the pending authorization change, and
   allow a subsequent name-only save without restoring that role.
 - All 349 selected backend tests passed across 15 affected handler/service
   modules against an isolated MongoDB 8.0.12 replica set, with no ignored tests
-  or database skips. The test executable was compiled from the final backend
-  source with debug symbols disabled for the backend crate; test assertions
-  were unchanged. Full backend CI subsequently passed all 6,120 tests with zero
-  skips; backend coverage and Clippy also passed. Backend source did not change
-  during the frontend test correction.
+  or database skips. This local run preceded integration of the upstream options
+  API and dynamic scope picker. The earlier full backend CI passed 6,120 tests
+  with zero skips; the integrated backend is validated by the fresh full CI
+  attached to the PR. Local debug symbols were disabled for the backend crate;
+  test assertions were unchanged.
 - Workspace Clippy passed with warnings denied (`cargo clippy --workspace
   --all-targets -- -D warnings`). Rust formatting and whitespace checks passed.
 
