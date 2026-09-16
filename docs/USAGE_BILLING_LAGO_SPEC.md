@@ -457,8 +457,13 @@ pub enum PaysFrom { Personal, OrgWallet { org_id: String } }  // MemberWallet DE
 ```
 
 - `Direct` → personal wallet.
-- `AsOrg*` → **org wallet** (P1/P3 default). Per-member wallets + per-member spend caps are DEFERRED
-  (no org-billing-policy field exists yet — ADR open question).
+- `AsOrg*` → **org wallet** for org-owned credentials (`UserOwned`, `AgentOverrideUserOwned`,
+  `NodeManaged`, and `NyxidPlatformOauthApp`).
+- **Platform-key exception:** execution uses `BillingOwnerResolver::resolve_for_execution` with
+  the final credential class, after agent overrides. `NyxidManagedMaster` always selects the
+  requesting person's personal wallet and billing rollout, even when an org grant supplies
+  access through an org-owned service. Other classes delegate to the resource-owner resolver
+  and retain its org ACL. Approval ownership and rate limiting are independent and unchanged.
 - **Legacy `DownstreamService` path (R9):** `effective_owner_for_approval` is `None` there (set only in
   the `pre_resolved` arm, `proxy.rs:1187`). Fall back to the **actor's personal wallet**, and treat
   legacy-path requests as platform-metered only (never resale). Document this; the legacy path is still
@@ -587,8 +592,10 @@ rate-cache reservation sizing; entitlement decision table (incl. Unknown → fai
 - **Idempotent replay + dedup:** re-push same `transaction_id` → Lago dedups; `transaction_id_taken`
   422 → `lago_acked=true`, not dead-letter; per-layer + per-flush ids never collide.
 - **Connection-flush:** a WS session with K flushes emits K distinct `transaction_id`s → all K billed.
-- **Owner attribution:** org-member request bills the org wallet (`billing_owner_id`), not the actor;
-  legacy-path request bills the actor's personal wallet, platform-only.
+- **Owner attribution:** org-member BYOK requests bill the org wallet (`billing_owner_id`).
+  Platform-master-key requests bill the requesting person, including org-routed requests,
+  and use that person's rollout flag. An agent override retains org billing when its final
+  credential class is `AgentOverrideUserOwned`. Legacy-path requests use the personal wallet.
 - **Resale classification:** BYO key (and agent-override BYO) on a resale-billable catalog service →
   `CredentialClass != NyxidManagedMaster` → platform-only, no resale charge.
 - **Path coverage:** a billing-active service over each path (`/proxy` direct/node/WS, `/llm`,

@@ -52,7 +52,11 @@ describe("useBillingUsage", () => {
         requests: 0,
         bytes: 0,
         events: 0,
-        estimated_credits_micros: null,
+        estimated_credits_micros: 2440,
+        wallet_credits_micros: 0,
+        grant_credits_micros: 2440,
+        allowance_credits_micros: 0,
+        allowance_quantity: 0,
       },
       billing: {
         charging_enabled: false,
@@ -69,6 +73,9 @@ describe("useBillingUsage", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(mockGet).toHaveBeenCalledWith("/billing/usage?period=7d");
     expect(result.current.data?.billing.charging_enabled).toBe(false);
+    expect(result.current.data?.totals.estimated_credits_micros).toBe(2440);
+    expect(result.current.data?.totals.wallet_credits_micros).toBe(0);
+    expect(result.current.data?.totals.grant_credits_micros).toBe(2440);
   });
 
   it("rejects wallet or top-up-shaped payloads", async () => {
