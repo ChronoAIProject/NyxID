@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AdminRoleDetailPage } from "./admin-role-detail";
@@ -135,40 +141,74 @@ it.each([
     const user = userEvent.setup();
     const view = render(<Component />);
     await user.click(screen.getByRole("button", { name: "Edit" }));
-    if (kind === "group")
-      await user.selectOptions(screen.getByLabelText(label), [
-        "role-a",
-        "role-b",
-      ]);
-    else fireEvent.change(screen.getByLabelText(label), { target: { value } });
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
-    await screen.findByRole("button", { name: "Confirm changes" });
+    const editor = await screen.findByRole("dialog", {
+      name: kind === "group" ? "Edit Group" : "Edit Role",
+    });
+    const authorizationInput = within(editor).getByLabelText(label);
+    if (kind === "group") {
+      expect(authorizationInput).toHaveValue(["role-a"]);
+      await user.selectOptions(authorizationInput, "role-b");
+      // Finish the native select interaction before submitting the form.
+      await user.tab();
+    } else fireEvent.change(authorizationInput, { target: { value } });
+    await waitFor(() =>
+      expect(authorizationInput).toHaveValue(
+        kind === "group" ? ["role-a", "role-b"] : value,
+      ),
+    );
+    expect(within(editor).getByLabelText("Name")).toHaveValue(
+      kind === "group" ? "Group A" : "Role A",
+    );
+    expect(authorizationInput.closest("form")).toBeValid();
+    const save = within(editor).getByRole("button", { name: "Save Changes" });
+    expect(save).toBeEnabled();
+    await user.click(save);
+    const review = await screen.findByRole("dialog", { name: "Review changes" });
+    const confirm = within(review).getByRole("button", {
+      name: "Confirm changes",
+    });
+    expect(confirm).toBeEnabled();
+    expect(
+      within(review).getByText(kind === "group" ? /role-b/ : /write/),
+    ).toBeInTheDocument();
     if (kind === "role") mock.role = { ...mock.role, permissions: [] };
     else mock.group = { ...mock.group, roles: [] };
     view.rerender(<Component />);
-    expect(
-      screen.getByRole("button", { name: "Confirm changes" }),
-    ).toBeDisabled();
+    expect(confirm).toBeDisabled();
+    expect(within(review).getByRole("alert")).toHaveTextContent(
+      "Saved values changed while you were editing",
+    );
+    await user.click(confirm);
     expect(mock.update).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    if (kind === "group")
-      await user.deselectOptions(screen.getByLabelText(label), "role-b");
-    else
-      fireEvent.change(screen.getByLabelText(label), {
+    await user.click(within(review).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(review).not.toBeInTheDocument());
+    if (kind === "group") {
+      await user.deselectOptions(authorizationInput, "role-b");
+      await user.tab();
+    } else
+      fireEvent.change(authorizationInput, {
         target: { value: "read" },
       });
-    fireEvent.change(screen.getByLabelText("Name"), {
+    await waitFor(() =>
+      expect(authorizationInput).toHaveValue(
+        kind === "group" ? ["role-a"] : "read",
+      ),
+    );
+    fireEvent.change(within(editor).getByLabelText("Name"), {
       target: { value: "Rename only" },
     });
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.click(save);
     await user.click(
       await screen.findByRole("button", { name: "Confirm changes" }),
     );
     await waitFor(() =>
-      expect(mock.update).toHaveBeenCalledWith({
+      expect(mock.update).toHaveBeenCalledExactlyOnceWith({
         [kind === "role" ? "roleId" : "groupId"]: "entity-a",
         data: { name: "Rename only" },
       }),
+    );
+    await waitFor(() =>
+      expect(screen.queryAllByRole("dialog", { hidden: true })).toHaveLength(0),
     );
   },
 );
