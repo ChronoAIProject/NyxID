@@ -1936,6 +1936,8 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: service.base_url.clone(),
             auth_method: "bearer".into(),
             auth_key_name: "Authorization".into(),
