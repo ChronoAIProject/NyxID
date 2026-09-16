@@ -592,6 +592,7 @@ function FlagMetadataEditor({
   };
   const [baseline, setBaseline] = useState(current);
   const [observed, setObserved] = useState(current);
+  const [hydrationPending, setHydrationPending] = useState(false);
   const next = {
     description: description.trim() || null,
     owner: owner.trim() || null,
@@ -613,25 +614,32 @@ function FlagMetadataEditor({
       setBaseline(values);
       setDescription(values.description ?? "");
       setOwner(values.owner ?? "");
+      setHydrationPending(false);
       toast.success("Flag details saved");
     },
     (pending) => hasFieldConflicts(pending.before, current, pending.body),
     flag.key,
   );
 
-  if (
+  const sourceChanged =
     observed.description !== current.description ||
-    observed.owner !== current.owner
+    observed.owner !== current.owner;
+  if (sourceChanged) setObserved(current);
+  const pristine =
+    description === (baseline.description ?? "") &&
+    owner === (baseline.owner ?? "");
+  if (
+    (sourceChanged || hydrationPending) &&
+    pristine &&
+    !review.saving &&
+    !update.isPending
   ) {
-    setObserved(current);
-    const pristine =
-      description === (baseline.description ?? "") &&
-      owner === (baseline.owner ?? "");
-    if (pristine && !review.saving && !update.isPending) {
-      setBaseline(current);
-      setDescription(current.description ?? "");
-      setOwner(current.owner ?? "");
-    }
+    setBaseline(current);
+    setDescription(current.description ?? "");
+    setOwner(current.owner ?? "");
+    setHydrationPending(false);
+  } else if (sourceChanged) {
+    setHydrationPending(true);
   }
 
   function save() {
@@ -667,6 +675,7 @@ function FlagMetadataEditor({
             setBaseline(current);
             setDescription(current.description ?? "");
             setOwner(current.owner ?? "");
+            setHydrationPending(false);
             review.cancel();
           }}
         />

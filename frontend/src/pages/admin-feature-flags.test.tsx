@@ -683,6 +683,113 @@ it("retains a dirty metadata draft through a changed refetch while collapsed and
   expect(mockSetMeta).not.toHaveBeenCalled();
 });
 
+it("hydrates observed remote metadata when a dirty draft is manually reverted to its baseline", () => {
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Original owner",
+          custom_description: "Original description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  const view = render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  const owner = screen.getByLabelText("Owner — who to ask about it");
+  const description = screen.getByLabelText(
+    "Description — what this flag controls",
+  );
+  fireEvent.change(owner, { target: { value: "Draft owner" } });
+  fireEvent.change(description, { target: { value: "Draft description" } });
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Remote owner",
+          custom_description: "Remote description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  expect(owner).toHaveValue("Draft owner");
+  expect(description).toHaveValue("Draft description");
+  fireEvent.change(owner, { target: { value: "Original owner" } });
+  expect(description).toHaveValue("Draft description");
+  fireEvent.change(description, { target: { value: "Original description" } });
+  expect(owner).toHaveValue("Remote owner");
+  expect(description).toHaveValue("Remote description");
+  expect(screen.getByRole("button", { name: "Save details" })).toBeDisabled();
+  expect(
+    screen.queryByText(/Saved values changed while/),
+  ).not.toBeInTheDocument();
+  expect(mockSetMeta).not.toHaveBeenCalled();
+});
+
+it("keeps its own saved values when a deferred refetch still contains the old edited field", async () => {
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Original owner",
+          custom_description: "Original description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  const view = render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.change(
+    screen.getByLabelText("Description — what this flag controls"),
+    { target: { value: "Draft description" } },
+  );
+  // Refetch an unrelated owner edit while this description draft remains dirty.
+  // Keep that fetched snapshot in the mock even after PATCH returns its saved values.
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Remote owner",
+          custom_description: "Original description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByRole("button", { name: "Save details" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Review changes" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(mockSetMeta).toHaveBeenCalledExactlyOnceWith({
+    flagKey: "experimental:ai-assistant",
+    body: { description: "Draft description" },
+  });
+  expect(
+    screen.getByLabelText("Description — what this flag controls"),
+  ).toHaveValue("Draft description");
+  expect(screen.getByLabelText("Owner — who to ask about it")).toHaveValue(
+    "Remote owner",
+  );
+  expect(screen.getByRole("button", { name: "Save details" })).toBeDisabled();
+  expect(
+    screen.queryByText(/Saved values changed while/),
+  ).not.toBeInTheDocument();
+});
+
 it("retains metadata drafts across cached errors, filtering and collapse, and patches only the edited field", async () => {
   const data = {
     flags: [

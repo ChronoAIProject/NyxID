@@ -3978,7 +3978,7 @@ mod tests {
                 serde_json::from_value(serde_json::json!({ "name": "Renamed" })).unwrap();
             assert!(!super::should_refresh_openapi_url(&service, &request));
             assert!(!super::should_refresh_asyncapi_url(&service, &request));
-            update_service(
+            let Json(response) = update_service(
                 State(test_app_state(db.clone())),
                 test_auth_user(&admin),
                 crate::telemetry::TelemetryContext::default(),
@@ -3987,6 +3987,8 @@ mod tests {
             )
             .await
             .unwrap();
+            assert_eq!(response.id, service.id);
+            assert_eq!(response.name, "Renamed");
             let stored = db
                 .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
                 .find_one(doc! { "_id": &service.id })
