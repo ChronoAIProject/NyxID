@@ -1,3 +1,13 @@
+import {
+  formToPayload,
+  type CreateEndpointPayload,
+} from "@/lib/endpoint-changes";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useEffect } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -40,7 +50,12 @@ interface EndpointFormDialogProps {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly endpoint?: ServiceEndpoint | null;
-  readonly onSubmit: (data: CreateEndpointFormData) => Promise<void>;
+  readonly serviceId?: string;
+  readonly currentEndpoint?: ServiceEndpoint | null;
+  readonly onSubmit: (
+    data: CreateEndpointFormData,
+    patch?: Partial<CreateEndpointPayload>,
+  ) => Promise<void>;
   readonly isPending: boolean;
 }
 
@@ -82,12 +97,23 @@ function buildEndpointFormSchema(existingDescription?: string | null) {
   });
 }
 
-export function EndpointFormDialog({
+export function EndpointFormDialog(props: EndpointFormDialogProps) {
+  return (
+    <EndpointFormEditor
+      key={`${props.serviceId ?? props.endpoint?.service_id ?? ""}:${props.endpoint?.id ?? "new"}`}
+      {...props}
+    />
+  );
+}
+
+function EndpointFormEditor({
   open,
   onOpenChange,
   endpoint,
   onSubmit,
   isPending,
+  serviceId,
+  currentEndpoint,
 }: EndpointFormDialogProps) {
   const isEditing = endpoint !== null && endpoint !== undefined;
   const formSchema = buildEndpointFormSchema(
@@ -132,11 +158,49 @@ export function EndpointFormDialog({
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, endpoint]);
+  }, [open, endpoint?.id]);
 
-  async function handleSubmit(data: CreateEndpointFormData) {
+  type EndpointReview = {
+    serviceId?: string;
+    endpointId: string;
+    data: CreateEndpointFormData;
+    patch: Partial<CreateEndpointPayload>;
+    before: CreateEndpointPayload;
+  };
+  const review = useChangeReview<EndpointReview>(
+    async (pending) => {
+      if (
+        pending.serviceId !== serviceId ||
+        pending.endpointId !== endpoint?.id
+      )
+        return;
+      await save(pending.data, pending.patch);
+    },
+    (pending) => {
+      const live = currentEndpoint === undefined ? endpoint : currentEndpoint;
+      return !live || hasFieldConflicts(pending.before, live, pending.patch);
+    },
+    `${serviceId ?? endpoint?.service_id ?? ""}:${endpoint?.id ?? "new"}`,
+  );
+
+  function handleSubmit(data: CreateEndpointFormData) {
+    if (!isEditing || !endpoint) return save(data);
+    const before = formToPayload(
+      form.formState.defaultValues as CreateEndpointFormData,
+    );
+    const patch = changedFields(before, formToPayload(data));
+    review.review(
+      { serviceId, endpointId: endpoint.id, data, before, patch },
+      describeChanges(before, patch),
+    );
+  }
+
+  async function save(
+    data: CreateEndpointFormData,
+    patch?: Partial<CreateEndpointPayload>,
+  ) {
     try {
-      await onSubmit(data);
+      await onSubmit(data, patch);
       onOpenChange(false);
     } catch (error) {
       if (error instanceof ApiError) {
@@ -146,11 +210,13 @@ export function EndpointFormDialog({
           isEditing ? "Failed to update endpoint" : "Failed to create endpoint",
         );
       }
+      if (isEditing) throw error;
     }
   }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      {review.dialog}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
@@ -308,7 +374,12 @@ export function EndpointFormDialog({
               >
                 Cancel
               </Button>
-              <Button variant="primary" type="submit" isLoading={isPending} disabled={!form.formState.isValid || isPending}>
+              <Button
+                variant="primary"
+                type="submit"
+                isLoading={isPending}
+                disabled={!form.formState.isValid || isPending}
+              >
                 {isEditing ? "Save Changes" : "Create Endpoint"}
               </Button>
             </DialogFooter>

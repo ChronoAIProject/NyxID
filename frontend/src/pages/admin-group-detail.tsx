@@ -1,3 +1,10 @@
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+  normalizedSet,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -55,11 +62,15 @@ import { toast } from "sonner";
 
 export function AdminGroupDetailPage() {
   const { groupId } = useParams({ strict: false }) as { groupId: string };
+  return <AdminGroupDetailPageEditor key={groupId} groupId={groupId} />;
+}
+
+function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
 
-  const { data: group, isLoading, error } = useGroup(groupId);
+  const { data: group, isLoading } = useGroup(groupId);
   const { data: membersData } = useGroupMembers(groupId);
   const { data: rolesData } = useRoles();
   const updateMutation = useUpdateGroup();
@@ -89,43 +100,54 @@ export function AdminGroupDetailPage() {
     },
   });
 
-  function openEditDialog() {
-    if (!group) return;
-    form.reset({
+  const normalize = (value: UpdateGroupFormData) => ({
+    ...value,
+    description: value.description ?? "",
+    parent_group_id: value.parent_group_id ?? "",
+    role_ids: normalizedSet((value.role_ids ?? "").split(",")),
+  });
+  function editValues(): UpdateGroupFormData {
+    if (!group) return form.getValues();
+    return {
       name: group.name,
       slug: group.slug,
       description: group.description ?? "",
       role_ids: group.roles.map((r) => r.id).join(","),
       parent_group_id: group.parent_group_id ?? "",
-    });
+    };
+  }
+
+  function openEditDialog() {
+    if (!group) return;
+    form.reset(editValues());
+    editReview.cancel();
     setEditOpen(true);
   }
 
-  async function handleEdit(data: UpdateGroupFormData) {
-    try {
-      const roleIds = data.role_ids
-        ? data.role_ids
-            .split(",")
-            .map((id) => id.trim())
-            .filter((id) => id.length > 0)
-        : [];
-      await updateMutation.mutateAsync({
-        groupId,
-        data: {
-          name: data.name,
-          slug: data.slug,
-          description: data.description || undefined,
-          role_ids: roleIds,
-          parent_group_id: data.parent_group_id || undefined,
-        },
-      });
+  const editReview = useChangeReview<
+    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...variables }) => {
+      void _before;
+      await updateMutation.mutateAsync(variables);
       toast.success("Group updated successfully");
       setEditOpen(false);
-    } catch (err) {
-      toast.error(
-        err instanceof ApiError ? err.message : "Failed to update group",
-      );
-    }
+    },
+    (pending) =>
+      !group ||
+      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+    groupId,
+  );
+
+  function handleEdit(data: UpdateGroupFormData) {
+    const before = normalize(
+      form.formState.defaultValues as UpdateGroupFormData,
+    );
+    const patch = changedFields(before, normalize(data));
+    editReview.review(
+      { groupId, data: patch, before },
+      describeChanges(before, patch),
+    );
   }
 
   async function handleDelete() {
@@ -176,7 +198,7 @@ export function AdminGroupDetailPage() {
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !group) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -185,7 +207,7 @@ export function AdminGroupDetailPage() {
     );
   }
 
-  if (error || !group) {
+  if (!group) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
@@ -214,14 +236,15 @@ export function AdminGroupDetailPage() {
           canWrite ? (
             <>
               <Button variant="outline" onClick={openEditDialog}>
-                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <Pencil className="h-3 w-3" />
+                </ButtonIcon>
                 Edit
               </Button>
-              <Button
-                variant="destructive"
-                onClick={() => setDeleteOpen(true)}
-              >
-                <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+              <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
+                <ButtonIcon variant="destructive">
+                  <Trash2 className="h-3 w-3 text-destructive" />
+                </ButtonIcon>
                 Delete
               </Button>
             </>
@@ -266,13 +289,19 @@ export function AdminGroupDetailPage() {
       <DetailSection title="Members">
         {canWrite && (
           <div className="px-4 py-3">
-            <AddCtaButton label="Add Member" onClick={() => setAddMemberOpen(true)} icon={UserPlus} />
+            <AddCtaButton
+              label="Add Member"
+              onClick={() => setAddMemberOpen(true)}
+              icon={UserPlus}
+            />
           </div>
         )}
         {members.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <BenchesIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">No members in this group.</p>
+            <p className="text-[12px] text-muted-foreground">
+              No members in this group.
+            </p>
           </div>
         ) : (
           <Table>
@@ -286,9 +315,7 @@ export function AdminGroupDetailPage() {
             <TableBody>
               {members.map((member) => (
                 <TableRow key={member.id}>
-                  <TableCell className="font-medium">
-                    {member.email}
-                  </TableCell>
+                  <TableCell className="font-medium">{member.email}</TableCell>
                   <TableCell>
                     {member.display_name ?? (
                       <span className="text-muted-foreground">--</span>
@@ -314,6 +341,7 @@ export function AdminGroupDetailPage() {
       </DetailSection>
 
       {/* Edit Dialog */}
+      {editReview.dialog}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -393,6 +421,21 @@ export function AdminGroupDetailPage() {
                         }}
                         style={{ minHeight: "80px" }}
                       >
+                        {(field.value ?? "")
+                          .split(",")
+                          .map((id) => id.trim())
+                          .filter(
+                            (id) =>
+                              id &&
+                              !availableRoles.some((role) => role.id === id),
+                          )
+                          .map((id) => (
+                            <option key={id} value={id}>
+                              {group.roles.find((role) => role.id === id)
+                                ?.name ?? id}{" "}
+                              (unavailable)
+                            </option>
+                          ))}
                         {availableRoles.map((role) => (
                           <option key={role.id} value={role.id}>
                             {role.name} ({role.slug})
@@ -412,7 +455,11 @@ export function AdminGroupDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  isLoading={updateMutation.isPending}
+                >
                   Save Changes
                 </Button>
               </DialogFooter>

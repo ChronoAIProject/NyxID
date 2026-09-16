@@ -5,44 +5,100 @@ for (const viewport of [
   { width: 1440, height: 1000 },
   { width: 390, height: 844 },
 ]) {
-  test(`shared provider and field clears require impact confirmation at ${String(viewport.width)}px`, async ({ page }) => {
+  test(`shared provider and field clears require impact confirmation at ${String(viewport.width)}px`, async ({
+    page,
+  }) => {
     await page.setViewportSize(viewport);
     await mockDashboard(page);
     const provider = {
-      provider: "x", label: "X (Twitter)", platform: "x", available: true,
+      provider: "x",
+      label: "X (Twitter)",
+      platform: "x",
+      available: true,
       backing: { type: "provider_oauth", provider_slug: "twitter" },
-      updated_at: "2026-09-08T00:00:00Z", setup_checklist: [],
-      webhook_verify_token: null, callback_url: null,
-      fields: ["client_id", "client_secret"].map((name) => ({ name,
+      updated_at: "2026-09-08T00:00:00Z",
+      setup_checklist: [],
+      webhook_verify_token: null,
+      callback_url: null,
+      fields: ["client_id", "client_secret"].map((name) => ({
+        name,
         label: name === "client_id" ? "Client ID" : "Client Secret",
-        secret: true, required: true, numeric: false, configured: true, help: "" })),
+        secret: true,
+        required: true,
+        numeric: false,
+        configured: true,
+        help: "",
+      })),
     };
-    await page.route("**/api/v1/admin/platform-credentials", (route) => route.fulfill({ json: [provider] }));
+    await page.route("**/api/v1/admin/platform-credentials", (route) =>
+      route.fulfill({ json: [provider] }),
+    );
     const writes: { method: string; body: unknown }[] = [];
-    await page.route("**/api/v1/admin/platform-credentials/x", async (route) => {
-      const method = route.request().method();
-      writes.push({ method, body: method === "PATCH" ? route.request().postDataJSON() : null });
-      await route.fulfill(method === "DELETE" ? { status: 204 } : { json: provider });
-    });
+    await page.route(
+      "**/api/v1/admin/platform-credentials/x",
+      async (route) => {
+        const method = route.request().method();
+        writes.push({
+          method,
+          body: method === "PATCH" ? route.request().postDataJSON() : null,
+        });
+        const fields =
+          method === "PATCH"
+            ? (route.request().postDataJSON().fields as Record<
+                string,
+                string | null
+              >)
+            : null;
+        for (const field of provider.fields) {
+          if (method === "DELETE" || (fields && field.name in fields))
+            field.configured =
+              method !== "DELETE" && fields?.[field.name] !== null;
+        }
+        provider.available = provider.fields.every((field) => field.configured);
+        provider.updated_at = new Date().toISOString();
+        await route.fulfill(
+          method === "DELETE" ? { status: 204 } : { json: provider },
+        );
+      },
+    );
     await page.goto("/admin/platform-credentials");
-    const warning = "These credentials are shared with the twitter provider. Clearing them stops all of its OAuth connections and logins until credentials are restored.";
-    for (const name of ["Clear Client ID", "Clear Client Secret", "Clear provider"]) {
+    const warning =
+      "These credentials are shared with the twitter provider. Clearing them stops all of its OAuth connections and logins until credentials are restored.";
+    for (const name of ["Clear Client ID", "Clear Client Secret"]) {
       await page.getByRole("button", { name, exact: true }).click();
-      await expect(page.getByRole("dialog").getByText(warning, { exact: true })).toBeVisible();
-      await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
       expect(writes).toEqual([]);
-      await expect(page.getByRole("button", { name: "Save credentials" })).toBeDisabled();
     }
-    await page.getByRole("button", { name: "Clear Client Secret", exact: true }).click();
-    await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
+    await page.getByRole("button", { name: "Save credentials" }).click();
+    const review = page.getByRole("dialog", { name: "Review changes" });
+    await expect(review).toContainText("OAuth connections and logins");
+    await review.getByRole("button", { name: "Cancel", exact: true }).click();
+    expect(writes).toEqual([]);
+    // Cancel preserves both deliberate field clears for another review.
+    await page.getByRole("button", { name: "Save credentials" }).click();
+    await review
+      .getByRole("button", { name: "Confirm changes", exact: true })
+      .click();
     await expect.poll(() => writes.length).toBe(1);
-    expect(writes[0]).toEqual({ method: "PATCH", body: { fields: { client_secret: null } } });
-    await page.getByRole("button", { name: "Clear provider", exact: true }).click();
-    await expect(page.getByRole("dialog").getByText(warning, { exact: true })).toBeVisible();
-    await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
+    expect(writes[0]).toEqual({
+      method: "PATCH",
+      body: { fields: { client_id: null, client_secret: null } },
+    });
+    await page
+      .getByRole("button", { name: "Clear provider", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toContainText(warning);
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Confirm", exact: true })
+      .click();
     await expect.poll(() => writes.length).toBe(2);
     expect(writes[1]).toEqual({ method: "DELETE", body: null });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await expect(page.getByRole("dialog")).toBeHidden();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
   });
 
   test(`platform credentials isolate two provider forms at ${String(viewport.width)}px`, async ({
@@ -111,17 +167,23 @@ for (const viewport of [
     await expect(
       page.getByText("Shared with the twitter provider."),
     ).toBeVisible();
-    const section = page
-      .locator("section")
-      .filter({
-        has: page.getByRole("heading", { name: "X (Twitter)", exact: true }),
-      });
+    const section = page.locator("section").filter({
+      has: page.getByRole("heading", { name: "X (Twitter)", exact: true }),
+    });
     await page.getByLabel("App Secret", { exact: true }).fill("unsaved-meta");
     await section.getByLabel("Client ID", { exact: true }).fill("x-client");
     await section
       .getByLabel("Client Secret", { exact: true })
       .fill("private-secret");
     await section.getByRole("button", { name: "Save credentials" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Review changes" }),
+    ).not.toContainText("private-secret");
+    expect(updates).toEqual([]);
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Confirm changes" })
+      .click();
     await expect(
       section.getByLabel("Client Secret", { exact: true }),
     ).toHaveValue("");

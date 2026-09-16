@@ -5831,7 +5831,11 @@ pub async fn update_provider(
         set_doc.insert("name", name.as_str());
     }
     if let Some(ref desc) = updates.description {
-        set_doc.insert("description", desc.as_str());
+        if desc.trim().is_empty() {
+            unset_doc.insert("description", "");
+        } else {
+            set_doc.insert("description", desc.trim());
+        }
     }
     if let Some(active) = updates.is_active {
         set_doc.insert("is_active", active);
@@ -5898,28 +5902,60 @@ pub async fn update_provider(
         set_doc.insert("supports_pkce", pkce);
     }
     if let Some(ref url) = updates.device_code_url {
-        set_doc.insert("device_code_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_code_url", "");
+        } else {
+            set_doc.insert("device_code_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.device_token_url {
-        set_doc.insert("device_token_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_token_url", "");
+        } else {
+            set_doc.insert("device_token_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.device_verification_url {
-        set_doc.insert("device_verification_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_verification_url", "");
+        } else {
+            set_doc.insert("device_verification_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.hosted_callback_url {
-        set_doc.insert("hosted_callback_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("hosted_callback_url", "");
+        } else {
+            set_doc.insert("hosted_callback_url", url.as_str());
+        }
     }
     if let Some(ref instr) = updates.api_key_instructions {
-        set_doc.insert("api_key_instructions", instr.as_str());
+        if instr.trim().is_empty() {
+            unset_doc.insert("api_key_instructions", "");
+        } else {
+            set_doc.insert("api_key_instructions", instr.trim());
+        }
     }
     if let Some(ref url) = updates.api_key_url {
-        set_doc.insert("api_key_url", url.as_str());
+        if url.trim().is_empty() {
+            unset_doc.insert("api_key_url", "");
+        } else {
+            set_doc.insert("api_key_url", url.trim());
+        }
     }
     if let Some(ref url) = updates.icon_url {
-        set_doc.insert("icon_url", url.as_str());
+        if url.trim().is_empty() {
+            unset_doc.insert("icon_url", "");
+        } else {
+            set_doc.insert("icon_url", url.trim());
+        }
     }
     if let Some(ref url) = updates.documentation_url {
-        set_doc.insert("documentation_url", url.as_str());
+        if url.trim().is_empty() {
+            unset_doc.insert("documentation_url", "");
+        } else {
+            set_doc.insert("documentation_url", url.trim());
+        }
     }
     if let Some(ref mode) = updates.credential_mode {
         let valid_modes = ["admin", "user", "both"];
@@ -5983,7 +6019,11 @@ pub async fn update_provider(
         } else {
             name.clone()
         };
-        set_doc.insert("client_id_param_name", value);
+        if value.trim().is_empty() {
+            unset_doc.insert("client_id_param_name", "");
+        } else {
+            set_doc.insert("client_id_param_name", value.trim());
+        }
     }
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
@@ -10643,6 +10683,79 @@ mod tests {
                     "direct-auth seed '{slug}' must have a service_auth_method"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_form_optional_provider_text_clears_are_absent() {
+        let db = connect_test_database("admin_form_provider_clear")
+            .await
+            .expect("Mongo required");
+        let enc = test_encryption_keys();
+        let provider = super::create_provider(
+            &db,
+            &enc,
+            "Clear",
+            "clear-test",
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fields = [
+            "description",
+            "api_key_instructions",
+            "api_key_url",
+            "icon_url",
+            "documentation_url",
+            "client_id_param_name",
+        ];
+        let mut set = bson::Document::new();
+        for field in fields {
+            set.insert(field, "saved");
+        }
+        db.collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .update_one(doc! {"_id": &provider.id}, doc! {"$set": set})
+            .await
+            .unwrap();
+        let saved = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                description: Some(" ".into()),
+                api_key_instructions: Some("".into()),
+                api_key_url: Some("".into()),
+                icon_url: Some("".into()),
+                documentation_url: Some("".into()),
+                client_id_param_name: Some("".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(saved.description.is_none());
+        assert!(saved.icon_url.is_none());
+        let raw = db
+            .collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .find_one(doc! {"_id": &provider.id})
+            .await
+            .unwrap()
+            .unwrap();
+        for field in fields {
+            assert!(!raw.contains_key(field), "{field} must be absent");
         }
     }
 }

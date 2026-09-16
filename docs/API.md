@@ -2636,6 +2636,11 @@ Get a single provider configuration by ID.
 
 Returns a single provider object (same shape as list response items).
 
+Provider responses include the saved `authorization_url`, `token_url`, and
+`revocation_url`, plus `has_client_id` and `has_client_secret` booleans. These
+allow editors to display configured values without returning stored client
+credentials. Device-flow URLs remain available in their corresponding fields.
+
 **Errors:**
 - `1003 not_found` -- Provider does not exist
 
@@ -2693,6 +2698,11 @@ Update a provider configuration. Only the provided fields are updated (partial u
 Returns the updated provider object.
 
 Structured `revocation` uses the same fields and validation rules as provider creation. An omitted field preserves the current configuration; explicit `"revocation": null` clears both `revocation` and deprecated `revocation_url`. RFC 7009 configurations keep the alias synchronized, while vendor-specific styles clear the alias.
+
+An explicit empty `default_scopes` array clears the scope list. Trimmed-empty
+`description`, `api_key_instructions`, `api_key_url`, `icon_url`, and
+`documentation_url` strings remove the corresponding optional stored field.
+Blank replacement credentials should be omitted to preserve existing secrets.
 
 **Errors:**
 - `1002 forbidden` -- User is not an admin
@@ -5163,6 +5173,61 @@ curl -X POST http://localhost:3001/api/v1/auth/mfa/confirm \
 ### Admin
 
 All admin endpoints require the authenticated user to have `is_admin = true`. Admin endpoints include self-protection: admins cannot change their own role, disable themselves, or delete themselves.
+
+#### PATCH /api/v1/admin/feature-flags/{flag_key}/metadata
+
+Update only the supplied metadata fields for a registered feature flag.
+
+**Auth:** Admin
+
+| Field | Type | Required | Behavior |
+| --- | --- | --- | --- |
+| `description` | string/null | No | Omission preserves; null or trimmed blank clears the custom description and displays the code-declared fallback. |
+| `owner` | string/null | No | Omission preserves; null or trimmed blank clears the owner. |
+
+Unknown fields are rejected. An empty object leaves the metadata unchanged.
+An unknown flag key returns a bad-request error.
+
+**Response (200):** The saved metadata descriptor: `key`, effective `description`,
+`code_description`, nullable `custom_description`, nullable `owner`, and nullable
+`metadata_updated_at` / `metadata_updated_by`.
+
+For example, `{"owner":"Identity team"}` changes only the owner. The existing
+`PUT` route at this path keeps its replacement contract: omitted fields are
+cleared. Clients that need sparse updates should use `PATCH`.
+
+---
+
+#### PATCH /api/v1/admin/platform-ops/vendor-templates/{template_id}
+
+Update only the supplied fields of a platform vendor template.
+
+**Auth:** Admin
+
+| Fields | Type | Required | Behavior |
+| --- | --- | --- | --- |
+| `vendor`, `display_name`, `slug`, `base_url`, `auth_method`, `credential_label`, `credential_note`, `capability_summary`, `restriction_summary` | string | No | Omission preserves; supplied values use the template's existing validation rules; null is rejected. |
+| `is_active` | boolean | No | Omission preserves; false disables the template; null is rejected. |
+| `auth_key_name`, `operation` | string/null | No | Omission preserves; null explicitly clears the field, subject to merged-template validation. |
+
+Unknown fields are rejected. Validation uses the merged saved and submitted
+configuration. The write checks the dependent operation, slug, URL, and auth
+fields again; a concurrent change retries validation or returns conflict rather
+than storing an invalid combination. This is not a general revision precondition
+for every field.
+
+**Response (200):** The saved vendor descriptor, including its `id`, editable
+fields above, `service_category`, `visibility`, `is_seeded`, and nullable
+`existing_service`. A missing template returns not found.
+
+For example, `{"credential_note":"Use a dedicated platform key"}` changes only
+the note. The existing `PUT` route retains its replacement contract. These
+updates do not replace credentials on an already provisioned service.
+
+See [Admin form save behavior](ADMIN_FORM_SAFETY.md) for editor review,
+explicit-clear, and concurrency behavior across admin forms.
+
+---
 
 #### GET /api/v1/admin/users
 

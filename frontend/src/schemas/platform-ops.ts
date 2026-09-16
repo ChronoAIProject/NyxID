@@ -1,9 +1,6 @@
 import { z } from "zod";
 
-export const PLATFORM_OPERATION_QUERY_KEY = [
-  "admin",
-  "platform-ops",
-] as const;
+export const PLATFORM_OPERATION_QUERY_KEY = ["admin", "platform-ops"] as const;
 export const PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY = [
   "admin",
   "platform-ops",
@@ -108,10 +105,7 @@ const vendorServiceSlugSchema = z
   .string()
   .min(1, "Vendor service slug is required")
   .max(128, "Vendor service slug must be at most 128 characters")
-  .regex(
-    /^[a-z0-9-]+$/,
-    "Use only lowercase letters, digits, and hyphens",
-  );
+  .regex(/^[a-z0-9-]+$/, "Use only lowercase letters, digits, and hyphens");
 
 const safeIdentifierSchema = (label: string) =>
   z
@@ -168,10 +162,10 @@ export const speakConfigResponseSchema = z
   .strict();
 
 export const speakConfigSchema = speakConfigResponseSchema.extend({
-  allowed_voice_ids: uniqueStrings(
-    safeIdentifierSchema("Voice ID"),
-    100,
-  ).min(1, "Add at least one allowed voice ID"),
+  allowed_voice_ids: uniqueStrings(safeIdentifierSchema("Voice ID"), 100).min(
+    1,
+    "Add at least one allowed voice ID",
+  ),
 });
 
 export const callAndSayConfigResponseSchema = z
@@ -275,9 +269,7 @@ export const callAndSayUpdateSchema = z
   .strict();
 
 export type PlatformOperation = z.infer<typeof platformOperationSchema>;
-export type PlatformOperationList = z.infer<
-  typeof platformOperationListSchema
->;
+export type PlatformOperationList = z.infer<typeof platformOperationListSchema>;
 export type XSearchOperation = z.infer<typeof xSearchOperationSchema>;
 export type SpeakOperation = z.infer<typeof speakOperationSchema>;
 export type CallAndSayOperation = z.infer<typeof callAndSayOperationSchema>;
@@ -286,9 +278,9 @@ export type SpeakUpdate = z.infer<typeof speakUpdateSchema>;
 export type CallAndSayUpdate = z.infer<typeof callAndSayUpdateSchema>;
 
 export type UpdatePlatformOperationVariables =
-  | { readonly op: "x_search"; readonly data: XSearchUpdate }
-  | { readonly op: "speak"; readonly data: SpeakUpdate }
-  | { readonly op: "call_and_say"; readonly data: CallAndSayUpdate };
+  | { readonly op: "x_search"; readonly data: Partial<XSearchUpdate> }
+  | { readonly op: "speak"; readonly data: Partial<SpeakUpdate> }
+  | { readonly op: "call_and_say"; readonly data: Partial<CallAndSayUpdate> };
 
 export type PlatformVendor = z.infer<typeof platformVendorSchema>;
 export type PlatformVendorRequirement = z.infer<

@@ -139,6 +139,82 @@ pub async fn update_template(
         .ok_or_else(|| AppError::NotFound("Vendor template not found".to_string()))
 }
 
+/// Validate the merged configuration, but persist only submitted fields. The
+/// predicate fences the fields read by cross-field validation, not all writes.
+pub async fn patch_template(
+    db: &mongodb::Database,
+    id: &str,
+    patch: bson::Document,
+    actor: &str,
+) -> AppResult<PlatformVendorTemplate> {
+    let collection = db.collection::<PlatformVendorTemplate>(COLLECTION_NAME);
+    for _ in 0..3 {
+        let current = collection
+            .find_one(doc! { "_id": id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Vendor template not found".to_string()))?;
+        if patch.is_empty() {
+            return Ok(current);
+        }
+        let current_doc =
+            bson::to_document(&current).map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut merged = current_doc.clone();
+        merged.extend(patch.clone());
+        let input: PlatformVendorTemplateInput =
+            bson::from_document(merged).map_err(|e| AppError::ValidationError(e.to_string()))?;
+        let input = normalize_input(input);
+        validate_input(&input)?;
+        let normalized =
+            bson::to_document(&input).map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut set = doc! {};
+        for key in patch.keys() {
+            let value = normalized.get(key).ok_or_else(|| {
+                AppError::ValidationError(format!("Unknown template field: {key}"))
+            })?;
+            if current_doc.get(key) != Some(value) {
+                set.insert(key, value.clone());
+            }
+        }
+        if set.is_empty() {
+            return Ok(current);
+        }
+        let mut filter = doc! { "_id": id };
+        for key in [
+            "operation",
+            "slug",
+            "base_url",
+            "auth_method",
+            "auth_key_name",
+        ] {
+            filter.insert(
+                key,
+                current_doc.get(key).cloned().unwrap_or(bson::Bson::Null),
+            );
+        }
+        set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+        set.insert("updated_by", actor);
+        let updated = collection
+            .find_one_and_update(filter, doc! { "$set": set })
+            .return_document(ReturnDocument::After)
+            .await
+            .map_err(|error| {
+                if error.to_string().contains("duplicate key") {
+                    AppError::Conflict(
+                        "A vendor template with this key or slug already exists".to_string(),
+                    )
+                } else {
+                    AppError::DatabaseError(error)
+                }
+            })?;
+        if let Some(updated) = updated {
+            return Ok(updated);
+        }
+    }
+    Err(AppError::Conflict(
+        "Vendor template changed during validation; reload and review again".to_string(),
+    ))
+}
+
 pub async fn disable_template(db: &mongodb::Database, id: &str, actor: &str) -> AppResult<()> {
     let result = db
         .collection::<PlatformVendorTemplate>(COLLECTION_NAME)
@@ -161,7 +237,7 @@ pub async fn disable_template(db: &mongodb::Database, id: &str, actor: &str) -> 
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlatformVendorTemplateInput {
     pub vendor: String,
     pub display_name: String,
@@ -391,5 +467,112 @@ mod tests {
                 .to_string()
                 .contains("requires canonical slug 'platform-elevenlabs'")
         );
+    }
+
+    #[tokio::test]
+    async fn admin_form_template_patch_preserves_other_fields_and_validates_effective_config() {
+        let db = crate::test_utils::connect_test_database("admin_form_template_patch")
+            .await
+            .expect("Mongo required");
+        let input = PlatformVendorTemplateInput {
+            vendor: "custom".into(),
+            display_name: "Custom".into(),
+            slug: "platform-custom".into(),
+            base_url: "https://example.com".into(),
+            auth_method: "header".into(),
+            auth_key_name: Some("X-Key".into()),
+            credential_label: "Key".into(),
+            credential_note: "Original note".into(),
+            operation: None,
+            capability_summary: "Capability".into(),
+            restriction_summary: "Restriction".into(),
+            is_active: true,
+        };
+        let created = create_template(&db, input.clone(), "a").await.unwrap();
+        patch_template(
+            &db,
+            &created.id,
+            doc! { "is_active": false, "base_url": "https://changed.example" },
+            "b",
+        )
+        .await
+        .unwrap();
+        let saved = patch_template(
+            &db,
+            &created.id,
+            doc! { "credential_note": "New note" },
+            "a",
+        )
+        .await
+        .unwrap();
+        assert!(!saved.is_active);
+        assert_eq!(saved.base_url, "https://changed.example");
+        assert!(
+            patch_template(
+                &db,
+                &created.id,
+                doc! { "auth_key_name": bson::Bson::Null },
+                "a"
+            )
+            .await
+            .is_err()
+        );
+        let saved = patch_template(
+            &db,
+            &created.id,
+            doc! { "auth_method": "bearer", "auth_key_name": bson::Bson::Null },
+            "a",
+        )
+        .await
+        .unwrap();
+        assert!(saved.auth_key_name.is_none());
+        assert!(
+            patch_template(&db, &created.id, doc! { "operation": "speak" }, "a")
+                .await
+                .is_err()
+        );
+        let (note, active) = tokio::join!(
+            patch_template(
+                &db,
+                &created.id,
+                doc! { "credential_note": "Concurrent note" },
+                "a"
+            ),
+            patch_template(&db, &created.id, doc! { "is_active": true }, "b"),
+        );
+        note.unwrap();
+        active.unwrap();
+        let saved = patch_template(&db, &created.id, doc! {}, "a")
+            .await
+            .unwrap();
+        assert_eq!(saved.credential_note, "Concurrent note");
+        assert!(saved.is_active);
+        // These individually valid changes must not combine into an invalid header binding.
+        patch_template(
+            &db,
+            &created.id,
+            doc! { "auth_method": "bearer", "auth_key_name": "X-Key" },
+            "a",
+        )
+        .await
+        .unwrap();
+        let (header, clear_key) = tokio::join!(
+            patch_template(&db, &created.id, doc! { "auth_method": "header" }, "a"),
+            patch_template(
+                &db,
+                &created.id,
+                doc! { "auth_key_name": bson::Bson::Null },
+                "b"
+            ),
+        );
+        assert_ne!(header.is_ok(), clear_key.is_ok());
+        let saved = patch_template(&db, &created.id, doc! {}, "a")
+            .await
+            .unwrap();
+        assert!(saved.auth_method != "header" || saved.auth_key_name.is_some());
+        // The old complete PUT still replaces all editable values.
+        let saved = update_template(&db, &created.id, input, "a").await.unwrap();
+        assert_eq!(saved.credential_note, "Original note");
+        assert_eq!(saved.auth_method, "header");
     }
 }

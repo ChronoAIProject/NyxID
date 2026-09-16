@@ -682,20 +682,30 @@ fn derive_visibility(service_type: &str, explicit: Option<&str>) -> AppResult<St
     }
 }
 
+fn docs_base_changed(service: &DownstreamService, body: &UpdateServiceRequest) -> bool {
+    body.base_url.as_deref().is_some_and(|url| {
+        url.trim().trim_end_matches('/') != service.base_url.trim_end_matches('/')
+    })
+}
+
 fn should_refresh_openapi_url(service: &DownstreamService, body: &UpdateServiceRequest) -> bool {
-    body.openapi_spec_url.is_some()
-        || service.openapi_spec_url.is_none()
-        || service.openapi_spec_url.as_deref().is_some_and(|url| {
-            api_docs_service::is_auto_discovered_openapi_spec_url(&service.base_url, url)
-        })
+    body.openapi_spec_url.as_deref().is_some_and(|url| {
+        Some(url.trim()).filter(|url| !url.is_empty()) != service.openapi_spec_url.as_deref()
+    }) || (docs_base_changed(service, body)
+        && (service.openapi_spec_url.is_none()
+            || service.openapi_spec_url.as_deref().is_some_and(|url| {
+                api_docs_service::is_auto_discovered_openapi_spec_url(&service.base_url, url)
+            })))
 }
 
 fn should_refresh_asyncapi_url(service: &DownstreamService, body: &UpdateServiceRequest) -> bool {
-    body.asyncapi_spec_url.is_some()
-        || service.asyncapi_spec_url.is_none()
-        || service.asyncapi_spec_url.as_deref().is_some_and(|url| {
-            api_docs_service::is_auto_discovered_asyncapi_spec_url(&service.base_url, url)
-        })
+    body.asyncapi_spec_url.as_deref().is_some_and(|url| {
+        Some(url.trim()).filter(|url| !url.is_empty()) != service.asyncapi_spec_url.as_deref()
+    }) || (docs_base_changed(service, body)
+        && (service.asyncapi_spec_url.is_none()
+            || service.asyncapi_spec_url.as_deref().is_some_and(|url| {
+                api_docs_service::is_auto_discovered_asyncapi_spec_url(&service.base_url, url)
+            })))
 }
 
 fn resolve_spec_url_update(
@@ -1829,18 +1839,19 @@ pub async fn update_service(
             } else {
                 service.asyncapi_spec_url.clone()
             };
-            http_docs_refresh = if is_platform_vendor {
-                None
-            } else {
-                Some(
-                    api_docs_service::discover_service_docs(
-                        docs_base_url,
-                        explicit_openapi,
-                        explicit_asyncapi,
+            http_docs_refresh =
+                if is_platform_vendor || !(refresh_openapi_url || refresh_asyncapi_url) {
+                    None
+                } else {
+                    Some(
+                        api_docs_service::discover_service_docs(
+                            docs_base_url,
+                            explicit_openapi,
+                            explicit_asyncapi,
+                        )
+                        .await,
                     )
-                    .await,
-                )
-            };
+                };
         }
         "ssh" => {
             let has_http_only_updates = body.base_url.is_some()
@@ -2193,18 +2204,22 @@ pub async fn update_service(
             docs_metadata.asyncapi_spec_url.as_ref(),
             refresh_asyncapi_url,
         );
-        set_doc.insert(
-            "openapi_spec_url",
-            next_openapi_spec_url
-                .clone()
-                .map_or(bson::Bson::Null, bson::Bson::String),
-        );
-        set_doc.insert(
-            "asyncapi_spec_url",
-            next_asyncapi_spec_url
-                .clone()
-                .map_or(bson::Bson::Null, bson::Bson::String),
-        );
+        if refresh_openapi_url {
+            set_doc.insert(
+                "openapi_spec_url",
+                next_openapi_spec_url
+                    .clone()
+                    .map_or(bson::Bson::Null, bson::Bson::String),
+            );
+        }
+        if refresh_asyncapi_url {
+            set_doc.insert(
+                "asyncapi_spec_url",
+                next_asyncapi_spec_url
+                    .clone()
+                    .map_or(bson::Bson::Null, bson::Bson::String),
+            );
+        }
         if refresh_openapi_url || refresh_asyncapi_url {
             set_doc.insert("streaming_supported", docs_metadata.streaming_supported);
         }
@@ -2382,7 +2397,9 @@ pub async fn update_service(
     // so setting openapi_spec_url is enough to surface MCP tools and
     // workflow operations without a manual discover-endpoints call
     // (#1290 follow-up).
-    if catalog_spec_sync::should_auto_sync_service_endpoints(&updated) {
+    if should_refresh_openapi_url(&service, &body)
+        && catalog_spec_sync::should_auto_sync_service_endpoints(&updated)
+    {
         catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), service_id.clone());
     }
 
@@ -3922,6 +3939,91 @@ mod tests {
             }
         }).await.unwrap();
         db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn admin_form_name_patch_never_refreshes_specs() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let db = connect_test_database("admin_form_spec_preserve")
+            .await
+            .expect("Mongo required");
+        let admin = seed_user(&db, true).await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let app = axum::Router::new().fallback(move || { let count = count.clone(); async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            axum::Json(serde_json::json!({ "openapi": "3.0.0", "info": { "title": "Discovered", "version": "1" }, "paths": {} }))
+        }});
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for configured in [false, true] {
+            if configured {
+                server.abort();
+            }
+            let mut service = dummy_service();
+            service.id = Uuid::new_v4().to_string();
+            service.slug = format!("spec-preserve-{}", service.id);
+            service.created_by = admin.clone();
+            service.base_url = base.clone();
+            service.openapi_spec_url = configured.then(|| format!("{base}/openapi.json"));
+            service.asyncapi_spec_url = configured.then(|| format!("{base}/asyncapi.json"));
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            let request: UpdateServiceRequest =
+                serde_json::from_value(serde_json::json!({ "name": "Renamed" })).unwrap();
+            assert!(!super::should_refresh_openapi_url(&service, &request));
+            assert!(!super::should_refresh_asyncapi_url(&service, &request));
+            let Json(response) = update_service(
+                State(test_app_state(db.clone())),
+                test_auth_user(&admin),
+                crate::telemetry::TelemetryContext::default(),
+                Path(service.id.clone()),
+                Json(request),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.id, service.id);
+            assert_eq!(response.name, "Renamed");
+            let stored = db
+                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(doc! { "_id": &service.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.openapi_spec_url, service.openapi_spec_url);
+            assert_eq!(stored.asyncapi_spec_url, service.asyncapi_spec_url);
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[test]
+    fn admin_form_spec_refresh_requires_actual_relevant_changes() {
+        let mut service = dummy_service();
+        service.base_url = "https://example.com".into();
+        service.openapi_spec_url = Some("https://example.com/openapi.json".into());
+        for value in [
+            serde_json::json!({"name":"New"}),
+            serde_json::json!({"base_url":"https://example.com"}),
+            serde_json::json!({"openapi_spec_url":"https://example.com/openapi.json"}),
+        ] {
+            let request = serde_json::from_value(value).unwrap();
+            assert!(!super::should_refresh_openapi_url(&service, &request));
+        }
+        for value in [
+            serde_json::json!({"base_url":"https://new.example.com"}),
+            serde_json::json!({"openapi_spec_url":""}),
+        ] {
+            assert!(super::should_refresh_openapi_url(
+                &service,
+                &serde_json::from_value(value).unwrap()
+            ));
+        }
     }
 }
 

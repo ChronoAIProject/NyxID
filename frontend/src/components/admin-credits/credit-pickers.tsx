@@ -63,6 +63,28 @@ export function UserPicker({
         />
       </div>
       <div className="min-h-0 max-h-48 flex-1 overflow-y-auto overscroll-contain p-1">
+        {selected
+          .filter((id) => !filtered.some((user) => user.id === id))
+          .map((id) => (
+            <label
+              key={id}
+              className="flex items-center gap-3 px-2 py-2 text-xs"
+            >
+              <Checkbox
+                checked
+                onCheckedChange={() =>
+                  onChange(selected.filter((value) => value !== id))
+                }
+              />
+              <span>
+                Selected owner:{" "}
+                {users.find((user) => user.id === id)?.display_name ||
+                  users.find((user) => user.id === id)?.email ||
+                  id}{" "}
+                (outside current results)
+              </span>
+            </label>
+          ))}
         {filtered.map((user) => {
           const checked = selected.includes(user.id);
           return (
@@ -143,6 +165,26 @@ export function ServicePicker({
         />
       </div>
       <div className="min-h-0 max-h-44 flex-1 overflow-y-auto overscroll-contain p-1">
+        {selected
+          .filter((id) => !filtered.some((service) => service.id === id))
+          .map((id) => (
+            <label
+              key={id}
+              className="flex items-center gap-3 px-2 py-2 text-xs"
+            >
+              <Checkbox
+                checked
+                onCheckedChange={() =>
+                  onChange(selected.filter((value) => value !== id))
+                }
+              />
+              <span>
+                Selected service:{" "}
+                {services.find((service) => service.id === id)?.name ?? id}{" "}
+                (outside current results)
+              </span>
+            </label>
+          ))}
         {filtered.map((service) => {
           const checked = selected.includes(service.id);
           const metric = resolveServiceBillingMetric(service);

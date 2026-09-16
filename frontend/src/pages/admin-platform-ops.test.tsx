@@ -13,14 +13,13 @@ const {
   mockRefetch,
   mockToastError,
   mockToastSuccess,
-} =
-  vi.hoisted(() => ({
-    mockMutateAsync: vi.fn(),
-    mockProvisionAsync: vi.fn(),
-    mockRefetch: vi.fn(),
-    mockToastError: vi.fn(),
-    mockToastSuccess: vi.fn(),
-  }));
+} = vi.hoisted(() => ({
+  mockMutateAsync: vi.fn(),
+  mockProvisionAsync: vi.fn(),
+  mockRefetch: vi.fn(),
+  mockToastError: vi.fn(),
+  mockToastSuccess: vi.fn(),
+}));
 
 const vendorRequirements: PlatformVendorRequirementList = {
   vendors: [
@@ -147,6 +146,7 @@ describe("AdminPlatformOpsPage", () => {
     vi.clearAllMocks();
     mockMutateAsync.mockImplementation(
       async ({ op, data }: { op: string; data: Record<string, unknown> }) => ({
+        ...operations.operations.find((operation) => operation.op === op),
         op,
         ...data,
         updated_at: "2026-08-25T10:00:00Z",
@@ -183,13 +183,15 @@ describe("AdminPlatformOpsPage", () => {
     });
     await waitFor(() => expect(save).toBeEnabled());
     await user.click(save);
+    expect(mockMutateAsync).not.toHaveBeenCalled();
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
 
     await waitFor(() =>
       expect(mockMutateAsync).toHaveBeenCalledWith({
         op: "x_search",
         data: {
-          enabled: false,
-          vendor_service_slug: "platform-x",
           config: { type: "x_search", max_results_cap: 12 },
         },
       }),
@@ -223,9 +225,7 @@ describe("AdminPlatformOpsPage", () => {
     await user.click(screen.getByRole("combobox", { name: "Vendor" }));
     await user.click(screen.getByRole("option", { name: "ElevenLabs" }));
 
-    expect(screen.getByLabelText("Slug")).toHaveValue(
-      "platform-elevenlabs",
-    );
+    expect(screen.getByLabelText("Slug")).toHaveValue("platform-elevenlabs");
     expect(screen.getByLabelText("Slug")).toBeDisabled();
     expect(screen.getByLabelText("Base URL")).toHaveValue(
       "https://api.elevenlabs.io",

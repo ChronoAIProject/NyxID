@@ -32,6 +32,8 @@ export function useUpdatePlatformOperation() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    onMutate: () =>
+      queryClient.cancelQueries({ queryKey: PLATFORM_OPERATION_QUERY_KEY }),
     mutationFn: async ({
       op,
       data,
@@ -42,7 +44,10 @@ export function useUpdatePlatformOperation() {
       );
       return platformOperationSchema.parse(response);
     },
-    onSuccess: (updated) => {
+    onSuccess: async (updated) => {
+      await queryClient.cancelQueries({
+        queryKey: PLATFORM_OPERATION_QUERY_KEY,
+      });
       queryClient.setQueryData<PlatformOperationList>(
         PLATFORM_OPERATION_QUERY_KEY,
         (current) => {
@@ -93,8 +98,12 @@ export function useCreatePlatformVendorTemplate() {
       return platformVendorRequirementSchema.parse(response);
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: PLATFORM_VENDOR_TEMPLATES_QUERY_KEY });
-      void queryClient.invalidateQueries({ queryKey: PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY });
+      void queryClient.invalidateQueries({
+        queryKey: PLATFORM_VENDOR_TEMPLATES_QUERY_KEY,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY,
+      });
     },
   });
 }
@@ -107,17 +116,21 @@ export function useUpdatePlatformVendorTemplate() {
       data,
     }: {
       readonly id: string;
-      readonly data: PlatformVendorTemplateForm;
+      readonly data: Partial<PlatformVendorTemplateForm>;
     }) => {
-      const response = await api.put<unknown>(
+      const response = await api.patch<unknown>(
         `/admin/platform-ops/vendor-templates/${id}`,
         data,
       );
       return platformVendorRequirementSchema.parse(response);
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: PLATFORM_VENDOR_TEMPLATES_QUERY_KEY });
-      void queryClient.invalidateQueries({ queryKey: PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY });
+      void queryClient.invalidateQueries({
+        queryKey: PLATFORM_VENDOR_TEMPLATES_QUERY_KEY,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY,
+      });
     },
   });
 }
@@ -129,8 +142,12 @@ export function useDisablePlatformVendorTemplate() {
       await api.delete<void>(`/admin/platform-ops/vendor-templates/${id}`);
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: PLATFORM_VENDOR_TEMPLATES_QUERY_KEY });
-      void queryClient.invalidateQueries({ queryKey: PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY });
+      void queryClient.invalidateQueries({
+        queryKey: PLATFORM_VENDOR_TEMPLATES_QUERY_KEY,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY,
+      });
     },
   });
 }

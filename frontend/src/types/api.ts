@@ -355,6 +355,7 @@ export interface ServiceBilling {
   readonly platform_metric?: string;
   /** NyxID-authored price and its synchronization state in Lago. */
   readonly platform_pricing?: ServicePlatformPricing | null;
+  readonly platform_pricing_cleanup_metric_code?: string | null;
   readonly resale_billable?: boolean;
   readonly resale_metric?: string;
   readonly lago_resale_metric_code?: string | null;
@@ -615,6 +616,11 @@ export interface ProviderConfig {
     | "telegram_widget";
   readonly revocation?: ProviderRevocationConfig | null;
   readonly has_oauth_config: boolean;
+  readonly authorization_url?: string | null;
+  readonly token_url?: string | null;
+  readonly revocation_url?: string | null;
+  readonly has_client_id?: boolean;
+  readonly has_client_secret?: boolean;
   readonly credential_mode: CredentialMode;
   readonly default_scopes: readonly string[] | null;
   readonly supports_oauth_scopes?: boolean;
