@@ -592,6 +592,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -601,6 +604,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "telnyx", "Seeded default provider: Telnyx");
         seeded_count += 1;
