@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { useManagedOnboarding } from "@/hooks/use-channel-managed";
-import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
-import { TelegramSetupPage } from "@/pages/telegram-setup";
+import { ChannelBotConnect } from "@/components/channels/channel-bot-connect";
 import { TelegramClaimPage } from "@/pages/telegram-claim";
 import { useTelegramNewConfiguration } from "@/hooks/use-telegram-new";
 import { useWatch } from "react-hook-form";
@@ -22,7 +20,7 @@ import {
   type CreateDeviceConversationFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { CHANNEL_PLATFORMS, channelBotRegistrationPayload } from "@/lib/channel-platforms";
+import { CHANNEL_PLATFORMS, channelBotRegistrationPayload, managedConnectPlatform } from "@/lib/channel-platforms";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -258,11 +256,22 @@ function EmptyState() {
   );
 }
 
+const EMPTY_BOT_CREDENTIALS = {
+  bot_token: "",
+  app_id: "",
+  app_secret: "",
+  verification_token: "",
+  encrypt_key: "",
+  public_key: "",
+  phone_number_id: "",
+  waba_id: "",
+};
+
 function CreateBotDialog({
   open,
   onOpenChange,
   defaultOrgId,
-  defaultPlatform = "telegram",
+  defaultPlatform,
   defaultLabel = "",
 }: {
   readonly open: boolean;
@@ -280,55 +289,63 @@ function CreateBotDialog({
   useEffect(() => {
     if (createdBot && dialogContentRef.current) dialogContentRef.current.scrollTop = 0;
   }, [createdBot]);
+  const form = useAppForm<CreateChannelBotFormData>({
+    mode: "onChange",
+    resolver: zodResolver(createChannelBotSchema),
+    defaultValues: {
+      ...EMPTY_BOT_CREDENTIALS,
+      platform: defaultPlatform ?? "telegram",
+      label: defaultLabel,
+      target_org_id: defaultOrgId ?? undefined,
+    },
+  });
+
   const {
     register,
     handleSubmit,
     setValue,
     control,
     reset,
+    getValues,
     formState: { errors, isDirty, isValid },
-  } = useAppForm<CreateChannelBotFormData>({
-    mode: "onChange",
-    resolver: zodResolver(createChannelBotSchema),
-    defaultValues: {
-      platform: defaultPlatform,
-      bot_token: "",
-      label: defaultLabel,
-      verification_token: "",
-      encrypt_key: "",
-      target_org_id: defaultOrgId ?? undefined,
-    },
-  });
-
-  // RHF's `defaultValues` only apply on first mount. The dialog stays
-  // mounted across page-scope changes, so re-seed the form whenever the
-  // page scope changes OR the dialog (re)opens. Otherwise the dialog
-  // would silently submit with the stale first-mount scope -- e.g.
-  // switch page scope to an org, click "Add Bot", and it would create a
-  // personal bot.
-  useEffect(() => {
-    if (!open) return;
-    reset({
-      platform: defaultPlatform,
-      bot_token: "",
-      label: defaultLabel,
-      verification_token: "",
-      encrypt_key: "",
-      target_org_id: defaultOrgId ?? undefined,
-    });
-  }, [open, defaultOrgId, defaultPlatform, defaultLabel, reset]);
+  } = form;
 
   const platform = useWatch({ control, name: "platform" });
   const setupNote = CHANNEL_PLATFORMS[platform].setupNote;
   const targetOrgId = useWatch({ control, name: "target_org_id" }) ?? null;
   const label = useWatch({ control, name: "label" });
-  const managed = useManagedOnboarding(platform, open && Boolean(CHANNEL_PLATFORMS[platform].managedFlow));
-  const [advanced, setAdvanced] = useState(false);
-  const managedAvailable = Boolean(CHANNEL_PLATFORMS[platform].managedFlow && managed.data?.available);
-  const managedFlow = CHANNEL_PLATFORMS[platform].managedFlow;
-  const ManagedConnect = managedFlow ? MANAGED_FLOW_COMPONENTS[managedFlow].Connect : undefined;
+  const previousPlatform = useRef(defaultPlatform);
+
+  // Opening remounts the form with the current page scope. A new deep link
+  // can also select a flow while this dialog is already open.
+  useEffect(() => {
+    const changed = previousPlatform.current !== defaultPlatform;
+    previousPlatform.current = defaultPlatform;
+    if (!changed || !defaultPlatform || defaultPlatform === getValues("platform")) return;
+    reset({
+      ...EMPTY_BOT_CREDENTIALS,
+      platform: defaultPlatform,
+      label: defaultLabel,
+      target_org_id: defaultOrgId ?? undefined,
+    });
+  }, [defaultPlatform, defaultLabel, defaultOrgId, getValues, reset]);
+
+  function changePlatform(next: ChannelPlatform) {
+    reset({
+      ...EMPTY_BOT_CREDENTIALS,
+      platform: next,
+      label,
+      target_org_id: targetOrgId ?? undefined,
+    }, { keepDefaultValues: true });
+    void navigate({
+      to: "/channel-bots",
+      search: { connect: managedConnectPlatform(next), label, target_org_id: targetOrgId ?? undefined },
+      replace: true,
+    });
+  }
 
   function onSubmit(data: CreateChannelBotFormData) {
+    if (CHANNEL_PLATFORMS[data.platform].fields.length === 0) return;
     const payload = channelBotRegistrationPayload(data);
     createBot.mutate(payload, {
       onSuccess: (result) => {
@@ -395,105 +412,98 @@ function CreateBotDialog({
             }}>Done</Button></DialogFooter>
           </div>
         ) : <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="scope">Scope</Label>
-            <OrgScopeSelect
-              value={targetOrgId}
-              onChange={(next) =>
-                setValue("target_org_id", next ?? undefined)
-              }
-              label="Scope"
-            />
-            <p className="text-xs text-muted-foreground">
-              Choose where this bot lives. Org bots are visible to every
-              org admin and can be bound to org-owned agent keys.
-            </p>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="platform">Platform</Label>
-            <Select
-              value={platform}
-              onValueChange={(value) => {
-                if (value === "telegram-new") {
-                  onOpenChange(false);
-                  void navigate({
-                    to: "/channel-bots",
-                    search: { connect: "telegram-new", label, target_org_id: targetOrgId ?? undefined },
-                  });
-                } else {
-                  setValue("platform", value as ChannelPlatform);
-                }
-              }}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Select platform" />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.entries(CHANNEL_PLATFORMS).map(([id, descriptor]) => <SelectItem key={id} value={id}>{descriptor.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            {errors.platform && (
-              <p className="text-xs text-destructive">
-                {errors.platform.message}
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="label">Label</Label>
-            <Input
-              id="label"
-              placeholder={`My ${platformLabel(platform)} Bot`}
-              {...register("label")}
-            />
-            {errors.label && (
-              <p className="text-xs text-destructive">
-                {errors.label.message}
-              </p>
-            )}
-          </div>
-
-          {CHANNEL_PLATFORMS[platform].managedOnly && !managedAvailable && (
-            <p role="status" className="text-xs text-muted-foreground">{managed.isLoading ? "Loading account connection..." : managed.isError ? "Unable to load account connection settings. Retry shortly." : `Not available until an admin configures ${platformLabel(platform)}.`}</p>
-          )}
-          {managedAvailable && managed.data && ManagedConnect && <>
-            <ManagedConnect key={`${platform}:${targetOrgId ?? "personal"}`} platform={platform} bootstrap={managed.data} label={label} orgId={targetOrgId} onConnected={(bot) => {
+          <ChannelBotConnect
+            platform={platform}
+            label={label}
+            orgId={targetOrgId}
+            form={form}
+            onConnected={(id, replace) => {
               onOpenChange(false);
-              void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } });
-            }} />
-            {!CHANNEL_PLATFORMS[platform].managedOnly && <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-xs text-muted-foreground">{CHANNEL_PLATFORMS[platform].advancedLabel}</summary></details>}
-          </>}
-          {platform !== "telegram-new" && !CHANNEL_PLATFORMS[platform].managedOnly && (!managedAvailable || advanced) && <>
-          {setupNote && (
-            <div className="space-y-1 rounded-lg border border-border/70 bg-muted/30 p-4">
-              <p className="text-[12px] font-medium">{setupNote.title}</p>
-              <p className="text-xs text-muted-foreground">{setupNote.text}</p>
-            </div>
-          )}
-          {CHANNEL_PLATFORMS[platform].fields.map((field) => (
-            <div key={field.name} className="space-y-2">
-              <Label htmlFor={field.name}>{field.label}{field.required ? "" : " (optional)"}</Label>
-              <Input id={field.name} type={field.secret ? "password" : "text"} inputMode={field.numeric ? "numeric" : undefined}
-                autoComplete={field.secret ? "new-password" : "off"} {...register(field.name)} />
-              {field.hint && <p className="text-xs text-muted-foreground">{field.hint}</p>}
-              {errors[field.name] && <p className="text-xs text-destructive">{errors[field.name]?.message}</p>}
-            </div>
-          ))}
+              void navigate({ to: "/channel-bots/$botId", params: { botId: id }, replace });
+            }}
+            renderFields={({ disabled, scopeDescription }) => (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="scope">Scope</Label>
+                  <OrgScopeSelect
+                    value={targetOrgId}
+                    disabled={disabled}
+                    onChange={(next) =>
+                      setValue("target_org_id", next ?? undefined)
+                    }
+                    label="Scope"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {scopeDescription ?? "Choose where this bot lives. Org bots are visible to every org admin and can be bound to org-owned agent keys."}
+                  </p>
+                </div>
 
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button variant="primary" type="submit" disabled={createBot.isPending || !isDirty || !isValid}>
-              {createBot.isPending ? "Creating..." : "Add Bot"}
-            </Button>
-          </DialogFooter>
-          </>}
+                <div className="space-y-2">
+                  <Label htmlFor="platform">Platform</Label>
+                  <Select
+                    value={platform}
+                    onValueChange={(value) => changePlatform(value as ChannelPlatform)}
+                  >
+                    <SelectTrigger id="platform">
+                      <SelectValue placeholder="Select platform" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Object.entries(CHANNEL_PLATFORMS).map(([id, descriptor]) => <SelectItem key={id} value={id}>{descriptor.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  {errors.platform && (
+                    <p className="text-xs text-destructive">
+                      {errors.platform.message}
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="label">Label</Label>
+                  <Input
+                    id="label"
+                    disabled={disabled}
+                    placeholder={`My ${platformLabel(platform)} Bot`}
+                    {...register("label")}
+                  />
+                  {errors.label && (
+                    <p className="text-xs text-destructive">
+                      {errors.label.message}
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
+          >
+            {setupNote && (
+              <div className="space-y-1 rounded-lg border border-border/70 bg-muted/30 p-4">
+                <p className="text-[12px] font-medium">{setupNote.title}</p>
+                <p className="text-xs text-muted-foreground">{setupNote.text}</p>
+              </div>
+            )}
+            {CHANNEL_PLATFORMS[platform].fields.map((field) => (
+              <div key={field.name} className="space-y-2">
+                <Label htmlFor={field.name}>{field.label}{field.required ? "" : " (optional)"}</Label>
+                <Input id={field.name} type={field.secret ? "password" : "text"} inputMode={field.numeric ? "numeric" : undefined}
+                  autoComplete={field.secret ? "new-password" : "off"} {...register(field.name)} />
+                {field.hint && <p className="text-xs text-muted-foreground">{field.hint}</p>}
+                {errors[field.name] && <p className="text-xs text-destructive">{errors[field.name]?.message}</p>}
+              </div>
+            ))}
+
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+              >
+                Cancel
+              </Button>
+              <Button variant="primary" type="submit" disabled={createBot.isPending || !isDirty || !isValid}>
+                {createBot.isPending ? "Creating..." : "Add Bot"}
+              </Button>
+            </DialogFooter>
+          </ChannelBotConnect>
         </form>}
       </DialogContent>
     </Dialog>
@@ -1012,14 +1022,27 @@ function DeviceChannelsSection({
 
 function ChannelBotsList() {
   const navigate = useNavigate();
-  const telegram = useTelegramNewConfiguration();
-  const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; label?: string; target_org_id?: string };
+  const telegram = useTelegramNewConfiguration(undefined, false);
+  const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; label?: string; target_org_id?: string; request_id?: string };
   const [scopeOrgId, setScopeOrgId] = useState<string | null>(search.target_org_id ?? null);
   const { data: bots, isLoading, error, refetch } = useChannelBots({ orgId: scopeOrgId });
   const [createOpen, setCreateOpen] = useState(Boolean(search.connect));
+  const [previousConnect, setPreviousConnect] = useState(search.connect);
   const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [viewMode, setViewMode] = useViewMode("channel-bots");
+
+  if (search.connect !== previousConnect) {
+    setPreviousConnect(search.connect);
+    if (search.connect) setCreateOpen(true);
+  }
+
+  function changeCreateOpen(open: boolean) {
+    setCreateOpen(open);
+    if (!open && search.connect) {
+      void navigate({ to: "/channel-bots", search: { ...search, connect: undefined }, replace: true });
+    }
+  }
 
   return (
     <div className="space-y-8">
@@ -1046,7 +1069,7 @@ function ChannelBotsList() {
               Continue setting up {telegram.data.request.label} from your saved step.
             </p>
           </div>
-          <Button variant="outline" onClick={() => void navigate({ to: "/channel-bots", search: { connect: "telegram-new" } })}>
+          <Button variant="outline" onClick={() => void navigate({ to: "/channel-bots", search: { connect: "telegram-new", request_id: telegram.data?.request?.id }, replace: true })}>
             Resume Telegram setup
           </Button>
         </div>
@@ -1068,13 +1091,13 @@ function ChannelBotsList() {
         viewMode={viewMode}
       />
 
-      <CreateBotDialog
+      {createOpen && <CreateBotDialog
         open={createOpen}
-        onOpenChange={setCreateOpen}
-        defaultOrgId={scopeOrgId}
+        onOpenChange={changeCreateOpen}
+        defaultOrgId={search.connect ? search.target_org_id ?? null : scopeOrgId}
         defaultPlatform={search.connect}
         defaultLabel={search.label}
-      />
+      />}
       <CreateDeviceChannelDialog
         open={createDeviceOpen}
         onOpenChange={setCreateDeviceOpen}
@@ -1087,7 +1110,5 @@ function ChannelBotsList() {
 
 export function ChannelBotsPage() {
   const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; claim_entry?: boolean };
-  return search.connect === "telegram-new"
-    ? search.claim_entry ? <TelegramClaimPage /> : <TelegramSetupPage />
-    : <ChannelBotsList />;
+  return search.claim_entry ? <TelegramClaimPage /> : <ChannelBotsList />;
 }
