@@ -93,6 +93,27 @@ describe("editable async options selection", () => {
     expect(screen.getByRole("status", { name: "Stored scopes" })).toHaveTextContent(/^roles$/);
   });
 
+  it.each(["personal", "organization"])("preserves typing and focus while the initial identity loads for a %s owner", async (ownerKind) => {
+    useAuthStore.setState({ user: null });
+    fetchMock.mockImplementation(async (url) => new Response(JSON.stringify(nestedResponse(String(url)))));
+    function LoadingPicker() {
+      const identity = useAuthStore((state) => state.user?.id);
+      return <Picker custom owner={ownerKind === "personal" ? identity ?? "" : "organization"} />;
+    }
+    const user = userEvent.setup();
+    render(<LoadingPicker />, { wrapper: optionsWrapper() });
+    const input = screen.getByRole("combobox");
+    await user.type(input, "reports");
+    expect(fetchMock).not.toHaveBeenCalled();
+    act(() => useAuthStore.setState({ user: { id: "actor" } as User }));
+    expect(screen.getByRole("combobox")).toBe(input);
+    expect(input).toHaveValue("reports");
+    expect(input).toHaveFocus();
+    await user.click(await screen.findByRole("option", { name: "Explore reports:" }));
+    await user.click(screen.getByRole("option", { name: "reports:read" }));
+    expect(screen.getByRole("status", { name: "Selected scopes" })).toHaveTextContent(/^reports:read$/);
+  });
+
   it("restarts paging when response versions change", async () => {
     let initialRequests = 0;
     fetchMock.mockImplementation(async (url) => {

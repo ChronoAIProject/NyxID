@@ -50,7 +50,23 @@ function suggestions(items: OptionItem[], draft: string, delimiter?: string): Ch
 
 export function AsyncOptionSelect(props: Props) {
   const identity = useAuthStore((state) => state.user?.id);
-  return <OptionSelection key={JSON.stringify([identity, props.optionSet, props.context])} {...props} />;
+  const [session, setSession] = useState({ identity, optionSet: props.optionSet, context: props.context, generation: 0 });
+  const sameResource = session.optionSet === props.optionSet
+    && session.context.principal_type === props.context.principal_type
+    && session.context.service_account_id === props.context.service_account_id;
+  const sameOwner = session.context.owner_id === props.context.owner_id;
+  let generation = session.generation;
+  if (session.identity !== identity || !sameResource || !sameOwner) {
+    // Initial identity/owner loading enables suggestions without interrupting
+    // an editable draft. Actual account or owner switches still reset the UI.
+    const loadingIdentity = session.identity === undefined && identity !== undefined;
+    const loadingPersonalOwner = !session.context.owner_id && props.context.owner_id === identity
+      && (loadingIdentity || session.identity === identity);
+    const initialLoad = sameResource && ((sameOwner && loadingIdentity) || loadingPersonalOwner);
+    if (!initialLoad) generation += 1;
+    setSession({ identity, optionSet: props.optionSet, context: props.context, generation });
+  }
+  return <OptionSelection key={generation} {...props} />;
 }
 
 type Draft = {
