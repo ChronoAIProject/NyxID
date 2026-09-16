@@ -94,18 +94,17 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
   const updateMutation = useUpdateService();
   const user = useAuthStore((s) => s.user);
   const { data: appsData } = useDeveloperApps();
-  const selectedAppIds = service.developer_app_ids ?? [];
+  const form = useAppForm<UpdateServiceFormData>({
+    resolver: zodResolver(updateServiceSchema),
+    defaultValues: serviceFormValues(service),
+  });
+  const selectedAppIds = form.watch("developer_app_ids") ?? [];
   const developerApps = (appsData?.clients ?? []).filter(
     (c) => c.is_active || selectedAppIds.includes(c.id),
   );
   const unavailableAppIds = selectedAppIds.filter(
     (id) => !developerApps.some((app) => app.id === id),
   );
-
-  const form = useAppForm<UpdateServiceFormData>({
-    resolver: zodResolver(updateServiceSchema),
-    defaultValues: serviceFormValues(service),
-  });
   const stale =
     !sameValue(serviceFormValues(service), serviceFormValues(source)) ||
     (!!form.watch("credential")?.trim() &&

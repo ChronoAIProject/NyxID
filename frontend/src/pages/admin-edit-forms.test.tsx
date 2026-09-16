@@ -30,6 +30,12 @@ const mock = vi.hoisted(() => ({
   updateProvider: vi.fn(),
   updateService: vi.fn(),
   navigate: vi.fn(),
+  developerApps: [] as {
+    id: string;
+    client_name: string;
+    client_type: string;
+    is_active: boolean;
+  }[],
 }));
 vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ providerId: "provider-1", serviceId: "service-1" }),
@@ -52,16 +58,7 @@ vi.mock("@/hooks/use-services", () => ({
 }));
 vi.mock("@/hooks/use-developer-apps", () => ({
   useDeveloperApps: () => ({
-    data: {
-      clients: [
-        {
-          id: "inactive-app",
-          client_name: "Old app",
-          client_type: "confidential",
-          is_active: false,
-        },
-      ],
-    },
+    data: { clients: mock.developerApps },
   }),
 }));
 vi.mock("@/stores/auth-store", () => ({
@@ -73,6 +70,20 @@ vi.mock("@/hooks/use-admin", () => ({
 }));
 beforeEach(() => {
   vi.clearAllMocks();
+  mock.developerApps = [
+    {
+      id: "inactive-app",
+      client_name: "Old app",
+      client_type: "confidential",
+      is_active: false,
+    },
+    {
+      id: "new-app",
+      client_name: "New app",
+      client_type: "confidential",
+      is_active: true,
+    },
+  ];
   mock.provider = {
     isLoading: false,
     data: {
@@ -207,6 +218,54 @@ it("shows selected inactive and unavailable apps and patches only a service rena
     }),
   );
 });
+it.each(["inactive", "missing"] as const)(
+  "keeps a newly selected app visible and removable when refetched as %s",
+  async (state) => {
+    const user = userEvent.setup();
+    const view = render(<ServiceEditPage />);
+    fireEvent.change(screen.getByLabelText("Service Name"), {
+      target: { value: "Service draft" },
+    });
+    await user.click(screen.getByRole("checkbox", { name: "New app" }));
+    expect(screen.getByRole("checkbox", { name: "New app" })).toBeChecked();
+
+    mock.developerApps =
+      state === "missing"
+        ? mock.developerApps.filter((app) => app.id !== "new-app")
+        : mock.developerApps.map((app) =>
+            app.id === "new-app" ? { ...app, is_active: false } : app,
+          );
+    view.rerender(<ServiceEditPage />);
+
+    const selectedApp = screen.getByRole("checkbox", {
+      name:
+        state === "inactive"
+          ? "New app (inactive)"
+          : "Selected app: new-app (details unavailable)",
+    });
+    expect(selectedApp).toBeChecked();
+    expect(selectedApp).toBeEnabled();
+    expect(screen.getByLabelText("Old app (inactive)")).toBeChecked();
+    expect(
+      screen.getByLabelText("Selected app: unavailable-app (details unavailable)"),
+    ).toBeChecked();
+    expect(screen.getByLabelText("Service Name")).toHaveValue("Service draft");
+
+    await user.click(selectedApp);
+    expect(selectedApp).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    expect(mock.updateService).not.toHaveBeenCalled();
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
+    await waitFor(() =>
+      expect(mock.updateService).toHaveBeenCalledExactlyOnceWith({
+        serviceId: "service-1",
+        data: { name: "Service draft" },
+      }),
+    );
+  },
+);
 it("preserves node-key auth when editing an SSH host", () => {
   const service = {
     ...mock.service.data!,
