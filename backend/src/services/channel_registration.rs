@@ -95,6 +95,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
 
 #[derive(Clone, Copy, Debug)]
 pub struct RegistrationDescriptor {
+    pub documentation_url: Option<&'static str>,
     pub fields: &'static [RegistrationField],
     pub token_fields: &'static [&'static str],
     pub extra_fields: &'static [RegistrationField],
@@ -115,6 +116,7 @@ pub struct RegistrationDescriptor {
 impl Default for RegistrationDescriptor {
     fn default() -> Self {
         Self {
+            documentation_url: None,
             fields: &[BOT_TOKEN_FIELD],
             token_fields: &["bot_token"],
             extra_fields: LEGACY_OPTIONAL_FIELDS,

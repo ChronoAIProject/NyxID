@@ -3195,8 +3195,8 @@ const SCHEMA_MIGRATIONS: &str = "schema_migrations";
 const PURGE_CHANNEL_MESSAGE_CONTENT_MIGRATION: &str = "purge_channel_message_content_v1";
 
 /// Enforce ADR-013 on any historical `channel_messages` documents that were
-/// written before the metadata-only refactor. Unsets `text`, `attachments`,
-/// and `raw_platform_data` from matching rows.
+/// written before the metadata-only refactor. Removes message content and
+/// legacy attachment objects, retaining the new provider-reference metadata.
 ///
 /// Gated behind a `schema_migrations` marker so the full-collection scan
 /// (the `$exists` filter cannot use an index) runs exactly once per
@@ -3219,17 +3219,24 @@ async fn purge_legacy_channel_message_content(db: &Database) -> Result<(), mongo
             doc! {
                 "$or": [
                     { "text": { "$exists": true } },
-                    { "attachments": { "$exists": true } },
                     { "raw_platform_data": { "$exists": true } },
                 ],
             },
             doc! {
                 "$unset": {
                     "text": "",
-                    "attachments": "",
                     "raw_platform_data": "",
                 },
             },
+        )
+        .await?;
+
+    // New metadata always has provider_ref. Do not erase it if a migration
+    // is retried after this server has already accepted an inbound attachment.
+    messages
+        .update_many(
+            doc! { "attachments": { "$elemMatch": { "provider_ref": { "$exists": false } } } },
+            doc! { "$unset": { "attachments": "" } },
         )
         .await?;
 
@@ -4610,6 +4617,29 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn channel_media_migration_preserves_provider_metadata_and_purges_legacy_content() {
+        let Some(db) = crate::test_utils::connect_test_database("channel_media_migration").await
+        else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        let rows = db.collection::<Document>("channel_messages");
+        rows.insert_many([
+            doc! {"_id":"legacy", "text":"private", "raw_platform_data":{"text":"private"}, "attachments":[{"url":"old"}]},
+            doc! {"_id":"new", "attachments":[{"content_type":"file", "provider_ref":"file-id"}]},
+        ]).await.unwrap();
+        purge_legacy_channel_message_content(&db).await.unwrap();
+        let legacy = rows.find_one(doc! {"_id":"legacy"}).await.unwrap().unwrap();
+        for key in ["text", "raw_platform_data", "attachments"] {
+            assert!(!legacy.contains_key(key));
+        }
+        let current = rows.find_one(doc! {"_id":"new"}).await.unwrap().unwrap();
+        assert_eq!(current.get_array("attachments").unwrap().len(), 1);
+        purge_legacy_channel_message_content(&db).await.unwrap();
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn billing_ledger_dedupe_index_falls_back_on_historical_duplicates() {

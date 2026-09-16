@@ -1,7 +1,7 @@
 import { useState, type ComponentType, type ReactNode } from "react";
 import type { UseFormReturn } from "react-hook-form";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
-import { CHANNEL_PLATFORMS } from "@/lib/channel-platforms";
+import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import type { CreateChannelBotFormData } from "@/schemas/channels";
 import type { ChannelPlatform } from "@/types/channels";
 import { MANAGED_FLOW_COMPONENTS } from "./managed-flows";
@@ -39,7 +39,8 @@ function ManagedBotConnect({
   renderFields,
   children,
 }: ChannelBotConnectProps) {
-  const descriptor = CHANNEL_PLATFORMS[platform];
+  const { getPlatform } = useChannelPlatformViews();
+  const descriptor = getPlatform(platform);
   const managed = useManagedOnboarding(
     platform,
     Boolean(descriptor.managedFlow),

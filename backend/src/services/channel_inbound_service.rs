@@ -239,6 +239,7 @@ pub(crate) async fn process_inbound_messages(
             &api_key.name,
             inbound,
             Some(reply_token),
+            &state.config.base_url,
         );
 
         // Forward to the agent's callback URL

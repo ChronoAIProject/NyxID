@@ -1,3 +1,4 @@
+import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "@tanstack/react-router";
 import { useAppForm } from "@/components/ui/form";
@@ -23,7 +24,7 @@ import {
   type UpdateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { CHANNEL_PLATFORMS, editableChannelFields } from "@/lib/channel-platforms";
+import { editableChannelFields } from "@/lib/channel-platforms";
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
@@ -84,11 +85,9 @@ import { toast } from "sonner";
 import type {
   ChannelBotDetail,
   ChannelConversationItem,
-  ChannelPlatform,
 } from "@/types/channels";
 import {
   conversationTypeLabel,
-  platformLabel,
   statusBadgeVariant,
   statusLabel,
 } from "./channel-bot-detail.helpers";
@@ -673,9 +672,10 @@ function EditVerificationSection({
 }: {
   readonly bot: ChannelBotDetail;
 }) {
+  const { getPlatform } = useChannelPlatformViews();
   const botId = bot.id;
   const updateBot = useUpdateChannelBot();
-  const fields = editableChannelFields(bot.platform);
+  const fields = editableChannelFields(getPlatform(bot.platform));
   const { register, handleSubmit, reset, formState: { errors, isDirty } } = useAppForm<UpdateChannelBotFormData>({
     resolver: zodResolver(updateChannelBotSchema),
     defaultValues: { bot_token: "", verification_token: "", encrypt_key: "", app_id: "", app_secret: "" },
@@ -736,15 +736,6 @@ function EditVerificationSection({
   );
 }
 
-/**
- * Per-platform deep link to the docs page that explains where to paste a
- * webhook URL. Returned URLs are shown via `CopyableUrlCallout`'s
- * "Learn more →" affordance.
- */
-function platformWebhookDocsHref(platform: ChannelPlatform): string | undefined {
-  return CHANNEL_PLATFORMS[platform]?.webhookDocs;
-}
-
 type ChecklistStatus = "done" | "todo" | "waiting" | "optional";
 
 interface ChecklistRow {
@@ -800,6 +791,7 @@ function ChecklistItem({ row }: { readonly row: ChecklistRow }) {
  * Wave B item B.1.
  */
 function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
+  const { getPlatform } = useChannelPlatformViews();
   const { data: runtimeConfig } = useRuntimeConfig();
   // `runtimeConfig.api_base_url` is the authoritative public base for the
   // backend (set in the deploy env). Falls back to the current window
@@ -847,14 +839,14 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
       label: "Verification",
       hint: bot.setup_instructions?.length
         ? `Use the ${bot.webhook_secret_label ?? "verification secret"} shown once at creation in the platform dashboard.`
-        : `Handled automatically by the ${platformLabel(bot.platform)} webhook secret.`,
+        : `Handled automatically by the ${getPlatform(bot.platform).label} webhook secret.`,
     });
   }
 
   rows.push({
     status: "waiting",
     label: "Inbound test",
-    hint: `Send a test message to the bot in ${platformLabel(bot.platform)}. Once a verified inbound arrives, this bot moves to Active automatically.`,
+    hint: `Send a test message to the bot in ${getPlatform(bot.platform).label}. Once a verified inbound arrives, this bot moves to Active automatically.`,
   });
 
   return (
@@ -864,17 +856,17 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
           Finish webhook setup
         </p>
         <p className="text-[12px] text-muted-foreground">
-          Register the URL below in {platformLabel(bot.platform)} and complete
+          Register the URL below in {getPlatform(bot.platform).label} and complete
           the checklist. The bot moves to Active automatically once{" "}
-          {platformLabel(bot.platform)} delivers a verified inbound message.
+          {getPlatform(bot.platform).label} delivers a verified inbound message.
         </p>
       </div>
 
       <CopyableUrlCallout
         label="Webhook URL"
         url={webhookUrl}
-        description={`Paste this into ${platformLabel(bot.platform)}'s Event Subscriptions / webhook settings.`}
-        docsHref={platformWebhookDocsHref(bot.platform)}
+        description={`Paste this into ${getPlatform(bot.platform).label}'s Event Subscriptions / webhook settings.`}
+        docsHref={getPlatform(bot.platform).webhookDocs}
       />
 
       <ul className="space-y-2 pt-1">
@@ -887,6 +879,7 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
 }
 
 export function ChannelBotDetailPage() {
+  const { getPlatform } = useChannelPlatformViews();
   const { botId } = useParams({ strict: false }) as { botId: string };
   const navigate = useNavigate();
   const currentUserId = useAuthStore((s) => s.user?.id ?? null);
@@ -1003,16 +996,16 @@ export function ChannelBotDetailPage() {
 
       {/* Bot Information */}
       <DetailSection title="Bot Information">
-        <DetailRow label="Credential source" value={bot.credential_source === "connection" ? CHANNEL_PLATFORMS[bot.platform].connectedLabel ?? "Connected account" : bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
+        <DetailRow label="Credential source" value={bot.credential_source === "connection" ? getPlatform(bot.platform).connectedLabel ?? "Connected account" : bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
         <DetailRow
           label="Platform"
-          value={platformLabel(bot.platform)}
+          value={getPlatform(bot.platform).label}
           badge
           badgeVariant="secondary"
         />
         <DetailRow label="Bot Username" value={bot.platform_bot_username || "-"} />
-        <DetailRow label={CHANNEL_PLATFORMS[bot.platform].identityLabel ?? "Platform Bot ID"} value={bot.platform_bot_id || "-"} copyable />
-        {CHANNEL_PLATFORMS[bot.platform].detailFields?.map(({ name, label }) => typeof bot[name] === "string" && bot[name] ? <DetailRow key={name} label={label} value={String(bot[name])} copyable /> : null)}
+        <DetailRow label={getPlatform(bot.platform).identityLabel ?? "Platform Bot ID"} value={bot.platform_bot_id || "-"} copyable />
+        {getPlatform(bot.platform).detailFields?.map(({ name, label }) => typeof bot[name] === "string" && bot[name] ? <DetailRow key={name} label={label} value={String(bot[name])} copyable /> : null)}
         <DetailRow label="Status" value={statusLabel(bot.status)} badge badgeVariant={statusBadgeVariant(bot.status)} />
         {bot.webhook_ingestion === false ? <DetailRow label="Ingestion" value="Polling" /> : <DetailRow label="Webhook" value={bot.webhook_registered ? "Registered" : "Not registered"} />}
         <DetailRow label="Owner" value={ownerLabel} />
@@ -1025,9 +1018,9 @@ export function ChannelBotDetailPage() {
       </DetailSection>
 
       {Boolean(bot.setup_instructions?.length) && (
-        <DetailSection title={`${platformLabel(bot.platform)} Setup`}>
+        <DetailSection title={`${getPlatform(bot.platform).label} Setup`}>
           <div className="space-y-4 p-5">
-            <CopyableUrlCallout label="Callback URL" url={bot.webhook_url ?? ""} docsHref={platformWebhookDocsHref(bot.platform)} />
+            <CopyableUrlCallout label="Callback URL" url={bot.webhook_url ?? ""} docsHref={getPlatform(bot.platform).webhookDocs} />
             <ol className="list-decimal space-y-2 pl-4 text-xs text-muted-foreground">
               {bot.setup_instructions?.map((instruction) => <li key={instruction}>{instruction}</li>)}
             </ol>
@@ -1037,9 +1030,9 @@ export function ChannelBotDetailPage() {
       {bot.permission_setup_url && <LarkPermissionSetupSection bot={bot} />}
       {bot.platform === "telegram-new" && <TelegramNewSetupSection bot={bot} />}
       {(() => {
-        const flow = CHANNEL_PLATFORMS[bot.platform].managedFlow;
+        const flow = getPlatform(bot.platform).managedFlow;
         const ManagedDetail = flow ? MANAGED_FLOW_COMPONENTS[flow].Detail : undefined;
-        return bot.credential_source !== "user" && bot.credential_source && ManagedDetail ? <ManagedDetail bot={bot} orgId={ownerOrgId} /> : editableChannelFields(bot.platform).length > 0 && <EditVerificationSection bot={bot} />;
+        return bot.credential_source !== "user" && bot.credential_source && ManagedDetail ? <ManagedDetail bot={bot} orgId={ownerOrgId} /> : editableChannelFields(getPlatform(bot.platform)).length > 0 && <EditVerificationSection bot={bot} />;
       })()}
 
       {/* Conversation Routes */}
@@ -1051,7 +1044,7 @@ export function ChannelBotDetailPage() {
 
       {/* Delete Confirmation */}
       <DeleteBotDialog
-        deletionNote={bot.credential_source !== "user" ? CHANNEL_PLATFORMS[bot.platform].deletionNote : undefined}
+        deletionNote={bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined}
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}
         onConfirm={() => void handleDelete()}

@@ -201,7 +201,7 @@ Complete the Stripe sandbox checkout opened by the command. The verifier passes 
 | `JWT_ISSUER` | `nyxid` | JWT `iss` claim value |
 | `JWT_ACCESS_TTL_SECS` | `900` (15 min) | Access token lifetime in seconds |
 | `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Refresh token lifetime in seconds |
-| `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens are single-use, scoped to one inbound message + conversation + agent, and cannot be used against other NyxID endpoints. |
+| `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens authorize one send, scoped to one inbound message + conversation + agent. Repeated attachment downloads do not consume the send; edits require the consumed send token. |
 | `JWT_RELAY_CALLBACK_TTL_SECS` | `300` (5 min) | Lifetime of the signed channel-relay callback JWT sent in `X-NyxID-Callback-Token`. |
 | `JWT_RELAY_ACCESS_TTL_SECS` | `300` (5 min) | Lifetime of the `X-NyxID-User-Token` relay access token shipped to a bot callback URL. Kept short (vs. the 900s general access token) because it is a first-party bearer credential that leaves NyxID's trust boundary. It is usable only on proxy/LLM surfaces (rejected elsewhere), inherits the originating agent key's service/node allowlist, and is invalidated when that agent key is revoked. |
 | `JWT_ASSISTANT_FORWARD_TTL_SECS` | `300` (5 min) | **LEGACY / tombstone.** Was the TTL of the retired `assistant_forward` marker token. Live assistant capability uses a standard delegated access token whose 300-second lifetime is the compile-time constant `crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS`; there is no environment variable for that lifetime, so setting this variable changes no live assistant token. See [Assistant Chat Architecture](chat/01-architecture.md#authorization-is-not-caller-passthrough). |
@@ -481,6 +481,7 @@ Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL
 |----------|---------|-------------|
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND` | `1` | Shared per-conversation proactive send rate, checked before authentication; deliberately lower than replies because unsolicited messages are a spam surface |
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST` | `5` | Burst capacity for proactive sends, including retries/idempotent replays |
+| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/reply` and `/send` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64. |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |

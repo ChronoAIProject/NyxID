@@ -457,6 +457,14 @@ pub enum AppError {
 
     #[error("Conversation is not reachable: {0}")]
     ChannelConversationNotReachable(String),
+    #[error("Channel media is not supported")]
+    ChannelMediaUnsupported,
+    #[error("Channel media exceeds the configured size limit")]
+    ChannelMediaTooLarge,
+    #[error("Channel media fetch failed: {0}")]
+    ChannelMediaFetchFailed(String),
+    #[error("Channel attachment not found")]
+    ChannelAttachmentNotFound,
 
     #[error("Platform does not support initiated messages")]
     ChannelPlatformSendUnsupported,
@@ -720,6 +728,10 @@ impl AppError {
             Self::ChannelPlatformEditUnsupported => StatusCode::NOT_IMPLEMENTED,
             Self::DeviceChannelReplyNotAllowed => StatusCode::BAD_REQUEST,
             Self::ChannelConversationNotReachable(_) => StatusCode::BAD_REQUEST,
+            Self::ChannelMediaUnsupported => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::ChannelMediaTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::ChannelMediaFetchFailed(_) => StatusCode::BAD_GATEWAY,
+            Self::ChannelAttachmentNotFound => StatusCode::NOT_FOUND,
             Self::ChannelPlatformSendUnsupported => StatusCode::NOT_IMPLEMENTED,
             Self::ChannelConversationNotAddressable => StatusCode::BAD_REQUEST,
             Self::ChannelAgentInitiateNotAllowed => StatusCode::FORBIDDEN,
@@ -905,6 +917,10 @@ impl AppError {
             Self::ChannelPlatformEditUnsupported => 10007,
             Self::DeviceChannelReplyNotAllowed => 10006,
             Self::ChannelConversationNotReachable(_) => 10011,
+            Self::ChannelMediaUnsupported => 10012,
+            Self::ChannelMediaTooLarge => 10013,
+            Self::ChannelMediaFetchFailed(_) => 10014,
+            Self::ChannelAttachmentNotFound => 10015,
             Self::ChannelPlatformSendUnsupported => 10010,
             Self::ChannelConversationNotAddressable => 10009,
             Self::ChannelAgentInitiateNotAllowed => 10008,
@@ -1126,6 +1142,10 @@ impl AppError {
             Self::ChannelPlatformEditUnsupported => "edit_unsupported",
             Self::DeviceChannelReplyNotAllowed => "device_channel_reply_not_allowed",
             Self::ChannelConversationNotReachable(_) => "channel_conversation_not_reachable",
+            Self::ChannelMediaUnsupported => "channel_media_unsupported",
+            Self::ChannelMediaTooLarge => "channel_media_too_large",
+            Self::ChannelMediaFetchFailed(_) => "channel_media_fetch_failed",
+            Self::ChannelAttachmentNotFound => "channel_attachment_not_found",
             Self::ChannelPlatformSendUnsupported => "channel_platform_send_unsupported",
             Self::ChannelConversationNotAddressable => "channel_conversation_not_addressable",
             Self::ChannelAgentInitiateNotAllowed => "channel_agent_initiate_not_allowed",
@@ -2381,6 +2401,30 @@ mod tests {
                 StatusCode::BAD_REQUEST,
                 "ssh_auth_mode_unsupported_for_operation",
                 1015,
+            ),
+            (
+                AppError::ChannelMediaUnsupported,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "channel_media_unsupported",
+                10012,
+            ),
+            (
+                AppError::ChannelMediaTooLarge,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "channel_media_too_large",
+                10013,
+            ),
+            (
+                AppError::ChannelMediaFetchFailed("provider unavailable".into()),
+                StatusCode::BAD_GATEWAY,
+                "channel_media_fetch_failed",
+                10014,
+            ),
+            (
+                AppError::ChannelAttachmentNotFound,
+                StatusCode::NOT_FOUND,
+                "channel_attachment_not_found",
+                10015,
             ),
             (
                 AppError::ChannelPlatformEditUnsupported,

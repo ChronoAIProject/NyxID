@@ -17,12 +17,15 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "Cannot edit a message authored by another user",
 ];
 
+use crate::services::channel_media_service as media;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities};
+
 use ed25519_dalek::{Signature, VerifyingKey};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
-    BotIdentity, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
+    BotIdentity, InboundAttachment, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
 };
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
@@ -121,6 +124,43 @@ fn extract_sender(payload: &serde_json::Value) -> (String, Option<String>) {
     (String::new(), None)
 }
 
+fn extract_attachments(payload: &serde_json::Value) -> Vec<InboundAttachment> {
+    let files: Vec<_> = if let Some(files) = payload.get("attachments").and_then(|v| v.as_array()) {
+        files.iter().collect()
+    } else {
+        payload
+            .pointer("/data/resolved/attachments")
+            .and_then(|v| v.as_object())
+            .map(|files| files.values().collect())
+            .unwrap_or_default()
+    };
+    files
+        .into_iter()
+        .filter_map(|file| {
+            let mime = file["content_type"].as_str().unwrap_or("");
+            let kind = if mime.starts_with("image/") {
+                "image"
+            } else if mime.starts_with("audio/") {
+                "audio"
+            } else if mime.starts_with("video/") {
+                "video"
+            } else {
+                "file"
+            };
+            Some(InboundAttachment {
+                content_type: kind.into(),
+                url: file["url"].as_str()?.into(),
+                platform_message_id: payload["id"].as_str().map(str::to_string),
+                file_key: file["id"].as_str().map(str::to_string),
+                image_key: None,
+                filename: file["filename"].as_str().map(str::to_string),
+                mime_type: file["content_type"].as_str().map(str::to_string),
+                size_bytes: file["size"].as_u64(),
+            })
+        })
+        .collect()
+}
+
 /// Parse an APPLICATION_COMMAND or MESSAGE_COMPONENT interaction into an
 /// [`InboundMessage`].
 fn parse_interaction(payload: &serde_json::Value) -> Option<InboundMessage> {
@@ -183,7 +223,7 @@ fn parse_interaction(payload: &serde_json::Value) -> Option<InboundMessage> {
         sender_display_name: sender_name,
         content_type: "text".to_string(),
         text,
-        attachments: Vec::new(),
+        attachments: extract_attachments(payload),
         reply_to_platform_message_id: None,
         thread_id,
         raw_data: payload.clone(),
@@ -221,9 +261,12 @@ fn parse_gateway_message(payload: &serde_json::Value) -> Option<InboundMessage> 
         conversation_type: "group".to_string(),
         sender_platform_id: sender_id,
         sender_display_name: sender_name,
-        content_type: if text.is_some() { "text" } else { "unknown" }.to_string(),
+        content_type: extract_attachments(msg)
+            .first()
+            .map(|a| a.content_type.clone())
+            .unwrap_or_else(|| if text.is_some() { "text" } else { "unknown" }.into()),
         text,
-        attachments: Vec::new(),
+        attachments: extract_attachments(msg),
         reply_to_platform_message_id: reply_to,
         thread_id,
         raw_data: payload.clone(),
@@ -308,8 +351,23 @@ fn build_edit_message_request(
     )
 }
 
+#[cfg(test)]
+impl DiscordAdapter {
+    pub(super) fn media_test_adapter(base: &str) -> Self {
+        Self {
+            base_url: base.into(),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for DiscordAdapter {
+    fn display_name(&self) -> &str {
+        "Discord"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::ALL
+    }
     /// No durable thread key. interaction_thread_id is a reply-only follow-up credential.
     fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
         crate::services::channel_platform::OutboundCapabilities {
@@ -329,6 +387,9 @@ impl PlatformAdapter for DiscordAdapter {
             BOT_TOKEN_FIELD, RegistrationDescriptor, RegistrationField,
         };
         RegistrationDescriptor {
+            documentation_url: Some(
+                "https://discord.com/developers/docs/interactions/receiving-and-responding",
+            ),
             required_suffix: " for Discord",
             fields: &[
                 BOT_TOKEN_FIELD,
@@ -473,6 +534,24 @@ impl PlatformAdapter for DiscordAdapter {
         }
     }
 
+    async fn fetch_attachment(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        attachment: &InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        media::download(
+            &attachment.url,
+            &["cdn.discordapp.com", "media.discordapp.net"],
+            Some(&self.base_url),
+            None,
+            attachment,
+            max_bytes,
+        )
+        .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
@@ -481,11 +560,42 @@ impl PlatformAdapter for DiscordAdapter {
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
         let bot_token = credentials.token;
-        let (url, body) = build_message_request(&self.base_url, conversation_id, reply);
-        let resp: serde_json::Value = http
+        let (url, mut body) = build_message_request(&self.base_url, conversation_id, reply);
+        let request = http
             .post(&url)
-            .header("Authorization", format!("Bot {bot_token}"))
-            .json(&body)
+            .header("Authorization", format!("Bot {bot_token}"));
+        let request = if reply.attachments.is_empty() {
+            request.json(&body)
+        } else {
+            let captions: Vec<_> = reply
+                .text
+                .iter()
+                .map(String::as_str)
+                .chain(
+                    reply
+                        .attachments
+                        .iter()
+                        .filter_map(|a| a.caption.as_deref()),
+                )
+                .collect();
+            body["content"] = serde_json::json!(captions.join("\n"));
+            body["attachments"] = serde_json::json!(reply.attachments.iter().enumerate().map(|(i, a)| {
+                serde_json::json!({"id": i, "filename": media::safe_filename(a.filename.as_deref())})
+            }).collect::<Vec<_>>());
+            let mut form = reqwest::multipart::Form::new().text("payload_json", body.to_string());
+            for (i, attachment) in reply.attachments.iter().enumerate() {
+                form = form.part(format!("files[{i}]"), media::multipart_part(attachment)?);
+            }
+            request.multipart(form)
+        };
+        if !reply.attachments.is_empty() {
+            let response = media::response_json(request).await?;
+            return response["id"]
+                .as_str()
+                .map(|id| Some(id.to_string()))
+                .ok_or_else(media::upload_failed);
+        }
+        let resp: serde_json::Value = request
             .send()
             .await
             .map_err(|e| {
@@ -733,6 +843,31 @@ mod tests {
     fn handle_challenge_invalid_json_returns_none() {
         let adapter = DiscordAdapter::default();
         assert!(adapter.handle_challenge(b"not json").is_none());
+    }
+
+    #[test]
+    fn channel_discord_attachment_arrays_and_interaction_files_are_normalized() {
+        let files = serde_json::json!([
+            {"id":"1", "url":"https://cdn.discordapp.com/a", "filename":"a.png", "content_type":"image/png", "size":10},
+            {"id":"2", "url":"https://cdn.discordapp.com/b", "filename":"b.pdf", "content_type":"application/pdf"},
+            {"id":"3", "url":"https://cdn.discordapp.com/c", "content_type":"audio/ogg"},
+            {"id":"4", "url":"https://cdn.discordapp.com/d", "content_type":"video/mp4"}
+        ]);
+        let parsed = extract_attachments(&serde_json::json!({"id":"m1", "attachments":files}));
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|a| a.content_type.as_str())
+                .collect::<Vec<_>>(),
+            ["image", "file", "audio", "video"]
+        );
+        assert_eq!(parsed[0].size_bytes, Some(10));
+        assert_eq!(parsed[0].platform_message_id.as_deref(), Some("m1"));
+        let interaction = extract_attachments(
+            &serde_json::json!({"id":"i1", "data":{"resolved":{"attachments":{"1":files[0]}}}}),
+        );
+        assert_eq!(interaction.len(), 1);
+        assert_eq!(interaction[0].filename.as_deref(), Some("a.png"));
     }
 
     // -- parse_inbound -------------------------------------------------------
@@ -997,6 +1132,7 @@ mod tests {
     #[test]
     fn initiated_request_uses_channel_without_anchor_or_thread() {
         let mut reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".into()),
             reply_to_platform_message_id: None,
             metadata: None,

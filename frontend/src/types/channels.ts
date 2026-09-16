@@ -1,12 +1,5 @@
-export type ChannelPlatform =
-  | "telegram"
-  | "telegram-new"
-  | "discord"
-  | "lark"
-  | "feishu"
-  | "slack"
-  | "x"
-  | "whatsapp";
+/** Platform identifiers are supplied by the server catalog. */
+export type ChannelPlatform = string;
 
 /**
  * All platform values a conversation may report. `"device"` is for HTTP
@@ -92,6 +85,7 @@ export interface ChannelBotDetail extends ChannelBotItem {
 }
 
 export interface CreateChannelBotRequest {
+  readonly [field: string]: string | undefined;
   readonly platform: ChannelPlatform;
   readonly bot_token: string;
   readonly label: string;
@@ -112,6 +106,7 @@ export interface CreateChannelBotRequest {
 }
 
 export interface UpdateChannelBotRequest {
+  readonly [field: string]: string | undefined;
   readonly bot_token?: string;
   readonly label?: string;
   readonly verification_token?: string;
@@ -149,6 +144,7 @@ export interface ManagedBotSetup {
 }
 
 export interface OutboundCapabilities {
+  readonly media: MediaCapabilities;
   readonly initiated_send: boolean;
   readonly reply_to: boolean;
   readonly thread: boolean;
@@ -221,6 +217,7 @@ export interface UpdateChannelConversationRequest {
  * and NyxID retains only routing metadata.
  */
 export interface ChannelMessageItem {
+  readonly attachments?: readonly ChannelAttachment[];
   readonly id: string;
   /** `null` for messages on device channels. */
   readonly channel_bot_id: string | null;
@@ -249,14 +246,16 @@ export interface ChannelRelayReplyRequest {
   readonly reply: {
     readonly text?: string;
     readonly metadata?: Record<string, unknown>;
+    readonly attachments?: readonly OutboundAttachment[];
   };
 }
 
 export interface SendChannelMessageRequest {
   readonly conversation_id: string;
   readonly message: {
-    readonly text: string;
+    readonly text?: string;
     readonly metadata?: Record<string, unknown>;
+    readonly attachments?: readonly OutboundAttachment[];
   };
   readonly idempotency_key?: string;
 }
@@ -266,3 +265,60 @@ export interface SendChannelMessageResponse {
   /** Platform acceptance receipt, not proof that the recipient saw the message. */
   readonly platform_message_id?: string;
 }
+
+export type MediaKind = "image" | "file" | "audio" | "video";
+export interface MediaCapabilities { readonly inbound: readonly MediaKind[]; readonly outbound: readonly MediaKind[] }
+export interface OutboundAttachment {
+  readonly kind: MediaKind;
+  readonly source: { readonly type: "url"; readonly url: string } | { readonly type: "base64"; readonly data: string };
+  readonly filename?: string;
+  readonly mime_type?: string;
+  readonly caption?: string;
+}
+export interface ChannelAttachment {
+  readonly content_type: string;
+  readonly url: string;
+  readonly download_url: string;
+  readonly platform_message_id?: string | null;
+  readonly file_key?: string | null;
+  readonly image_key?: string | null;
+  readonly filename?: string | null;
+  readonly mime_type?: string | null;
+  readonly size_bytes?: number | null;
+}
+export interface ChannelRegistrationField {
+  readonly name: string;
+  readonly label: string;
+  readonly secret: boolean;
+  readonly required: boolean;
+  readonly patchable: boolean;
+  readonly clearable: boolean;
+  readonly storage: string;
+  readonly webhook_secret: boolean;
+  readonly platform_fallback: string | null;
+}
+export interface ChannelPlatformDescriptor {
+  readonly platform: ChannelPlatform | "openclaw";
+  readonly display_name: string;
+  readonly enabled: boolean;
+  readonly managed_only: boolean;
+  readonly managed_only_message: string;
+  readonly ingestion: { readonly mode: "webhook" } | { readonly mode: "poll"; readonly min_interval_secs: number };
+  readonly registration: {
+    readonly documentation_url?: string | null;
+    readonly fields: readonly ChannelRegistrationField[];
+    readonly extra_fields: readonly ChannelRegistrationField[];
+    readonly token_fields: readonly string[];
+    readonly required_suffix: string;
+    readonly automatic_webhook: boolean;
+    readonly webhook_ingestion: boolean;
+    readonly webhook_secret_label: string | null;
+    readonly create_response_status: string;
+    readonly setup_instructions: readonly string[];
+  };
+  readonly managed_onboarding: { readonly flow: string; readonly provider: string; readonly bootstrap_fields: readonly string[]; readonly completion_fields: readonly string[] } | null;
+  readonly platform_credentials: { readonly provider: string; readonly configured: boolean } | null;
+  readonly capabilities: OutboundCapabilities;
+  readonly webhook_path: string | null;
+}
+export interface ChannelPlatformsResponse { readonly platforms: readonly ChannelPlatformDescriptor[] }

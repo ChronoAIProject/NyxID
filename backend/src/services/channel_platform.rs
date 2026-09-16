@@ -44,7 +44,7 @@ pub struct BotIdentity {
 }
 
 /// A normalized inbound message parsed from any platform's webhook payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub platform_message_id: String,
     /// Platform-native conversation/chat identifier
@@ -61,12 +61,12 @@ pub struct InboundMessage {
     pub reply_to_platform_message_id: Option<String>,
     /// Thread or topic identifier (platform-specific)
     pub thread_id: Option<String>,
-    /// Raw webhook payload for auditing and debugging
+    /// Ephemeral raw webhook payload for the callback; never audit or log content.
     pub raw_data: serde_json::Value,
 }
 
 /// A file or media attachment on an inbound message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InboundAttachment {
     /// Content category: "image", "file", "audio", "video"
     pub content_type: String,
@@ -85,6 +85,111 @@ pub struct InboundAttachment {
     pub filename: Option<String>,
     pub mime_type: Option<String>,
     pub size_bytes: Option<u64>,
+}
+
+/// Adapter-declared normalized media types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    File,
+    Audio,
+    Video,
+}
+
+impl MediaKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::File => "file",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct MediaCapabilities {
+    pub inbound: &'static [MediaKind],
+    pub outbound: &'static [MediaKind],
+}
+impl MediaCapabilities {
+    pub const NONE: Self = Self {
+        inbound: &[],
+        outbound: &[],
+    };
+    pub const ALL: Self = Self {
+        inbound: &[
+            MediaKind::Image,
+            MediaKind::File,
+            MediaKind::Audio,
+            MediaKind::Video,
+        ],
+        outbound: &[
+            MediaKind::Image,
+            MediaKind::File,
+            MediaKind::Audio,
+            MediaKind::Video,
+        ],
+    };
+}
+
+/// Public request shape. Sources and captions never enter persistent storage.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OutboundAttachment {
+    pub kind: MediaKind,
+    pub source: OutboundMediaSource,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub caption: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutboundMediaSource {
+    Url { url: String },
+    Base64 { data: String },
+}
+
+/// Internal adapter boundary: all sources have been validated and materialized.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MaterializedAttachment {
+    pub kind: MediaKind,
+    pub bytes: bytes::Bytes,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub caption: Option<String>,
+}
+
+pub struct FetchedMedia {
+    pub bytes: bytes::Bytes,
+    pub mime_type: Option<String>,
+    pub filename: Option<String>,
+}
+
+macro_rules! redacted_media_debug {
+    ($($ty:ty),+) => {$(
+        impl std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($ty), "([REDACTED])"))
+            }
+        }
+    )+};
+}
+redacted_media_debug!(
+    InboundMessage,
+    InboundAttachment,
+    OutboundAttachment,
+    OutboundMediaSource,
+    MaterializedAttachment,
+    FetchedMedia
+);
+
+/// Additive discovery response, keeping the transport declaration independent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ChannelCapabilities {
+    #[serde(flatten)]
+    pub outbound: OutboundCapabilities,
+    pub media: MediaCapabilities,
 }
 
 /// What the native outbound transport actually preserves. Contract-tested in channel_adapters.
@@ -133,6 +238,8 @@ pub fn classify_upstream_refusal(
 /// A reply to send back to the chat platform.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OutboundReply {
+    #[serde(default)]
+    pub attachments: Vec<MaterializedAttachment>,
     pub text: Option<String>,
     /// Platform message ID to reply to (for threading)
     pub reply_to_platform_message_id: Option<String>,
@@ -240,6 +347,21 @@ pub trait PlatformAdapter: Send + Sync {
     fn platform_id(&self) -> &str;
 
     fn outbound_capabilities(&self) -> OutboundCapabilities;
+    fn media_capabilities(&self) -> MediaCapabilities;
+
+    fn display_name(&self) -> &str {
+        self.platform_id()
+    }
+
+    async fn fetch_attachment(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _attachment: &InboundAttachment,
+        _max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        Err(crate::errors::AppError::ChannelMediaUnsupported)
+    }
 
     fn ingestion(&self) -> Ingestion {
         Ingestion::Webhook
@@ -580,6 +702,7 @@ mod tests {
     #[test]
     fn outbound_reply_serde_roundtrip() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".to_string()),
             reply_to_platform_message_id: Some("msg-123".to_string()),
             metadata: Some(serde_json::json!({"parse_mode": "markdown"})),
@@ -597,6 +720,7 @@ mod tests {
     #[test]
     fn outbound_reply_serde_roundtrip_with_none_fields() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: None,
             reply_to_platform_message_id: None,
             metadata: None,

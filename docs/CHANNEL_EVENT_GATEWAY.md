@@ -444,7 +444,7 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 
 ### Breaking API change
 
-`GET /channel-relay/messages/{conversation_id}` and `GET /channel-conversations/{id}/messages` **no longer return `text` or `attachments` fields** on message items. Agents that need historical bodies must retain their own conversation state. Documented in the NyxID skill (`skills/nyxid/SKILL.md`) and the changelog.
+`GET /channel-relay/messages/{conversation_id}` and `GET /channel-conversations/{id}/messages` **do not return message text or media bytes**. The bot relay history now additionally returns inbound attachment routing metadata and `download_url`; device events retain no attachment content and cannot use the media-download endpoint. Agents that need historical bodies must retain their own conversation state. Documented in the NyxID skill (`skills/nyxid/SKILL.md`) and the changelog.
 
 ## Related Documents
 

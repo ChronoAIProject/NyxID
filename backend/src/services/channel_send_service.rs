@@ -18,7 +18,12 @@ pub enum ClaimResult {
 }
 
 /// Canonicalize objects recursively so key order does not alter delivery identity.
-pub fn delivery_fingerprint(text: Option<&str>, metadata: Option<&serde_json::Value>) -> String {
+pub fn delivery_fingerprint(
+    text: Option<&str>,
+    metadata: Option<&serde_json::Value>,
+    attachments: &[super::channel_platform::OutboundAttachment],
+    max_bytes: u64,
+) -> AppResult<String> {
     fn canonical(value: serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(object) => {
@@ -33,8 +38,21 @@ pub fn delivery_fingerprint(text: Option<&str>, metadata: Option<&serde_json::Va
             other => other,
         }
     }
-    let payload = canonical(serde_json::json!({ "text": text, "metadata": metadata }));
-    hex::encode(Sha256::digest(payload.to_string().as_bytes()))
+    let media = attachments.iter().map(|a| {
+        use super::channel_platform::OutboundMediaSource;
+        let source = match &a.source {
+            OutboundMediaSource::Url { url } => serde_json::json!({"url": url}),
+            OutboundMediaSource::Base64 { data } => serde_json::json!({"sha256": hex::encode(Sha256::digest(super::channel_media_service::decode_base64(data, max_bytes)?))}),
+        };
+        Ok(serde_json::json!({"kind": a.kind, "source": source, "filename": a.filename, "mime_type": a.mime_type, "caption": a.caption}))
+    }).collect::<AppResult<Vec<_>>>()?;
+    // Preserve fingerprints of pre-media, text-only claims during rolling upgrades.
+    let mut payload = serde_json::json!({ "text": text, "metadata": metadata });
+    if !media.is_empty() {
+        payload["attachments"] = serde_json::json!(media);
+    }
+    let payload = canonical(payload);
+    Ok(hex::encode(Sha256::digest(payload.to_string().as_bytes())))
 }
 
 pub async fn claim_send(
@@ -146,6 +164,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn channel_media_fingerprint_binds_each_attachment_field_and_decoded_content() {
+        use crate::services::channel_platform::{
+            MediaKind, OutboundAttachment, OutboundMediaSource,
+        };
+        let attachment = OutboundAttachment {
+            kind: MediaKind::File,
+            source: OutboundMediaSource::Base64 {
+                data: "aGVsbG8=".into(),
+            },
+            filename: Some("a.txt".into()),
+            mime_type: Some("text/plain".into()),
+            caption: Some("caption".into()),
+        };
+        let fingerprint = |a: &OutboundAttachment| {
+            delivery_fingerprint(None, None, std::slice::from_ref(a), 100).unwrap()
+        };
+        let original = fingerprint(&attachment);
+        for field in 0..6 {
+            let mut changed = attachment.clone();
+            match field {
+                0 => changed.kind = MediaKind::Image,
+                1 => {
+                    changed.source = OutboundMediaSource::Base64 {
+                        data: "d29ybGQ=".into(),
+                    }
+                }
+                2 => {
+                    changed.source = OutboundMediaSource::Url {
+                        url: "https://public.example/a".into(),
+                    }
+                }
+                3 => changed.filename = Some("b.txt".into()),
+                4 => changed.caption = None,
+                _ => changed.mime_type = None,
+            }
+            assert_ne!(original, fingerprint(&changed));
+        }
+        assert_eq!(original, fingerprint(&attachment));
+        assert!(!original.contains("caption"));
+    }
+
+    #[test]
     fn concrete_platform_address_rejects_empty_and_wildcard_routes() {
         for id in ["", " \t\n", "*", "  *  "] {
             assert!(!is_concrete_platform_address(id), "{id:?}");
@@ -215,16 +275,16 @@ mod tests {
         let first = serde_json::from_str(r#"{"z":[{"b":2,"a":1}],"a":true}"#).unwrap();
         let reordered = serde_json::from_str(r#"{"a":true,"z":[{"a":1,"b":2}]}"#).unwrap();
         assert_eq!(
-            delivery_fingerprint(Some("hello"), Some(&first)),
-            delivery_fingerprint(Some("hello"), Some(&reordered))
+            delivery_fingerprint(Some("hello"), Some(&first), &[], 1024).unwrap(),
+            delivery_fingerprint(Some("hello"), Some(&reordered), &[], 1024).unwrap()
         );
         assert_ne!(
-            delivery_fingerprint(Some("hello"), Some(&first)),
-            delivery_fingerprint(Some("changed"), Some(&first))
+            delivery_fingerprint(Some("hello"), Some(&first), &[], 1024).unwrap(),
+            delivery_fingerprint(Some("changed"), Some(&first), &[], 1024).unwrap()
         );
         assert_ne!(
-            delivery_fingerprint(Some("hello"), Some(&first)),
-            delivery_fingerprint(Some("hello"), None)
+            delivery_fingerprint(Some("hello"), Some(&first), &[], 1024).unwrap(),
+            delivery_fingerprint(Some("hello"), None, &[], 1024).unwrap()
         );
     }
 }

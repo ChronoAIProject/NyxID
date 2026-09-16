@@ -1,13 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
   channelTestMessageSchema,
-  createChannelBotSchema,
+  buildCreateChannelBotSchema,
   updateChannelBotSchema,
   createChannelConversationSchema,
   createDeviceConversationSchema,
   updateChannelConversationSchema,
   conversationPlatformSchema,
 } from "./channels";
+
+import { platformFixtures } from "@/test/fixtures/channel-platforms";
+const createChannelBotSchema = buildCreateChannelBotSchema(platformFixtures);
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -187,9 +190,9 @@ describe("conversation schemas", () => {
 });
 
 describe("conversationPlatformSchema", () => {
-  it("includes device but not slack (read-back set)", () => {
+  it("includes device and slack (read-back set)", () => {
     expect(conversationPlatformSchema.safeParse("device").success).toBe(true);
-    expect(conversationPlatformSchema.safeParse("slack").success).toBe(false);
+    expect(conversationPlatformSchema.safeParse("slack").success).toBe(true);
   });
 });
 

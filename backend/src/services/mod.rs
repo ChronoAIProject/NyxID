@@ -35,6 +35,7 @@ pub mod channel_credentials;
 pub mod channel_event_service;
 pub mod channel_inbound_service;
 pub mod channel_managed;
+pub mod channel_media_service;
 pub mod channel_platform;
 pub mod channel_poll_service;
 pub mod channel_registration;
@@ -161,3 +162,5 @@ pub mod ws_frame_injector;
 
 pub mod inference_service;
 pub mod platform_key_service;
+
+pub mod channel_platform_catalog_service;

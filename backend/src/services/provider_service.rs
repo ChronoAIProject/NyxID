@@ -49,6 +49,7 @@ const TWITTER_DEFAULT_SCOPES: &[&str] = &[
     "offline.access",
     "dm.read",
     "dm.write",
+    "media.write",
 ];
 
 /// Seed default AI provider configurations at startup (idempotent).
@@ -776,9 +777,10 @@ pub async fn seed_default_providers(
             doc! { "slug": "twitter", "$or": [
                 { "default_scopes": { "$ne": "dm.read" } },
                 { "default_scopes": { "$ne": "dm.write" } },
+                { "default_scopes": { "$ne": "media.write" } },
             ] },
             doc! {
-                "$addToSet": { "default_scopes": { "$each": ["dm.read", "dm.write"] } },
+                "$addToSet": { "default_scopes": { "$each": ["dm.read", "dm.write", "media.write"] } },
                 "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
             },
         )

@@ -1111,6 +1111,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PlatformAdapter for RecordingAdapter {
+        fn media_capabilities(&self) -> crate::services::channel_platform::MediaCapabilities {
+            crate::services::channel_platform::MediaCapabilities::NONE
+        }
         fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
             crate::services::channel_platform::OutboundCapabilities::NONE
         }
@@ -1414,6 +1417,9 @@ mod tests {
 
         #[async_trait::async_trait]
         impl PlatformAdapter for TelegramAdapter {
+            fn media_capabilities(&self) -> crate::services::channel_platform::MediaCapabilities {
+                crate::services::channel_platform::MediaCapabilities::NONE
+            }
             fn outbound_capabilities(
                 &self,
             ) -> crate::services::channel_platform::OutboundCapabilities {

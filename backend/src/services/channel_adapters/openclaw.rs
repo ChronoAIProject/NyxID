@@ -9,6 +9,8 @@
 //! mostly no-ops -- the real message processing stays in the legacy handler at
 //! `handlers/openclaw_channel.rs` until the full migration is complete.
 
+use crate::services::channel_platform::MediaCapabilities;
+
 use crate::errors::AppResult;
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
@@ -31,6 +33,12 @@ impl Default for OpenClawAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for OpenClawAdapter {
+    fn display_name(&self) -> &str {
+        "OpenClaw"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::NONE
+    }
     fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
         crate::services::channel_platform::OutboundCapabilities {
             initiated_send: false,
@@ -261,6 +269,7 @@ mod tests {
         let adapter = OpenClawAdapter;
         let http = reqwest::Client::new();
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("test".to_string()),
             reply_to_platform_message_id: None,
             metadata: None,
@@ -334,6 +343,7 @@ mod tests {
     async fn unsupported_send_makes_no_http_request() {
         let server = wiremock::MockServer::start().await;
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".into()),
             reply_to_platform_message_id: None,
             metadata: None,

@@ -25,7 +25,7 @@ type HmacSha256 = Hmac<Sha256>;
 // ---------------------------------------------------------------------------
 
 /// Normalized message payload delivered to the agent's callback URL.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct CallbackPayload {
     pub message_id: String,
     pub correlation_id: String,
@@ -52,6 +52,22 @@ pub struct CallbackPayload {
     pub raw_platform_data: Option<serde_json::Value>,
 }
 
+impl std::fmt::Debug for CallbackPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CallbackPayload([REDACTED])")
+    }
+}
+impl std::fmt::Debug for CallbackContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CallbackContent([REDACTED])")
+    }
+}
+impl std::fmt::Debug for CallbackAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CallbackAttachment([REDACTED])")
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CallbackAgent {
     pub api_key_id: String,
@@ -73,7 +89,7 @@ pub struct CallbackSender {
     pub display_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct CallbackContent {
     #[serde(rename = "type")]
     pub content_type: String,
@@ -83,8 +99,9 @@ pub struct CallbackContent {
     pub attachments: Vec<CallbackAttachment>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct CallbackAttachment {
+    pub download_url: String,
     pub content_type: String,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,7 +146,8 @@ pub async fn inbound_platform_message_exists(
 /// Persist inbound-message metadata (platform -> agent direction).
 ///
 /// Per ADR-013, this record stores routing metadata only — not the message
-/// body, attachments, or raw webhook payload. The full message content is
+/// body, attachment bytes, or raw webhook payload. Provider handles and
+/// descriptive inbound attachment metadata are retained for authorized downloads. The full message content is
 /// held in memory for the duration of the callback forward and then
 /// discarded. Downstream agents keep any history they need.
 #[allow(clippy::too_many_arguments)]
@@ -143,6 +161,20 @@ pub async fn store_inbound_message(
     agent_api_key_id: &str,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        attachments: inbound
+            .attachments
+            .iter()
+            .map(|a| crate::models::channel_message::StoredAttachment {
+                content_type: a.content_type.clone(),
+                provider_ref: a.url.clone(),
+                platform_message_id: a.platform_message_id.clone(),
+                file_key: a.file_key.clone(),
+                image_key: a.image_key.clone(),
+                filename: a.filename.clone(),
+                mime_type: a.mime_type.clone(),
+                size_bytes: a.size_bytes,
+            })
+            .collect(),
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: Some(channel_bot_id.to_string()),
         conversation_id: conversation_id.to_string(),
@@ -186,9 +218,11 @@ pub async fn store_outbound_message(
     reply_to_message_id: Option<&str>,
     platform_message_id: Option<&str>,
     platform_conversation_id: Option<&str>,
+    content_type: &str,
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
+        attachments: vec![],
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: Some(channel_bot_id.to_string()),
         conversation_id: conversation_id.to_string(),
@@ -199,7 +233,7 @@ pub async fn store_outbound_message(
         platform_message_id: platform_message_id.map(String::from),
         sender_platform_id: None,
         sender_display_name: None,
-        content_type: "text".to_string(),
+        content_type: content_type.to_string(),
         thread_id: None,
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: None,
@@ -251,6 +285,7 @@ pub async fn store_device_event_message(
     inherited_thread_id: Option<String>,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        attachments: vec![],
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: channel_bot_id.map(String::from),
         conversation_id: conversation_id.to_string(),
@@ -605,11 +640,14 @@ pub fn build_callback_payload(
     api_key_name: &str,
     inbound: &InboundMessage,
     reply_token: Option<String>,
+    base_url: &str,
 ) -> CallbackPayload {
     let attachments: Vec<CallbackAttachment> = inbound
         .attachments
         .iter()
-        .map(|a| CallbackAttachment {
+        .enumerate()
+        .map(|(index, a)| CallbackAttachment {
+            download_url: super::channel_media_service::download_url(base_url, &message.id, index),
             content_type: a.content_type.clone(),
             url: a.url.clone(),
             platform_message_id: a.platform_message_id.clone(),
@@ -775,6 +813,7 @@ mod tests {
             None,
             Some(platform_message_id),
             Some(&conversation.platform_conversation_id),
+            "text",
         )
         .await
         .expect("insert outbound message");
@@ -844,6 +883,7 @@ mod tests {
             None,
             Some(platform_message_id),
             Some(&conversation.platform_conversation_id),
+            "text",
         )
         .await
         .expect("insert first outbound message");
@@ -860,6 +900,7 @@ mod tests {
             None,
             Some(platform_message_id),
             Some(&conversation.platform_conversation_id),
+            "text",
         )
         .await
         .expect("insert duplicate outbound message");
@@ -978,6 +1019,8 @@ mod tests {
             content_type: "image".to_string(),
             text: None,
             attachments: vec![CallbackAttachment {
+                download_url:
+                    "https://nyxid.example/api/v1/channel-relay/messages/msg/attachments/0".into(),
                 content_type: "image".to_string(),
                 url: "https://example.com/photo.jpg".to_string(),
                 platform_message_id: None,
@@ -998,6 +1041,7 @@ mod tests {
     fn build_callback_payload_preserves_provider_attachment_handles() {
         let now = Utc::now();
         let message = ChannelMessage {
+            attachments: vec![],
             id: "msg-attachment".to_string(),
             channel_bot_id: Some("bot-1".to_string()),
             conversation_id: "conv-1".to_string(),
@@ -1056,10 +1100,24 @@ mod tests {
             raw_data: serde_json::json!({ "event": "fixture" }),
         };
 
-        let payload =
-            build_callback_payload(&message, &conversation, "key-1", "agent", &inbound, None);
+        let payload = build_callback_payload(
+            &message,
+            &conversation,
+            "key-1",
+            "agent",
+            &inbound,
+            None,
+            "https://nyxid.example",
+        );
         let json = serde_json::to_value(&payload).expect("serialize callback payload");
         let attachment = &json["content"]["attachments"][0];
+        assert_eq!(
+            attachment["download_url"],
+            format!(
+                "https://nyxid.example/api/v1/channel-relay/messages/{}/attachments/0",
+                message.id
+            )
+        );
 
         assert_eq!(attachment["content_type"], "file");
         assert_eq!(attachment["platform_message_id"], "om_file_msg");
@@ -1223,6 +1281,7 @@ mod tests {
             channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_media_max_bytes: 20 * 1024 * 1024,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
             channel_relay_initiate_rate_limit_per_second: 1,
