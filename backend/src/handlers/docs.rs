@@ -212,10 +212,16 @@ pub async fn service_openapi_json(
                 ));
             };
 
-            // Serialize the shared `Arc<Value>` directly into bytes so we
-            // don't deep-clone the parsed spec tree on every cache hit.
-            let spec = api_docs_service::fetch_spec_json_scoped(spec_url, &owner_id).await?;
-            let body = serde_json::to_vec(spec.as_ref())
+            let cached = api_docs_service::fetch_spec_json_scoped(spec_url, &owner_id).await?;
+            let mut spec = std::sync::Arc::unwrap_or_clone(cached);
+            api_docs_service::rewrite_openapi_servers(
+                &mut spec,
+                &format!(
+                    "{}/api/v1/proxy/{service_id}/",
+                    state.config.base_url.trim_end_matches('/')
+                ),
+            );
+            let body = serde_json::to_vec(&spec)
                 .map_err(|err| AppError::Internal(format!("serialize openapi spec: {err}")))?;
             Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
         }
@@ -479,9 +485,18 @@ mod tests {
             .insert_one(user_service.clone())
             .await
             .unwrap();
-        cache_test_spec(SPEC_URL, Some(&caller_id), openapi_spec());
+        let mut instance_spec = openapi_spec();
+        let outside = serde_json::json!([{"url":"https://outside.test"}]);
+        instance_spec["paths"]["/ping"]["servers"] = outside.clone();
+        instance_spec["paths"]["/ping"]["get"]["servers"] = outside;
+        cache_test_spec(SPEC_URL, Some(&caller_id), instance_spec);
 
         let state = test_app_state(db);
+        let expected_proxy = format!(
+            "{}/api/v1/proxy/{}/",
+            state.config.base_url.trim_end_matches('/'),
+            user_service.id
+        );
         let response = service_openapi_json(
             State(state),
             test_auth_user(&caller_id),
@@ -502,6 +517,10 @@ mod tests {
 
         assert_eq!(spec["openapi"], "3.1.0");
         assert!(spec["paths"]["/ping"]["get"].is_object());
+        assert_eq!(spec["servers"][0]["url"], expected_proxy);
+        assert!(spec["paths"]["/ping"].get("servers").is_none());
+        assert!(spec["paths"]["/ping"]["get"].get("servers").is_none());
+        assert!(!spec.to_string().contains("outside.test"));
     }
 
     #[tokio::test]

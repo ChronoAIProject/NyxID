@@ -539,9 +539,13 @@ async fn main() {
         .expect("Failed to seed default providers");
 
     // Seed downstream services for default providers (idempotent)
-    services::provider_service::seed_default_services(&db, encryption_keys.as_ref())
-        .await
-        .expect("Failed to seed default services");
+    services::provider_service::seed_default_services_with_destinations(
+        &db,
+        encryption_keys.as_ref(),
+        config.google_workspace_multi_origin_enabled,
+    )
+    .await
+    .expect("Failed to seed default services");
 
     services::inference_service::backfill(&db)
         .await
@@ -556,9 +560,12 @@ async fn main() {
     // Materialize ServiceEndpoint rows for seeded catalog services from the
     // hosted overlay specs so /api/v1/mcp/config publishes concrete
     // service_id + endpoint_id operations for workflow consumers (#1290).
-    services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
-        .await
-        .expect("Failed to sync seeded catalog spec endpoints");
+    services::catalog_spec_sync::sync_seeded_service_endpoints_with_destinations(
+        &db,
+        config.google_workspace_multi_origin_enabled,
+    )
+    .await
+    .expect("Failed to sync seeded catalog spec endpoints");
 
     // Auto-run endpoint discovery for admin catalog services that have an
     // openapi_spec_url but never had discover-endpoints run (#1290

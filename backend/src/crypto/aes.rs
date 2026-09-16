@@ -1044,6 +1044,7 @@ mod tests {
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
+            google_workspace_multi_origin_enabled: true,
             proxy_max_body_size: 100 * 1024 * 1024,
             llm_max_body_size: 10 * 1024 * 1024,
             proxy_stream_idle_timeout_secs: 60,

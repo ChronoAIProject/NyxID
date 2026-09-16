@@ -37,6 +37,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 8000-8005 node/proxy: 8000 `NodeNotFound`, 8001 `NodeOffline`, 8002 `NodeProxyTimeout`, 8003 `NodeRegistrationFailed`, 8004 `NodeCredentialMissing`, 8005 `WsProxyDownstream`
 - 8006-8011 pending-credential protocol: 8006 `PendingCredentialDecryptFailed`, 8007 `PendingCredentialVersionUnsupported`, 8008 `PendingCredentialCiphertextTooLarge`, 8009 `PendingCredentialPubkeyAwaiting`, 8010 `PendingCredentialNodeOffline`, 8011 `PendingCredentialQueueFull`
 - 8012 `ClientDisconnected` (HTTP 499, nginx's "Client Closed Request"): the caller hung up before the response could be written and upstream work was cancelled. Never delivered to anyone — it exists so cancelled work is not counted as a server fault in telemetry and audit. Do not map it to 5xx.
+- 8013 `NodeHttpSignatureUnsupported` (HTTP 502): target-selected HTTP requests require a node advertising HTTP signature v2
 - 9500-9599 device-code binding: 9500 `DeviceCodeNotFound`, 9501 `DeviceCodeExpired`, 9502 `DevicePollSignatureInvalid`, 9503 `DeviceUserCodeInvalid`, 9504 `DeviceCodePending`, 9505 `DeviceCodeAlreadyDelivered`, 9506 `DeviceCodeRateLimited`, 9507 `DeviceCodeLocked`, 9508 `DeviceCodeSlowDown`
 - 10000-10011 channel relay: 10000 `ChannelBotNotFound`, 10001 `ChannelBotInactive`, 10002 `ChannelBotLimitReached`, 10003 `ChannelWebhookVerificationFailed`, 10004 `ChannelRelayFailed`, 10005 `ChannelPlatformError`, 10006 `DeviceChannelReplyNotAllowed`, 10007 `ChannelPlatformEditUnsupported`, 10008 `ChannelAgentInitiateNotAllowed`, 10009 `ChannelConversationNotAddressable`, 10010 `ChannelPlatformSendUnsupported`, 10011 `ChannelConversationNotReachable`
 - 11000-11099 oracle relay: 11000 `OraclePoolNotFound`, 11001 `OraclePoolSlugTaken`, 11002 `OraclePoolInactive`, 11003 `OracleWorkerTokenInvalid`, 11004 `OracleQueueFull`, 11005 `OracleQuotaExceeded`, 11006 `OracleTaskNotFound`, 11007 `OracleSessionNotFound`, 11008 `OracleSessionClosed`, 11009 `OraclePayloadTooLarge`, 11010 `OracleExtractDisabled`, 11011 `OracleWorkerNotFound`, 11012 `OracleWorkerCapabilityUnsupported`, 11013 `OracleWorkerCommandNotFound`, 11014 `OracleWorkerLabelUnavailable`, 11015 `OracleLoginSnapshotNotFound`
@@ -48,6 +49,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11700 `RequestBodyTooLarge` (HTTP 413): a bounded proxy or forwarding ingress exceeded its configured byte limit
 - 11900-11909 Agent Key login: 11900 `AgentKeyLoginNotFound`, 11901 `AgentKeyLoginExpired`, 11902 `AgentKeyLoginPending`, 11903 `AgentKeyLoginSlowDown`, 11904 `AgentKeyLoginDenied`, 11905 `AgentKeyLoginAlreadyDelivered`, 11906 `AgentKeyLoginRateLimited`, 11907 `AgentKeyLoginUserCodeInvalid`, 11908 `AgentKeyLoginKeyIneligible`, 11909 `AgentKeyCredentialNotFound`
 - 12000-12004 one-time login codes: 12000 `LoginCodeInvalid`, 12001 `LoginCodeExpired`, 12002 `LoginCodeCancelled`, 12003 `LoginCodeRedeemed`, 12004 `LoginCodeRateLimited`
+- 12100 `WorkspaceDestinationsNotActivated` (HTTP 503): temporary Workspace editor activation gate; expected rollout state, excluded from proxy-fault telemetry
 
 ### 4. Frontend Patterns
 
@@ -462,6 +464,7 @@ INVITE_CODE_REQUIRED=true           # Gate registration behind invite codes (iss
 AUTO_VERIFY_EMAIL=false             # Dev only: skip email verification on registration
 
 # Optional
+GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=false # Temporary readers-before-writer upgrade gate. First true startup CAS-installs the known-default Workspace destination map/policy and additively syncs 13 editor endpoints. Idempotent; safe to leave true. Remove after every environment activates.
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET
 SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_ADDRESS

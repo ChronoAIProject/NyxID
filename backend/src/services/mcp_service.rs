@@ -170,6 +170,7 @@ pub struct McpExecContext<'a> {
 
 /// A downstream service with its active endpoints, ready for MCP tool generation.
 pub struct McpToolService {
+    pub workspace_destinations_pending: bool,
     pub service_id: String,
     pub service_name: String,
     pub service_slug: String,
@@ -248,6 +249,7 @@ fn mcp_credential_class(
 /// A single endpoint within a service.
 #[derive(Default)]
 pub struct McpToolEndpoint {
+    pub target_id: Option<String>,
     pub endpoint_id: String,
     pub name: String,
     pub description: Option<String>,
@@ -291,7 +293,7 @@ pub struct McpOperationCatalog {
 /// Descriptive labels are excluded; every execution-relevant selector and
 /// schema field is included.
 pub fn endpoint_contract_digest(endpoint: &McpToolEndpoint) -> String {
-    canonical_sha256(serde_json::json!({
+    let mut contract = serde_json::json!({
         "contract_version": "nyxid-exact-endpoint.v1",
         "endpoint_id": endpoint.endpoint_id,
         "method": endpoint.method,
@@ -301,7 +303,11 @@ pub fn endpoint_contract_digest(endpoint: &McpToolEndpoint) -> String {
         "request_content_type": endpoint.request_content_type,
         "request_body_required": endpoint.request_body_required,
         "response": endpoint.response,
-    }))
+    });
+    if let Some(target_id) = &endpoint.target_id {
+        contract["target_id"] = target_id.clone().into();
+    }
+    canonical_sha256(contract)
 }
 
 /// Digest of one exact invocation. This binds the server-published endpoint
@@ -1357,6 +1363,8 @@ async fn load_user_tools_with_grants(
             .unwrap_or_default();
 
         result.push(McpToolService {
+            workspace_destinations_pending: catalog_policy
+                .is_some_and(super::destination_routing::workspace_destinations_pending),
             service_id: us.id.clone(),
             service_name: endpoint_label.to_string(),
             service_slug: us.slug.clone(),
@@ -1395,6 +1403,8 @@ async fn load_user_tools_with_grants(
         let durable_endpoint_metadata = service_endpoint_durable_metadata(&endpoint_rows);
 
         result.push(McpToolService {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(svc),
             service_id: svc.id.clone(),
             service_name: svc.name.clone(),
             service_slug: svc.slug.clone(),
@@ -1420,6 +1430,7 @@ async fn load_user_tools_with_grants(
 fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
     eps.iter()
         .map(|ep| McpToolEndpoint {
+            target_id: ep.target_id.clone(),
             endpoint_id: ep.id.clone(),
             name: ep.name.clone(),
             description: ep.description.clone(),
@@ -1504,6 +1515,7 @@ async fn fetch_and_parse_user_spec(
             },
         );
         endpoints.push(McpToolEndpoint {
+            target_id: None,
             // Dynamic operations have no persisted row. Hash the producer's
             // OpenAPI operationId, falling back to canonical method/path, so
             // callers receive a stable opaque ID and never derive identity.
@@ -1972,6 +1984,7 @@ fn classify_credential(
 /// predefined API endpoints. Lets the AI make arbitrary HTTP requests.
 fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
     McpToolEndpoint {
+        target_id: None,
         endpoint_id: GENERIC_PROXY_ENDPOINT_ID.to_string(),
         name: "request".to_string(),
         description: Some(format!(
@@ -2526,6 +2539,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             .iter()
             .filter(|rule| rule.enabled)
             .map(|rule| McpToolEndpoint {
+                target_id: None,
                 endpoint_id: rule.id.clone(),
                 name: public_endpoint_tool_name(&rule.method, &rule.path_pattern),
                 description: Some(format!(
@@ -2548,6 +2562,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
         }
 
         public_services.push(McpToolService {
+            workspace_destinations_pending: false,
             service_id: svc.id.clone(),
             service_name: svc.name.clone(),
             service_slug: format!("public__{}", sanitize_tool_segment(&svc.slug)),
@@ -3041,6 +3056,24 @@ pub fn resolve_tool_call<'a>(
     Some((service, endpoint))
 }
 
+pub fn inactive_workspace_tool(name: &str, services: &[McpToolService]) -> bool {
+    let Some((slug, operation)) = name.split_once("__") else {
+        return false;
+    };
+    services
+        .iter()
+        .any(|service| service.service_slug == slug && service.workspace_destinations_pending)
+        && ["google-docs", "google-sheets", "google-slides"]
+            .into_iter()
+            .any(|key| {
+                super::catalog_spec_registry::spec_for_key(key).is_some_and(|spec| {
+                    super::openapi_parser::parse_openapi_spec_value(&spec).is_ok_and(|endpoints| {
+                        endpoints.iter().any(|endpoint| endpoint.name == operation)
+                    })
+                })
+            })
+}
+
 // ---------------------------------------------------------------------------
 // Proxy argument building (ported from TypeScript buildProxyArgs)
 // ---------------------------------------------------------------------------
@@ -3225,6 +3258,7 @@ pub fn build_proxy_args(
 }
 
 pub struct PreparedProxyCall {
+    endpoint_target: Option<Option<String>>,
     method: reqwest::Method,
     path: String,
     query: Option<String>,
@@ -3235,6 +3269,54 @@ pub struct PreparedProxyCall {
 }
 
 impl PreparedProxyCall {
+    pub(crate) fn resolve_destination(
+        &self,
+        target: &mut proxy_service::ProxyTarget,
+    ) -> AppResult<()> {
+        if target.service.proxy_operation_policy.is_none()
+            && target.service.destination_targets.is_empty()
+            && self.endpoint_target.as_ref().is_none_or(Option::is_none)
+        {
+            return Ok(());
+        }
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_built(&self.path)?;
+        crate::services::destination_routing::resolve_target(
+            target,
+            self.method.as_str(),
+            &canonical,
+            self.endpoint_target.as_ref().map(|id| id.as_deref()),
+        )?;
+        Ok(())
+    }
+
+    fn validate_destination(&self, target: &proxy_service::ProxyTarget) -> AppResult<()> {
+        if target.service.destination_targets.is_empty() && target.target_id.is_none() {
+            return Ok(());
+        }
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_built(&self.path)?;
+        let (_, id) = crate::services::destination_routing::select_target(
+            &target.service,
+            self.method.as_str(),
+            &canonical,
+        )?;
+        if id != target.target_id
+            || self
+                .endpoint_target
+                .as_ref()
+                .is_some_and(|expected| expected != &id)
+            || id.as_ref().is_some_and(|id| {
+                target.service.destination_targets.get(id) != Some(&target.base_url)
+            })
+        {
+            return Err(AppError::ValidationError(
+                "Resolved operation destination changed before dispatch".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
         operation_descriptor::build_mcp_descriptor(
             self.method.as_str(),
@@ -3258,25 +3340,59 @@ pub fn prepare_proxy_tool_call(
     } else {
         build_proxy_args(endpoint, args)?
     };
+    if service.workspace_destinations_pending {
+        let canonical = if is_generic_proxy_endpoint {
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(&path)?
+        } else {
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_built(&path)?
+        };
+        if super::destination_routing::workspace_editor_operation(method.as_str(), &canonical) {
+            return Err(AppError::WorkspaceDestinationsNotActivated);
+        }
+    }
     let path = if service.proxy_operation_policy.is_some() {
         let canonical_path = if is_generic_proxy_endpoint {
             crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(&path)?
         } else {
             crate::services::proxy_authorization::CanonicalPath::from_mcp_built(&path)?
         };
-        crate::services::proxy_authorization::authorize_proxy_operation_fields(
-            &service.service_id,
-            &service.service_slug,
-            service.proxy_operation_policy.as_ref(),
-            method.as_str(),
-            &canonical_path,
-        )?;
-        canonical_path.forwarding_path()
+        let forwarding_path =
+            crate::services::proxy_authorization::authorize_proxy_operation_fields(
+                &service.service_id,
+                &service.service_slug,
+                service.proxy_operation_policy.as_ref(),
+                method.as_str(),
+                &canonical_path,
+            )?;
+        if !is_generic_proxy_endpoint {
+            let selected = crate::services::proxy_authorization::rule_from_endpoint(
+                &endpoint.method,
+                &endpoint.path,
+                endpoint.parameters.as_ref(),
+            )?;
+            if crate::services::proxy_authorization::rule_forwarding_path(
+                &selected,
+                method.as_str(),
+                &canonical_path,
+            )
+            .as_deref()
+                != Some(forwarding_path.as_str())
+            {
+                return Err(AppError::NotFound(
+                    "Service operation not found".to_string(),
+                ));
+            }
+        }
+        forwarding_path
     } else {
         path
     };
 
     Ok(PreparedProxyCall {
+        endpoint_target: (!is_generic_proxy_endpoint
+            && (endpoint.target_id.is_some()
+                || producer_operation_generation(service, endpoint).is_some()))
+        .then(|| endpoint.target_id.clone()),
         method,
         path,
         query,
@@ -3711,6 +3827,28 @@ pub async fn execute_tool(
             .ok_or_else(|| {
                 AppError::NotFound(format!("User service '{}' not found", service.service_slug))
             })?;
+            prepared.resolve_destination(&mut resolution.target)?;
+            let mut override_audit = super::destination_routing::DestinationAudit::new(
+                db,
+                super::audit_service::AuditActor {
+                    user_id: user_id.into(),
+                    api_key_id: exec_ctx.api_key_id.map(str::to_string),
+                    api_key_name: None,
+                    ip_address: None,
+                    user_agent: None,
+                },
+                &resolution.target,
+            );
+            if let Some(api_key_id) = exec_ctx.api_key_id {
+                super::destination_routing::validate_selected_override(
+                    db,
+                    user_id,
+                    api_key_id,
+                    user_service_id,
+                    &resolution.target,
+                )
+                .await?;
+            }
             let has_cred = resolution.has_server_credential;
 
             let mut agent_override = false;
@@ -3797,6 +3935,7 @@ pub async fn execute_tool(
             // never bypasses the node for user-managed node-routed tools.
             // (Sixth-round Codex review P1.)
             let has_cred_for_fallback = has_cred && nr.is_none();
+            override_audit.dismiss();
             let mut billing_context_builder =
                 McpBillingRouteContextBuilder::from_user_service_resolution(
                     billing_principal_user_id,
@@ -3892,7 +4031,10 @@ pub async fn execute_tool(
         }
     };
 
-    match execute_tool_resolved(
+    let mut target = target;
+    prepared.resolve_destination(&mut target)?;
+
+    match Box::pin(execute_tool_resolved(
         http_client,
         db,
         encryption_keys,
@@ -3914,7 +4056,7 @@ pub async fn execute_tool(
         node_route,
         has_server_credential,
         billing_context_builder,
-    )
+    ))
     .await?
     {
         McpToolExecutionOutcome::Response(response) => Ok(response),
@@ -4007,7 +4149,20 @@ pub async fn execute_tool_resolved(
     use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
     use crate::services::{delegation_service, identity_service, node_service};
 
+    let mut destination_audit = super::destination_routing::DestinationAudit::new(
+        db,
+        super::audit_service::AuditActor {
+            user_id: user_id.into(),
+            api_key_id: exec_ctx.api_key_id.map(str::to_string),
+            api_key_name: None,
+            ip_address: None,
+            user_agent: None,
+        },
+        &target,
+    );
+    prepared.validate_destination(&target)?;
     let PreparedProxyCall {
+        endpoint_target: _,
         method,
         path,
         query,
@@ -4210,7 +4365,14 @@ pub async fn execute_tool_resolved(
             all_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
         }
 
+        super::destination_routing::validate_node_outbound_destination(
+            &target,
+            method.as_str(),
+            &path,
+            &delegated,
+        )?;
         let node_request = NodeProxyRequest {
+            target_id: target.target_id.clone(),
             request_id: uuid::Uuid::new_v4().to_string(),
             service_id: target.service.id.clone(),
             service_slug: target.service.slug.clone(),
@@ -4244,6 +4406,12 @@ pub async fn execute_tool_resolved(
                 None
             };
 
+            if target.target_id.is_some() {
+                node_ws_manager
+                    .require_http_signature_v2(nid, signing_secret.is_some())
+                    .await?;
+            }
+            destination_audit.dispatch();
             billing.mark_forwarded(&metered).await?;
             match node_ws_manager
                 .send_proxy_request_classified(
@@ -4264,6 +4432,7 @@ pub async fn execute_tool_resolved(
                         )
                         .await?;
                     let body_text = String::from_utf8_lossy(&resp.body).to_string();
+                    destination_audit.complete(resp.status);
                     return Ok(McpToolExecutionOutcome::Response((resp.status, body_text)));
                 }
                 Ok(ProxyResponseType::Streaming(rx)) => {
@@ -4281,6 +4450,7 @@ pub async fn execute_tool_resolved(
                             None,
                         )
                         .await?;
+                    destination_audit.complete(status);
                     return Ok(McpToolExecutionOutcome::Response((
                         status,
                         String::from_utf8_lossy(&body_buf).to_string(),
@@ -4293,6 +4463,7 @@ pub async fn execute_tool_resolved(
                         ));
                     }
                     NodeDispatchFailureDisposition::TryFallback => {
+                        destination_audit.denied();
                         last_error = Some(failure.error);
                         continue;
                     }
@@ -4300,6 +4471,12 @@ pub async fn execute_tool_resolved(
             }
         }
 
+        if matches!(
+            last_error.as_ref(),
+            Some(AppError::NodeHttpSignatureUnsupported)
+        ) {
+            return Err(AppError::NodeHttpSignatureUnsupported);
+        }
         // All nodes failed. Fall through to direct only when the server
         // holds a decrypt-able credential. node_managed keys and node-only
         // platform services have no server credential.
@@ -4313,6 +4490,7 @@ pub async fn execute_tool_resolved(
     // -------------------------------------------------------------------
     // Direct proxy (no node, or node offline with server credential fallback)
     // -------------------------------------------------------------------
+    destination_audit.dispatch();
     billing.mark_forwarded(&metered).await?;
     let response = match proxy_service::forward_request_with_extra_outbound_headers(
         http_client,
@@ -4384,6 +4562,7 @@ pub async fn execute_tool_resolved(
         )
         .await?;
 
+    destination_audit.complete(status);
     Ok(McpToolExecutionOutcome::Response((status, body_text)))
 }
 
@@ -4950,6 +5129,566 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn google_custom_methods_reach_the_same_upstream_over_rest_and_mcp() {
+        use crate::services::billing::route_inventory::{
+            BillingIngress, BillingRoutePolicy, enforce_billing_egress_classification,
+        };
+        use crate::services::google_workspace::GoogleProduct;
+        use axum::{
+            Router,
+            body::{Body, to_bytes},
+            extract::{Path, State},
+            http::{Method, Request, Uri},
+            routing::any,
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tower::ServiceExt;
+
+        async fn rest(
+            State((state, user_id)): State<(crate::AppState, String)>,
+            Path((service_id, path)): Path<(String, String)>,
+            request: Request<Body>,
+        ) -> AppResult<axum::response::Response> {
+            crate::handlers::proxy::proxy_request(
+                State(state),
+                crate::test_utils::test_auth_user(&user_id),
+                Default::default(),
+                Path((service_id, path)),
+                request,
+            )
+            .await
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new().route(
+            "/{*path}",
+            any({
+                let count = count.clone();
+                move |method: Method, uri: Uri| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        axum::Json(serde_json::json!({"method":method.as_str(), "path":uri.path()}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let db = connect_test_database("google_editor_transports")
+            .await
+            .expect("MongoDB required");
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let router = Router::new()
+            .route("/proxy/{service_id}/{*path}", any(rest))
+            .layer(axum::Extension(BillingRoutePolicy::Metered(
+                BillingIngress::Proxy,
+            )))
+            .with_state((state.clone(), user_id.clone()));
+        for (slug, operation, parameter) in [
+            (
+                "api-google-docs",
+                "docs_batch_update_document",
+                "documentId",
+            ),
+            (
+                "api-google-sheets",
+                "sheets_batch_update_spreadsheet",
+                "spreadsheetId",
+            ),
+            (
+                "api-google-slides",
+                "slides_batch_update_presentation",
+                "presentationId",
+            ),
+        ] {
+            let endpoint = google_editor_endpoint(slug, operation);
+            let path = endpoint.path.replace(&format!("{{{parameter}}}"), "doc");
+            let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+            catalog.id = uuid::Uuid::new_v4().to_string();
+            catalog.slug = slug.into();
+            catalog.base_url = base_url.clone();
+            catalog.service_category = "internal".into();
+            catalog.requires_user_credential = false;
+            catalog.proxy_operation_policy = Some(
+                GoogleProduct::from_slug(slug)
+                    .unwrap()
+                    .operation_policy()
+                    .unwrap(),
+            );
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&catalog)
+                .await
+                .unwrap();
+            for raw in [path.clone(), path.replace(':', "%3A")] {
+                let request = Request::builder()
+                    .method("POST")
+                    .uri(format!("/proxy/{}{raw}", catalog.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"requests":[]}"#))
+                    .unwrap();
+                let response = router.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    axum::http::StatusCode::OK,
+                    "{slug}: {raw}"
+                );
+                let echo: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                        .unwrap();
+                assert_eq!(echo, serde_json::json!({"method":"POST","path":path}));
+            }
+            let mut service = make_service(&catalog.id, slug, slug, vec![]);
+            service.proxy_operation_policy = catalog.proxy_operation_policy.clone();
+            for generic in [false, true] {
+                service.is_generic_proxy = generic;
+                let generic_endpoint = build_generic_proxy_endpoint(slug);
+                let selected = if generic {
+                    &generic_endpoint
+                } else {
+                    &endpoint
+                };
+                let arguments = if generic {
+                    serde_json::json!({"method":"POST","path":path,"body":{"requests":[]}})
+                } else {
+                    serde_json::json!({parameter:"doc","requests":[]})
+                };
+                let prepared = prepare_proxy_tool_call(&service, selected, &arguments).unwrap();
+                let permit = enforce_billing_egress_classification(
+                    Some(BillingRoutePolicy::Metered(BillingIngress::Mcp)),
+                    BillingIngress::Mcp,
+                )
+                .unwrap();
+                let (status, body) = execute_tool(
+                    &state.http_client,
+                    &db,
+                    &state.encryption_keys,
+                    &state.node_ws_manager,
+                    &state.billing,
+                    &user_id,
+                    &user_id,
+                    &service,
+                    selected,
+                    prepared,
+                    &state.jwt_keys,
+                    &state.config,
+                    &state.connection_expiry_notifier,
+                    &state.token_exchange_cache,
+                    &state.cloud_response_cache,
+                    &McpExecContext {
+                        api_key_id: None,
+                        allow_all_nodes: true,
+                        allowed_node_ids: &[],
+                    },
+                    permit,
+                )
+                .await
+                .unwrap();
+                assert_eq!(status, 200);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                    serde_json::json!({"method":"POST","path":path})
+                );
+            }
+            let before = count.load(Ordering::SeqCst);
+            for invalid in [
+                path.replace(":batchUpdate", ":other"),
+                path.replace("doc:batchUpdate", ":batchUpdate"),
+                path.replace(":", "%253A"),
+                path.replace("doc:", "doc%2Fother:"),
+                path.replace("doc:", "doc%252Fother:"),
+            ] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("/proxy/{}{invalid}", catalog.id))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(response.status().is_client_error(), "{invalid}");
+            }
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                before,
+                "denials must precede upstream dispatch"
+            );
+        }
+        let sheets = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"slug": "api-google-sheets"})
+            .await
+            .unwrap()
+            .unwrap();
+        let range_path = "/v4/spreadsheets/doc/values/Sheet1%21A1%3AB2";
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/proxy/{}{range_path}", sheets.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let echo: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(echo["path"], range_path);
+
+        let mut legacy = crate::models::downstream_service::test_helpers::dummy_service();
+        legacy.id = uuid::Uuid::new_v4().to_string();
+        legacy.slug = "llm-google-ai".into();
+        legacy.base_url = format!("{base_url}/v1beta");
+        legacy.service_category = "internal".into();
+        legacy.requires_user_credential = false;
+        assert!(legacy.proxy_operation_policy.is_none());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&legacy)
+            .await
+            .unwrap();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/proxy/{}/models/gemini:generateContent",
+                        legacy.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let echo: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(echo["path"], "/v1beta/models/gemini:generateContent");
+        assert_eq!(count.load(Ordering::SeqCst), 14);
+        server.abort();
+    }
+    fn google_editor_endpoint(slug: &str, name: &str) -> McpToolEndpoint {
+        let spec = crate::services::catalog_spec_registry::spec_for_slug(slug).unwrap();
+        let endpoint = crate::services::openapi_parser::parse_openapi_spec_value(&spec)
+            .unwrap()
+            .into_iter()
+            .find(|endpoint| endpoint.name == name)
+            .unwrap();
+        McpToolEndpoint {
+            target_id: None,
+            endpoint_id: name.to_string(),
+            name: endpoint.name,
+            method: endpoint.method,
+            path: endpoint.path,
+            parameters: endpoint.parameters,
+            request_body_schema: endpoint.request_body_schema,
+            request_content_type: endpoint.request_content_type,
+            request_body_required: endpoint.request_body_required,
+            response: endpoint.response,
+            ..make_endpoint(name, "Google editor")
+        }
+    }
+
+    #[test]
+    fn google_editor_batch_update_rest_generic_and_typed_paths_agree() {
+        use crate::services::google_workspace::GoogleProduct;
+        use crate::services::proxy_authorization::{
+            CanonicalPath, authorize_proxy_operation_fields,
+        };
+        for (slug, name, parameter, path, origin) in [
+            (
+                "api-google-docs",
+                "docs_batch_update_document",
+                "documentId",
+                "/v1/documents/id:batchUpdate",
+                "https://docs.googleapis.com",
+            ),
+            (
+                "api-google-sheets",
+                "sheets_batch_update_spreadsheet",
+                "spreadsheetId",
+                "/v4/spreadsheets/id:batchUpdate",
+                "https://sheets.googleapis.com",
+            ),
+            (
+                "api-google-slides",
+                "slides_batch_update_presentation",
+                "presentationId",
+                "/v1/presentations/id:batchUpdate",
+                "https://slides.googleapis.com",
+            ),
+        ] {
+            let endpoint = google_editor_endpoint(slug, name);
+            let mut service = make_service(slug, slug, slug, vec![]);
+            service.proxy_operation_policy = Some(
+                GoogleProduct::from_slug(slug)
+                    .unwrap()
+                    .operation_policy()
+                    .unwrap(),
+            );
+            let args = serde_json::json!({parameter: "id", "requests": []});
+            let typed = prepare_exact_proxy_tool_call(&service, &endpoint, &args, None).unwrap();
+            service.is_generic_proxy = true;
+            let generic = prepare_proxy_tool_call(
+                &service,
+                &build_generic_proxy_endpoint(slug),
+                &serde_json::json!({"method":"POST", "path":path, "body":{"requests":[]}}),
+            )
+            .unwrap();
+            let rest = CanonicalPath::from_rest_decoded(path).unwrap();
+            authorize_proxy_operation_fields(
+                slug,
+                slug,
+                service.proxy_operation_policy.as_ref(),
+                "POST",
+                &rest,
+            )
+            .unwrap();
+            assert_eq!(
+                typed.path,
+                crate::services::proxy_authorization::authorize_proxy_operation_fields(
+                    slug,
+                    slug,
+                    service.proxy_operation_policy.as_ref(),
+                    "POST",
+                    &rest
+                )
+                .unwrap()
+            );
+            assert_eq!(generic.path, typed.path);
+            assert_eq!(typed.body, generic.body);
+            let url = reqwest::Client::new()
+                .post(format!("{origin}/{}", typed.path))
+                .build()
+                .unwrap()
+                .url()
+                .clone();
+            assert_eq!(url.origin().ascii_serialization(), origin);
+            assert_eq!(url.path(), path);
+            assert!(url.username().is_empty());
+            assert!(url.query().is_none());
+            assert!(url.fragment().is_none());
+        }
+    }
+
+    #[test]
+    fn google_editor_mcp_rejects_custom_method_smuggling_before_approval() {
+        use crate::services::google_workspace::GoogleProduct;
+        let mut service = make_service("docs", "Docs", "api-google-docs", vec![]);
+        service.proxy_operation_policy = Some(GoogleProduct::Docs.operation_policy().unwrap());
+        let endpoint = google_editor_endpoint("api-google-docs", "docs_batch_update_document");
+        for id in [
+            "",
+            "id:other",
+            "id%3Aother",
+            "id%253Aother",
+            "id/other",
+            "id%2Fother",
+            "id\\other",
+            "..",
+            "id?query",
+            "id#fragment",
+        ] {
+            assert!(
+                prepare_exact_proxy_tool_call(
+                    &service,
+                    &endpoint,
+                    &serde_json::json!({"documentId":id,"requests":[]}),
+                    None
+                )
+                .is_err(),
+                "{id}"
+            );
+        }
+        service.is_generic_proxy = true;
+        let generic = build_generic_proxy_endpoint("Docs");
+        for path in [
+            "/v1/documents/id:other",
+            "/v1/documents/:batchUpdate",
+            "/v1/documents/id%3AbatchUpdate",
+            "/v1/documents/id%253AbatchUpdate",
+            "/v1/documents/id%2Fx:batchUpdate",
+        ] {
+            assert!(
+                prepare_proxy_tool_call(
+                    &service,
+                    &generic,
+                    &serde_json::json!({"method":"POST","path":path,"body":{"requests":[]}})
+                )
+                .is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_typed_operation_cannot_shift_to_another_allowlisted_custom_method() {
+        use crate::models::downstream_service::ProxyOperationRule;
+        let endpoint = McpToolEndpoint {
+            target_id: None,
+            method: "POST".into(),
+            path: "/v1/items/{id}".into(),
+            parameters: Some(serde_json::json!([{"name":"id","in":"path","required":true}])),
+            ..make_endpoint("plain_write", "Write item")
+        };
+        let mut service = make_service("s", "S", "s", vec![]);
+        service.proxy_operation_policy = Some(ProxyOperationPolicy {
+            rules: vec![
+                ProxyOperationRule {
+                    method: "POST".into(),
+                    path_template: "/v1/items/{id}".into(),
+                    ..Default::default()
+                },
+                ProxyOperationRule {
+                    method: "POST".into(),
+                    path_template: "/v1/items/{id}:other".into(),
+                    ..Default::default()
+                },
+            ],
+        });
+        let shifted = crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(
+            "/v1/items/id:other",
+        )
+        .unwrap();
+        crate::services::proxy_authorization::authorize_proxy_operation_fields(
+            "s",
+            "s",
+            service.proxy_operation_policy.as_ref(),
+            "POST",
+            &shifted,
+        )
+        .unwrap();
+        assert!(
+            prepare_exact_proxy_tool_call(
+                &service,
+                &endpoint,
+                &serde_json::json!({"id":"id:other"}),
+                None
+            )
+            .is_err()
+        );
+        let other = McpToolEndpoint {
+            target_id: None,
+            path: "/v1/items/{id}:other".into(),
+            ..endpoint
+        };
+        prepare_exact_proxy_tool_call(&service, &other, &serde_json::json!({"id":"id"}), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn sheets_mcp_validates_a1_values_on_the_server() {
+        use crate::services::google_workspace::GoogleProduct;
+        for (name, method, suffix) in [
+            ("sheets_get_values", "GET", ""),
+            ("sheets_update_values", "PUT", ""),
+            ("sheets_append_values", "POST", ":append"),
+            ("sheets_clear_values", "POST", ":clear"),
+        ] {
+            let endpoint = google_editor_endpoint("api-google-sheets", name);
+            let mut service = make_service("s", "Sheets", "api-google-sheets", vec![]);
+            service.proxy_operation_policy =
+                Some(GoogleProduct::Sheets.operation_policy().unwrap());
+            for range in ["Sheet1!A1:B2", "'Quarter 1'!A1:B2"] {
+                let args = match name {
+                    "sheets_get_values" => serde_json::json!({"spreadsheetId":"id","range":range}),
+                    "sheets_clear_values" => {
+                        serde_json::json!({"spreadsheetId":"id","range":range,"body":{}})
+                    }
+                    _ => {
+                        serde_json::json!({"spreadsheetId":"id","range":range,"valueInputOption":"RAW","body":{"values":[["x"]]}})
+                    }
+                };
+                let typed =
+                    prepare_exact_proxy_tool_call(&service, &endpoint, &args, None).unwrap();
+                let mut percent_title_args = args.clone();
+                percent_title_args["range"] = serde_json::json!("'Q1 100%'!A1:B2");
+                assert!(matches!(
+                    prepare_exact_proxy_tool_call(&service, &endpoint, &percent_title_args, None),
+                    Err(AppError::BadRequest(_))
+                ));
+                let expected = format!("/v4/spreadsheets/id/values/{range}{suffix}");
+                let rest = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+                    &expected,
+                )
+                .unwrap();
+                assert_eq!(
+                    typed.path,
+                    crate::services::proxy_authorization::authorize_proxy_operation_fields(
+                        "s",
+                        "s",
+                        service.proxy_operation_policy.as_ref(),
+                        method,
+                        &rest
+                    )
+                    .unwrap()
+                );
+                service.is_generic_proxy = true;
+                let generic = prepare_proxy_tool_call(
+                    &service,
+                    &build_generic_proxy_endpoint("Sheets"),
+                    &serde_json::json!({"method":method,"path":expected}),
+                )
+                .unwrap();
+                assert_eq!(generic.path, typed.path);
+                service.is_generic_proxy = false;
+            }
+            let mut args = serde_json::json!({"spreadsheetId":"id","range":"A1:B2:clear","valueInputOption":"RAW","body":{"values":[["x"]]}});
+            if name == "sheets_get_values" {
+                args = serde_json::json!({"spreadsheetId":"id","range":"A1:B2:clear"});
+            } else if name == "sheets_clear_values" {
+                args = serde_json::json!({"spreadsheetId":"id","range":"A1:B2:clear","body":{}});
+            }
+            assert!(matches!(
+                prepare_exact_proxy_tool_call(&service, &endpoint, &args, None),
+                Err(AppError::NotFound(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn google_ai_no_policy_keeps_generate_content_path_bytes() {
+        let endpoint = McpToolEndpoint {
+            target_id: None,
+            method: "POST".into(),
+            path: "/models/{model}:generateContent".into(),
+            parameters: Some(serde_json::json!([{"name":"model","in":"path","required":true}])),
+            ..make_endpoint("generate_content", "Generate content")
+        };
+        let mut service = make_service("google-ai", "Gemini", "llm-google-ai", vec![]);
+        let typed = prepare_proxy_tool_call(
+            &service,
+            &endpoint,
+            &serde_json::json!({"model":"gemini:legacy"}),
+        )
+        .unwrap();
+        assert_eq!(typed.path, "models/gemini%3Alegacy:generateContent");
+        service.is_generic_proxy = true;
+        let path = "models/gemini:generateContent";
+        let generic = prepare_proxy_tool_call(
+            &service,
+            &build_generic_proxy_endpoint("Gemini"),
+            &serde_json::json!({"method":"POST","path":path}),
+        )
+        .unwrap();
+        assert_eq!(generic.path, path);
+    }
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::test_utils::{
         connect_test_database, test_encryption_keys, test_user_endpoint, test_user_service,
@@ -4957,6 +5696,7 @@ mod tests {
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {
+            target_id: None,
             endpoint_id: format!("endpoint-{name}"),
             name: name.to_string(),
             description: Some(description.to_string()),
@@ -4991,6 +5731,7 @@ mod tests {
             })
             .collect();
         McpToolService {
+            workspace_destinations_pending: false,
             service_id: id.to_string(),
             service_name: name.to_string(),
             service_slug: slug.to_string(),
@@ -5271,10 +6012,12 @@ mod tests {
                 crate::models::downstream_service::ProxyOperationRule {
                     method: "POST".to_string(),
                     path_template: "/air/order_cancellations".to_string(),
+                    ..Default::default()
                 },
                 crate::models::downstream_service::ProxyOperationRule {
                     method: "POST".to_string(),
                     path_template: "/air/order_cancellations/{id}/actions/confirm".to_string(),
+                    ..Default::default()
                 },
             ],
         })
@@ -5284,6 +6027,7 @@ mod tests {
     #[test]
     fn mcp_preparation_denies_before_approval_descriptor_for_blocked_order_read() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             method: "GET".to_string(),
             path: "/air/orders/{id}".to_string(),
             parameters: Some(serde_json::json!([{
@@ -5306,6 +6050,7 @@ mod tests {
     #[test]
     fn mcp_cancellation_prepares_a_write_for_the_existing_approval_path() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             method: "POST".to_string(),
             path: "/air/order_cancellations/{id}/actions/confirm".to_string(),
             parameters: Some(serde_json::json!([{
@@ -5335,6 +6080,7 @@ mod tests {
     #[test]
     fn mcp_no_policy_keeps_existing_passthrough_preparation() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             method: "GET".to_string(),
             path: "/existing/{id}".to_string(),
             parameters: Some(serde_json::json!([{
@@ -5472,6 +6218,7 @@ mod tests {
     #[test]
     fn service_scope_keeps_only_exact_user_service_identities() {
         let user_service = McpToolService {
+            workspace_destinations_pending: false,
             source: McpToolSource::UserManaged {
                 user_service_id: "service-allowed".to_string(),
                 catalog_service_id: None,
@@ -5746,6 +6493,7 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: connected_id.clone(),
                 name: "status".to_string(),
@@ -5955,6 +6703,7 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: platform_id.clone(),
                 name: "status".to_string(),
@@ -6149,6 +6898,7 @@ mod tests {
         // Template row that would publish `template_op` without an override.
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: catalog_id.clone(),
                 name: "template_op".to_string(),
@@ -6264,6 +7014,7 @@ mod tests {
 
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: catalog_id.clone(),
                 name: "template_op".to_string(),
@@ -6781,6 +7532,7 @@ mod tests {
     #[test]
     fn build_input_schema_uses_base64_string_for_binary_bodies() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -6816,6 +7568,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_non_json_object_bodies() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "submit_xml".to_string(),
             description: Some("Submit XML".to_string()),
@@ -6848,6 +7601,7 @@ mod tests {
     #[test]
     fn build_input_schema_exposes_body_when_content_type_has_no_schema() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -6874,6 +7628,7 @@ mod tests {
     #[test]
     fn build_input_schema_treats_unknown_application_uploads_as_binary() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_tarball".to_string(),
             description: Some("Upload a tarball".to_string()),
@@ -6900,6 +7655,7 @@ mod tests {
     #[test]
     fn build_input_schema_includes_supported_header_and_cookie_params() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -6945,6 +7701,7 @@ mod tests {
     #[test]
     fn build_input_schema_uses_alternate_body_field_when_body_param_exists() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_archive".to_string(),
             description: Some("Upload an archive".to_string()),
@@ -6981,6 +7738,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -7036,6 +7794,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_blocked_header_params() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -7073,6 +7832,7 @@ mod tests {
     fn build_input_schema_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -7116,6 +7876,7 @@ mod tests {
     #[test]
     fn build_input_schema_wraps_optional_json_body_without_requiring_it() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_profile".to_string(),
             description: Some("Update a profile".to_string()),
@@ -7148,6 +7909,7 @@ mod tests {
     #[test]
     fn build_input_schema_defaults_binary_media_type_when_missing() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -7175,6 +7937,7 @@ mod tests {
     #[test]
     fn build_input_schema_defaults_wildcard_binary_media_type_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -7203,6 +7966,7 @@ mod tests {
     fn build_input_schema_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
             description: Some("Submit a message".to_string()),
@@ -7238,6 +8002,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -7270,6 +8035,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -7302,6 +8068,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_tarball".to_string(),
             description: Some("Upload a tarball".to_string()),
@@ -7329,6 +8096,7 @@ mod tests {
     #[test]
     fn build_proxy_args_preserves_flattened_json_body_named_body_property() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "submit_payload".to_string(),
             description: Some("Submit a JSON object with a body field".to_string()),
@@ -7365,6 +8133,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_flattened_json_body() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_profile".to_string(),
             description: Some("Update a profile".to_string()),
@@ -7394,6 +8163,7 @@ mod tests {
     #[test]
     fn build_proxy_args_routes_header_and_cookie_params_out_of_body() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -7463,6 +8233,7 @@ mod tests {
     #[test]
     fn build_proxy_args_accepts_header_parameters_case_insensitively() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -7513,6 +8284,7 @@ mod tests {
     #[test]
     fn build_proxy_args_allows_missing_optional_wrapped_json_body() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_profile".to_string(),
             description: Some("Update a profile".to_string()),
@@ -7543,6 +8315,7 @@ mod tests {
         use base64::Engine as _;
 
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_archive".to_string(),
             description: Some("Upload an archive".to_string()),
@@ -7579,6 +8352,7 @@ mod tests {
     #[test]
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -7653,6 +8427,7 @@ mod tests {
     #[test]
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_blocked_header_params() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -7705,6 +8480,7 @@ mod tests {
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
      {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -7761,6 +8537,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_binary_body() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -7785,6 +8562,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_reserved_header_parameters() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
             description: Some("Submit a message".to_string()),
@@ -7822,6 +8600,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_reserved_header_parameters_case_insensitively() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
             description: Some("Submit a message".to_string()),
@@ -7860,6 +8639,7 @@ mod tests {
     fn build_proxy_args_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
     {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
             description: Some("Submit a message".to_string()),
@@ -7903,6 +8683,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_extra_fields_for_wrapped_json_body() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "submit_message".to_string(),
             description: Some("Submit a JSON string body".to_string()),
@@ -7935,6 +8716,7 @@ mod tests {
     #[test]
     fn build_proxy_args_preserves_urlencoded_body_as_raw_text() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "submit_form".to_string(),
             description: Some("Submit a urlencoded form".to_string()),
@@ -7965,6 +8747,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_unknown_args_when_endpoint_has_no_request_body() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "list_users".to_string(),
             description: Some("List users".to_string()),
@@ -8005,6 +8788,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_body_for_bodyless_post_endpoint() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "create_session".to_string(),
             description: Some("Create a session without a request body".to_string()),
@@ -8037,6 +8821,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_path_parameter() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "get_user".to_string(),
             description: Some("Get a user".to_string()),
@@ -8071,6 +8856,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_unresolved_path_templates_without_required_metadata() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "get_user".to_string(),
             description: Some("Get a user".to_string()),
@@ -8105,6 +8891,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_missing_required_non_body_parameters() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -8179,6 +8966,7 @@ mod tests {
     #[test]
     fn build_proxy_args_rejects_multipart_body() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_form".to_string(),
             description: Some("Upload multipart form".to_string()),
@@ -8211,6 +8999,7 @@ mod tests {
     #[test]
     fn build_proxy_args_error_mentions_alternate_body_field_name() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "submit_text".to_string(),
             description: Some("Submit text".to_string()),
@@ -8248,6 +9037,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_defaults_binary_schema_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -8273,6 +9063,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_defaults_wildcard_binary_schema_to_octet_stream() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -8298,6 +9089,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_uses_endpoint_content_type() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -8323,6 +9115,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_omits_optional_body_without_payload() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -8342,6 +9135,7 @@ mod tests {
     #[test]
     fn request_content_type_header_value_omits_default_json_without_payload() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "create_session".to_string(),
             description: Some("Create a session".to_string()),
@@ -8368,6 +9162,7 @@ mod tests {
     #[test]
     fn build_downstream_request_headers_sets_content_type_without_forcing_accept() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "upload_skill".to_string(),
             description: Some("Upload a skill archive".to_string()),
@@ -8502,6 +9297,7 @@ mod tests {
     #[test]
     fn request_body_field_name_avoids_collision() {
         let endpoint = McpToolEndpoint {
+            target_id: None,
             endpoint_id: String::new(),
             name: "test".into(),
             description: None,
@@ -8674,6 +9470,8 @@ mod tests {
         let service = crate::models::downstream_service::test_helpers::dummy_service();
         proxy_service::UserServiceResolution {
             target: proxy_service::ProxyTarget {
+                workspace_destinations_pending: false,
+                target_id: None,
                 base_url: service.base_url.clone(),
                 auth_method: service.auth_method.clone(),
                 auth_key_name: service.auth_key_name.clone(),
@@ -9000,6 +9798,7 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
+                destination_targets: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 name: format!("Service {slug}"),
                 slug: slug.to_string(),

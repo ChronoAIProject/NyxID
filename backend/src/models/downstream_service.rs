@@ -167,10 +167,22 @@ pub struct ProxyOperationPolicy {
     pub rules: Vec<ProxyOperationRule>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ProxyOperationRule {
     pub method: String,
     pub path_template: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    /// Explicit value grammars for parameters that contain path punctuation.
+    /// Omit empty maps to preserve existing policy and approval digest bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub path_parameter_constraints: std::collections::BTreeMap<String, ProxyPathConstraint>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyPathConstraint {
+    SheetsA1Range,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,6 +217,8 @@ pub struct DownstreamService {
     /// Base URL of the downstream service.
     /// For SSH services this is derived as `ssh://host:port`.
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub destination_targets: std::collections::BTreeMap<String, String>,
     /// "http" | "ssh"
     #[serde(default = "default_service_type")]
     pub service_type: String,
@@ -460,6 +474,7 @@ pub mod test_helpers {
     /// valid struct but don't care about specific field values.
     pub fn dummy_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             id: "test-id".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),
@@ -561,6 +576,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = DownstreamService {
+            destination_targets: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             name: "Test Service".to_string(),
             slug: "test-service".to_string(),
@@ -645,6 +661,7 @@ mod tests {
         // Serialize a full struct, then remove default fields from the doc,
         // and verify they get their defaults on deserialization.
         let svc = DownstreamService {
+            destination_targets: Default::default(),
             id: "test-id".to_string(),
             name: "Svc".to_string(),
             slug: "svc".to_string(),

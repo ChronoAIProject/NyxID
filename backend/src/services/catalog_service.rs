@@ -971,6 +971,7 @@ mod tests {
 
     fn make_catalog_service(slug: &str, name: &str, user_id: &str) -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             slug: slug.to_string(),
             name: name.to_string(),

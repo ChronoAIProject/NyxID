@@ -2496,6 +2496,7 @@ mod tests {
             &node.id,
             Some("0.7.1-test".to_string()),
             Some(NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),
@@ -2616,6 +2617,7 @@ mod tests {
             &node.id,
             None,
             Some(NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),
@@ -2806,6 +2808,7 @@ mod tests {
             .send_proxy_request(
                 "node-1",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "req-stream-invalid".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),

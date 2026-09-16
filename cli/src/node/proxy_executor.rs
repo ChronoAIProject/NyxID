@@ -46,6 +46,41 @@ pub async fn execute_proxy_request(
     let request_id = request["request_id"].as_str().unwrap_or("");
     let service_slug = request["service_slug"].as_str().unwrap_or("");
 
+    let target_selected = request.get("target_id").is_some_and(|id| !id.is_null());
+    let base_url = request["base_url"].as_str().unwrap_or("");
+    if target_selected && base_url.is_empty() {
+        metrics.record_error();
+        let _ = send_ws_message(
+            tx,
+            proxy_error_response_with_reason(
+                request_id,
+                "Target-selected request is missing its authorized base URL",
+                502,
+                false,
+                Some("target_base_url_missing"),
+            ),
+        )
+        .await;
+        return;
+    }
+    if (target_selected || request.get("signature_version").is_some())
+        && (request["signature_version"].as_u64() != Some(2)
+            || signing_secret.is_none()
+            || request["signature"].as_str().is_none())
+    {
+        metrics.record_error();
+        let _ = send_ws_message(
+            tx,
+            proxy_error_response(
+                request_id,
+                "Target-selected requests require HTTP signature v2",
+                403,
+                false,
+            ),
+        )
+        .await;
+        return;
+    }
     // 1. Verify HMAC signature if signing is enabled
     if let Some(secret) = signing_secret {
         let timestamp = request["timestamp"].as_str();
@@ -119,13 +154,30 @@ pub async fn execute_proxy_request(
         }
     };
 
+    if target_selected
+        && !cred.header().is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("Authorization") && value.starts_with("Bearer ")
+        })
+    {
+        metrics.record_error();
+        let _ = send_ws_message(
+            tx,
+            proxy_error_response(
+                request_id,
+                "Target-selected requests require a bearer credential",
+                403,
+                false,
+            ),
+        )
+        .await;
+        return;
+    }
     // 3. Build the downstream HTTP request
     let method_str = request["method"].as_str().unwrap_or("GET");
     let path = request["path"].as_str().unwrap_or("/");
     let query = request["query"].as_str();
-    let base_url = request["base_url"].as_str().unwrap_or("");
 
-    // If NyxID sent an empty base_url, resolve from local credential config
+    // Legacy requests with an empty base_url resolve from local credential config.
     let effective_base_url = if base_url.is_empty() {
         match cred.target_url() {
             Some(url) => url,
@@ -178,6 +230,13 @@ pub async fn execute_proxy_request(
     }
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let destination_client;
+    let http_client = if target_selected {
+        destination_client = target_http_client();
+        &destination_client
+    } else {
+        http_client
+    };
     let mut req_builder = http_client.request(method.clone(), &url);
 
     // 4. Collect forwarded headers. We accumulate them in `forwarded_headers`
@@ -346,6 +405,28 @@ pub async fn execute_proxy_request(
             .await;
         }
     }
+}
+
+#[cfg(any(test, feature = "node-proxy-test"))]
+tokio::task_local! { pub static TARGET_HTTP_CLIENT_BUILDER: std::sync::Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>; }
+
+fn target_http_client() -> Client {
+    #[cfg(any(test, feature = "node-proxy-test"))]
+    if let Ok(builder) = TARGET_HTTP_CLIENT_BUILDER.try_with(|build| build()) {
+        return build_target_http_client(builder);
+    }
+    static CLIENT: std::sync::LazyLock<Client> =
+        std::sync::LazyLock::new(|| build_target_http_client(Client::builder()));
+    CLIENT.clone()
+}
+
+fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
+    builder
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build()
+        .expect("target HTTP client")
 }
 
 pub fn build_http_client() -> Result<Client> {
@@ -538,6 +619,106 @@ pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::append_query_param;
+
+    #[tokio::test]
+    async fn selected_request_without_base_url_never_uses_local_credential_target() {
+        use super::super::config::{CredentialConfig, NodeConfig};
+        use super::super::encryption::LocalEncryption;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let configured_url = format!("http://{}", listener.local_addr().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+        let mut config: NodeConfig = toml::from_str(
+            r#"
+                [server]
+                url = "https://nyxid.test"
+                [node]
+                id = "test-node"
+                auth_token_encrypted = ""
+            "#,
+        )
+        .unwrap();
+        config.credentials.insert(
+            "workspace".into(),
+            CredentialConfig::new_header(
+                "Authorization".into(),
+                Some(encryption.encrypt("Bearer fixture-token").unwrap()),
+                Some(configured_url),
+            ),
+        );
+        let credentials = super::CredentialStore::from_config(&config, &encryption).unwrap();
+        let secret = "ab".repeat(32);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let replay = tokio::sync::Mutex::new(super::ReplayGuard::new());
+        let metrics = super::NodeMetrics::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .unwrap();
+        for missing in [false, true] {
+            let mut request = serde_json::json!({
+                "request_id": "missing-target-origin", "service_id": "workspace-id",
+                "service_slug": "workspace", "target_id": "docs", "signature_version": 2,
+                "base_url": "", "method": "POST", "path": "/v1/documents/doc:batchUpdate",
+                "query": "", "body": "", "timestamp": chrono::Utc::now().to_rfc3339(),
+                "nonce": uuid::Uuid::new_v4().to_string(),
+            });
+            let message = serde_json::json!([
+                "nyxid-node-http.v2",
+                request["timestamp"],
+                request["nonce"],
+                request["service_id"],
+                request["service_slug"],
+                request["target_id"],
+                "",
+                request["method"],
+                request["path"],
+                "",
+                "",
+            ])
+            .to_string();
+            let mut mac = Hmac::<Sha256>::new_from_slice(&hex::decode(&secret).unwrap()).unwrap();
+            mac.update(message.as_bytes());
+            request["signature"] = hex::encode(mac.finalize().into_bytes()).into();
+            if missing {
+                request.as_object_mut().unwrap().remove("base_url");
+            }
+            // The verifier independently rejects the origin even with a matching HMAC.
+            assert!(!super::signing::verify_request_signature(
+                &request,
+                &secret,
+                request["signature"].as_str().unwrap(),
+            ));
+            super::execute_proxy_request(
+                &request,
+                &credentials,
+                Some(&secret),
+                &replay,
+                &metrics,
+                &tx,
+                false,
+                &client,
+            )
+            .await;
+            let Some(super::NodeWsMessage::Text(frame)) = rx.recv().await else {
+                panic!("expected a node error frame");
+            };
+            let response: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(response["type"], "proxy_error");
+            assert_eq!(response["status"], 502);
+            assert_eq!(response["reason"], "target_base_url_missing");
+            assert_eq!(response["retryable"], false);
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept(),)
+                .await
+                .is_err(),
+            "the configured local target must receive no connection"
+        );
+    }
 
     #[test]
     fn append_query_param_url_encodes_name_and_value() {

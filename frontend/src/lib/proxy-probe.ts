@@ -128,6 +128,10 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   },
   "api-google-drive": { path: "drive/v3/files?pageSize=1&fields=files(id)" },
   "api-google-gmail": { path: "gmail/v1/users/me/messages?maxResults=1" },
+  // Reads require an existing document ID; there is no account-level probe.
+  "api-google-docs": null,
+  "api-google-sheets": null,
+  "api-google-slides": null,
   "api-spotify": { path: "me" }, // base is .../v1
   "api-twitter": { path: "users/me" }, // base is .../2
   "api-reddit": { path: "api/v1/me" }, // base is bare oauth.reddit.com

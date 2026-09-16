@@ -499,3 +499,9 @@ See [ORACLE_RELAY.md](ORACLE_RELAY.md) for the full design.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RUST_LOG` | `nyxid=info,tower_http=info` | Tracing filter string |
+
+### Workspace multi-origin upgrade gate
+
+`GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED` defaults to `false`. This temporary gate orders upgraded readers before the catalog writer. Deploying with the default does not activate Workspace's 13 Docs, Sheets, and Slides operations. The hosted Workspace spec always lists all 38 operations; before activation, editor calls return HTTP 503, code 12100, `workspace_destinations_not_activated`, with operator instructions.
+
+On the first startup with `true`, NyxID compares and sets the known default Workspace policy and absent destination map, then additively synchronizes the 13 editor endpoints. Admin-edited policies/maps are preserved. The writes are idempotent, and leaving the gate enabled afterward is safe. Turning it off does not undo activation. The gate is scheduled for removal once every environment has activated. Upgrade all backend readers and the participating node agents before enabling it; see [Google Workspace OAuth](GOOGLE_WORKSPACE_OAUTH.md) for the rollout and approval window.

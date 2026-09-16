@@ -2300,6 +2300,7 @@ mod tests {
 
         let active_id = uuid::Uuid::new_v4().to_string();
         let active = DownstreamService {
+            destination_targets: Default::default(),
             id: active_id.clone(),
             name: "OpenAI API".to_string(),
             slug: "openai".to_string(),
@@ -2309,6 +2310,7 @@ mod tests {
         // Deactivated services must still resolve: audit rows reference them
         // long after an admin retires the catalog entry.
         let inactive = DownstreamService {
+            destination_targets: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             name: "Retired Service".to_string(),
             slug: "retired".to_string(),

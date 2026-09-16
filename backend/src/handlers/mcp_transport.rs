@@ -1498,6 +1498,13 @@ async fn handle_tools_call(
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
         Some(pair) => pair,
         None => {
+            if mcp_service::inactive_workspace_tool(tool_name, &services) {
+                return tool_result(
+                    request.id.clone(),
+                    &crate::errors::AppError::WorkspaceDestinationsNotActivated.to_string(),
+                    true,
+                );
+            }
             return tool_result(
                 request.id.clone(),
                 &format!(
@@ -2072,6 +2079,13 @@ async fn handle_meta_call_tool(
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
         Some(pair) => pair,
         None => {
+            if mcp_service::inactive_workspace_tool(tool_name, &services) {
+                return tool_result(
+                    request_id,
+                    &crate::errors::AppError::WorkspaceDestinationsNotActivated.to_string(),
+                    true,
+                );
+            }
             return tool_result(
                 request_id,
                 &format!(
@@ -3807,6 +3821,7 @@ mod tests {
 
     fn user_managed(id: &str) -> McpToolService {
         McpToolService {
+            workspace_destinations_pending: false,
             service_id: id.into(),
             service_name: id.into(),
             service_slug: id.into(),
@@ -3831,6 +3846,7 @@ mod tests {
 
     fn platform(id: &str) -> McpToolService {
         McpToolService {
+            workspace_destinations_pending: false,
             service_id: id.into(),
             service_name: id.into(),
             service_slug: id.into(),
@@ -4271,6 +4287,7 @@ mod tests {
                     rules: vec![crate::models::downstream_service::ProxyOperationRule {
                         method: "POST".to_string(),
                         path_template: "/air/order_cancellations".to_string(),
+                        ..Default::default()
                     }],
                 },
             )
@@ -4286,6 +4303,7 @@ mod tests {
         let now = chrono::Utc::now();
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),
                 name: "read_order".to_string(),
@@ -4314,6 +4332,7 @@ mod tests {
             .expect("insert blocked MCP endpoint");
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
             .insert_one(ServiceEndpoint {
+                target_id: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 service_id: service.id.clone(),
                 name: "create_cancellation".to_string(),
@@ -5196,3 +5215,7 @@ mod tests {
         assert!(text.contains("Artifacts (1)"));
     }
 }
+
+#[cfg(test)]
+#[path = "workspace_mcp_tests.rs"]
+mod workspace_mcp_tests;

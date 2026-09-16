@@ -233,6 +233,7 @@ mod tests {
     /// (identity_propagation_mode != "none" or token forwarding/delegation on).
     fn catalog_service(created_by: &str, identity_propagating: bool) -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             id: Uuid::new_v4().to_string(),
             name: "Catalog".to_string(),
             slug: format!("svc-{}", Uuid::new_v4().simple()),

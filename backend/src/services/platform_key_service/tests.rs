@@ -591,6 +591,7 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
         ..Default::default()
     };
     let tool = mcp_service::McpToolService {
+        workspace_destinations_pending: false,
         service_id: result.service.id.clone(),
         service_name: "xAI".into(),
         service_slug: result.service.slug.clone(),
@@ -1371,6 +1372,8 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     let mut service = platform_service();
     service.requires_user_credential = false;
     let mut target = proxy_service::ProxyTarget {
+        workspace_destinations_pending: false,
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method: "bearer".into(),
         auth_key_name: "Authorization".into(),

@@ -1739,6 +1739,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         node_max_ws_connections: 100,
         node_max_stream_duration_secs: 300,
         node_hmac_signing_enabled: true,
+        google_workspace_multi_origin_enabled: true,
         proxy_max_body_size: 100 * 1024 * 1024,
         llm_max_body_size: 10 * 1024 * 1024,
         proxy_stream_idle_timeout_secs: 60,
@@ -2536,6 +2537,7 @@ pub(crate) fn test_auto_connected_catalog_service()
 -> crate::models::downstream_service::DownstreamService {
     use crate::models::downstream_service::DownstreamService;
     DownstreamService {
+        destination_targets: Default::default(),
         id: uuid::Uuid::new_v4().to_string(),
         name: "Catalog".to_string(),
         slug: "autoplatform".to_string(),
