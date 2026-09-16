@@ -133,6 +133,47 @@ it.each([
 );
 
 it.each([
+  ["role", AdminRoleDetailPage],
+  ["group", AdminGroupDetailPage],
+] as const)(
+  "allows a name-only %s save when authorization is revoked concurrently",
+  async (kind, Component) => {
+    const user = userEvent.setup();
+    const view = render(<Component />);
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const editor = await screen.findByRole("dialog", {
+      name: kind === "group" ? "Edit Group" : "Edit Role",
+    });
+    fireEvent.change(within(editor).getByLabelText("Name"), {
+      target: { value: "Rename only" },
+    });
+
+    if (kind === "role") mock.role = { ...mock.role, permissions: [] };
+    else mock.group = { ...mock.group, roles: [] };
+    view.rerender(<Component />);
+
+    await user.click(
+      within(editor).getByRole("button", { name: "Save Changes" }),
+    );
+    const review = await screen.findByRole("dialog", {
+      name: "Review changes",
+    });
+    const confirm = within(review).getByRole("button", {
+      name: "Confirm changes",
+    });
+    expect(confirm).toBeEnabled();
+    expect(mock.update).not.toHaveBeenCalled();
+    await user.click(confirm);
+    await waitFor(() =>
+      expect(mock.update).toHaveBeenCalledExactlyOnceWith({
+        [kind === "role" ? "roleId" : "groupId"]: "entity-a",
+        data: { name: "Rename only" },
+      }),
+    );
+  },
+);
+
+it.each([
   ["role", AdminRoleDetailPage, "Permissions", "read, write"],
   ["group", AdminGroupDetailPage, "Roles", "role-a, role-b"],
 ] as const)(
