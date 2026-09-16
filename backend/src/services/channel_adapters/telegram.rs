@@ -399,6 +399,10 @@ impl PlatformAdapter for TelegramAdapter {
     fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
         super::super::channel_platform::RegistrationDescriptor {
             documentation_url: Some("https://core.telegram.org/bots/api#setwebhook"),
+            fields: &[super::super::channel_registration::RegistrationField {
+                hint: Some("Connect an existing Telegram bot using its BotFather token."),
+                ..super::super::channel_registration::BOT_TOKEN_FIELD
+            }],
             automatic_webhook: true,
             empty_ack_is_text: false,
             webhook_secret_label: None,
@@ -623,45 +627,61 @@ impl PlatformAdapter for TelegramAdapter {
         platform_message_id: &str,
         edit: &OutboundEdit,
     ) -> AppResult<()> {
-        let body = build_edit_message_body(conversation_id, platform_message_id, edit)?;
-        let url = format!("{}{}/editMessageText", self.base_url, credentials.token);
-        let resp: serde_json::Value = http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Telegram editMessageText request failed: {}",
-                    e.without_url()
-                ))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Telegram editMessageText response parse failed: {}",
-                    e.without_url()
-                ))
-            })?;
-        if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-            return Ok(());
+        let mut body = build_edit_message_body(conversation_id, platform_message_id, edit)?;
+        let mut method = "editMessageText";
+        loop {
+            let url = format!("{}{}/{method}", self.base_url, credentials.token);
+            let resp: serde_json::Value = http
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    AppError::ChannelPlatformError(format!(
+                        "Telegram {method} request failed: {}",
+                        e.without_url()
+                    ))
+                })?
+                .json()
+                .await
+                .map_err(|e| {
+                    AppError::ChannelPlatformError(format!(
+                        "Telegram {method} response parse failed: {}",
+                        e.without_url()
+                    ))
+                })?;
+            if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                return Ok(());
+            }
+            let description = resp
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            // A media send returns its media message ID, whose editable text is its caption.
+            if method == "editMessageText"
+                && description == "Bad Request: there is no text in the message to edit"
+            {
+                method = "editMessageCaption";
+                body = serde_json::json!({
+                    "chat_id": conversation_id,
+                    "message_id": body["message_id"],
+                    "caption": body["text"],
+                    "parse_mode": "Markdown",
+                });
+                continue;
+            }
+            // Telegram rejects identical edits, while the relay's edit is idempotent.
+            if description.starts_with("Bad Request: message is not modified") {
+                return Ok(());
+            }
+            return Err(
+                crate::services::channel_platform::classify_upstream_refusal(
+                    "Telegram",
+                    description,
+                    UNREACHABLE_TARGET_MARKERS,
+                ),
+            );
         }
-        let description = resp
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
-        // Telegram rejects identical edits, while the relay's edit is idempotent.
-        if description.starts_with("Bad Request: message is not modified") {
-            return Ok(());
-        }
-        Err(
-            crate::services::channel_platform::classify_upstream_refusal(
-                "Telegram",
-                description,
-                UNREACHABLE_TARGET_MARKERS,
-            ),
-        )
     }
 
     async fn register_webhook(
@@ -1099,6 +1119,65 @@ mod tests {
                 assert!(
                     matches!(result, Err(AppError::ChannelConversationNotReachable(reason)) if reason == format!("Telegram: {marker}"))
                 );
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_edit_media_caption_fallback_preserves_noop_and_refusal_classification() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        for (status, response, refused) in [
+            (200, serde_json::json!({"ok": true}), false),
+            (
+                400,
+                serde_json::json!({"ok": false, "description": "Bad Request: message is not modified"}),
+                false,
+            ),
+            (
+                400,
+                serde_json::json!({"ok": false, "description": "Bad Request: message can't be edited"}),
+                true,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/bottest-token/editMessageText"))
+                .and(body_json(serde_json::json!({"chat_id": "-100123", "message_id": 42, "text": "*updated*", "parse_mode": "Markdown"})))
+                .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "ok": false, "description": "Bad Request: there is no text in the message to edit"
+                })))
+                .expect(1).mount(&server).await;
+            Mock::given(method("POST"))
+                .and(path("/bottest-token/editMessageCaption"))
+                .and(body_json(serde_json::json!({"chat_id": "-100123", "message_id": 42, "caption": "*updated*", "parse_mode": "Markdown"})))
+                .respond_with(ResponseTemplate::new(status).set_body_json(response))
+                .expect(1).mount(&server).await;
+            let adapter = TelegramAdapter {
+                base_url: format!("{}/bot", server.uri()),
+                file_base_url: format!("{}/file/bot", server.uri()),
+            };
+            let result = adapter
+                .edit_reply(
+                    &reqwest::Client::new(),
+                    &"test-token".into(),
+                    "-100123",
+                    "42",
+                    &OutboundEdit {
+                        text: Some("*updated*".into()),
+                        metadata: None,
+                    },
+                )
+                .await;
+            if refused {
+                assert!(matches!(
+                    result,
+                    Err(AppError::ChannelConversationNotReachable(_))
+                ));
             } else {
                 result.unwrap();
             }

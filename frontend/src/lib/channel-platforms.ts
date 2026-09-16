@@ -5,7 +5,6 @@ export type ManagedFlow = "meta_embedded_signup" | "oauth_connection";
 export interface ChannelFieldDescriptor extends Omit<ChannelRegistrationField, "name"> {
   readonly name: ChannelCredentialField;
   readonly configuredKey?: keyof Pick<ChannelBotDetail, "app_secret_configured" | "lark_verification_token_configured" | "lark_encrypt_key_configured">;
-  readonly hint?: string;
 }
 const configuredKeys: Record<string, ChannelFieldDescriptor["configuredKey"]> = {
   app_secret_encrypted: "app_secret_configured",

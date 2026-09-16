@@ -202,11 +202,11 @@ sequenceDiagram
 
 An assigned agent API key can edit both anchored replies and agent-initiated messages. A per-callback reply token can edit only replies anchored to its bound inbound message, and only after its JTI has been consumed by `/reply`; it cannot edit initiated rows. The existing authorization and per-message rate limit apply to every edit, with rate limiting before authentication. Discovery exposes native support as `capabilities.edit`.
 
-- **Telegram / telegram-new:** `editMessageText` with the chat ID, numeric message ID, and `parse_mode: "Markdown"`, matching sends. Ordinary bot messages are subject to Telegram's 48-hour edit window. An identical edit (`message is not modified`) succeeds idempotently.
-- **Discord:** NyxID always edits through `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token and never through the interaction-webhook edit endpoint, so edits that Discord only permits via the interaction token (for example ephemeral interaction responses) are not supported and surface as a classified refusal.
-- **Slack:** `chat.update` with `channel`, `ts`, and `text`; `reply.metadata.blocks` passes through just as it does on sends. Existing Slack rate-limit error handling is preserved.
-- **Lark / Feishu:** unchanged text edits via `PUT /im/v1/messages/{id}` and card edits via `PATCH /im/v1/messages/{id}` using `reply.metadata.card`.
-- **WhatsApp / X / OpenClaw:** `501 edit_unsupported`. Device channels return `400 device_channel_reply_not_allowed`.
+- **Telegram / telegram-new:** text messages use `editMessageText`; media captions use `editMessageCaption` after Telegram returns exactly `Bad Request: there is no text in the message to edit`. Both use the chat ID, numeric message ID, and `parse_mode: "Markdown"`, matching sends. Ordinary bot messages are subject to Telegram's 48-hour edit window. An identical edit (`message is not modified`) succeeds idempotently.
+- **Discord:** `PATCH` edits `content` on any bot message, including media messages. NyxID always edits through `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token and never through the interaction-webhook edit endpoint, so edits that Discord only permits via the interaction token (for example ephemeral interaction responses) are not supported and surface as a classified refusal.
+- **Slack:** `chat.update` with `channel`, `ts`, and `text`; `reply.metadata.blocks` passes through just as it does on sends. File/image messages cannot be edited by `chat.update` and surface as classified refusals. Existing Slack rate-limit error handling is preserved.
+- **Lark / Feishu:** text edits via `PUT /im/v1/messages/{id}` and card edits via `PATCH /im/v1/messages/{id}` using `reply.metadata.card`. These edits do not apply to file/image messages and surface as classified refusals.
+- **WhatsApp / X / OpenClaw:** `501 edit_unsupported`; WhatsApp and X have no message edit API. Device channels return `400 device_channel_reply_not_allowed`.
 
 The edit address comes first from the outbound row. For pre-0.21.0 rows without that address, NyxID reads the parent inbound row, then falls back to the conversation's concrete address. Wildcard (`"*"`) and empty addresses cannot reach a platform; no resolvable address returns `channel_conversation_not_addressable` before dispatch.
 
@@ -600,6 +600,8 @@ classDiagram
 | **Slack** | Bot user OAuth token (`xoxb-`) + Signing Secret | HMAC-SHA256 over `v0:timestamp:body`, five-minute replay window | `url_verification` | `POST /api/chat.postMessage` |
 | **WhatsApp** | Permanent System User access token + Phone Number ID + Meta App Secret; optional WABA ID | `X-Hub-Signature-256: sha256=<HMAC-SHA256(app_secret, raw_body)>` | GET subscription: constant-time SHA-256 Verify Token check, raw challenge as `text/plain` | `POST /{version}/{phone_number_id}/messages` with Bearer auth |
 
+Existing Lark/Feishu bots must grant `im:resource` in the developer console before attachment downloads work; until then downloads return `channel_media_fetch_failed`.
+
 For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Configure the webhook URL and subscribe to both `im.message.receive_v1` and `card.action.trigger` only in the Lark/Feishu Developer Console. The console inputs map to NyxID fields as follows:
 
 - **App ID** -> `ChannelBot.app_id`
@@ -719,7 +721,7 @@ The `raw_platform_data` field on the callback payload serves the advanced use ca
 
 Callbacks preserve existing provider fields and add `content.attachments[i].download_url`. Agent history (`GET /channel-relay/messages/{conversation_id}`) returns the same attachment metadata and absolute download URLs. A document may carry `content.type = "file"` with no text: runtimes should process its attachments instead of dropping it as an unsupported text message.
 
-`GET /api/v1/channel-relay/messages/{message_id}/attachments/{index}` accepts either the conversation's assigned, live API key or a valid reply token bound to that exact inbound message, conversation, platform and agent. Reading validates the signature and live bindings **without consuming the JTI**; the token may download repeatedly and still send its single reply. Relay, delegated, service-account, and ordinary user credentials are forbidden. Device conversations are refused because they have no bot. Inactive bots cannot fetch. Unknown indexes return `channel_attachment_not_found` (404).
+`GET /api/v1/channel-relay/messages/{message_id}/attachments/{index}` accepts either the conversation's assigned, live API key or a valid reply token bound to that exact inbound message, conversation, platform and agent. Reading validates the signature and live bindings **without consuming the JTI**; the token may download repeatedly and still send its single reply. Relay, delegated, service-account, and ordinary user credentials are forbidden. Device conversations are refused because they have no bot. Inactive bots cannot fetch. API-key downloads also consume the key's configured per-agent rate-limit bucket before context resolution; exceeding it returns 429. Unknown indexes return `channel_attachment_not_found` (404).
 
 NyxID resolves the live bot credential and calls the adapter's `fetch_attachment`. The response includes `Content-Type`, `Content-Length`, sanitized `Content-Disposition: attachment; filename="..."`, and `Cache-Control: private, no-store`. Downloads have a 30-second request timeout. `CHANNEL_MEDIA_MAX_BYTES` defaults to 20 MiB (Telegram's bot download limit). Content-Length is checked first; streamed chunks are counted before copying into the bounded buffer. The adapter returns ephemeral `FetchedMedia` bytes, then the handler writes them to the response. Nothing is written to disk or persisted as content. Provider URLs may expire; a retained metadata row is not an archival copy of a file.
 
@@ -761,6 +763,8 @@ The service materializes every source before dispatch. At the adapter boundary, 
 | WhatsApp | Multipart `/{phone_number_id}/media`, then image/document/audio/video message with media ID. Audio captions are separate text messages. |
 | X | OAuth2 multipart `/2/media/upload` with `dm_image`, `dm_video`, or `dm_gif`, processing-status wait when needed, then DM `attachments: [{media_id}]`. |
 
+Editing a media send targets the returned media message ID. Telegram uses `editMessageText` for text messages and falls back to `editMessageCaption` for media captions; Discord `PATCH` edits `content` on any bot message. Slack `chat.update` and Lark/Feishu message edits do not apply to file/image messages and surface as classified refusals. WhatsApp and X have no edit API. `/reply/update` does not replace attachment bytes.
+
 The result is the last platform message ID; Slack may omit it if no share timestamp is available. Lark/Feishu need `im:resource`; Slack needs file read/write scopes; existing X OAuth connections need fresh consent to `media.write`. Platform size/type restrictions can be stricter than NyxID's cap.
 
 Send idempotency fingerprints include attachment kind, source URL or SHA-256 of decoded bytes, filename, MIME type and caption. Changing any of them with the same key returns 409. The source URL identifies URL-based content; changing bytes behind the same URL cannot be detected on an already-completed replay. A multi-message send can partially succeed before a later upload fails; NyxID cannot roll back a platform send. Existing claim/retry semantics apply.
@@ -784,6 +788,7 @@ Response shape (field lists and flow values vary by descriptor):
     "registration": {
       "documentation_url": "https://core.telegram.org/bots/api#setwebhook",
       "fields": [{ "name": "bot_token", "label": "Bot token", "secret": true,
+        "hint": "Connect an existing Telegram bot using its BotFather token.",
         "required": true, "patchable": false, "clearable": false,
         "storage": "bot_token_encrypted", "webhook_secret": false, "platform_fallback": null }],
       "token_fields": ["bot_token"], "extra_fields": [], // extra_fields uses the same field shape
@@ -1112,6 +1117,11 @@ graph TD
 | Concern | Mitigation |
 |---|---|
 | **SSRF** | Callback URLs validated: HTTPS-only in production, block RFC 1918/loopback ranges, optional domain allowlist |
+| **Forged webhook attachment URLs** | Adapter-owned host allowlists, public-IP validation and DNS pinning, and no redirects. Credentials are never sent to a rejected host. |
+| **Agent-supplied media URL sources** | HTTPS only, with the same public-host validation, IP pinning and redirect prohibition. |
+| **Oversized media** | Content-Length pre-check plus streamed byte cap; base64 length checked before allocation. The raised JSON body cap applies only to `/reply` and `/send`. |
+| **Download abuse** | Assigned-key or exact-reply-token binding and live authorization; API-key downloads use the per-agent limiter when configured. Reply-token reads do not consume the send JTI and remain subject to the group's global per-IP limiter. |
+| **Large `/send` JSON before admission** | `/send` still parses the now-larger JSON body before its per-conversation limiter. The group's global per-IP limiter mitigates this work, and the route body cap remains bounded. |
 | **Bot token storage** | AES-256 encrypted at rest (same pattern as `UserApiKey.credential_encrypted`). Never returned in API responses. Only `platform_bot_username` is exposed. |
 | **Webhook forgery** | Per-platform verification: Telegram secret header, Discord Ed25519, Lark / Feishu Verification Token checks plus optional Encrypt Key signature verification and AES decryption. All comparisons use constant-time equality where applicable. |
 | **WhatsApp verification** | POST HMAC verifies the exact raw body with the Meta App Secret before phone-number filtering. GET subscription checks SHA-256 of the one-time Verify Token in constant time. Bodies, secrets, and upstream free-form errors are never logged. |

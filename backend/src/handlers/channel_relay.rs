@@ -1503,6 +1503,7 @@ pub async fn fetch_attachment(
         let auth = auth_user.as_ref().ok_or_else(|| {
             AppError::Unauthorized("Agent API key or reply token required".into())
         })?;
+        crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth).await?;
         let body = AsyncReplyRequest {
             message_id,
             reply: AsyncReplyBody {
@@ -4499,6 +4500,7 @@ mod tests {
         // A body above the configured route cap fails before any platform effect.
         let large = serde_json::json!({"message_id":"missing","reply":{"text":"x".repeat(2 * 1024 * 1024)}});
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -4511,6 +4513,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // Downloads consume the assigned key's configured bucket before provider work.
+        fixture
+            .state
+            .db
+            .collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! {"_id": &fixture.api_key.id},
+                doc! {"$set": {"rate_limit_per_second": 1, "rate_limit_burst": 1}},
+            )
+            .await
+            .unwrap();
+        for expected in [StatusCode::BAD_GATEWAY, StatusCode::TOO_MANY_REQUESTS] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/v1/channel-relay/messages/{}/attachments/0",
+                            fixture.message.id
+                        ))
+                        .header("authorization", format!("Bearer {raw_key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
         fixture.state.db.drop().await.unwrap();
     }
 }

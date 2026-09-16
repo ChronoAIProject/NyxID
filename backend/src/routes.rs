@@ -1482,7 +1482,7 @@ fn build_router_internal(
                 crate::services::channel_media_service::request_body_limit(
                     platform_gate_state
                         .as_ref()
-                        .map_or(20 * 1024 * 1024, |state| {
+                        .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
                             state.config.channel_media_max_bytes
                         }),
                 ),
@@ -1498,7 +1498,7 @@ fn build_router_internal(
                 crate::services::channel_media_service::request_body_limit(
                     platform_gate_state
                         .as_ref()
-                        .map_or(20 * 1024 * 1024, |state| {
+                        .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
                             state.config.channel_media_max_bytes
                         }),
                 ),

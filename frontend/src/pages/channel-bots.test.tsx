@@ -478,8 +478,9 @@ it("renders and validates required secret fields from the catalog, including new
   get.mockImplementation(async (path: string) => {
     if (path === "/channel-platforms") return { platforms: [{
       ...platformFixtures[0], display_name: "Catalog-defined Telegram",
-      registration: { ...platformFixtures[0]!.registration, fields: [{
+      registration: { ...platformFixtures[0]!.registration, setup_instructions: ["Enable your workspace before connecting."], fields: [{
         name: "future_secret", label: "Workspace credential", secret: true, required: true,
+        hint: "Copy the credential from workspace settings.",
         patchable: false, clearable: false, storage: "future_secret_encrypted", webhook_secret: false, platform_fallback: null,
       }] },
     }] };
@@ -491,6 +492,8 @@ it("renders and validates required secret fields from the catalog, including new
   const dialog = within(await screen.findByRole("dialog"));
   const secret = await dialog.findByLabelText("Workspace credential");
   expect(secret).toHaveAttribute("type", "password");
+  expect(dialog.getByText("Copy the credential from workspace settings.")).toBeVisible();
+  expect(dialog.getByText("Enable your workspace before connecting.")).toBeVisible();
   expect(dialog.queryByLabelText("Bot token")).not.toBeInTheDocument();
   const submit = dialog.getByRole("button", { name: "Add Bot" });
   await user.type(dialog.getByLabelText("Label", { exact: true }), "Catalog bot");

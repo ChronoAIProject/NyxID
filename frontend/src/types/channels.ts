@@ -287,6 +287,7 @@ export interface ChannelAttachment {
   readonly size_bytes?: number | null;
 }
 export interface ChannelRegistrationField {
+  readonly hint: string | null;
   readonly name: string;
   readonly label: string;
   readonly secret: boolean;
@@ -298,7 +299,7 @@ export interface ChannelRegistrationField {
   readonly platform_fallback: string | null;
 }
 export interface ChannelPlatformDescriptor {
-  readonly platform: ChannelPlatform | "openclaw";
+  readonly platform: ChannelPlatform;
   readonly display_name: string;
   readonly enabled: boolean;
   readonly managed_only: boolean;

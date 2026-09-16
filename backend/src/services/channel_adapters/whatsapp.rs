@@ -541,6 +541,9 @@ impl PlatformAdapter for WhatsAppAdapter {
             fields: &[
                 RegistrationField {
                     label: "Access token",
+                    hint: Some(
+                        "Permanent System User token for the WhatsApp Business Platform (Meta Cloud API).",
+                    ),
                     patchable: true,
                     ..BOT_TOKEN_FIELD
                 },
@@ -553,6 +556,9 @@ impl PlatformAdapter for WhatsAppAdapter {
                     patchable: false,
                     clearable: false,
                     webhook_secret: false,
+                    hint: Some(
+                        "Meta phone number identifier, not the display phone number or App ID.",
+                    ),
                     platform_fallback: None,
                 },
                 RegistrationField {
@@ -564,6 +570,7 @@ impl PlatformAdapter for WhatsAppAdapter {
                     patchable: true,
                     clearable: false,
                     webhook_secret: true,
+                    hint: None,
                     platform_fallback: Some("app_secret"),
                 },
                 RegistrationField {
@@ -575,11 +582,13 @@ impl PlatformAdapter for WhatsAppAdapter {
                     patchable: false,
                     clearable: false,
                     webhook_secret: false,
+                    hint: Some("Optional WABA ID."),
                     platform_fallback: None,
                 },
             ],
             webhook_secret_label: Some("Verify Token"),
             setup_instructions: &[
+                "Find the Phone Number ID in WhatsApp > API Setup and the App Secret in Meta App Dashboard > Basic settings.",
                 "In Meta App Dashboard > WhatsApp > Configuration, enter the Callback URL and Verify Token shown here, then verify and save.",
                 "Subscribe to the messages webhook field. Subscribe this app to the WhatsApp Business Account (POST /{WABA_ID}/subscribed_apps with a system user token).",
                 "Use a permanent System User access token with whatsapp_business_messaging and whatsapp_business_management permissions and access to the phone number.",

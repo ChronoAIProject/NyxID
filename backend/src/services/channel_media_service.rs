@@ -210,14 +210,14 @@ pub async fn materialize(
     Ok(result)
 }
 
-/// Provider JSON responses are small control messages, not unbounded media buffers.
+/// Provider control JSON responses are bounded to 256 KiB, allowing attachment-rich objects.
 pub async fn response_json(request: reqwest::RequestBuilder) -> AppResult<Value> {
     let response = request
         .timeout(TIMEOUT)
         .send()
         .await
         .map_err(|_| upload_failed())?;
-    let media = bounded_response(response, 64 * 1024)
+    let media = bounded_response(response, 256 * 1024)
         .await
         .map_err(|_| upload_failed())?;
     serde_json::from_slice(&media.bytes).map_err(|_| upload_failed())
@@ -284,6 +284,28 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[tokio::test]
+    async fn channel_media_control_json_allows_large_attachment_metadata_but_stays_bounded() {
+        let server = MockServer::start().await;
+        for size in [200 * 1024, 257 * 1024] {
+            Mock::given(method("GET"))
+                .and(path(format!("/{size}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "metadata": "x".repeat(size)
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result =
+                response_json(reqwest::Client::new().get(format!("{}/{size}", server.uri()))).await;
+            if size < 256 * 1024 {
+                assert_eq!(result.unwrap()["metadata"].as_str().unwrap().len(), size);
+            } else {
+                assert!(matches!(result, Err(AppError::ChannelPlatformError(_))));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn channel_media_bounded_download_and_host_fences() {

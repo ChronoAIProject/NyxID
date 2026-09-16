@@ -708,6 +708,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: false,
                 webhook_secret: true,
+                hint: Some("Event Subscriptions > Security in the Lark/Feishu console."),
                 platform_fallback: None,
             },
             RegistrationField {
@@ -719,6 +720,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: false,
                 webhook_secret: false,
+                hint: None,
                 platform_fallback: None,
             },
             RegistrationField {
@@ -730,6 +732,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: false,
                 webhook_secret: false,
+                hint: None,
                 platform_fallback: None,
             },
             RegistrationField {
@@ -741,8 +744,14 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: true,
                 webhook_secret: true,
+                hint: Some(
+                    "Optional. Required only when encrypted callbacks are enabled in the platform console.",
+                ),
                 platform_fallback: None,
             },
+        ],
+        setup_instructions: &[
+            "In Lark/Feishu Event Subscriptions, copy the Verification Token from Security settings. Encrypt Key is optional and should match the Encrypt Key field from the same panel if you enabled encrypted callbacks.",
         ],
         ..RegistrationDescriptor::default()
     }

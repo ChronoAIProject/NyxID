@@ -1,6 +1,6 @@
 import type { ChannelPlatformDescriptor, ChannelRegistrationField } from "@/types/channels";
-function field(name: string, secret = false, required = true, patchable = false): ChannelRegistrationField {
-  return { name, label: name === "bot_token" ? "Bot token" : name, secret, required, patchable, clearable: false, storage: name,
+function field(name: string, secret = false, required = true, patchable = false, hint: string | null = null): ChannelRegistrationField {
+  return { name, hint, label: name === "bot_token" ? "Bot token" : name, secret, required, patchable, clearable: false, storage: name,
     webhook_secret: false, platform_fallback: null };
 }
 export function platformFixture(platform: ChannelPlatformDescriptor["platform"], fields: readonly ChannelRegistrationField[] = [field("bot_token", true)]): ChannelPlatformDescriptor {

@@ -43,6 +43,7 @@ pub struct RegistrationItem {
 pub struct RegistrationFieldItem {
     pub name: &'static str,
     pub label: &'static str,
+    pub hint: Option<&'static str>,
     pub secret: bool,
     pub required: bool,
     pub patchable: bool,
@@ -56,6 +57,7 @@ impl From<&RegistrationField> for RegistrationFieldItem {
         Self {
             name: f.name,
             label: f.label,
+            hint: f.hint,
             secret: f.secret,
             required: f.required,
             patchable: f.patchable,
@@ -188,7 +190,8 @@ mod tests {
             telegram["registration"]["fields"],
             serde_json::json!([{
                 "name":"bot_token","label":"Bot token","secret":true,"required":true,"patchable":false,"clearable":false,
-                "storage":"bot_token_encrypted","webhook_secret":false,"platform_fallback":null
+                "storage":"bot_token_encrypted","webhook_secret":false,"platform_fallback":null,
+                "hint":"Connect an existing Telegram bot using its BotFather token."
             }])
         );
         assert_eq!(
@@ -203,6 +206,16 @@ mod tests {
         let whatsapp =
             serde_json::to_value(entries.iter().find(|e| e.platform == "whatsapp").unwrap())
                 .unwrap();
+        let phone_number = whatsapp["registration"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["name"] == "phone_number_id")
+            .unwrap();
+        assert_eq!(
+            phone_number["hint"],
+            "Meta phone number identifier, not the display phone number or App ID."
+        );
         assert_eq!(
             whatsapp["managed_onboarding"]["flow"],
             "meta_embedded_signup"

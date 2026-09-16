@@ -382,6 +382,7 @@ impl PlatformAdapter for SlackAdapter {
                     patchable: true,
                     clearable: false,
                     webhook_secret: true,
+                    hint: Some("Basic Information > App Credentials in Slack app settings."),
                     platform_fallback: None,
                 },
             ],

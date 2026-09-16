@@ -12,6 +12,7 @@ use crate::models::channel_bot::ChannelBot;
 pub struct RegistrationField {
     pub name: &'static str,
     pub label: &'static str,
+    pub hint: Option<&'static str>,
     pub storage: &'static str,
     pub secret: bool,
     pub required: bool,
@@ -30,6 +31,7 @@ pub const BOT_TOKEN_FIELD: RegistrationField = RegistrationField {
     patchable: false,
     clearable: false,
     webhook_secret: false,
+    hint: None,
     platform_fallback: None,
 };
 
@@ -45,6 +47,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -56,6 +59,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -67,6 +71,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -78,6 +83,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -89,6 +95,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: true,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
 ];

@@ -255,18 +255,19 @@ fn parse_gateway_message(payload: &serde_json::Value) -> Option<InboundMessage> 
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    let attachments = extract_attachments(msg);
     Some(InboundMessage {
         platform_message_id: message_id.to_string(),
         conversation_id: channel_id.to_string(),
         conversation_type: "group".to_string(),
         sender_platform_id: sender_id,
         sender_display_name: sender_name,
-        content_type: extract_attachments(msg)
+        content_type: attachments
             .first()
             .map(|a| a.content_type.clone())
             .unwrap_or_else(|| if text.is_some() { "text" } else { "unknown" }.into()),
         text,
-        attachments: extract_attachments(msg),
+        attachments,
         reply_to_platform_message_id: reply_to,
         thread_id,
         raw_data: payload.clone(),
@@ -402,6 +403,7 @@ impl PlatformAdapter for DiscordAdapter {
                     patchable: false,
                     clearable: false,
                     webhook_secret: false,
+                    hint: None,
                     platform_fallback: None,
                 },
             ],
