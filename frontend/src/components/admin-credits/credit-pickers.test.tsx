@@ -54,3 +54,29 @@ describe("ServicePicker", () => {
     expect(onChange).toHaveBeenCalledWith(["service-one"]);
   });
 });
+
+it("keeps missing and filtered saved services visible and removable", () => {
+  const onChange = vi.fn();
+  render(
+    <ServicePicker
+      services={[service("old", "Old service", "requests")]}
+      selected={["old", "missing"]}
+      onChange={onChange}
+      multiple
+    />,
+  );
+  fireEvent.change(screen.getByPlaceholderText("Search services"), {
+    target: { value: "no matches" },
+  });
+  expect(
+    screen.getByLabelText(
+      "Selected service: Old service (outside current results)",
+    ),
+  ).toBeChecked();
+  fireEvent.click(
+    screen.getByLabelText(
+      "Selected service: missing (outside current results)",
+    ),
+  );
+  expect(onChange).toHaveBeenCalledWith(["old"]);
+});

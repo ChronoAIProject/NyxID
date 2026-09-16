@@ -1,38 +1,48 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { PlatformCredentials } from "@/types/admin";
 import { AdminPlatformCredentialsPage } from "./admin-platform-credentials";
-
-const mocks = vi.hoisted(() => ({
-  providers: [] as PlatformCredentials[],
+const mock = vi.hoisted(() => ({
+  data: [] as PlatformCredentials[],
   update: vi.fn(),
+  clear: vi.fn(),
   reset: vi.fn(),
+  isLoading: false,
+  error: null as unknown,
 }));
-
 vi.mock("@/hooks/use-admin-platform-credentials", () => ({
   useAdminPlatformCredentials: () => ({
-    data: mocks.providers,
-    isLoading: false,
+    data: mock.data,
+    isLoading: mock.isLoading,
+    error: mock.error,
   }),
   useUpdatePlatformCredentials: () => ({
-    mutateAsync: mocks.update,
-    reset: mocks.reset,
+    mutateAsync: mock.update,
     isPending: false,
+    reset: mock.reset,
   }),
   useClearPlatformCredentials: () => ({
-    mutateAsync: vi.fn(),
+    mutateAsync: mock.clear,
     isPending: false,
   }),
 }));
-
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.providers = [
+  mock.isLoading = false;
+  mock.error = null;
+  mock.data = [
     {
       provider: "future-provider",
+      platform: "future",
       label: "Future Provider",
-      platform: "future-platform",
       available: true,
       fields: [
         {
@@ -58,14 +68,29 @@ beforeEach(() => {
       setup_checklist: ["A provider-owned setup step"],
       callback_url: null,
       webhook_verify_token: null,
-      updated_at: "today",
+      updated_at: "v1",
     },
   ];
+  mock.update.mockImplementation(async ({ fields }) => {
+    const saved = {
+      ...mock.data[0]!,
+      updated_at: "v2",
+      fields: mock.data[0]!.fields.map((f) =>
+        fields && f.name in fields
+          ? {
+              ...f,
+              value: f.secret ? undefined : (fields[f.name] ?? undefined),
+              configured: fields[f.name] !== null,
+            }
+          : f,
+      ),
+    };
+    mock.data = [saved];
+    return saved;
+  });
 });
-
-it("renders an unknown provider entirely from its descriptor with masked configured secrets", () => {
+it("renders saved non-secret values and configured secret status", () => {
   render(<AdminPlatformCredentialsPage />);
-  expect(screen.getByText("Future Provider")).toBeInTheDocument();
   expect(screen.getByLabelText("Tenant ID")).toHaveValue("tenant-42");
   expect(screen.getByLabelText("Signing Key")).toHaveAttribute(
     "type",
@@ -77,68 +102,145 @@ it("renders an unknown provider entirely from its descriptor with masked configu
     screen.getByRole("button", { name: "Save credentials" }),
   ).toBeDisabled();
 });
-
-it("saves a Telegram manager token after a single paste", async () => {
-  mocks.providers = [
-    {
-      provider: "telegram-new",
-      label: "Telegram — bot creation",
-      platform: "telegram-new",
-      available: false,
-      fields: [
-        {
-          name: "manager_bot_token",
-          label: "Manager bot token",
-          secret: true,
-          configured: false,
-          help: "Dedicated manager bot token",
-          numeric: false,
-          required: true,
-        },
-      ],
-      setup_checklist: [],
-      callback_url: null,
-      webhook_verify_token: null,
-      updated_at: null,
-    },
-  ];
+it("reviews only changed credentials and resets the baseline after success", async () => {
   const user = userEvent.setup();
   render(<AdminPlatformCredentialsPage />);
-  const save = screen.getByRole("button", { name: "Save credentials" });
-  expect(save).toBeDisabled();
-
-  await user.click(screen.getByLabelText("Manager bot token"));
-  await user.paste("123456789:synthetic-manager-token");
-
-  await waitFor(() => expect(save).toBeEnabled());
-  await user.click(save);
+  fireEvent.change(screen.getByLabelText("Tenant ID"), {
+    target: { value: "tenant-43" },
+  });
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  const dialog = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(within(dialog).getByText("tenant-42")).toBeInTheDocument();
+  expect(within(dialog).getByText("tenant-43")).toBeInTheDocument();
+  expect(mock.update).not.toHaveBeenCalled();
+  await user.click(
+    within(dialog).getByRole("button", { name: "Confirm changes" }),
+  );
   await waitFor(() =>
-    expect(mocks.update).toHaveBeenCalledExactlyOnceWith({
-      fields: { manager_bot_token: "123456789:synthetic-manager-token" },
+    expect(mock.update).toHaveBeenCalledExactlyOnceWith({
+      fields: { tenant: "tenant-43" },
+    }),
+  );
+  expect(
+    screen.getByRole("button", { name: "Save credentials" }),
+  ).toBeDisabled();
+});
+it("confirms secret removal as an explicit null and never renders a replacement secret", async () => {
+  const user = userEvent.setup();
+  render(<AdminPlatformCredentialsPage />);
+  fireEvent.change(screen.getByLabelText("Signing Key"), {
+    target: { value: "new-secret-never-preview" },
+  });
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog).not.toHaveTextContent("new-secret-never-preview");
+  expect(within(dialog).getByText("Replace stored value")).toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await user.click(screen.getByRole("button", { name: "Clear Signing Key" }));
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  expect(await screen.findByText("Clear stored value")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Confirm changes" }));
+  await waitFor(() =>
+    expect(mock.update).toHaveBeenCalledExactlyOnceWith({
+      fields: { signing_key: null },
     }),
   );
 });
-
-it("saves only the rotated secret and disables saving invalid or unchanged values", async () => {
+it("keeps edits during refresh and blocks saving until the latest values are loaded", async () => {
   const user = userEvent.setup();
-  render(<AdminPlatformCredentialsPage />);
-  const secret = screen.getByLabelText("Signing Key");
-  const save = screen.getByRole("button", { name: "Save credentials" });
-
-  await user.click(secret);
-  await user.paste("replacement-secret");
-  await waitFor(() => expect(save).toBeEnabled());
-  await user.click(save);
-  await waitFor(() =>
-    expect(mocks.update).toHaveBeenCalledExactlyOnceWith({
-      fields: { signing_key: "replacement-secret" },
-    }),
+  const view = render(<AdminPlatformCredentialsPage />);
+  fireEvent.change(screen.getByLabelText("Tenant ID"), {
+    target: { value: "local-draft" },
+  });
+  mock.data = [
+    {
+      ...mock.data[0]!,
+      updated_at: "v3",
+      fields: mock.data[0]!.fields.map((f) =>
+        f.name === "tenant" ? { ...f, value: "remote-change" } : f,
+      ),
+    },
+  ];
+  view.rerender(<AdminPlatformCredentialsPage />);
+  expect(screen.getByLabelText("Tenant ID")).toHaveValue("local-draft");
+  expect(
+    screen.getByRole("button", { name: "Save credentials" }),
+  ).toBeDisabled();
+  await user.click(
+    screen.getByRole("button", { name: "Load latest values (discard edits)" }),
   );
+  expect(screen.getByLabelText("Tenant ID")).toHaveValue("remote-change");
+  expect(mock.update).not.toHaveBeenCalled();
+});
 
-  fireEvent.change(secret, { target: { value: "x".repeat(4097) } });
-  await waitFor(() => expect(save).toBeDisabled());
-  await user.clear(secret);
-  await waitFor(() => expect(save).toBeDisabled());
-  await user.paste("valid-replacement");
-  await waitFor(() => expect(save).toBeEnabled());
+it("retains a credential draft when a background refresh fails", () => {
+  const view = render(<AdminPlatformCredentialsPage />);
+  fireEvent.change(screen.getByLabelText("Tenant ID"), {
+    target: { value: "unsaved-tenant" },
+  });
+  mock.error = new Error("Network unavailable");
+  view.rerender(<AdminPlatformCredentialsPage />);
+  expect(
+    screen.getByText("Unable to refresh platform credentials"),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("Tenant ID")).toHaveValue("unsaved-tenant");
+});
+
+it("preserves unsaved credential edits when regenerating the verify token", async () => {
+  mock.data[0] = { ...mock.data[0]!, webhook_verify_token: "old-verify-token" };
+  const user = userEvent.setup();
+  const view = render(<AdminPlatformCredentialsPage />);
+  fireEvent.change(screen.getByLabelText("Tenant ID"), {
+    target: { value: "unsaved-tenant" },
+  });
+  await user.click(
+    screen.getByRole("button", { name: "Regenerate verify token" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Confirm" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  view.rerender(<AdminPlatformCredentialsPage />);
+  expect(mock.update).toHaveBeenCalledExactlyOnceWith({
+    regenerate_verify_token: true,
+  });
+  expect(screen.getByLabelText("Tenant ID")).toHaveValue("unsaved-tenant");
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Save credentials" }),
+    ).toBeEnabled(),
+  );
+});
+
+it("blocks duplicate confirmation and retains the reviewed draft after a failed save", async () => {
+  const user = userEvent.setup();
+  let rejectSave!: (error: Error) => void;
+  mock.update.mockImplementationOnce(
+    () =>
+      new Promise((_, reject) => {
+        rejectSave = reject;
+      }),
+  );
+  render(<AdminPlatformCredentialsPage />);
+  fireEvent.change(screen.getByLabelText("Tenant ID"), {
+    target: { value: "retry-tenant" },
+  });
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  await user.dblClick(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  expect(mock.update).toHaveBeenCalledTimes(1);
+  await act(async () => rejectSave(new Error("Save failed")));
+  const dialog = screen.getByRole("dialog", { name: "Review changes" });
+  expect(within(dialog).getByRole("alert")).toHaveTextContent("Save failed");
+  expect(screen.getByLabelText("Tenant ID")).toHaveValue("retry-tenant");
+  await user.click(
+    within(dialog).getByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(mock.update).toHaveBeenNthCalledWith(2, {
+    fields: { tenant: "retry-tenant" },
+  });
 });

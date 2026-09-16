@@ -1,3 +1,5 @@
+import { changedFields, describeChanges } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -82,31 +84,28 @@ export function AdminRoleDetailPage() {
     setEditOpen(true);
   }
 
-  async function handleEdit(data: UpdateRoleFormData) {
-    try {
-      const permissions = data.permissions
-        ? data.permissions
-            .split(",")
-            .map((p) => p.trim())
-            .filter((p) => p.length > 0)
-        : [];
-      await updateMutation.mutateAsync({
-        roleId,
-        data: {
-          name: data.name,
-          slug: data.slug,
-          description: data.description || undefined,
-          permissions,
-          is_default: data.is_default,
-        },
-      });
-      toast.success("Role updated successfully");
-      setEditOpen(false);
-    } catch (err) {
-      toast.error(
-        err instanceof ApiError ? err.message : "Failed to update role",
-      );
-    }
+  const editReview = useChangeReview<
+    Parameters<typeof updateMutation.mutateAsync>[0]["data"]
+  >(async (data) => {
+    await updateMutation.mutateAsync({ roleId, data });
+    toast.success("Role updated successfully");
+    setEditOpen(false);
+  });
+
+  function handleEdit(data: UpdateRoleFormData) {
+    const normalize = (value: UpdateRoleFormData) => ({
+      ...value,
+      description: value.description ?? "",
+      permissions: (value.permissions ?? "")
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean),
+    });
+    const before = normalize(
+      form.formState.defaultValues as UpdateRoleFormData,
+    );
+    const patch = changedFields(before, normalize(data));
+    editReview.review(patch, describeChanges(before, patch));
   }
 
   async function handleDelete() {
@@ -175,15 +174,16 @@ export function AdminRoleDetailPage() {
         actions={
           canWrite ? (
             <>
-              <Button
-                variant="outline"
-                onClick={() => setBulkAssignOpen(true)}
-              >
-                <ButtonIcon><Users className="h-3 w-3" /></ButtonIcon>
+              <Button variant="outline" onClick={() => setBulkAssignOpen(true)}>
+                <ButtonIcon>
+                  <Users className="h-3 w-3" />
+                </ButtonIcon>
                 Assign All
               </Button>
               <Button variant="outline" onClick={openEditDialog}>
-                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <Pencil className="h-3 w-3" />
+                </ButtonIcon>
                 Edit
               </Button>
               {!role.is_system && (
@@ -191,7 +191,9 @@ export function AdminRoleDetailPage() {
                   variant="destructive"
                   onClick={() => setDeleteOpen(true)}
                 >
-                  <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+                  <ButtonIcon variant="destructive">
+                    <Trash2 className="h-3 w-3 text-destructive" />
+                  </ButtonIcon>
                   Delete
                 </Button>
               )}
@@ -227,12 +229,18 @@ export function AdminRoleDetailPage() {
         {role.permissions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SmartRemoteIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">No permissions assigned.</p>
+            <p className="text-[12px] text-muted-foreground">
+              No permissions assigned.
+            </p>
           </div>
         ) : (
           <div className="flex flex-wrap gap-2 px-4 py-3">
             {role.permissions.map((perm) => (
-              <Badge key={perm} variant="secondary" className="font-mono text-xs">
+              <Badge
+                key={perm}
+                variant="secondary"
+                className="font-mono text-xs"
+              >
                 {perm}
               </Badge>
             ))}
@@ -241,6 +249,7 @@ export function AdminRoleDetailPage() {
       </DetailSection>
 
       {/* Edit Dialog */}
+      {editReview.dialog}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -343,7 +352,11 @@ export function AdminRoleDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  isLoading={updateMutation.isPending}
+                >
                   Save Changes
                 </Button>
               </DialogFooter>

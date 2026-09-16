@@ -1,3 +1,6 @@
+import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Ban, Check, Pencil, Plus, RotateCcw } from "lucide-react";
@@ -116,11 +119,23 @@ export function PlatformVendorTemplateManager({
     form.reset(templateToForm(template));
   };
 
+  const baseline = form.formState.defaultValues as PlatformVendorTemplateForm;
+  const stale = Boolean(
+    editing && !sameValue(baseline, templateToForm(editing)),
+  );
+  const review = useChangeReview<PlatformVendorTemplateForm>(async (data) => {
+    if (!editingId) return;
+    await update.mutateAsync({ id: editingId, data });
+    toast.success("Vendor template updated");
+    setEditingId(null);
+    form.reset(EMPTY_FORM);
+  }, stale);
+
   const onSubmit = async (data: PlatformVendorTemplateForm) => {
     try {
       if (editingId) {
-        await update.mutateAsync({ id: editingId, data });
-        toast.success("Vendor template updated");
+        review.review(data, describeChanges(baseline, changedFields(baseline, data)));
+        return;
       } else {
         await create.mutateAsync(data);
         toast.success("Vendor template added");
@@ -147,6 +162,7 @@ export function PlatformVendorTemplateManager({
 
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => (nextOpen ? onOpenChange(true) : close())}>
+      {review.dialog}
       <DialogContent className="max-w-3xl" scrollMode="body">
         <DialogHeader>
           <DialogTitle>Vendor templates</DialogTitle>
@@ -198,7 +214,10 @@ export function PlatformVendorTemplateManager({
             )}
           </div>
 
-          <Form {...form}>
+          {stale && editing && (
+          <StaleFormNotice onReload={() => { form.reset(templateToForm(editing)); review.cancel(); }} />
+        )}
+        <Form {...form}>
             <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
               <div className="flex items-center justify-between border-y border-border/50 py-3">
                 <div>

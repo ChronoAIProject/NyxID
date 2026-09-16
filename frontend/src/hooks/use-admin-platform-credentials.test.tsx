@@ -38,7 +38,19 @@ it("loads descriptor inventory and keeps managed bootstrap opt-in", async () => 
   expect(mock.get).not.toHaveBeenCalled();
 });
 it("sends explicit field clears, token rotation and provider deletion", async () => {
-  mock.patch.mockResolvedValue({});
+  const saved = {
+    provider: "meta",
+    label: "Meta",
+    platform: "whatsapp",
+    available: false,
+    fields: [],
+    setup_checklist: [],
+    callback_url: null,
+    webhook_verify_token: null,
+    updated_at: null,
+  };
+  mock.patch.mockResolvedValue({ ...saved, future_field: true });
+  mock.get.mockResolvedValue([saved]);
   mock.delete.mockResolvedValue(undefined);
   const { result } = renderHook(
     () => ({
@@ -57,6 +69,7 @@ it("sends explicit field clears, token rotation and provider deletion", async ()
     fields: { app_secret: null },
     regenerate_verify_token: true,
   });
+  await waitFor(() => expect(result.current.update.data).toEqual(saved));
   await act(() => result.current.clear.mutateAsync());
   expect(mock.delete).toHaveBeenCalledWith("/admin/platform-credentials/meta");
 });

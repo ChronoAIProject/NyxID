@@ -1,3 +1,5 @@
+import { changedFields, describeChanges } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -101,31 +103,29 @@ export function AdminGroupDetailPage() {
     setEditOpen(true);
   }
 
-  async function handleEdit(data: UpdateGroupFormData) {
-    try {
-      const roleIds = data.role_ids
-        ? data.role_ids
-            .split(",")
-            .map((id) => id.trim())
-            .filter((id) => id.length > 0)
-        : [];
-      await updateMutation.mutateAsync({
-        groupId,
-        data: {
-          name: data.name,
-          slug: data.slug,
-          description: data.description || undefined,
-          role_ids: roleIds,
-          parent_group_id: data.parent_group_id || undefined,
-        },
-      });
-      toast.success("Group updated successfully");
-      setEditOpen(false);
-    } catch (err) {
-      toast.error(
-        err instanceof ApiError ? err.message : "Failed to update group",
-      );
-    }
+  const editReview = useChangeReview<
+    Parameters<typeof updateMutation.mutateAsync>[0]["data"]
+  >(async (data) => {
+    await updateMutation.mutateAsync({ groupId, data });
+    toast.success("Group updated successfully");
+    setEditOpen(false);
+  });
+
+  function handleEdit(data: UpdateGroupFormData) {
+    const normalize = (value: UpdateGroupFormData) => ({
+      ...value,
+      description: value.description ?? "",
+      parent_group_id: value.parent_group_id ?? "",
+      role_ids: (value.role_ids ?? "")
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean),
+    });
+    const before = normalize(
+      form.formState.defaultValues as UpdateGroupFormData,
+    );
+    const patch = changedFields(before, normalize(data));
+    editReview.review(patch, describeChanges(before, patch));
   }
 
   async function handleDelete() {
@@ -214,14 +214,15 @@ export function AdminGroupDetailPage() {
           canWrite ? (
             <>
               <Button variant="outline" onClick={openEditDialog}>
-                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <Pencil className="h-3 w-3" />
+                </ButtonIcon>
                 Edit
               </Button>
-              <Button
-                variant="destructive"
-                onClick={() => setDeleteOpen(true)}
-              >
-                <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+              <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
+                <ButtonIcon variant="destructive">
+                  <Trash2 className="h-3 w-3 text-destructive" />
+                </ButtonIcon>
                 Delete
               </Button>
             </>
@@ -266,13 +267,19 @@ export function AdminGroupDetailPage() {
       <DetailSection title="Members">
         {canWrite && (
           <div className="px-4 py-3">
-            <AddCtaButton label="Add Member" onClick={() => setAddMemberOpen(true)} icon={UserPlus} />
+            <AddCtaButton
+              label="Add Member"
+              onClick={() => setAddMemberOpen(true)}
+              icon={UserPlus}
+            />
           </div>
         )}
         {members.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <BenchesIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">No members in this group.</p>
+            <p className="text-[12px] text-muted-foreground">
+              No members in this group.
+            </p>
           </div>
         ) : (
           <Table>
@@ -286,9 +293,7 @@ export function AdminGroupDetailPage() {
             <TableBody>
               {members.map((member) => (
                 <TableRow key={member.id}>
-                  <TableCell className="font-medium">
-                    {member.email}
-                  </TableCell>
+                  <TableCell className="font-medium">{member.email}</TableCell>
                   <TableCell>
                     {member.display_name ?? (
                       <span className="text-muted-foreground">--</span>
@@ -314,6 +319,7 @@ export function AdminGroupDetailPage() {
       </DetailSection>
 
       {/* Edit Dialog */}
+      {editReview.dialog}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -412,7 +418,11 @@ export function AdminGroupDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  isLoading={updateMutation.isPending}
+                >
                   Save Changes
                 </Button>
               </DialogFooter>

@@ -1,4 +1,8 @@
+import { useState } from "react";
 import type { ProviderConfig } from "@/types/api";
+import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -35,95 +39,76 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
 import {
   PROVIDER_TYPE_LABELS,
-  splitScopes,
-  stripEmptyStrings,
+  providerFormPayload,
+  providerFormValues,
 } from "./provider-edit.helpers";
 
 export function ProviderEditPage() {
-  const { providerId } = useParams({ strict: false }) as {
-    providerId: string;
-  };
+  const { providerId } = useParams({ strict: false }) as { providerId: string };
   const { data: provider, isLoading, error, refetch } = useProvider(providerId);
-
-  if (isLoading) {
+  if (isLoading) return <Skeleton className="h-96 w-full" />;
+  if (!provider)
     return (
-      <div className="space-y-6">
-        <Skeleton className="h-10 w-64" />
-        <Skeleton className="h-96 w-full" />
-      </div>
+      <ErrorBanner
+        message={
+          error instanceof ApiError ? error.message : "Unable to load provider"
+        }
+        onRetry={refetch}
+      />
     );
-  }
-
-  if (error || !provider) {
-    return (
-      <div className="space-y-8">
-        <PageHeader title="Provider Not Found" />
-        <ErrorBanner
-          message={error instanceof ApiError ? error.message : "The provider you are trying to edit does not exist or has been deleted."}
-          onRetry={refetch}
-        />
-      </div>
-    );
-  }
-
-  return <ProviderEditForm provider={provider} />;
+  return <ProviderEditForm key={providerId} source={provider} />;
 }
 
-function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
+function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
+  const [provider, setProvider] = useState(source);
   const providerId = provider.id;
   const navigate = useNavigate();
   const updateMutation = useUpdateProvider(providerId);
+
   const form = useAppForm<UpdateProviderFormData>({
     resolver: zodResolver(updateProviderSchema),
-    values: {
-      name: provider.name,
-      slug: provider.slug,
-      description: provider.description ?? "",
-      provider_type: provider.provider_type,
-      credential_mode: provider.credential_mode || "admin",
-      authorization_url: "",
-      token_url: "",
-      revocation_url: "",
-      default_scopes: provider.default_scopes?.join(", ") ?? "",
-      is_active: provider.is_active,
-      client_id: "",
-      client_secret: "",
-      client_id_param_name: provider.client_id_param_name ?? "",
-      supports_pkce: provider.supports_pkce,
-      device_code_url: "",
-      device_token_url: "",
-      hosted_callback_url: provider.hosted_callback_url ?? "",
-      api_key_instructions: provider.api_key_instructions ?? "",
-      api_key_url: provider.api_key_url ?? "",
-      icon_url: provider.icon_url ?? "",
-      documentation_url: provider.documentation_url ?? "",
-    },
+    defaultValues: providerFormValues(provider),
   });
+  const stale = !sameValue(provider, source);
+  const review = useChangeReview<
+    Parameters<typeof updateMutation.mutateAsync>[0]
+  >(saveChanges, stale);
 
   const watchedProviderType = useWatch({
     control: form.control,
     name: "provider_type",
   });
 
-  async function onSubmit(data: UpdateProviderFormData) {
+  function onSubmit(data: UpdateProviderFormData) {
+    const before = providerFormPayload(providerFormValues(provider));
+    const patch = changedFields(before, providerFormPayload(data));
+    const payload: Parameters<typeof updateMutation.mutateAsync>[0] = {
+      ...patch,
+    };
+    if (patch.revocation_url && provider.revocation) {
+      delete payload.revocation_url;
+      payload.revocation = {
+        ...provider.revocation,
+        url: patch.revocation_url,
+      };
+    }
+    if (patch.revocation_url === "") {
+      delete payload.revocation_url;
+      payload.revocation = null;
+    }
+    review.review(
+      payload,
+      describeChanges(before, patch, {
+        secretFields: ["client_id", "client_secret"],
+      }),
+    );
+  }
+
+  async function saveChanges(
+    data: Parameters<typeof updateMutation.mutateAsync>[0],
+  ) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { slug: _, provider_type: _providerType, ...updateFields } = data;
-      const isOAuthOrDeviceCode =
-        data.provider_type === "oauth2" ||
-        data.provider_type === "device_code";
-      const cleaned = stripEmptyStrings({
-        ...updateFields,
-        default_scopes: splitScopes(data.default_scopes),
-        supports_pkce:
-          data.provider_type === "oauth2" ? data.supports_pkce : undefined,
-        credential_mode: isOAuthOrDeviceCode
-          ? updateFields.credential_mode
-          : undefined,
-      });
-      await updateMutation.mutateAsync(
-        cleaned as Parameters<typeof updateMutation.mutateAsync>[0],
-      );
+      await updateMutation.mutateAsync(data);
       toast.success("Provider updated");
       void navigate({
         to: "/providers/$providerId",
@@ -135,6 +120,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
       } else {
         toast.error("Failed to update provider");
       }
+      throw err;
     }
   }
 
@@ -145,10 +131,18 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
 
   return (
     <div className="space-y-8">
-      <PageHeader
-        title={`Edit ${provider.name}`}
-      />
+      <PageHeader title={`Edit ${provider.name}`} />
 
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            setProvider(source);
+            form.reset(providerFormValues(source));
+            review.cancel();
+          }}
+        />
+      )}
+      {review.dialog}
       <div className="max-w-2xl">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
@@ -301,7 +295,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                   OAuth 2.0 Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Leave URL fields blank to keep current values.
+                  Saved endpoint URLs are shown below.
                 </p>
 
                 <FormField
@@ -312,7 +306,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                       <FormLabel>Authorization URL</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Leave blank to keep current"
+                          placeholder="https://…"
                           {...field}
                         />
                       </FormControl>
@@ -329,7 +323,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                       <FormLabel>Token URL</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Leave blank to keep current"
+                          placeholder="https://…"
                           {...field}
                         />
                       </FormControl>
@@ -346,7 +340,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                       <FormLabel>Revocation URL</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Leave blank to keep current"
+                          placeholder="https://…"
                           {...field}
                         />
                       </FormControl>
@@ -380,7 +374,12 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                   name="client_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client ID</FormLabel>
+                      <FormLabel>
+                        Client ID —{" "}
+                        {provider.has_client_id
+                          ? "Configured"
+                          : "Not configured"}
+                      </FormLabel>
                       <FormControl>
                         <Input
                           placeholder="Leave blank to keep current"
@@ -397,7 +396,12 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client Secret</FormLabel>
+                      <FormLabel>
+                        Client Secret —{" "}
+                        {provider.has_client_secret
+                          ? "Configured"
+                          : "Not configured"}
+                      </FormLabel>
                       <FormControl>
                         <Input
                           type="password"
@@ -443,7 +447,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                   Device Code Configuration (RFC 8628)
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Leave URL fields blank to keep current values.
+                  Saved endpoint URLs are shown below.
                 </p>
 
                 <FormField
@@ -454,7 +458,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                       <FormLabel>Device Code URL</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Leave blank to keep current"
+                          placeholder="https://…"
                           {...field}
                         />
                       </FormControl>
@@ -474,7 +478,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                       <FormLabel>Device Token URL</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Leave blank to keep current"
+                          placeholder="https://…"
                           {...field}
                         />
                       </FormControl>
@@ -494,7 +498,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                       <FormLabel>Authorization URL (fallback)</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Leave blank to keep current"
+                          placeholder="https://…"
                           {...field}
                         />
                       </FormControl>
@@ -511,7 +515,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                       <FormLabel>Token URL (fallback)</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Leave blank to keep current"
+                          placeholder="https://…"
                           {...field}
                         />
                       </FormControl>
@@ -545,7 +549,12 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                   name="client_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client ID</FormLabel>
+                      <FormLabel>
+                        Client ID —{" "}
+                        {provider.has_client_id
+                          ? "Configured"
+                          : "Not configured"}
+                      </FormLabel>
                       <FormControl>
                         <Input
                           placeholder="Leave blank to keep current"
@@ -610,7 +619,12 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Bot Token</FormLabel>
+                      <FormLabel>
+                        Bot Token —{" "}
+                        {provider.has_client_secret
+                          ? "Configured"
+                          : "Not configured"}
+                      </FormLabel>
                       <FormControl>
                         <Input
                           type="password"
@@ -631,7 +645,9 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
             {isApiKey && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-[13px] font-semibold">API Key Configuration</h3>
+                <h3 className="text-[13px] font-semibold">
+                  API Key Configuration
+                </h3>
 
                 <FormField
                   control={form.control}
@@ -673,8 +689,45 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
               </>
             )}
 
+            {(isOAuth || isDeviceCode) && (
+              <div className="space-y-2 rounded-md border border-border p-3 text-xs">
+                <p>
+                  Token endpoint authentication:{" "}
+                  {provider.token_endpoint_auth_method}
+                </p>
+                {isDeviceCode && (
+                  <p>Device code format: {provider.device_code_format}</p>
+                )}
+                {provider.device_verification_url && (
+                  <p className="break-all">
+                    Device verification URL: {provider.device_verification_url}
+                  </p>
+                )}
+                {provider.extra_auth_params && (
+                  <div>
+                    Additional authorization parameters:
+                    <pre className="whitespace-pre-wrap">
+                      {JSON.stringify(provider.extra_auth_params, null, 2)}
+                    </pre>
+                  </div>
+                )}
+                {provider.revocation && (
+                  <p className="break-all">
+                    Revocation: {provider.revocation.style},{" "}
+                    {provider.revocation.url}; authentication:{" "}
+                    {provider.revocation.auth}; revokes grant:{" "}
+                    {provider.revocation.revokes_grant ? "Yes" : "No"}
+                  </p>
+                )}
+              </div>
+            )}
             <div className="flex items-center justify-end gap-3 pt-4">
-              <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
+              <Button
+                variant="primary"
+                type="submit"
+                isLoading={updateMutation.isPending}
+                disabled={stale || !form.formState.isDirty}
+              >
                 Save Changes
               </Button>
               <Button

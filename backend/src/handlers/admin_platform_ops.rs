@@ -134,9 +134,9 @@ pub struct AdminCallAndSayConfigResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdatePlatformOperationRequest {
-    pub enabled: bool,
-    pub vendor_service_slug: String,
-    pub config: PlatformOperationConfig,
+    pub enabled: Option<bool>,
+    pub vendor_service_slug: Option<String>,
+    pub config: Option<PlatformOperationConfig>,
 }
 
 /// GET /api/v1/admin/platform-ops/vendor-requirements
@@ -268,7 +268,7 @@ pub async fn update_platform_operation(
     // while the caller-facing platform-services feature flag remains disabled.
     require_admin(&state, &auth_user).await?;
     let op = platform_operation_service::parse_operation_name(&op)?;
-    let operation = platform_operation_service::upsert_operation(
+    let operation = platform_operation_service::patch_operation(
         &state.db,
         &state.encryption_keys,
         op,
@@ -525,6 +525,15 @@ mod tests {
     }
 
     #[test]
+    fn operation_update_accepts_only_changed_fields() {
+        let update: UpdatePlatformOperationRequest =
+            serde_json::from_value(serde_json::json!({"enabled": false})).unwrap();
+        assert_eq!(update.enabled, Some(false));
+        assert!(update.vendor_service_slug.is_none());
+        assert!(update.config.is_none());
+    }
+
+    #[test]
     fn update_request_rejects_unknown_fields() {
         let value = serde_json::json!({
             "enabled": false,
@@ -586,6 +595,20 @@ mod tests {
                 max_results_cap: 12,
             })
         );
+        let patched = platform_operation_service::patch_operation(
+            &db,
+            &encryption_keys,
+            PlatformOperationName::XSearch,
+            Some(false),
+            None,
+            None,
+            "second-admin",
+        )
+        .await
+        .expect("patch enabled only");
+        assert!(!patched.enabled);
+        assert_eq!(patched.config, operation.config);
+        assert_eq!(patched.vendor_service_slug, operation.vendor_service_slug);
         assert_eq!(
             db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
                 .count_documents(mongodb::bson::doc! { "op": "x_search" })

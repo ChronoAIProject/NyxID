@@ -1,3 +1,4 @@
+import { changedFields } from "@/lib/form-changes";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type { ServiceEndpoint, DiscoverEndpointsResponse } from "@/types/api";
@@ -72,14 +73,29 @@ export function useUpdateEndpoint() {
       serviceId,
       endpointId,
       data,
+      before,
     }: {
       readonly serviceId: string;
       readonly endpointId: string;
+      readonly before?: ServiceEndpoint;
       readonly data: CreateEndpointFormData;
     }): Promise<void> => {
       return api.put<void>(
         `/services/${serviceId}/endpoints/${endpointId}`,
-        formToPayload(data),
+        before
+          ? changedFields(
+              {
+                name: before.name,
+                description: before.description,
+                method: before.method,
+                path: before.path,
+                parameters: before.parameters,
+                request_body_schema: before.request_body_schema,
+                response_description: before.response_description,
+              },
+              formToPayload(data),
+            )
+          : formToPayload(data),
       );
     },
     onSuccess: (_data, variables) => {

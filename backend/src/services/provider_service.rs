@@ -5824,16 +5824,32 @@ pub async fn update_provider(
         set_doc.insert("supports_pkce", pkce);
     }
     if let Some(ref url) = updates.device_code_url {
-        set_doc.insert("device_code_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_code_url", "");
+        } else {
+            set_doc.insert("device_code_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.device_token_url {
-        set_doc.insert("device_token_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_token_url", "");
+        } else {
+            set_doc.insert("device_token_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.device_verification_url {
-        set_doc.insert("device_verification_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_verification_url", "");
+        } else {
+            set_doc.insert("device_verification_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.hosted_callback_url {
-        set_doc.insert("hosted_callback_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("hosted_callback_url", "");
+        } else {
+            set_doc.insert("hosted_callback_url", url.as_str());
+        }
     }
     if let Some(ref instr) = updates.api_key_instructions {
         set_doc.insert("api_key_instructions", instr.as_str());

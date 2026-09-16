@@ -1,6 +1,8 @@
+import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 import {
   forwardRef,
-  useEffect,
   useState,
   type InputHTMLAttributes,
   type KeyboardEvent,
@@ -205,10 +207,12 @@ function OperationHeader({
 }
 
 function XSearchOperationCard({
-  operation,
+  operation: source,
 }: {
   readonly operation: XSearchOperation;
 }) {
+  const [operation, setOperation] = useState(source);
+  const stale = !sameValue(operation, source);
   const update = useUpdatePlatformOperation();
   const form = useAppForm<XSearchUpdate>({
     resolver: zodResolver(xSearchUpdateSchema),
@@ -219,18 +223,18 @@ function XSearchOperationCard({
     },
   });
 
-  useEffect(() => {
-    form.reset({
-      enabled: operation.enabled,
-      vendor_service_slug: operation.vendor_service_slug,
-      config: operation.config,
-    });
-  }, [form, operation]);
+  const review = useChangeReview<Partial<XSearchUpdate>>(save, stale);
+  const onSubmit = (data: XSearchUpdate) => {
+    const before = form.formState.defaultValues as XSearchUpdate;
+    const patch = changedFields(before, data);
+    review.review(patch, describeChanges(before, patch));
+  };
 
-  const onSubmit = async (data: XSearchUpdate) => {
+  async function save(data: Partial<XSearchUpdate>) {
     try {
       const saved = await update.mutateAsync({ op: "x_search", data });
       if (saved.op === "x_search") {
+        setOperation(saved);
         form.reset({
           enabled: saved.enabled,
           vendor_service_slug: saved.vendor_service_slug,
@@ -240,11 +244,26 @@ function XSearchOperationCard({
       toast.success("X Search configuration saved");
     } catch (error) {
       toast.error(updateErrorMessage(error));
+      throw error;
     }
-  };
+  }
 
   return (
     <Form {...form}>
+      {review.dialog}
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            setOperation(source);
+            form.reset({
+              enabled: source.enabled,
+              vendor_service_slug: source.vendor_service_slug,
+              config: source.config,
+            });
+            review.cancel();
+          }}
+        />
+      )}
       <form onSubmit={form.handleSubmit(onSubmit)}>
         <Card className="h-full">
           <OperationHeader
@@ -291,7 +310,7 @@ function XSearchOperationCard({
             <Button
               type="submit"
               variant="primary"
-              disabled={!form.formState.isDirty || update.isPending}
+              disabled={stale || !form.formState.isDirty || update.isPending}
               isLoading={update.isPending}
             >
               <Check className="h-4 w-4" />
@@ -305,10 +324,12 @@ function XSearchOperationCard({
 }
 
 function SpeakOperationCard({
-  operation,
+  operation: source,
 }: {
   readonly operation: SpeakOperation;
 }) {
+  const [operation, setOperation] = useState(source);
+  const stale = !sameValue(operation, source);
   const update = useUpdatePlatformOperation();
   const form = useAppForm<SpeakUpdate>({
     resolver: zodResolver(speakUpdateSchema),
@@ -319,18 +340,18 @@ function SpeakOperationCard({
     },
   });
 
-  useEffect(() => {
-    form.reset({
-      enabled: operation.enabled,
-      vendor_service_slug: operation.vendor_service_slug,
-      config: operation.config,
-    });
-  }, [form, operation]);
+  const review = useChangeReview<Partial<SpeakUpdate>>(save, stale);
+  const onSubmit = (data: SpeakUpdate) => {
+    const before = form.formState.defaultValues as SpeakUpdate;
+    const patch = changedFields(before, data);
+    review.review(patch, describeChanges(before, patch));
+  };
 
-  const onSubmit = async (data: SpeakUpdate) => {
+  async function save(data: Partial<SpeakUpdate>) {
     try {
       const saved = await update.mutateAsync({ op: "speak", data });
       if (saved.op === "speak") {
+        setOperation(saved);
         form.reset({
           enabled: saved.enabled,
           vendor_service_slug: saved.vendor_service_slug,
@@ -340,11 +361,26 @@ function SpeakOperationCard({
       toast.success("Speech configuration saved");
     } catch (error) {
       toast.error(updateErrorMessage(error));
+      throw error;
     }
-  };
+  }
 
   return (
     <Form {...form}>
+      {review.dialog}
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            setOperation(source);
+            form.reset({
+              enabled: source.enabled,
+              vendor_service_slug: source.vendor_service_slug,
+              config: source.config,
+            });
+            review.cancel();
+          }}
+        />
+      )}
       <form onSubmit={form.handleSubmit(onSubmit)}>
         <Card className="h-full">
           <OperationHeader
@@ -425,7 +461,7 @@ function SpeakOperationCard({
             <Button
               type="submit"
               variant="primary"
-              disabled={!form.formState.isDirty || update.isPending}
+              disabled={stale || !form.formState.isDirty || update.isPending}
               isLoading={update.isPending}
             >
               <Check className="h-4 w-4" />
@@ -439,10 +475,12 @@ function SpeakOperationCard({
 }
 
 function CallAndSayOperationCard({
-  operation,
+  operation: source,
 }: {
   readonly operation: CallAndSayOperation;
 }) {
+  const [operation, setOperation] = useState(source);
+  const stale = !sameValue(operation, source);
   const update = useUpdatePlatformOperation();
   const form = useAppForm<CallAndSayUpdate>({
     resolver: zodResolver(callAndSayUpdateSchema),
@@ -453,18 +491,18 @@ function CallAndSayOperationCard({
     },
   });
 
-  useEffect(() => {
-    form.reset({
-      enabled: operation.enabled,
-      vendor_service_slug: operation.vendor_service_slug,
-      config: operation.config,
-    });
-  }, [form, operation]);
+  const review = useChangeReview<Partial<CallAndSayUpdate>>(save, stale);
+  const onSubmit = (data: CallAndSayUpdate) => {
+    const before = form.formState.defaultValues as CallAndSayUpdate;
+    const patch = changedFields(before, data);
+    review.review(patch, describeChanges(before, patch));
+  };
 
-  const onSubmit = async (data: CallAndSayUpdate) => {
+  async function save(data: Partial<CallAndSayUpdate>) {
     try {
       const saved = await update.mutateAsync({ op: "call_and_say", data });
       if (saved.op === "call_and_say") {
+        setOperation(saved);
         form.reset({
           enabled: saved.enabled,
           vendor_service_slug: saved.vendor_service_slug,
@@ -474,11 +512,26 @@ function CallAndSayOperationCard({
       toast.success("Call and Say configuration saved");
     } catch (error) {
       toast.error(updateErrorMessage(error));
+      throw error;
     }
-  };
+  }
 
   return (
     <Form {...form}>
+      {review.dialog}
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            setOperation(source);
+            form.reset({
+              enabled: source.enabled,
+              vendor_service_slug: source.vendor_service_slug,
+              config: source.config,
+            });
+            review.cancel();
+          }}
+        />
+      )}
       <form onSubmit={form.handleSubmit(onSubmit)}>
         <Card className="h-full">
           <OperationHeader
@@ -541,7 +594,11 @@ function CallAndSayOperationCard({
                   <FormItem>
                     <FormLabel>Caller ID</FormLabel>
                     <FormControl>
-                      <Input {...field} inputMode="tel" placeholder="+14155550123" />
+                      <Input
+                        {...field}
+                        inputMode="tel"
+                        placeholder="+14155550123"
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -603,7 +660,7 @@ function CallAndSayOperationCard({
             <Button
               type="submit"
               variant="primary"
-              disabled={!form.formState.isDirty || update.isPending}
+              disabled={stale || !form.formState.isDirty || update.isPending}
               isLoading={update.isPending}
             >
               <Check className="h-4 w-4" />
@@ -711,7 +768,8 @@ export function AdminPlatformOpsPage() {
           }
           onRetry={() => void refetchOperations()}
         />
-      ) : isLoading ? (
+      ) : null}
+      {isLoading && !data ? (
         <div className="grid gap-4 xl:grid-cols-3">
           {Array.from({ length: 3 }).map((_, index) => (
             <Skeleton

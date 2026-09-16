@@ -1,3 +1,5 @@
+import { changedFields, describeChanges } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useEffect } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -134,7 +136,15 @@ export function EndpointFormDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, endpoint]);
 
-  async function handleSubmit(data: CreateEndpointFormData) {
+  const review = useChangeReview<CreateEndpointFormData>(save);
+
+  function handleSubmit(data: CreateEndpointFormData) {
+    if (!isEditing) return save(data);
+    const before = form.formState.defaultValues as CreateEndpointFormData;
+    review.review(data, describeChanges(before, changedFields(before, data)));
+  }
+
+  async function save(data: CreateEndpointFormData) {
     try {
       await onSubmit(data);
       onOpenChange(false);
@@ -146,11 +156,13 @@ export function EndpointFormDialog({
           isEditing ? "Failed to update endpoint" : "Failed to create endpoint",
         );
       }
+      if (isEditing) throw error;
     }
   }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      {review.dialog}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
@@ -308,7 +320,12 @@ export function EndpointFormDialog({
               >
                 Cancel
               </Button>
-              <Button variant="primary" type="submit" isLoading={isPending} disabled={!form.formState.isValid || isPending}>
+              <Button
+                variant="primary"
+                type="submit"
+                isLoading={isPending}
+                disabled={!form.formState.isValid || isPending}
+              >
                 {isEditing ? "Save Changes" : "Create Endpoint"}
               </Button>
             </DialogFooter>

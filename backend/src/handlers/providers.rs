@@ -174,6 +174,11 @@ pub struct ProviderResponse {
     pub provider_type: String,
     pub revocation: Option<RevocationConfigResponse>,
     pub has_oauth_config: bool,
+    pub authorization_url: Option<String>,
+    pub token_url: Option<String>,
+    pub revocation_url: Option<String>,
+    pub has_client_id: bool,
+    pub has_client_secret: bool,
     pub default_scopes: Option<Vec<String>>,
     pub supports_pkce: bool,
     pub device_code_url: Option<String>,
@@ -235,6 +240,11 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
             revokes_grant: revocation.revokes_grant,
         }),
         has_oauth_config,
+        authorization_url: p.authorization_url,
+        token_url: p.token_url,
+        revocation_url: p.revocation_url,
+        has_client_id: p.client_id_encrypted.is_some(),
+        has_client_secret: p.client_secret_encrypted.is_some(),
         default_scopes: p.default_scopes,
         supports_pkce: p.supports_pkce,
         device_code_url: p.device_code_url,
@@ -626,16 +636,24 @@ pub async fn update_provider(
     {
         provider_service::validate_revocation_url(url).await?;
     }
-    if let Some(ref url) = body.device_code_url {
+    if let Some(ref url) = body.device_code_url
+        && !url.is_empty()
+    {
         validate_base_url(url)?;
     }
-    if let Some(ref url) = body.device_token_url {
+    if let Some(ref url) = body.device_token_url
+        && !url.is_empty()
+    {
         validate_base_url(url)?;
     }
-    if let Some(ref url) = body.device_verification_url {
+    if let Some(ref url) = body.device_verification_url
+        && !url.is_empty()
+    {
         validate_base_url(url)?;
     }
-    if let Some(ref url) = body.hosted_callback_url {
+    if let Some(ref url) = body.hosted_callback_url
+        && !url.is_empty()
+    {
         validate_base_url(url)?;
     }
 
@@ -831,6 +849,26 @@ mod tests {
                     .oauth_request_headers
                     .is_empty()
             );
+        }
+    }
+
+    #[test]
+    fn edit_response_includes_saved_endpoints_and_credential_presence_only() {
+        let response = serde_json::to_value(provider_to_response(make_provider("oauth2"))).unwrap();
+        assert_eq!(
+            response["authorization_url"],
+            "https://auth.example.com/authorize"
+        );
+        assert_eq!(response["token_url"], "https://auth.example.com/token");
+        assert_eq!(response["has_client_id"], true);
+        assert_eq!(response["has_client_secret"], true);
+        for secret in [
+            "client_id",
+            "client_secret",
+            "client_id_encrypted",
+            "client_secret_encrypted",
+        ] {
+            assert!(response.get(secret).is_none());
         }
     }
 

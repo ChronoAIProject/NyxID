@@ -1,3 +1,6 @@
+import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 import { type ReactNode, useEffect, useState } from "react";
 import { ChevronDown, Search, User } from "lucide-react";
 import { toast } from "sonner";
@@ -120,7 +123,9 @@ export function AdminFeatureFlagsPage() {
 
   const pending = Object.entries(drafts).filter(([k, v]) => {
     const [flag, type, id] = k.split("\u001f");
-    return v !== persisted(flag ?? "", (type ?? "global") as ScopeType, id ?? "");
+    return (
+      v !== persisted(flag ?? "", (type ?? "global") as ScopeType, id ?? "")
+    );
   });
   const pendingCount = pending.length;
 
@@ -170,9 +175,7 @@ export function AdminFeatureFlagsPage() {
       prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
     );
   const pendingKeys = new Set(pending.map(([k]) => k));
-  const dirtyFlags = new Set(
-    pending.map(([k]) => k.split("\u001f")[0] ?? ""),
-  );
+  const dirtyFlags = new Set(pending.map(([k]) => k.split("\u001f")[0] ?? ""));
 
   return (
     <div className="space-y-6">
@@ -289,13 +292,13 @@ function FlagCard({
   const userIds = uniq([...flag.users.map((u) => u.id), ...stagedUsers]);
   const labelFor = (type: ScopeType, id: string) =>
     type === "user"
-      ? flag.users.find((user) => user.id === id)?.label ??
+      ? (flag.users.find((user) => user.id === id)?.label ??
         stagedUserLabels[id] ??
-        id
+        id)
       : type === "org"
-        ? flag.orgs.find((org) => org.id === id)?.label ??
+        ? (flag.orgs.find((org) => org.id === id)?.label ??
           stagedOrgLabels[id] ??
-          id
+          id)
         : id;
 
   // Collapsed summary pills: Global + configured orgs/users (non-inherit).
@@ -493,25 +496,28 @@ function FlagMetadataEditor({
   const [description, setDescription] = useState(flag.customDescription ?? "");
   const [owner, setOwner] = useState(flag.owner ?? "");
 
-  const trimmedDescription = description.trim();
-  const trimmedOwner = owner.trim();
-  const dirty =
-    trimmedDescription !== (flag.customDescription ?? "") ||
-    trimmedOwner !== (flag.owner ?? "");
+  const current = {
+    description: flag.customDescription ?? null,
+    owner: flag.owner ?? null,
+  };
+  const [baseline, setBaseline] = useState(current);
+  const next = {
+    description: description.trim() || null,
+    owner: owner.trim() || null,
+  };
+  const patch = changedFields(baseline, next);
+  const dirty = Object.keys(patch).length > 0;
+  const stale = !sameValue(baseline, current);
+  const review = useChangeReview<typeof next>(async (body) => {
+    await update.mutateAsync({ flagKey: flag.key, body });
+    setBaseline(body);
+    setDescription(body.description ?? "");
+    setOwner(body.owner ?? "");
+    toast.success("Flag details saved");
+  }, stale);
 
-  async function save() {
-    try {
-      await update.mutateAsync({
-        flagKey: flag.key,
-        body: {
-          description: trimmedDescription || null,
-          owner: trimmedOwner || null,
-        },
-      });
-      toast.success("Flag details saved");
-    } catch {
-      toast.error("Failed to save flag details");
-    }
+  function save() {
+    review.review(next, describeChanges(baseline, patch));
   }
 
   if (!canWrite) {
@@ -533,6 +539,17 @@ function FlagMetadataEditor({
 
   return (
     <div className="space-y-2.5 px-3 py-2.5">
+      {review.dialog}
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            setBaseline(current);
+            setDescription(current.description ?? "");
+            setOwner(current.owner ?? "");
+            review.cancel();
+          }}
+        />
+      )}
       <div className="space-y-1">
         <Label
           htmlFor={`flag-description-${flag.key}`}
@@ -588,7 +605,7 @@ function FlagMetadataEditor({
             variant="primary"
             size="sm"
             onClick={save}
-            disabled={!dirty || update.isPending}
+            disabled={stale || !dirty || update.isPending}
           >
             {update.isPending ? "Saving…" : "Save details"}
           </Button>
@@ -641,7 +658,10 @@ function AccountSearchPicker({
   const normalizedSearch = search.trim();
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(normalizedSearch), 300);
+    const timer = window.setTimeout(
+      () => setDebouncedSearch(normalizedSearch),
+      300,
+    );
     return () => window.clearTimeout(timer);
   }, [normalizedSearch]);
 
@@ -652,9 +672,12 @@ function AccountSearchPicker({
     kind,
   );
   const waitingForSearch = normalizedSearch !== debouncedSearch;
-  const results = debouncedSearch && !waitingForSearch
-    ? (data?.users ?? []).filter((account) => !excludedIds.includes(account.id))
-    : [];
+  const results =
+    debouncedSearch && !waitingForSearch
+      ? (data?.users ?? []).filter(
+          (account) => !excludedIds.includes(account.id),
+        )
+      : [];
 
   // A flag card renders one picker per scope, so only fetch defaults while this
   // picker's dropdown is actually open; identical keys dedupe across cards.
@@ -707,7 +730,9 @@ function AccountSearchPicker({
       {normalizedSearch ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
           {isLoading || waitingForSearch ? (
-            <p className="px-3 py-2 text-xs text-muted-foreground">Searching…</p>
+            <p className="px-3 py-2 text-xs text-muted-foreground">
+              Searching…
+            </p>
           ) : results.length === 0 ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">
               {isOrg
@@ -729,7 +754,9 @@ function AccountSearchPicker({
         showDefaults && (
           <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
             {defaultsLoading ? (
-              <p className="px-3 py-2 text-xs text-muted-foreground">Loading…</p>
+              <p className="px-3 py-2 text-xs text-muted-foreground">
+                Loading…
+              </p>
             ) : defaults.length === 0 ? (
               <p className="px-3 py-2 text-xs text-muted-foreground">
                 {isOrg
@@ -882,7 +909,11 @@ function ScopeRow({
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 function word(s: ScopeState): string {
-  return s === "enabled" ? "Enabled" : s === "disabled" ? "Disabled" : "Inherit";
+  return s === "enabled"
+    ? "Enabled"
+    : s === "disabled"
+      ? "Disabled"
+      : "Inherit";
 }
 function kindVariant(kind: FlagKind): "info" | "accent" | "secondary" {
   return kind === "experiment"

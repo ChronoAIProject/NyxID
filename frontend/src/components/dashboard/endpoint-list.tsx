@@ -75,6 +75,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
       await updateMutation.mutateAsync({
         serviceId,
         endpointId: editingEndpoint.id,
+        before: editingEndpoint,
         data,
       });
       toast.success("Endpoint updated");
@@ -112,7 +113,9 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
             onClick={() => void handleDiscover()}
             isLoading={discoverMutation.isPending}
           >
-            <ButtonIcon><Wand2 className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <Wand2 className="h-3 w-3" />
+            </ButtonIcon>
             Auto-discover from OpenAPI
           </Button>
         )}

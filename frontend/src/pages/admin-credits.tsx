@@ -1,3 +1,5 @@
+import { changedFields, describeChanges } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Pencil, Plus } from "lucide-react";
@@ -189,6 +191,21 @@ export function AdminCreditsPage() {
     }
   }
 
+  const allowanceReview = useChangeReview<
+    Parameters<typeof updateAllowance.mutateAsync>[0]
+  >(async (update) => {
+    await updateAllowance.mutateAsync(update);
+    toast.success("Allowance updated");
+    setAllowanceOpen(false);
+  });
+  const scheduleReview = useChangeReview<
+    Parameters<typeof updateSchedule.mutateAsync>[0]
+  >(async (update) => {
+    await updateSchedule.mutateAsync(update);
+    toast.success("Credit schedule updated");
+    setScheduleOpen(false);
+  });
+
   async function submitAllowance(value: AllowanceForm) {
     try {
       const normalized = {
@@ -197,11 +214,20 @@ export function AdminCreditsPage() {
           value.target_kind === "all_users" ? [] : value.target_user_ids,
       };
       if (editingAllowance) {
-        await updateAllowance.mutateAsync({
-          id: editingAllowance.id,
-          body: normalized,
-        });
-        toast.success("Allowance updated");
+        const defaults = allowanceForm.formState.defaultValues as AllowanceForm;
+        const before = {
+          ...defaults,
+          target_user_ids:
+            defaults.target_kind === "all_users"
+              ? []
+              : defaults.target_user_ids,
+        };
+        const body = changedFields(before, normalized);
+        allowanceReview.review(
+          { id: editingAllowance.id, body },
+          describeChanges(before, body),
+        );
+        return;
       } else {
         await createAllowance.mutateAsync(normalized);
         toast.success("Allowance created");
@@ -218,19 +244,25 @@ export function AdminCreditsPage() {
         value.target_kind === "all_users" ? [] : value.target_user_ids;
       const serviceRefs = value.all_services ? [] : value.service_refs;
       if (editingSchedule) {
-        await updateSchedule.mutateAsync({
-          id: editingSchedule.id,
-          body: {
-            amount_credits: value.amount_credits,
-            expiry: value.expiry,
-            target_kind: value.target_kind,
-            target_user_ids: targetUserIds,
-            all_services: value.all_services,
-            service_refs: serviceRefs,
-            reason: value.reason,
-          },
+        const normalize = (data: ScheduleForm) => ({
+          amount_credits: data.amount_credits,
+          expiry: data.expiry,
+          target_kind: data.target_kind,
+          target_user_ids:
+            data.target_kind === "all_users" ? [] : data.target_user_ids,
+          all_services: data.all_services,
+          service_refs: data.all_services ? [] : data.service_refs,
+          reason: data.reason,
         });
-        toast.success("Credit schedule updated");
+        const before = normalize(
+          scheduleForm.formState.defaultValues as ScheduleForm,
+        );
+        const body = changedFields(before, normalize(value));
+        scheduleReview.review(
+          { id: editingSchedule.id, body },
+          describeChanges(before, body),
+        );
+        return;
       } else {
         await createSchedule.mutateAsync({
           ...value,
@@ -288,6 +320,8 @@ export function AdminCreditsPage() {
 
   return (
     <div className="space-y-6">
+      {allowanceReview.dialog}
+      {scheduleReview.dialog}
       <PageHeader
         title="Credits"
         description="Manage promotional credit grants, recurring credit schedules, and free usage allowances."

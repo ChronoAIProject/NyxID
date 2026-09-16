@@ -15,7 +15,10 @@ const { mockUseFlags, mockUseUsers, mockSetFlag, mockClearFlag, mockSetMeta } =
 
 vi.mock("@/hooks/use-admin-feature-flags", () => ({
   useAdminFeatureFlags: mockUseFlags,
-  useSetAdminFeatureFlag: () => ({ mutateAsync: mockSetFlag, isPending: false }),
+  useSetAdminFeatureFlag: () => ({
+    mutateAsync: mockSetFlag,
+    isPending: false,
+  }),
   useClearAdminFeatureFlag: () => ({
     mutateAsync: mockClearFlag,
     isPending: false,
@@ -209,7 +212,11 @@ describe("AdminFeatureFlagsPage", () => {
   });
 
   it("shows loading and error states", () => {
-    mockUseFlags.mockReturnValue({ data: undefined, isLoading: true, error: null });
+    mockUseFlags.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      error: null,
+    });
     const { rerender } = render(<AdminFeatureFlagsPage />);
     expect(screen.getByLabelText("Loading feature flags")).toBeInTheDocument();
 
@@ -219,7 +226,9 @@ describe("AdminFeatureFlagsPage", () => {
       error: new Error("failed"),
     });
     rerender(<AdminFeatureFlagsPage />);
-    expect(screen.getByText("Failed to load feature flags")).toBeInTheDocument();
+    expect(
+      screen.getByText("Failed to load feature flags"),
+    ).toBeInTheDocument();
   });
 
   it("finds a user beyond the unsearched first page with server search", async () => {
@@ -272,7 +281,9 @@ describe("AdminFeatureFlagsPage", () => {
     fireEvent.click(screen.getByText("experimental:ai-assistant"));
     // Nothing is suggested — and no request fans out — until the admin
     // actually opens the dropdown.
-    expect(screen.queryByText("suggested-0@example.com")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("suggested-0@example.com"),
+    ).not.toBeInTheDocument();
     expect(mockUseUsers).toHaveBeenCalledWith(1, 8, undefined, "person", {
       enabled: false,
     });
@@ -284,7 +295,9 @@ describe("AdminFeatureFlagsPage", () => {
       await screen.findByText("suggested-0@example.com"),
     ).toBeInTheDocument();
     expect(screen.getByText("suggested-4@example.com")).toBeInTheDocument();
-    expect(screen.queryByText("suggested-5@example.com")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("suggested-5@example.com"),
+    ).not.toBeInTheDocument();
     // total (200) minus the 5 shown.
     expect(
       screen.getByText("+195 more — keep typing to narrow"),
@@ -411,6 +424,9 @@ describe("AdminFeatureFlagsPage", () => {
       target: { value: " Platform team " },
     });
     fireEvent.click(screen.getByText("Save details"));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
 
     await waitFor(() =>
       expect(mockSetMeta).toHaveBeenCalledWith({
@@ -453,6 +469,9 @@ describe("AdminFeatureFlagsPage", () => {
     // Clearing the description sends null, which restores the code default.
     fireEvent.click(screen.getByText("Use code default"));
     fireEvent.click(screen.getByText("Save details"));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
     await waitFor(() =>
       expect(mockSetMeta).toHaveBeenCalledWith({
         flagKey: "experimental:ai-assistant",
@@ -479,9 +498,7 @@ describe("AdminFeatureFlagsPage", () => {
     });
 
     expect(screen.getByText("experimental:ai-assistant")).toBeInTheDocument();
-    expect(
-      screen.queryByText("experimental:billing"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText("experimental:billing")).not.toBeInTheDocument();
   });
 
   it("shows operators the flag details read-only", () => {

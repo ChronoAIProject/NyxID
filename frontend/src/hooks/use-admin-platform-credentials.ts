@@ -1,7 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import { platformCredentialsListSchema } from "@/schemas/admin-platform-credentials";
-import type { PlatformCredentialsUpdate } from "@/types/admin";
+import {
+  platformCredentialsListSchema,
+  platformCredentialsSchema,
+} from "@/schemas/admin-platform-credentials";
+import type {
+  PlatformCredentials,
+  PlatformCredentialsUpdate,
+} from "@/types/admin";
 
 export const platformCredentialsKey = [
   "admin",
@@ -23,12 +29,19 @@ export function useUpdatePlatformCredentials(provider: string) {
   const client = useQueryClient();
   return useMutation({
     gcTime: 0,
-    mutationFn: (body: PlatformCredentialsUpdate) =>
-      api.patch(
-        `/admin/platform-credentials/${encodeURIComponent(provider)}`,
-        body,
+    mutationFn: async (body: PlatformCredentialsUpdate) =>
+      platformCredentialsSchema.parse(
+        await api.patch(
+          `/admin/platform-credentials/${encodeURIComponent(provider)}`,
+          body,
+        ),
       ),
-    onSuccess: async () => {
+    onSuccess: async (saved) => {
+      client.setQueryData<PlatformCredentials[]>(
+        platformCredentialsKey,
+        (current) =>
+          current?.map((item) => (item.provider === provider ? saved : item)),
+      );
       await client.invalidateQueries({ queryKey: platformCredentialsKey });
       await client.invalidateQueries({ queryKey: ["managed-onboarding"] });
     },
@@ -38,8 +51,18 @@ export function useUpdatePlatformCredentials(provider: string) {
 export function useClearPlatformCredentials(provider: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: () =>
-      api.delete(`/admin/platform-credentials/${encodeURIComponent(provider)}`),
+    mutationFn: async () => {
+      await api.delete(
+        `/admin/platform-credentials/${encodeURIComponent(provider)}`,
+      );
+      const providers = platformCredentialsListSchema.parse(
+        await api.get("/admin/platform-credentials"),
+      );
+      client.setQueryData(platformCredentialsKey, providers);
+      const saved = providers.find((item) => item.provider === provider);
+      if (!saved) throw new Error("Unable to reload provider credentials");
+      return saved;
+    },
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: platformCredentialsKey });
       await client.invalidateQueries({ queryKey: ["managed-onboarding"] });

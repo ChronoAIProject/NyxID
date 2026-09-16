@@ -1,3 +1,5 @@
+import { changedFields, describeChanges } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState, useEffect } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -125,56 +127,32 @@ export function ServiceAccountDetail({
     setEditOpen(true);
   }
 
-  async function handleEdit(formData: UpdateServiceAccountFormData) {
-    if (!sa) return;
+  const editReview = useChangeReview<
+    Parameters<typeof updateMutation.mutateAsync>[0]["data"]
+  >(async (data) => {
+    await updateMutation.mutateAsync({ saId, data });
+    toast.success("Service account updated");
+    setEditOpen(false);
+  });
 
-    const newRoleIds = formData.role_ids
-      ? formData.role_ids
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [];
-    const roleIdsChanged =
-      JSON.stringify([...sa.role_ids].sort()) !==
-      JSON.stringify([...newRoleIds].sort());
-
-    const newRate = formData.rate_limit_override
-      ? Number(formData.rate_limit_override)
-      : null;
-
-    const payload = {
-      ...(formData.name !== sa.name ? { name: formData.name } : {}),
-      ...((formData.description ?? "") !== (sa.description ?? "")
-        ? { description: formData.description || undefined }
-        : {}),
-      ...(formData.allowed_scopes !== sa.allowed_scopes
-        ? { allowed_scopes: formData.allowed_scopes }
-        : {}),
-      ...(roleIdsChanged ? { role_ids: newRoleIds } : {}),
-      ...(newRate !== sa.rate_limit_override
-        ? { rate_limit_override: newRate }
-        : {}),
-      ...(formData.is_active !== sa.is_active
-        ? { is_active: formData.is_active }
-        : {}),
-    };
-
-    if (Object.keys(payload).length === 0) {
-      setEditOpen(false);
-      return;
-    }
-
-    try {
-      await updateMutation.mutateAsync({ saId, data: payload });
-      toast.success("Service account updated");
-      setEditOpen(false);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        form.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to update service account");
-      }
-    }
+  function handleEdit(formData: UpdateServiceAccountFormData) {
+    const normalize = (value: UpdateServiceAccountFormData) => ({
+      ...value,
+      description: value.description ?? "",
+      role_ids: (value.role_ids ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .sort(),
+      rate_limit_override: value.rate_limit_override
+        ? Number(value.rate_limit_override)
+        : null,
+    });
+    const before = normalize(
+      form.formState.defaultValues as UpdateServiceAccountFormData,
+    );
+    const patch = changedFields(before, normalize(formData));
+    editReview.review(patch, describeChanges(before, patch));
   }
 
   async function handleRotateSecret() {
@@ -261,14 +239,18 @@ export function ServiceAccountDetail({
         actions={
           <>
             <Button variant="outline" onClick={openEditDialog}>
-              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+              <ButtonIcon>
+                <Pencil className="h-3 w-3" />
+              </ButtonIcon>
               Edit
             </Button>
             <Button
               variant="destructive"
               onClick={() => setConfirmAction("delete")}
             >
-              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+              <ButtonIcon variant="destructive">
+                <Trash2 className="h-3 w-3 text-destructive" />
+              </ButtonIcon>
               Delete
             </Button>
           </>
@@ -278,10 +260,7 @@ export function ServiceAccountDetail({
       <DetailSection title="Service Account Information">
         <DetailRow label="ID" value={sa.id} copyable />
         <DetailRow label="Client ID" value={sa.client_id} copyable />
-        <DetailRow
-          label="Secret Prefix"
-          value={`${sa.secret_prefix}...`}
-        />
+        <DetailRow label="Secret Prefix" value={`${sa.secret_prefix}...`} />
         <DetailRow
           label="Status"
           value={sa.is_active ? "Active" : "Inactive"}
@@ -332,20 +311,25 @@ export function ServiceAccountDetail({
       <DetailSection title="Actions">
         <div className="flex flex-wrap gap-2 px-4 py-3">
           <Button variant="outline" onClick={openRotateDialog}>
-            <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <RefreshCw className="h-3 w-3" />
+            </ButtonIcon>
             Rotate Secret
           </Button>
           <Button
             variant="outline"
             onClick={() => setConfirmAction("revoke-tokens")}
           >
-            <ButtonIcon><Ban className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <Ban className="h-3 w-3" />
+            </ButtonIcon>
             Revoke Tokens
           </Button>
         </div>
       </DetailSection>
 
       {/* Edit Dialog */}
+      {editReview.dialog}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -466,7 +450,12 @@ export function ServiceAccountDetail({
                 >
                   Cancel
                 </Button>
-                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty || updateMutation.isPending}>
+                <Button
+                  variant="primary"
+                  type="submit"
+                  isLoading={updateMutation.isPending}
+                  disabled={!form.formState.isDirty || updateMutation.isPending}
+                >
                   Save Changes
                 </Button>
               </DialogFooter>

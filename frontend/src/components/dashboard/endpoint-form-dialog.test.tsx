@@ -42,14 +42,20 @@ describe("EndpointFormDialog", () => {
       />,
     );
 
+    await user.clear(screen.getByLabelText("Path"));
+    await user.type(screen.getByLabelText("Path"), "/people");
     await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
 
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledWith({
         name: endpoint.name,
         description: existingDescription,
         method: "GET",
-        path: endpoint.path,
+        path: "/people",
         parameters: "",
         request_body_schema: "",
         response_description: "",

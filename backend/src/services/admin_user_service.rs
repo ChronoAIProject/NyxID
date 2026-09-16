@@ -259,7 +259,7 @@ pub async fn update_user(
                 "Avatar URL must be 2048 characters or less".to_string(),
             ));
         }
-        if !url.starts_with("https://") {
+        if !url.is_empty() && !url.starts_with("https://") {
             return Err(AppError::ValidationError(
                 "Avatar URL must use https:// scheme".to_string(),
             ));

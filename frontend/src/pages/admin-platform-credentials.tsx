@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
+import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { KeyRound, RotateCw, Save, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
@@ -32,48 +35,58 @@ import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { ApiError } from "@/lib/api-client";
 
 function CredentialForm({
-  provider,
+  provider: source,
 }: {
   readonly provider: PlatformCredentials;
 }) {
+  const [provider, setProvider] = useState(source);
   const update = useUpdatePlatformCredentials(provider.provider);
   const clear = useClearPlatformCredentials(provider.provider);
-  const [confirm, setConfirm] = useState<"clear" | "regenerate" | { field: string } | null>(null);
+  const [confirm, setConfirm] = useState<"clear" | "regenerate" | null>(null);
   const sharedProvider = provider.backing?.type === "provider_oauth"
     ? provider.backing.provider_slug
     : null;
   const form = useAppForm<PlatformCredentialForm>({
     resolver: zodResolver(platformCredentialFormSchema),
-    defaultValues: { fields: {} },
+    defaultValues: credentialFormValues(provider),
     mode: "onChange",
   });
-  const { reset } = form;
-  // Subscribe to both before the first edit; short-circuiting skips isValid.
   const { isDirty, isValid } = form.formState;
-  const lastRevision = useRef<string | null>(null);
-  useEffect(() => {
-    const revision = JSON.stringify([provider.provider, provider.updated_at, provider.fields]);
-    if (lastRevision.current === revision) return;
-    lastRevision.current = revision;
-    reset({
-      fields: Object.fromEntries(
-        provider.fields.map((field) => [
-          field.name,
-          field.secret ? "" : (field.value ?? ""),
-        ]),
-      ),
-    });
-  }, [provider, reset]);
+  const stale = !sameValue(provider, source);
+  const review = useChangeReview<Record<string, string | null>>(save, stale);
   const pending = update.isPending || clear.isPending;
 
-  async function save(values: PlatformCredentialForm) {
-    const fields = Object.fromEntries(
-      Object.entries(values.fields).filter(
-        ([name]) => form.formState.dirtyFields.fields?.[name],
-      ),
+  function onSubmit(values: PlatformCredentialForm) {
+    const before = credentialFormValues(provider).fields;
+    const fields = changedFields(before, values.fields) as Record<
+      string,
+      string | null
+    >;
+    // A blank secret input keeps the stored secret; only the clear button sends null.
+    for (const field of provider.fields) {
+      if (fields[field.name] === "") {
+        if (field.secret) delete fields[field.name];
+        else fields[field.name] = null;
+      }
+    }
+    review.review(
+      fields,
+      [...(sharedProvider && Object.values(fields).includes(null) ? [{ field: "Shared OAuth credentials", before: sharedProvider, after: `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.` }] : []), ...describeChanges(before, fields, {
+        labels: Object.fromEntries(
+          provider.fields.map((field) => [field.name, field.label]),
+        ),
+        secretFields: provider.fields
+          .filter((field) => field.secret)
+          .map((field) => field.name),
+      })],
     );
+  }
+
+  async function save(fields: Record<string, string | null>) {
     try {
-      await update.mutateAsync({ fields });
+      const saved = await update.mutateAsync({ fields });
+      setProvider(saved);
+      form.reset(credentialFormValues(saved));
       update.reset();
       toast.success("Platform credentials saved");
     } catch (error) {
@@ -83,15 +96,31 @@ function CredentialForm({
             ? error.message
             : "Unable to save platform credentials",
       });
+      throw error;
     }
   }
 
   async function confirmAction() {
+    if (pending || stale || !confirm) return;
     try {
-      if (confirm && typeof confirm === "object") {
-        await update.mutateAsync({ fields: { [confirm.field]: null } });
-      } else if (confirm === "clear") await clear.mutateAsync();
-      else await update.mutateAsync({ regenerate_verify_token: true });
+      if (confirm === "clear") {
+        const saved = await clear.mutateAsync();
+        setProvider(saved);
+        form.reset(credentialFormValues(saved));
+      } else {
+        const draft = changedFields(
+          credentialFormValues(provider).fields,
+          form.getValues().fields,
+        );
+        const saved = await update.mutateAsync({
+          regenerate_verify_token: true,
+        });
+        setProvider(saved);
+        form.reset(credentialFormValues(saved));
+        for (const [name, value] of Object.entries(draft)) {
+          if (value !== undefined) form.setValue(`fields.${name}`, value);
+        }
+      }
       update.reset();
       setConfirm(null);
     } catch (error) {
@@ -112,10 +141,20 @@ function CredentialForm({
           {provider.available ? "Configured" : "Not configured"}
         </Badge>
       </div>
-      {provider.backing?.type === "provider_oauth" && (
-        <p className="text-xs text-muted-foreground">Shared with the {provider.backing.provider_slug} provider.</p>
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            setProvider(source);
+            form.reset(credentialFormValues(source));
+            review.cancel();
+          }}
+        />
       )}
-      <form onSubmit={form.handleSubmit(save)} className="max-w-2xl space-y-4">
+      {review.dialog}
+      <form
+        onSubmit={form.handleSubmit(onSubmit)}
+        className="max-w-2xl space-y-4"
+      >
         {form.formState.errors.root && (
           <ErrorBanner
             message={form.formState.errors.root.message ?? "Unable to save"}
@@ -150,13 +189,16 @@ function CredentialForm({
                 title={`Clear ${field.label}`}
                 aria-label={`Clear ${field.label}`}
                 disabled={pending || !field.configured}
-                onClick={() => sharedProvider
-                  ? setConfirm({ field: field.name })
-                  : form.setValue(`fields.${field.name}`, null)}
+                onClick={() => form.setValue(`fields.${field.name}`, null)}
               >
                 <X className="size-3" />
               </Button>
             </div>
+            {form.watch(`fields.${field.name}`) === null && (
+              <p className="text-xs text-destructive">
+                Will be cleared when you confirm changes.
+              </p>
+            )}
             <p className="text-xs text-muted-foreground">{field.help}</p>
             {form.formState.errors.fields?.[field.name] && (
               <p className="text-xs text-destructive">
@@ -170,7 +212,9 @@ function CredentialForm({
             variant="primary"
             type="submit"
             isLoading={pending}
-            disabled={pending || !isDirty || !isValid}
+            disabled={
+              pending || stale || !isDirty || !isValid
+            }
           >
             <Save className="size-3" />
             Save credentials
@@ -178,7 +222,7 @@ function CredentialForm({
           <Button
             type="button"
             variant="ghost"
-            disabled={pending || !provider.updated_at}
+            disabled={pending || stale || !provider.updated_at}
             onClick={() => setConfirm("clear")}
           >
             <Trash2 className="size-3" />
@@ -201,7 +245,7 @@ function CredentialForm({
             />
             <Button
               variant="outline"
-              disabled={pending}
+              disabled={pending || stale}
               onClick={() => setConfirm("regenerate")}
             >
               <RotateCw className="size-3" />
@@ -227,13 +271,19 @@ function CredentialForm({
                 : "Regenerate verify token"}
             </DialogTitle>
             <DialogDescription>
-              {confirm !== "regenerate"
+              {confirm === "clear"
                 ? sharedProvider
-                  ? `These credentials are shared with the ${sharedProvider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored.`
-                  : "Managed onboarding and managed bot authentication will be unavailable until credentials are restored."
+                  ? `These credentials are shared with the ${sharedProvider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored. Unsaved credential edits will be discarded.`
+                  : "Managed onboarding and managed bot authentication will be unavailable until credentials are restored. Unsaved credential edits will be discarded."
                 : `Update ${provider.label}'s webhook verification settings with the replacement token.`}
             </DialogDescription>
           </DialogHeader>
+          {stale && (
+            <p role="alert">
+              Saved values changed. Cancel and load the latest values before
+              continuing.
+            </p>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirm(null)}>
               Cancel
@@ -241,6 +291,7 @@ function CredentialForm({
             <Button
               variant="primary"
               isLoading={pending}
+              disabled={pending || stale}
               onClick={() => void confirmAction()}
             >
               Confirm
@@ -257,13 +308,14 @@ export function AdminPlatformCredentialsPage() {
   return (
     <div className="space-y-8">
       <PageHeader title="Platform Credentials" />
-      {query.isLoading ? (
-        <Skeleton className="h-64 w-full" />
-      ) : query.error ? (
+      {query.error && (
         <ErrorBanner
-          message="Unable to load platform credentials"
+          message="Unable to refresh platform credentials"
           onRetry={query.refetch}
         />
+      )}
+      {query.isLoading && !query.data ? (
+        <Skeleton className="h-64 w-full" />
       ) : (
         query.data?.map((provider) => (
           <CredentialForm key={provider.provider} provider={provider} />
@@ -271,4 +323,17 @@ export function AdminPlatformCredentialsPage() {
       )}
     </div>
   );
+}
+
+function credentialFormValues(
+  provider: PlatformCredentials,
+): PlatformCredentialForm {
+  return {
+    fields: Object.fromEntries(
+      provider.fields.map((field) => [
+        field.name,
+        field.secret ? "" : (field.value ?? ""),
+      ]),
+    ),
+  };
 }
