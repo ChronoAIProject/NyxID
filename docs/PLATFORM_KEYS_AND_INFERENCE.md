@@ -173,6 +173,13 @@ lane cards. Legacy billing is labeled superseded while lanes are configured.
 
 ## Billing lanes and durable accounting
 
+Platform-key usage is billed to the requesting person regardless of the granting audience.
+An organization grant authorizes its members to use NyxID's key; it never charges that
+organization's wallet for the master credential. `BillingOwnerResolver::resolve_for_execution`
+uses the final credential class: `NyxidManagedMaster` selects the person's wallet and billing
+rollout flag, while org BYOK and agent override credentials retain org-wallet billing.
+Resource authorization, approval ownership, and rate limiting are unchanged.
+
 `ServiceBilling` gains optional `byok_pricing` and `platform_key_pricing`, each a
 `LanePricing { metric, credits_per_unit, lago_metric_code, sync_status, sync_error }`.
 Decimals use the existing exact normalization. Server-owned codes are stable:

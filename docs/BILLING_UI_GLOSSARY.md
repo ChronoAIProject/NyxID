@@ -4,8 +4,8 @@ What every term on `/billing` actually means, where the number comes from, and w
 lies to you.
 
 **Scope:** the logged-in Billing page (https://nyx.chrono-ai.fun/billing). Source of truth is the
-code in this worktree — `frontend/src/pages/billing.tsx` + `backend/src/handlers/billing.rs`,
-identical to `main` at time of writing (last billing UI commit `f0691e23`).
+code in this worktree — `frontend/src/pages/billing.tsx` + `backend/src/handlers/billing.rs`.
+The usage descriptions include personal platform-key billing, free meters, and exact funding costs.
 
 **Design background:** [ADR-014](./ADR-014-usage-billing-lago.md) (decisions) and
 [USAGE_BILLING_LAGO_SPEC.md](./USAGE_BILLING_LAGO_SPEC.md) (implementation). Lago is the billing
@@ -22,7 +22,7 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 | Term | Meaning |
 |---|---|
 | **Credit** | The billing unit. **1 credit = 1 USD.** NyxID creates every Lago wallet in USD with `rate_amount: "1"`, so credits are 1:1 with the wallet currency (`services/billing/lago_client.rs:93-95`, `:272-278`). Wallet amounts are always whole integers. |
-| **Credit micros** | One millionth of a credit — fixed-point, no floating point. Any field ending in `_credits_micros` is divided by 1,000,000 for display, with up to 6 decimals (`billing.tsx:584-591`). 4,200 micros → `0.0042 credits`. Cost *estimates* use micros; wallet balances never do. |
+| **Credit micros** | One millionth of a credit — fixed-point, no floating point. Any field ending in `_credits_micros` is divided by 1,000,000 for display, with up to 6 decimals (`billing.tsx:584-591`). 4,200 micros → `0.0042 credits`. Usage costs and funding splits use micros; wallet balances and debits use whole credits. The wallet debit rounds its exact funded cost up to a whole credit, so the Usage cost is not the wallet balance change. |
 | **Layer** | Which of two independent charges produced a usage row. One request can produce one of each. |
 
 | Layer | What is being charged |
@@ -60,16 +60,19 @@ previous user-token price lane.
 
 Changing the period remounts the top-up history card (`key={period}`), resetting it to page 1.
 
-**Page access is gated three times:**
+**Page access and rollout:**
 - Capability: `user.capabilities.billing_available` requires billing enabled + Lago configured + the user's billing feature flag.
-- Frontend: `BillingRouteGuard` redirects to `/dashboard` if that capability is false (`components/billing-route-guard.tsx`).
-- Backend: every billing endpoint calls `ensure_billing_rollout()`, a staged-rollout feature flag. Owners outside it get **403 "Billing is not enabled for this account"** (`handlers/billing.rs:304-313`).
+- Frontend: `BillingRouteGuard` redirects to `/dashboard` if that capability is false.
+- Backend: wallet, top-up, receipt, and benefit reads retain their existing `ensure_billing_rollout()` gates. **Usage has no rollout gate**: authorized readers can see metered but uncharged traffic.
 
-**Whose money is this page about?** Always **your personal wallet**. Wallet, top-up, and history all
-call `resolve_for_wallet_management(actor, None)`, which passes your own id and resolves to
-`PaysFrom::Personal` (`services/billing/owner_resolver.rs:50-58`); usage keys directly on
-`auth_user.user_id` (`handlers/billing.rs:188`). Org-billed usage is recorded under the *org's*
-owner id and is **not visible anywhere on this page** — see §7.
+**Whose money is this page about?** The page shows the signed-in person's usage and wallet.
+Platform-key usage always bills the requesting person, including when an organization grant
+provides access and the resolved service belongs to that organization. The person's billing
+rollout flag applies. `BillingOwnerResolver::resolve_for_execution` selects this payer after
+final credential selection; an agent override using an org-owned credential still bills the org.
+Org BYOK traffic retains org-wallet billing and the org's rollout flag. It does not appear on
+this personal page. There is no owner selector. Grants and allowances retain their separate
+API support for authorized org reads.
 
 ---
 
@@ -83,7 +86,7 @@ Shown when the usage response's capability block says charging is off (`billing.
 | `charging_enabled` | Already `BILLING_ENABLED && lago_configured` — despite the name, not just the master switch. False means nothing is charged, only metered. |
 | `lago_configured` | A Lago API URL **and** key are present and the client constructed. **Not** a live health check (`services/billing/mod.rs:33`, `:82`). |
 | `source: "usage_meter"` | Numbers come from NyxID's own durable ledger, not Lago's rating engine. Never rendered. |
-| `rates_are_approximate: true` | **Every cost on this page is an estimate.** Always true. Never rendered. |
+| `rates_are_approximate: true` | Compatibility flag, always true. New settled rows use persisted exact gross costs; older rows use current cached rates. The UI labels the cost **Est. cost**. |
 
 While it shows, the Top Up input, Checkout button, and Provision Wallet button are all disabled
 (`billing.tsx:70-75`, `:176`, `:382`). Because the route guard already blocks the same conditions,
@@ -175,45 +178,51 @@ distinct from the history table's (`models/billing_topup_session.rs:7-13`):
 
 ## 5. Usage card
 
-Backed by `GET /api/v1/billing/usage?period=` (`handlers/billing.rs:183-301`), aggregated from the
-`usage_meter` ledger and grouped by service × layer × metric × ack state.
+Backed by `GET /api/v1/billing/usage?period=`, aggregated from `usage_meter`.
+The API groups by service × layer × metric code × model × API key × ack state × billable state;
+the table collapses these into expandable service rows.
 
-**Which rows exist at all:** only charged usage — a non-null `quantity` and `wallet_id`, and a status
-of `finalized` (or `dead_letter` that was actually forwarded). In-flight `reserved`/`forwarded` work
-and observability-only metering are excluded (`handlers/billing.rs:191-207`).
-
-### Header
-
-| UI element | Meaning |
-|---|---|
-| **"Per-service quantity and estimated cost."** | The only place on the page that says *estimated*. |
-| **Unlabeled number beside the ↻ icon** | The **total estimated cost** for the period, `totals.estimated_credits_micros / 1e6`. `-` when no estimate exists at all. It is not a refresh button. |
+**Which rows exist:** a non-null `quantity` and a status of `finalized`, or `dead_letter`
+that was actually forwarded. Both wallet-backed and observability-only rows are included.
+In-flight work and non-forwarded dead letters are excluded. `billable` is determined solely by
+whether `wallet_id` exists. Non-billable meters report zero for every cost/funding field, are
+never sent to Lago, and render **Free** with **—** cost.
 
 ### Totals strip
 
-| Label | Meaning | Caveat |
-|---|---|---|
-| **Quantity** | Sum of every row's `quantity`. | Rows use **different units**; tokens, requests, and bytes are added together. |
-| **Requests** | Sum of quantity **for rows whose metric is `requests`**. | A token-metered LLM service contributes 0, even though it served requests. |
-| **Bytes** | Sum of quantity **for rows whose metric is `bytes`**. | Same shape of undercount. |
-| **Events** | Count of underlying ledger documents. | Not a request count: one request can write a platform *and* a resale row, and WS/SSH sessions write one per flush. |
+| Label | Meaning |
+|---|---|
+| **Est. cost** | Sum of visible row costs in microcredits, displayed to 6 decimals. The same row costs are summed for each service. Missing estimates are skipped by `sum_optional`; a known zero counts, and all-unknown/empty costs show `-`. |
+| **Tokens / Requests / Bytes** | Quantities summed separately by metric. A token-metered LLM call contributes tokens, not a request count. |
+| **Funding line** | Appears when grants or allowances funded usage: **Funded by grants … · Funded by allowances … · Charged to wallet …**. These are exact pre-rounding costs for new settlements, not whole-credit wallet debits. |
 
 ### Table columns
 
-| Column | Meaning | Source |
-|---|---|---|
-| **Service** | `service_slug`, else `service_id`, else **Unknown** (neither present on the row). | `UsageMeterRow.service_slug` |
-| **Layer** | `Platform` or `Resale` — see §0. | `UsageMeterRow.layer` |
-| **Metric** | The unit counted: **Tokens** (LLM tokens), **Requests** (one per call), **Bytes** (payload volume). The admin's `platform_metric` override wins; otherwise the heuristic is WebSocket/SSH → bytes, `llm-` slug → tokens, everything else → requests (`handlers/proxy.rs:3136-3158`). | `UsageMeterRow.metric` |
-| **Quantity** | Metered units for that group, in the unit named by Metric. | `$sum: quantity` |
-| **Cost** | `credits_per_unit_micros × quantity` from the cached rate card (`billing_rate_cache`), in credits to 6 decimals. **Recomputed at read time from the *current* rate** — not a rate captured with the usage — so a repricing retroactively changes the cost shown for old usage. | `handlers/billing.rs:250-256` |
-| **Status → Acked** | Lago accepted the usage event, *or* reported its transaction id as an already-applied duplicate. Says nothing about whether an invoice was paid. | `lago_acked: true` |
-| **Status → Pending** | Lago has not acknowledged the row. Usually a new or retrying row — but forwarded `dead_letter` rows are included by the query and stay unacked **permanently** without operator action, so Pending is not always transient. | `lago_acked: false` |
-| **Status → Free** | Metered without cost, never pushed to Lago. | `billable: false` — unreachable, see gap 4 |
+| Column | Meaning |
+|---|---|
+| **Service** | `service_slug`, else `service_id`, else **Unknown**. Expand for model, agent and layer details. |
+| **Usage** | Quantity with its metric. A service spanning multiple metrics says how many metrics; expanded rows show each quantity and provider-reported token breakdown. |
+| **Est. cost** | **Gross cost of the full finalized quantity**, including allowance-covered units and grant-funded costs. New settlements use `funding.total_charge_micros`, persisted at settlement time. Historical rows without that field use `quantity × current cached rate`, selecting the row's model-specific rate before the generic metric rate. Repricing affects historical fallback estimates only. |
+| **Funding beneath cost** | **grants … · allowance … (1,200 tokens) · wallet …** when any non-wallet funding exists. Uses persisted `grant_funded_micros`, `allowance_funded_micros`, `wallet_funded_micros`, and `allowance_funded_quantity`. Allowance units appear only when the row/service has one metric, avoiding addition of unlike units. |
+| **Status → Acked** | Lago accepted the charged usage event or reported a duplicate. It does not mean an invoice was paid. |
+| **Status → Pending** | A charged row has not been acknowledged. Forwarded dead-letter rows can remain pending until operator action. |
+| **Status → Free** | Metered without cost, never pushed to Lago. A service with charged and free rows labels **Includes free usage** and computes Acked/Pending from its charged rows only. |
 
-Empty state: **"No usage in this period."** — which does not prove there was no traffic, only no
-finalized wallet-backed rows. On a usage error the page still passes an empty array down, so the
-error banner and this text can appear together.
+For pre-change funded rows, grant funding is the sum of `grant_consumptions.amount_micros`;
+allowance units are the sum of `allowance_consumptions.quantity`, valued at the current rate.
+Wallet funding is `max(0, estimated gross cost − grant funding − allowance funding)`.
+Rows without funding metadata use the same current-rate estimate, funded entirely by the wallet.
+Missing rates leave unknown estimates null. MongoDB aggregates the consumption arrays before
+responses are built. Costs are summed consistently from the API rows into both totals and service
+rows; non-billable rows contribute zero.
+
+Settlement stores this display metadata atomically with `funding.settled = true`. Retries reuse
+the stored settlement. Funding order (allowances → grants → wallet), rounded wallet debit,
+wallet-funded Lago quantity, usage identity and ledger encoding are unchanged.
+
+Empty state: **No usage in this period.** This means no finalized or forwarded-dead-letter meters
+with a known quantity for this person in the selected period. The backend can expose free meters even when
+the person has no chargeable wallet.
 
 ---
 
@@ -275,15 +284,13 @@ Ranked by how likely a user is to be misled.
    the button (`billing.tsx:382`). The one screen offering "Provision Wallet" is the one where
    provisioning cannot work. It needs an explanation, not a disabled button.
 
-4. **The "Free" badge is unreachable.** The usage query filters to `wallet_id != null`, then derives
-   `billable` from the presence of that same field (`handlers/billing.rs:196`, `:223`) — so
-   `billable` is always `true`. The `Free` badge and the `—` cost path (`billing.tsx:511-521`) are
-   dead code. Either drop the branch or stop excluding observability rows.
+4. **Resolved: metered free usage is visible.** Observability-only meters are included, carry
+   zero cost and funding values, and render Free / —. Mixed services retain meaningful charged status.
 
-5. **Org-billed usage is invisible here.** Usage keys on `auth_user.user_id` and the wallet resolves
-   to `PaysFrom::Personal`, but an org member's requests are metered under the *org's*
-   `billing_owner_id`. That spend appears on nobody's billing page, and the org wallet has no UI at
-   all. There is no owner switcher.
+5. **Platform-key usage is personal; org BYOK usage remains outside this page.** Platform-key
+   grants to organizations authorize their members to use NyxID's key; each requesting person
+   pays and sees that usage here. Org-owned BYOK credentials still bill the org wallet, whose
+   usage is not exposed on this personal page. There is no owner switcher.
 
 6. **"Quantity" totals add incompatible units.** Tokens + requests + bytes summed into one unitless
    number (`billing.tsx:477`, `handlers/billing.rs:282`). Bytes dominate by orders of magnitude, so
@@ -292,11 +299,10 @@ Ranked by how likely a user is to be misled.
 7. **"Requests" and "Bytes" totals undercount.** They sum only rows whose *metric* is that unit
    (`handlers/billing.rs:264-273`). The Requests tile is not "requests you made".
 
-8. **Cost is an estimate at the current rate, and the table never says so.** `rates_are_approximate`
-   is always true and never rendered; the estimate is recomputed from today's cached rate, so a
-   repricing rewrites history. Worse, `sum_optional` silently skips rows with no cached rate
-   (`handlers/billing.rs:754-762`) — the total can be **partial with no warning**, and only shows `-`
-   when *every* row lacks a rate. Header should read "Est. cost" and flag partial totals.
+8. **Historical estimates can be partial when rates are missing.** New settlements persist exact
+   gross cost and funding splits; older rows are recomputed from the current model/metric rate.
+   `sum_optional` skips unknown costs, includes known zeroes, and shows `-` only if all are
+   unknown. The table and totals consistently say Est. cost and sum the same visible rows.
 
 9. **`Balance − Reserved ≠ Available` on screen.** `pending_lago_debits` is subtracted but never
    shown. The CLI displays it; the web page should too, or explain the gap in a tooltip.

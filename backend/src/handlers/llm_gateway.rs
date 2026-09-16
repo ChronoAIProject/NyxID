@@ -369,10 +369,20 @@ pub async fn llm_proxy_request(
     let billing_resource_owner_id = owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmProvider,
@@ -385,12 +395,7 @@ pub async fn llm_proxy_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(
-            resolved_via_user_service,
-            master_credential,
-            credential_source.as_deref(),
-            &target,
-        ),
+        credential_class,
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
@@ -800,10 +805,20 @@ pub async fn gateway_request(
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmGateway,
@@ -816,12 +831,7 @@ pub async fn gateway_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(
-            resolved_via_user_service,
-            master_credential,
-            credential_source.as_deref(),
-            &target,
-        ),
+        credential_class,
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),

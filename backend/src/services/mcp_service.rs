@@ -113,9 +113,22 @@ impl McpBillingRouteContextBuilder {
         node_route: Option<&node_routing_service::NodeRoute>,
         has_server_credential: bool,
     ) -> AppResult<crate::services::billing::BillingRouteContext> {
+        let credential_class = self.credential_class_override.unwrap_or_else(|| {
+            mcp_credential_class(
+                self.is_user_service,
+                node_route.is_some(),
+                has_server_credential,
+                self.credential_source.as_deref(),
+                target,
+            )
+        });
         let billing_owner = billing
             .owner_resolver()
-            .resolve_for_resource(billing_principal_user_id, &self.effective_owner_id)
+            .resolve_for_execution(
+                billing_principal_user_id,
+                &self.effective_owner_id,
+                credential_class,
+            )
             .await?;
         let node_intent = match node_route {
             Some(route) if !route.fallback_node_ids.is_empty() => {
@@ -136,15 +149,7 @@ impl McpBillingRouteContextBuilder {
             Some(target.service.slug.clone()),
             node_intent,
             target.auth_method.clone(),
-            self.credential_class_override.unwrap_or_else(|| {
-                mcp_credential_class(
-                    self.is_user_service,
-                    node_route.is_some(),
-                    has_server_credential,
-                    self.credential_source.as_deref(),
-                    target,
-                )
-            }),
+            credential_class,
             BillingMetric::Requests,
             target.service.billing.as_ref(),
             billing.resale_enabled(),
@@ -8827,6 +8832,42 @@ mod tests {
         assert_eq!(billing_ctx.actor_user_id, actor_user_id);
         assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
         assert_eq!(billing_ctx.user_service_id.as_deref(), Some("user-service"));
+
+        // The same org connection can supply the master key or an agent's
+        // override. Payer selection must use that final credential class.
+        let mut master_resolution = resolution;
+        master_resolution.master_credential = true;
+        for (override_class, expected_owner, expected_class) in [
+            (None, &actor_user_id, CredentialClass::NyxidManagedMaster),
+            (
+                Some(CredentialClass::AgentOverrideUserOwned),
+                &org_user_id,
+                CredentialClass::AgentOverrideUserOwned,
+            ),
+        ] {
+            let mut builder = McpBillingRouteContextBuilder::from_user_service_resolution(
+                &actor_user_id,
+                &master_resolution,
+            );
+            if let Some(class) = override_class {
+                builder.credential_class_override = Some(class);
+            }
+            let ctx = builder
+                .build(
+                    &billing,
+                    &actor_user_id,
+                    &actor_user_id,
+                    None,
+                    &master_resolution.target,
+                    None,
+                    true,
+                )
+                .await
+                .expect("final credential MCP billing context");
+            assert_eq!(&ctx.billing_owner_id, expected_owner);
+            assert_eq!(ctx.actor_user_id, actor_user_id);
+            assert_eq!(ctx.credential_class, expected_class);
+        }
     }
 
     #[tokio::test]

@@ -604,7 +604,7 @@ pub async fn settle_usage_funding(
     }
 
     let chargeable_quantity = quantity.saturating_sub(allowance_covered);
-    let total_charge_micros = saturating_cost_micros(rate_micros, chargeable_quantity);
+    let charge_after_allowance_micros = saturating_cost_micros(rate_micros, chargeable_quantity);
     let mut grant_covered_micros = claimed
         .funding
         .as_ref()
@@ -616,7 +616,7 @@ pub async fn settle_usage_funding(
                 .sum::<i64>()
         })
         .unwrap_or(0)
-        .min(total_charge_micros);
+        .min(charge_after_allowance_micros);
     let grant_reservations = claimed
         .funding
         .as_ref()
@@ -631,7 +631,7 @@ pub async fn settle_usage_funding(
         let consume = reservation
             .amount_micros
             .max(0)
-            .min(total_charge_micros.saturating_sub(grant_covered_micros));
+            .min(charge_after_allowance_micros.saturating_sub(grant_covered_micros));
         if settle_grant_resource(
             db,
             &claimed,
@@ -645,12 +645,12 @@ pub async fn settle_usage_funding(
         {
             grant_covered_micros = grant_covered_micros
                 .saturating_add(consume)
-                .min(total_charge_micros);
+                .min(charge_after_allowance_micros);
             refresh_claimed_funding(db, &mut claimed).await?;
         }
     }
 
-    if grant_covered_micros < total_charge_micros {
+    if grant_covered_micros < charge_after_allowance_micros {
         let now = Utc::now();
         let mut grants =
             super::grants::list_active_for_user(db, &claimed.billing_owner_id, now).await?;
@@ -666,7 +666,7 @@ pub async fn settle_usage_funding(
                 .then_with(|| left.created_at.cmp(&right.created_at))
         });
         for grant in grants {
-            if grant_covered_micros >= total_charge_micros {
+            if grant_covered_micros >= charge_after_allowance_micros {
                 break;
             }
             let operation_id = format!("{}:grant-extra:{}", claimed.id, grant.id);
@@ -675,7 +675,7 @@ pub async fn settle_usage_funding(
                 continue;
             }
             let consume = super::grants::available_grant_micros(&grant)
-                .min(total_charge_micros.saturating_sub(grant_covered_micros));
+                .min(charge_after_allowance_micros.saturating_sub(grant_covered_micros));
             if consume <= 0 {
                 continue;
             }
@@ -684,13 +684,13 @@ pub async fn settle_usage_funding(
             {
                 grant_covered_micros = grant_covered_micros
                     .saturating_add(consume)
-                    .min(total_charge_micros);
+                    .min(charge_after_allowance_micros);
                 refresh_claimed_funding(db, &mut claimed).await?;
             }
         }
     }
 
-    let wallet_micros = total_charge_micros.saturating_sub(grant_covered_micros);
+    let wallet_micros = charge_after_allowance_micros.saturating_sub(grant_covered_micros);
     let wallet_charge_credits = whole_credits_for_micros(wallet_micros);
     // Grant- and allowance-funded usage is deliberately absent from Lago's
     // charging stream. Only the wallet-funded fraction is emitted, so Lago's
@@ -710,6 +710,11 @@ pub async fn settle_usage_funding(
             doc! {
                 "$set": {
                     "funding.settled": true,
+                    "funding.total_charge_micros": saturating_cost_micros(rate_micros, quantity),
+                    "funding.allowance_funded_quantity": allowance_covered,
+                    "funding.allowance_funded_micros": saturating_cost_micros(rate_micros, allowance_covered),
+                    "funding.grant_funded_micros": grant_covered_micros,
+                    "funding.wallet_funded_micros": wallet_micros,
                     "funding.wallet_charge_credits": wallet_charge_credits,
                     "funding.lago_billable_quantity_micros": lago_billable_quantity_micros,
                     "funding.settled_at": bson::DateTime::from_chrono(settled_at),

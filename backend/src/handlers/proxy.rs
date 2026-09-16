@@ -2106,12 +2106,6 @@ async fn execute_proxy_inner(
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
-    let billing_owner = state
-        .billing
-        .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
-        .await?;
-    let billing_request_id = uuid::Uuid::new_v4().to_string();
     let credential_class = final_credential_class(
         resolved_user_service_id.as_deref(),
         node_route.is_some(),
@@ -2121,6 +2115,16 @@ async fn execute_proxy_inner(
         credential_source.as_deref(),
         &target,
     );
+    let billing_owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
+        .await?;
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
     let is_ws_candidate = is_ws_upgrade_request(&request);
     let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
     let node_intent = match &node_route {

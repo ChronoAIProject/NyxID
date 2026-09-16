@@ -3335,10 +3335,15 @@ async fn execute_ssh_command_internal(
         user_service_service::find_by_catalog_service_id(&state.db, user_id, service_id)
             .await?
             .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
+    let credential_class = CredentialClass::NodeManaged;
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(auth.billing_principal_user_id(), &user_service.user_id)
+        .resolve_for_execution(
+            auth.billing_principal_user_id(),
+            &user_service.user_id,
+            credential_class,
+        )
         .await?;
     let node_intent = if node_route.fallback_node_ids.is_empty() {
         crate::services::billing::NodeIntent::Node
@@ -3356,7 +3361,7 @@ async fn execute_ssh_command_internal(
         Some(user_service.slug),
         node_intent,
         "ssh".to_string(),
-        CredentialClass::NodeManaged,
+        credential_class,
         BillingMetric::Requests,
         None,
         false,

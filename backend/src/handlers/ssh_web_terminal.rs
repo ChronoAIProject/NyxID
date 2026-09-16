@@ -293,10 +293,15 @@ async fn handle_node_web_terminal(
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
         .collect();
+    let credential_class = CredentialClass::NodeManaged;
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, &resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            &resource_owner_id,
+            credential_class,
+        )
         .await
     {
         Ok(owner) => owner,
@@ -322,7 +327,7 @@ async fn handle_node_web_terminal(
         Some(service_slug.clone()),
         node_intent,
         "ssh".to_string(),
-        CredentialClass::NodeManaged,
+        credential_class,
         BillingMetric::Bytes,
         None,
         false,
