@@ -115,8 +115,13 @@ integrated backend gate. The old backend executable cannot validate these change
 The previous 2026-09-16 validation (301 files/2,958 frontend tests and 53 focused
 backend tests) predates the independent-review fixes and main integration. Those
 numbers are superseded and are not evidence for the current source. Current
-focused results and final verification status are recorded in the resolution
-report; the parent is running the full integrated frontend/backend gates.
+focused runs passed 86 tests in 14 files, followed by 41 tests in six affected
+files and four new tests in two files (these sets overlap). The parent's first
+full frontend run passed 3,270 tests in 326 files and failed one outdated provider
+editor test. That test now passes with configured labels, saved URL fixtures,
+review confirmation, and an exact sparse credential body. Parent full ESLint
+passed with 27 existing warnings outside this change. Final integrated build,
+backend, and review status are recorded separately by the parent.
 
 Parent-provided real Chromium evidence: two role-editor tests passed at 1440px
 and 390px (saved fields, stacked dialogs, Cancel preserving draft/no request,
