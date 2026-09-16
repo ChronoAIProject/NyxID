@@ -2,6 +2,7 @@
 #[openapi(
     modifiers(&SecurityAddon),
     paths(
+        crate::handlers::options::get_options,
         crate::handlers::docs::docs_ui,
         crate::handlers::docs::catalog_ui,
         crate::handlers::docs::openapi_json,
@@ -110,6 +111,9 @@
     ),
     components(
         schemas(
+            crate::services::options_service::OptionsResponse,
+            crate::services::options_service::OptionItem,
+            crate::services::options_service::OptionsFreshness,
             crate::errors::ErrorResponse,
             crate::handlers::auth_agent_key::RequestBody,
             crate::handlers::auth_agent_key::RequestResponse,

@@ -50,7 +50,11 @@ Service accounts differ from user accounts in several key ways:
 
 ### Creating a Service Account
 
-Admins create service accounts via the admin API:
+Global admins create personal service accounts via the admin API. Organization admins can create accounts for their organization with `target_org_id`.
+
+The scope field offers suggestions from [the options API](OPTIONS_API.md): supported code-defined scopes and scopes already configured on service accounts belonging to the authorized owner. Suggestions help prefill the field; they are not a complete permission vocabulary or an authorization grant. The field shows every selected scope as a full, wrapping pill with Edit and Remove controls. Click or keyboard-activate a pill to edit it in place; Enter finishes the replacement and Escape cancels. The dropdown hides selected values and loads all suggestion pages automatically. For colon-delimited configured values, choose prefixes to navigate to a complete scope; for example, previously configured `reports:finance:read` can be reached through `reports:` and `reports:finance:`. Prefix navigation does not grant or save an intermediate scope. Type a full custom scope and press Enter, or paste space-separated scopes. Typed custom values reach the form immediately, so Save includes an unfinished draft without changing the field layout during the click. Arrow keys explicitly select a suggestion; Enter without an active suggestion adds exactly what you typed. Custom entry remains available when suggestions cannot load. All admin, organization, shared edit, assistant, and CLI wizard forms use this picker.
+
+Scope strings remain free-form. Existing values stay editable, and custom scopes can be created or updated without appearing in suggestions. Adding an unknown name does not create a new permission check. The picker deduplicates tokens when you edit the selection; it preserves the original stored string until an edit.
 
 ```http
 POST /api/v1/admin/service-accounts HTTP/1.1
@@ -60,7 +64,7 @@ Content-Type: application/json
 {
   "name": "CI Pipeline Bot",
   "description": "Automated CI/CD pipeline that runs LLM evaluations",
-  "allowed_scopes": "llm:proxy llm:status proxy:*",
+  "allowed_scopes": "llm:proxy proxy:*",
   "role_ids": ["role-uuid-1"]
 }
 ```
@@ -74,7 +78,7 @@ Response:
   "client_secret": "sas_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "name": "CI Pipeline Bot",
   "description": "Automated CI/CD pipeline that runs LLM evaluations",
-  "allowed_scopes": "llm:proxy llm:status proxy:*",
+  "allowed_scopes": "llm:proxy proxy:*",
   "created_at": "2025-01-15T10:00:00Z"
 }
 ```
@@ -107,7 +111,7 @@ Content-Type: application/json
 
 {
   "name": "CI Pipeline Bot (Production)",
-  "allowed_scopes": "llm:proxy llm:status"
+  "allowed_scopes": "llm:proxy"
 }
 ```
 
@@ -326,7 +330,7 @@ Alternatively, the SA can connect providers using its own token:
 2. Authenticate as the SA to get a token:
    ```
    POST /oauth/token
-   grant_type=client_credentials&client_id=sa_...&client_secret=sas_...&scope=providers:write llm:proxy
+   grant_type=client_credentials&client_id=sa_...&client_secret=sas_...&scope=llm:proxy
    ```
 3. Use the SA token to connect providers:
    - **API key:** `POST /api/v1/providers/{provider_id}/connect/api-key`
@@ -390,7 +394,7 @@ GET /api/v1/proxy/<service_id>/items?query=test HTTP/1.1
 Authorization: Bearer <sa_access_token>
 ```
 
-Requires `proxy:*` or `proxy:<service_id>` scope.
+Requires `proxy` or its `proxy:*` alias. Service-account scope strings do not implement a per-service grant. Existing resource and owner authorization still apply.
 
 ### Provider Management
 
@@ -411,7 +415,7 @@ Content-Type: application/json
 }
 ```
 
-Requires `providers:read` and `providers:write` scopes respectively.
+These routes use their existing authentication and ownership checks. The strings `providers:read` and `providers:write` are accepted as custom scope values but are not enforced permission gates for these operations.
 
 ---
 
@@ -483,31 +487,29 @@ class NyxIDClient:
 
 ## Scopes and Access Control
 
-### Available Scopes
+### Scope Suggestions and Existing Checks
 
-| Scope | Access |
-|-------|--------|
-| `proxy:*` | All proxy endpoints |
-| `proxy:<service_id>` | Specific service proxy only |
-| `llm:proxy` | LLM gateway proxy requests |
-| `llm:status` | LLM status endpoint |
-| `connections:read` | List service connections |
-| `connections:write` | Connect/disconnect services |
-| `providers:read` | List providers and tokens |
-| `providers:write` | Connect to providers, store API keys |
+| Value | Existing behavior |
+|-------|-------------------|
+| `proxy` | Passes the proxy scope check and the LLM gateway scope check; resource and owner checks still apply |
+| `proxy:*` | Existing alias of `proxy`; accepted as custom input and suggested when already configured |
+| `llm:proxy` | Passes the LLM gateway scope check, including status |
+| `roles` | Includes assigned roles and permissions in OAuth userinfo |
+| `groups` | Accepted as custom input; service accounts have no group memberships, so userinfo groups are empty |
+
+The default suggestion menu includes `proxy`, `llm:proxy`, and `roles`. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
+
+Create/update continue storing free-form scope strings. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation.
 
 ### Routes Accessible to Service Accounts
 
-| Endpoint | Required Scope |
-|----------|---------------|
-| `ANY /api/v1/llm/{provider}/v1/*` | `llm:proxy` |
-| `ANY /api/v1/llm/gateway/v1/*` | `llm:proxy` |
-| `GET /api/v1/llm/status` | `llm:status` |
-| `ANY /api/v1/proxy/{service_id}/*` | `proxy:*` or `proxy:{service_id}` |
-| `GET /api/v1/connections` | `connections:read` |
-| `POST /api/v1/connections` | `connections:write` |
-| `GET /api/v1/providers` | `providers:read` |
-| `POST /api/v1/providers/*/connect` | `providers:write` |
+| Endpoint | Existing scope check |
+|----------|----------------------|
+| `ANY /api/v1/llm/{provider}/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
+| `ANY /api/v1/llm/gateway/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
+| `GET /api/v1/llm/status` | `proxy`, `proxy:*`, or `llm:proxy` |
+| `ANY /api/v1/proxy/{service_id}/*` | `proxy` or `proxy:*` |
+| Connection/provider management | Existing route authentication and ownership checks; no separate connections/providers scope enforcement |
 
 ### Routes Blocked for Service Accounts
 
@@ -573,7 +575,7 @@ Expired tokens are automatically cleaned up by a MongoDB TTL index on the `servi
 - **RS256 signed** JWTs verified on every request
 - **Per-token revocation** via `jti` claim and `service_account_tokens` collection
 - **Active check** on every request -- deactivating a service account immediately blocks all requests
-- **Scope enforcement** -- tokens can only access resources within their granted scope
+- **Scope checks** -- proxy and LLM routes check recognized scope values alongside existing resource authorization; custom scope names do not add enforcement to other routes
 
 ### Rate Limiting
 

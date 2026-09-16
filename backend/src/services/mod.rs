@@ -139,3 +139,6 @@ pub mod user_service_service;
 pub mod user_token_service;
 pub mod webhook_delivery_service;
 pub mod ws_frame_injector;
+
+pub mod options_service;
+pub mod service_account_scope_service;

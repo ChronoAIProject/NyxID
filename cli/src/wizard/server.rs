@@ -440,6 +440,16 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
         FlowKind::ServiceAccountCreate => vec![
             ProxyRoute {
                 method: Method::GET,
+                path_template: "/api/v1/users/me",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/options/service-scope",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::GET,
                 path_template: "/api/v1/orgs",
                 body_fields: &[],
             },
@@ -2427,6 +2437,26 @@ mod tests {
         assert!(
             keys_post.body_fields.contains(&"target_org_id"),
             "ai-key wizard create route should permit org owner passthrough",
+        );
+    }
+
+    #[test]
+    fn service_account_options_allowlist_is_read_only_and_set_specific() {
+        let routes = allowlist_for(FlowKind::ServiceAccountCreate);
+        for path in ["/api/v1/users/me", "/api/v1/options/service-scope"] {
+            assert!(routes.iter().any(|route| route.method == Method::GET
+                && route.path_template == path
+                && route.body_fields.is_empty()));
+            assert!(
+                !routes
+                    .iter()
+                    .any(|route| route.method == Method::POST && route.path_template == path)
+            );
+        }
+        assert!(
+            !routes
+                .iter()
+                .any(|route| route.path_template == "/api/v1/options/:option_set")
         );
     }
 

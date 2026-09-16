@@ -1,3 +1,4 @@
+import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
 import { useState, useEffect } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -397,10 +398,7 @@ export function ServiceAccountDetail({
                   <FormItem>
                     <FormLabel>Allowed Scopes</FormLabel>
                     <FormControl>
-                      <Input
-                        placeholder="e.g. openid proxy:* llm:proxy"
-                        {...field}
-                      />
+                      <ServiceAccountScopePicker ownerId={sa.owner_id ?? sa.created_by} serviceAccountId={sa.id} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>

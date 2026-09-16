@@ -1769,6 +1769,7 @@ fn build_router_internal(
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route("/options/{option_set}", get(handlers::options::get_options))
         .route(
             "/channel-bots/managed-onboarding/{platform}",
             get(handlers::channel_managed::bootstrap),
