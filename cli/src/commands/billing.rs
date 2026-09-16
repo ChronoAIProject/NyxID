@@ -43,6 +43,8 @@ pub struct BillingUsageResponse {
 pub struct BillingUsageRow {
     pub service_slug: Option<String>,
     pub service_id: Option<String>,
+    pub model: Option<String>,
+    pub api_key_name: Option<String>,
     pub metric: String,
     pub lago_metric_code: String,
     pub layer: String,
@@ -51,7 +53,18 @@ pub struct BillingUsageRow {
     pub bytes: i64,
     pub events: i64,
     pub lago_acked: bool,
+    #[serde(default = "default_billable")]
+    pub billable: bool,
     pub estimated_credits_micros: Option<i64>,
+    pub wallet_credits_micros: Option<i64>,
+    pub grant_credits_micros: Option<i64>,
+    pub allowance_credits_micros: Option<i64>,
+    #[serde(default)]
+    pub allowance_quantity: i64,
+}
+
+fn default_billable() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
@@ -61,6 +74,11 @@ pub struct BillingUsageTotals {
     pub bytes: i64,
     pub events: i64,
     pub estimated_credits_micros: Option<i64>,
+    pub wallet_credits_micros: Option<i64>,
+    pub grant_credits_micros: Option<i64>,
+    pub allowance_credits_micros: Option<i64>,
+    #[serde(default)]
+    pub allowance_quantity: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
@@ -106,7 +124,7 @@ pub fn usage_path(period: Option<BillingUsagePeriodArg>) -> String {
 pub async fn get_usage(
     api: &mut ApiClient,
     period: Option<BillingUsagePeriodArg>,
-) -> Result<BillingUsageResponse> {
+) -> Result<serde_json::Value> {
     api.get(&usage_path(period)).await
 }
 
@@ -289,51 +307,121 @@ fn print_wallet(wallet: &BillingWalletResponse, output: OutputFormat) -> Result<
     Ok(())
 }
 
-fn print_usage(usage: &BillingUsageResponse, output: OutputFormat) -> Result<()> {
+fn print_usage(usage: &serde_json::Value, output: OutputFormat) -> Result<()> {
+    let rendered = format_usage(usage, output)?;
     match output {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(usage)?);
-        }
-        OutputFormat::Table => {
-            eprintln!("Billing Usage ({})", usage.period);
-            eprintln!();
-            eprintln!("Owner:             {}", usage.owner_id);
-            eprintln!(
-                "Charging Enabled:  {}",
-                usage.billing.charging_enabled && usage.billing.lago_configured
-            );
-            eprintln!(
-                "Estimated Cost:    {}",
-                format_estimated_credits(usage.totals.estimated_credits_micros)
-            );
-            eprintln!();
-
-            if usage.rows.is_empty() {
-                eprintln!("No usage in this period.");
-                return Ok(());
-            }
-
-            let mut table = Table::new();
-            table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(["Service", "Layer", "Metric", "Quantity", "Events", "Cost"]);
-            for row in &usage.rows {
-                table.add_row([
-                    row.service_slug
-                        .as_deref()
-                        .or(row.service_id.as_deref())
-                        .unwrap_or("-")
-                        .to_string(),
-                    row.layer.clone(),
-                    row.metric.clone(),
-                    row.quantity.to_string(),
-                    row.events.to_string(),
-                    format_estimated_credits(row.estimated_credits_micros),
-                ]);
-            }
-            eprintln!("{table}");
-        }
+        OutputFormat::Json => println!("{rendered}"),
+        OutputFormat::Table => eprintln!("{rendered}"),
     }
     Ok(())
+}
+
+fn format_usage(usage: &serde_json::Value, output: OutputFormat) -> Result<String> {
+    if matches!(output, OutputFormat::Json) {
+        return Ok(serde_json::to_string_pretty(usage)?);
+    }
+    let usage = BillingUsageResponse::deserialize(usage)?;
+    let mut lines = vec![
+        format!("Billing Usage ({})", usage.period),
+        String::new(),
+        format!("Owner:             {}", usage.owner_id),
+        format!(
+            "Charging Enabled:  {}",
+            usage.billing.charging_enabled && usage.billing.lago_configured
+        ),
+        format!(
+            "Estimated Cost:    {}",
+            format_estimated_credits(usage.totals.estimated_credits_micros)
+        ),
+    ];
+    for (label, micros, quantity) in [
+        ("Funded by grants", usage.totals.grant_credits_micros, 0),
+        (
+            "Funded by allowances",
+            usage.totals.allowance_credits_micros,
+            usage.totals.allowance_quantity,
+        ),
+        ("Charged to wallet", usage.totals.wallet_credits_micros, 0),
+    ] {
+        if micros.is_some_and(|value| value > 0) || quantity > 0 {
+            lines.push(format!("{label}: {}", format_estimated_credits(micros)));
+        }
+    }
+    lines.push(String::new());
+    if usage.rows.is_empty() {
+        lines.push("No usage in this period.".to_string());
+        return Ok(lines.join("\n"));
+    }
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL_CONDENSED);
+    table.set_header([
+        "Service", "Model", "Agent", "Layer", "Metric", "Quantity", "Events", "Cost", "Status",
+        "Funding",
+    ]);
+    for row in &usage.rows {
+        table.add_row([
+            row.service_slug
+                .as_deref()
+                .or(row.service_id.as_deref())
+                .unwrap_or("-")
+                .to_string(),
+            row.model.as_deref().unwrap_or("-").to_string(),
+            row.api_key_name.as_deref().unwrap_or("-").to_string(),
+            row.layer.clone(),
+            row.metric.clone(),
+            row.quantity.to_string(),
+            row.events.to_string(),
+            if row.billable {
+                format_estimated_credits(row.estimated_credits_micros)
+            } else {
+                "free".to_string()
+            },
+            if !row.billable {
+                "free"
+            } else if row.lago_acked {
+                "acked"
+            } else {
+                "pending"
+            }
+            .to_string(),
+            format_usage_funding(row),
+        ]);
+    }
+    lines.push(table.to_string());
+    Ok(lines.join("\n"))
+}
+
+fn format_usage_funding(row: &BillingUsageRow) -> String {
+    let grants = row.grant_credits_micros.is_some_and(|value| value > 0);
+    let allowances =
+        row.allowance_credits_micros.is_some_and(|value| value > 0) || row.allowance_quantity > 0;
+    if !row.billable || !(grants || allowances) {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    if grants {
+        parts.push(format!(
+            "grants {}",
+            format_estimated_credits(row.grant_credits_micros)
+        ));
+    }
+    if allowances {
+        let units = if row.allowance_quantity > 0 {
+            format!(" ({} {})", row.allowance_quantity, row.metric)
+        } else {
+            String::new()
+        };
+        parts.push(format!(
+            "allowance {}{units}",
+            format_estimated_credits(row.allowance_credits_micros)
+        ));
+    }
+    parts.push(format!(
+        "wallet {}",
+        format_estimated_credits(row.wallet_credits_micros)
+    ));
+    parts.join(" · ")
 }
 
 fn print_topup(response: &TopUpResponse, output: OutputFormat) -> Result<()> {
@@ -427,6 +515,151 @@ mod tests {
             usage_path(Some(BillingUsagePeriodArg::Last7Days)),
             "/billing/usage?period=7d"
         );
+    }
+
+    #[test]
+    fn usage_free_rows_render_free_cost_and_status() {
+        let mut payload = usage_json();
+        payload["rows"][0]["billable"] = serde_json::json!(false);
+        payload["rows"][0]["estimated_credits_micros"] = serde_json::json!(0);
+        payload["totals"]["estimated_credits_micros"] = serde_json::json!(0);
+        let output = format_usage(&payload, OutputFormat::Table).unwrap();
+        let row = output
+            .lines()
+            .find(|line| line.contains("chrono-llm-public"))
+            .unwrap();
+        assert_eq!(
+            row.split_whitespace()
+                .filter(|cell| *cell == "free")
+                .count(),
+            2
+        );
+        assert!(!row.contains("pending"));
+        assert!(!row.contains("acked"));
+        assert!(!row.contains("credits"));
+        assert!(!output.contains("Funded by"));
+        assert!(!output.contains("Charged to wallet"));
+    }
+
+    #[test]
+    fn usage_grant_funding_renders_gross_cost_and_split() {
+        let mut payload = usage_json();
+        {
+            let funding = &mut payload["rows"][0];
+            funding["billable"] = serde_json::json!(true);
+            funding["model"] = serde_json::json!("test-model");
+            funding["api_key_name"] = serde_json::json!("My agent");
+            funding["wallet_credits_micros"] = serde_json::json!(0);
+            funding["grant_credits_micros"] = serde_json::json!(2440);
+            funding["allowance_credits_micros"] = serde_json::json!(0);
+            funding["allowance_quantity"] = serde_json::json!(0);
+        }
+        payload["totals"]["grant_credits_micros"] = serde_json::json!(2440);
+        payload["totals"]["wallet_credits_micros"] = serde_json::json!(0);
+        let output = format_usage(&payload, OutputFormat::Table).unwrap();
+        assert!(output.contains("Estimated Cost:    0.002440 credits"));
+        assert!(output.contains("Funded by grants: 0.002440 credits"));
+        assert!(output.contains("grants 0.002440 credits · wallet 0.000000 credits"));
+        assert!(output.contains("test-model"));
+        assert!(output.contains("My agent"));
+        assert!(!output.contains("Funded by allowances"));
+        assert!(!output.contains("Charged to wallet"));
+    }
+
+    #[test]
+    fn usage_mixed_funding_renders_allowance_units_and_totals() {
+        let mut payload = usage_json();
+        let funding = serde_json::json!({
+            "wallet_credits_micros": 240,
+            "grant_credits_micros": 1000,
+            "allowance_credits_micros": 1200,
+            "allowance_quantity": 1200
+        });
+        payload["rows"][0]
+            .as_object_mut()
+            .unwrap()
+            .extend(funding.as_object().unwrap().clone());
+        payload["totals"]
+            .as_object_mut()
+            .unwrap()
+            .extend(funding.as_object().unwrap().clone());
+        let output = format_usage(&payload, OutputFormat::Table).unwrap();
+        assert!(output.contains("grants 0.001000 credits · allowance 0.001200 credits (1200 tokens) · wallet 0.000240 credits"));
+        assert!(output.contains("Funded by grants: 0.001000 credits"));
+        assert!(output.contains("Funded by allowances: 0.001200 credits"));
+        assert!(output.contains("Charged to wallet: 0.000240 credits"));
+    }
+
+    #[test]
+    fn usage_older_server_payload_defaults_to_billable() {
+        let payload = usage_json();
+        let usage: BillingUsageResponse = serde_json::from_value(payload.clone()).unwrap();
+        let row = &usage.rows[0];
+        assert!(row.billable);
+        assert_eq!(row.model, None);
+        assert_eq!(row.api_key_name, None);
+        assert_eq!(row.wallet_credits_micros, None);
+        assert_eq!(row.grant_credits_micros, None);
+        assert_eq!(row.allowance_credits_micros, None);
+        assert_eq!(row.allowance_quantity, 0);
+        assert_eq!(usage.totals.wallet_credits_micros, None);
+        assert_eq!(usage.totals.grant_credits_micros, None);
+        assert_eq!(usage.totals.allowance_credits_micros, None);
+        assert_eq!(usage.totals.allowance_quantity, 0);
+        let output = format_usage(&payload, OutputFormat::Table).unwrap();
+        assert!(output.contains("0.002440 credits"));
+        assert!(output.contains("pending"));
+        assert!(!output.contains("Funded by"));
+    }
+
+    #[test]
+    fn usage_json_preserves_raw_response_fields_without_adding_defaults() {
+        let old = usage_json();
+        let mut current = old.clone();
+        current["rows"][0]["billable"] = serde_json::json!(true);
+        current["rows"][0]["grant_credits_micros"] = serde_json::json!(2440);
+        current["rows"][0]["api_key_id"] = serde_json::json!("key-id");
+        current["rows"][0]["token_breakdown"] = serde_json::json!({"prompt_tokens": 2440});
+        for payload in [old, current] {
+            let output = format_usage(&payload, OutputFormat::Json).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output).unwrap(),
+                payload
+            );
+        }
+    }
+
+    fn usage_json() -> serde_json::Value {
+        serde_json::json!({
+            "owner_id": "owner-1",
+            "period": "7d",
+            "rows": [{
+                "service_slug": "chrono-llm-public",
+                "service_id": "service-1",
+                "metric": "tokens",
+                "lago_metric_code": "platform_tokens",
+                "layer": "platform",
+                "quantity": 2440,
+                "requests": 0,
+                "bytes": 0,
+                "events": 1,
+                "lago_acked": false,
+                "estimated_credits_micros": 2440
+            }],
+            "totals": {
+                "quantity": 2440,
+                "requests": 0,
+                "bytes": 0,
+                "events": 1,
+                "estimated_credits_micros": 2440
+            },
+            "billing": {
+                "charging_enabled": true,
+                "lago_configured": true,
+                "source": "usage_meter",
+                "rates_are_approximate": true
+            }
+        })
     }
 
     #[tokio::test]
