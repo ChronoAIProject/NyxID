@@ -293,22 +293,8 @@ export const updateProviderSchema = z
     client_secret: z.string().optional().or(z.literal("")),
   })
   .superRefine((data, ctx) => {
-    if (data.provider_type === "oauth2") {
-      if (!data.authorization_url) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Authorization URL is required for OAuth2 providers",
-          path: ["authorization_url"],
-        });
-      }
-      if (!data.token_url) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Token URL is required for OAuth2 providers",
-          path: ["token_url"],
-        });
-      }
-    }
+    // Update requests omit blank URL fields to preserve the configured endpoints.
+    // OAuth endpoint presence is required only by the create schema above.
     if (data.provider_type === "device_code") {
       if (!data.authorization_url) {
         ctx.addIssue({

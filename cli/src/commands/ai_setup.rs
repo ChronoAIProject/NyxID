@@ -297,6 +297,21 @@ fn cargo_setup_rc_snippet(shell_name: &str, cargo_bin: &Path, cargo_env: &Path) 
     )
 }
 
+pub(crate) fn codex_skill_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![home.join(".agents/skills")];
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        let root = PathBuf::from(codex_home).join("skills");
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    let legacy = home.join(".codex/skills");
+    if !roots.contains(&legacy) {
+        roots.push(legacy);
+    }
+    roots
+}
+
 fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
     let home = home_dir()?;
     match tool {
@@ -315,10 +330,21 @@ fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
             "rule".into(),
             PathBuf::from(".cursor/rules/nyxid.mdc"),
         )]),
-        AiToolTarget::Codex => Ok(vec![(
-            "skill".into(),
-            home.join(".codex/skills/nyxid/SKILL.md"),
-        )]),
+        AiToolTarget::Codex => Ok(codex_skill_roots(&home)
+            .into_iter()
+            .enumerate()
+            .map(|(index, root)| {
+                (
+                    if index == 0 {
+                        "skill"
+                    } else {
+                        "skill (legacy)"
+                    }
+                    .into(),
+                    root.join("nyxid/SKILL.md"),
+                )
+            })
+            .collect()),
         AiToolTarget::Openclaw => Ok(vec![(
             "skill".into(),
             home.join(".openclaw/skills/nyxid/SKILL.md"),
@@ -845,8 +871,12 @@ async fn install_skill_dir_tool(
 }
 
 async fn install_codex(content: &SkillContent, base_url: &str) -> Result<()> {
-    let root = home_dir()?.join(".codex/skills");
-    install_skill_dir_tool(AiToolTarget::Codex, root, content, base_url).await
+    for (index, root) in codex_skill_roots(&home_dir()?).into_iter().enumerate() {
+        if index == 0 || root.join("nyxid/SKILL.md").is_file() {
+            install_skill_dir_tool(AiToolTarget::Codex, root, content, base_url).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn install_openclaw(content: &SkillContent, base_url: &str) -> Result<()> {
@@ -1170,6 +1200,90 @@ mod command_tests {
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn codex_canonical_install_and_legacy_update_preserve_unmanaged_skills() {
+        let _lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    unsafe {
+                        match value {
+                            Some(value) => std::env::set_var(name, value),
+                            None => std::env::remove_var(name),
+                        }
+                    };
+                }
+            }
+        }
+        let _restore = Restore(
+            ["HOME", "CODEX_HOME"]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("CODEX_HOME", home.path().join(".agents"));
+        }
+        let roots = codex_skill_roots(home.path());
+        assert_eq!(
+            roots,
+            vec![
+                home.path().join(".agents/skills"),
+                home.path().join(".codex/skills")
+            ]
+        );
+        let content = SkillContent {
+            skill_md: "fixture".into(),
+            playbook: "server fixture".into(),
+            post_install: String::new(),
+            references: Vec::new(),
+            install_sh: String::new(),
+        };
+        let package = |text: &str| RepoSkill {
+            name: "nyxid".into(),
+            files: vec![
+                RepoSkillFile {
+                    rel_path: "SKILL.md".into(),
+                    content: text.into(),
+                },
+                RepoSkillFile {
+                    rel_path: "references/post-install.md".into(),
+                    content: "fixture reference".into(),
+                },
+            ],
+        };
+        for root in &roots {
+            write_file(&root.join("personal/SKILL.md"), "user-owned skill").unwrap();
+            install_all_skills(root, &[package("initial fixture")], &content).unwrap();
+        }
+        assert!(
+            skill_paths(AiToolTarget::Codex)
+                .unwrap()
+                .iter()
+                .all(|(_, path)| path.is_file())
+        );
+        for root in &roots {
+            install_all_skills(root, &[package("updated fixture")], &content).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(root.join("nyxid/SKILL.md")).unwrap(),
+                "updated fixture"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("personal/SKILL.md")).unwrap(),
+                "user-owned skill"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("nyxid/references/playbook.md")).unwrap(),
+                "server fixture"
+            );
+        }
+    }
 
     #[test]
     fn substitute_urls_rewrites_all_known_hosts() {

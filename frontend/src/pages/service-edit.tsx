@@ -1,3 +1,4 @@
+import { PlatformServiceFields } from "@/components/services/platform-service-fields";
 import { useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -79,6 +80,7 @@ export function ServiceEditPage() {
       forward_access_token: false,
       inject_delegation_token: false,
       platform_billable: false,
+      platform_charge_nyxid_credentials_only: false,
       platform_metric: "auto" as const,
       platform_price: "",
       delegation_token_scope: "",
@@ -111,6 +113,11 @@ export function ServiceEditPage() {
   useEffect(() => {
     if (service) {
       form.reset({
+        inference: service.inference,
+        platform_key: service.platform_key ?? undefined,
+        credential: "",
+        byok_pricing: service.billing?.byok_pricing,
+        platform_key_pricing: service.billing?.platform_key_pricing,
         service_type: service.service_type === "ssh" ? "ssh" : "http",
         visibility: service.visibility === "private" ? "private" : "public",
         name: service.name,
@@ -129,6 +136,8 @@ export function ServiceEditPage() {
         forward_access_token: service.forward_access_token ?? false,
         inject_delegation_token: service.inject_delegation_token ?? false,
         platform_billable: service.billing?.platform_billable ?? false,
+        platform_charge_nyxid_credentials_only:
+          service.billing?.platform_charge_nyxid_credentials_only ?? false,
         platform_metric:
           (service.billing?.platform_metric as UpdateServiceFormData["platform_metric"]) ??
           "auto",
@@ -249,6 +258,7 @@ export function ServiceEditPage() {
                   .map((s) => s.trim())
                   .filter(Boolean),
                 developer_app_ids: data.developer_app_ids ?? [],
+                ...(user?.is_admin ? { inference: data.inference, platform_key: data.platform_key, ...(data.credential?.trim() ? { credential: data.credential.trim() } : {}) } : {}),
                 capabilities: {
                   supports_proxy_read: data.supports_proxy_read ?? false,
                   supports_proxy_write: data.supports_proxy_write ?? false,
@@ -262,7 +272,10 @@ export function ServiceEditPage() {
                 // platform-layer opt-in.
                 billing: {
                   ...(service?.billing ?? {}),
+                  ...(user?.is_admin ? { byok_pricing: data.byok_pricing, platform_key_pricing: data.platform_key_pricing } : {}),
                   platform_billable: data.platform_billable ?? false,
+                  platform_charge_nyxid_credentials_only:
+                    data.platform_charge_nyxid_credentials_only ?? false,
                   platform_metric:
                     data.platform_metric && data.platform_metric !== "auto"
                       ? data.platform_metric
@@ -957,6 +970,7 @@ export function ServiceEditPage() {
                     </div>
 
                     <Separator className="my-2" />
+                    {user?.is_admin && <PlatformServiceFields form={form} service={service} />}
                     <div className="space-y-4">
                       <div className="space-y-1">
                         <h3 className="text-[13px] font-semibold">Billing</h3>
@@ -981,6 +995,29 @@ export function ServiceEditPage() {
                           checked={form.watch("platform_billable") ?? false}
                           onCheckedChange={(v) =>
                             form.setValue("platform_billable", v)
+                          }
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-3">
+                        <div className="space-y-1">
+                          <Label
+                            htmlFor="platform-charge-nyxid-credentials-only"
+                            className="text-[12px] font-normal"
+                          >
+                            Charge only NyxID-provided credentials
+                          </Label>
+                          <p className="text-xs text-muted-foreground">
+                            Charge NyxID master keys and shared OAuth apps. Users
+                            bringing their own credentials are metered for
+                            observability without platform charges.
+                          </p>
+                        </div>
+                        <Switch
+                          id="platform-charge-nyxid-credentials-only"
+                          checked={form.watch("platform_charge_nyxid_credentials_only") ?? false}
+                          onCheckedChange={(v) =>
+                            form.setValue("platform_charge_nyxid_credentials_only", v)
                           }
                         />
                       </div>

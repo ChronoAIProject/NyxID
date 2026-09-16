@@ -1,3 +1,5 @@
+import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
+import type { LanePricingView } from "@/schemas/platform-keys";
 // ai-key (service-add) pairing panel.
 //
 // Supports all three provider shapes mirroring
@@ -19,6 +21,7 @@ import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
+import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import type { ScopeCatalogEntry } from "@/types/keys";
 import { Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
@@ -48,6 +51,9 @@ interface CredentialFieldSpec {
 }
 
 interface CatalogEntryShape {
+  readonly billing?: { readonly platform_billable?: boolean; readonly resale_billable?: boolean };
+  readonly platform_key?: { readonly available: boolean; readonly pricing?: LanePricingView | null };
+  readonly byok_pricing?: LanePricingView | null;
   readonly slug: string;
   readonly name: string;
   readonly description?: string;
@@ -86,6 +92,7 @@ interface CatalogEntryShape {
   readonly device_code_format?: string | null;
   /** Provider default scopes — pre-selected in the scope picker (NyxID#917). */
   readonly default_scopes?: readonly string[] | null;
+  readonly supports_oauth_scopes?: boolean;
   /** Curated selectable scope menu for this provider (NyxID#917). */
   readonly scope_catalog?: readonly ScopeCatalogEntry[] | null;
   /** Per-provider scope-removal capability (NyxID#917). `unsupported` →
@@ -400,11 +407,17 @@ function ManageScopesPanel({
       : null;
   const seedScopes = cliSet ?? (granted.length > 0 ? granted : defaultScopes);
   const [override, setOverride] = useState<readonly string[] | null>(null);
-  const selectedScopes = override ?? seedScopes;
+  const selectedScopes = includeRequiredScopes(
+    override ?? seedScopes,
+    entry?.scope_catalog ?? [],
+  );
   const scopeOverride =
-    override !== null
-      ? override
-      : (cliSet ?? (granted.length > 0 ? granted : undefined));
+    override !== null ||
+    cliSet !== null ||
+    granted.length > 0 ||
+    entry?.scope_catalog?.some((scope) => scope.required)
+      ? selectedScopes
+      : undefined;
   const setSelectedScopes = setOverride;
 
   const [authFlowActive, setAuthFlowActive] = useState(false);
@@ -429,7 +442,7 @@ function ManageScopesPanel({
   const isOAuth = (entry.provider_type ?? "").toLowerCase() === "oauth2";
   // Scoped management only applies to OAuth providers. (The only device-code
   // provider, openai-codex, has fixed scopes — nothing to manage.)
-  if (!isOAuth || !entry.provider_config_id) {
+  if (!isOAuth || !entry.provider_config_id || entry.supports_oauth_scopes === false) {
     return (
       <div className="flex flex-col gap-1">
         <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
@@ -916,7 +929,9 @@ function CatalogConfirmForm({
   pairingId,
   onSuccess,
 }: CatalogConfirmFormProps) {
-  const shape = classifyFlow(entry);
+  const [platformChoice, setPlatformChoice] = useState(true);
+  const usePlatformKey = Boolean(entry.platform_key?.available && !prefill.via_node && platformChoice);
+  const shape = usePlatformKey ? "no-auth" : classifyFlow(entry);
   const [label, setLabel] = useState(prefill.label ?? entry.name);
   const [credential, setCredential] = useState("");
   const [endpointUrl, setEndpointUrl] = useState(prefill.endpoint_url ?? "");
@@ -929,8 +944,12 @@ function CatalogConfirmForm({
   // Seeded with the provider's defaults (all pre-selected) so an unedited
   // submit requests exactly today's scopes; the picker lets the user drop a
   // default or add custom scopes. Passed to the sub-flow as `scopeOverride`.
-  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+  const [scopeSelection, setSelectedScopes] = useState<readonly string[]>(
     entry.default_scopes ?? [],
+  );
+  const selectedScopes = includeRequiredScopes(
+    scopeSelection,
+    entry.scope_catalog ?? [],
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -949,6 +968,7 @@ function CatalogConfirmForm({
         service_slug: entry.slug,
         label,
       };
+      if (usePlatformKey) { body.use_platform_key = true; }
       if (shape === "token-exchange" && !viaNode) {
         // Multi-field credential: validate required-ness and JSON-
         // encode. Mirror wizard.js submit path at wizard.js:723-734.
@@ -970,7 +990,7 @@ function CatalogConfirmForm({
       // `no-auth` / `oauth` / `device-code` skip credential entirely;
       // OAuth / device-code placeholder creation lives in the sub-
       // flow components and doesn't reach this branch.
-      if (entry.requires_gateway_url || endpointUrl) {
+      if (!usePlatformKey && (entry.requires_gateway_url || endpointUrl)) {
         body.endpoint_url = endpointUrl;
       }
       if (viaNode) {
@@ -1121,14 +1141,15 @@ function CatalogConfirmForm({
   const effectiveEndpointUrl = endpointUrl.trim() || prefill.endpoint_url;
 
   // Whether the upstream provider accepts additional scopes on the
-  // initiate request. OAuth always does; `openai`-format device-code
+  // initiate request. Scopeless OAuth and `openai`-format device-code
   // providers (Codex) reject a `scope` parameter, so hide the picker
   // for them — same gate as `add-key-dialog.tsx::DeviceCodeStep`
   // (NyxID#917). When supported, the sub-flow receives the picker's
   // complete selection as `scopeOverride`; when not, no override.
   const supportsAdditionalScopes =
-    shape === "oauth" ||
-    (shape === "device-code" && entry.device_code_format !== "openai");
+    entry.supports_oauth_scopes !== false &&
+    (shape === "oauth" ||
+      (shape === "device-code" && entry.device_code_format !== "openai"));
   const scopeOverride = supportsAdditionalScopes ? selectedScopes : undefined;
 
   if (authFlowActive && shape === "oauth" && entry.provider_config_id) {
@@ -1192,7 +1213,7 @@ function CatalogConfirmForm({
     loading ||
     !label.trim() ||
     (needsCredentialInput && !viaNode && !credential.trim()) ||
-    (entry.requires_gateway_url && !endpointUrl.trim()) ||
+    (!usePlatformKey && entry.requires_gateway_url && !endpointUrl.trim()) ||
     (!viaNode && !tokenExchangeComplete);
 
   function handleSubmit() {
@@ -1228,6 +1249,7 @@ function CatalogConfirmForm({
         </div>
       </div>
 
+      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} />}
       <div className="flex flex-col gap-3">
         <Field label="Label" htmlFor="pair-aikey-label">
           <Input
@@ -1240,7 +1262,7 @@ function CatalogConfirmForm({
           />
         </Field>
 
-        {entry.requires_gateway_url ? (
+        {!usePlatformKey && entry.requires_gateway_url ? (
           <Field label="Instance URL" htmlFor="pair-aikey-url">
             <Input
               id="pair-aikey-url"

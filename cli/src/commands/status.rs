@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::api::{ApiClient, ApiError};
 use crate::auth::agent_key::{Identity, format_identity};
 use crate::cli::OutputFormat;
+use crate::commands::api_key::service_scope_display;
 
 pub async fn run(api: &mut ApiClient, output: OutputFormat) -> Result<()> {
     let identity: Option<Identity> = if api.is_agent_key_auth() {
@@ -140,19 +141,7 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
             let id = key["id"].as_str().or(key["_id"].as_str()).unwrap_or("-");
             let name = key["name"].as_str().unwrap_or("-");
             let scopes = key["scopes"].as_str().unwrap_or("-");
-            let services = if key["allow_all_services"].as_bool().unwrap_or(true) {
-                "all".to_string()
-            } else {
-                key["allowed_services"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|s| s["slug"].as_str().or(s["label"].as_str()))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_else(|| "-".to_string())
-            };
+            let services = service_scope_display(key);
             let nodes_scope = if key["allow_all_nodes"].as_bool().unwrap_or(true) {
                 "all".to_string()
             } else {

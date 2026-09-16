@@ -422,6 +422,7 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                     "allowed_service_ids",
                     "allowed_node_ids",
                     "allow_all_services",
+                    "allow_auto_connected_services",
                     "allow_all_nodes",
                     "rate_limit_per_second",
                     "rate_limit_burst",
@@ -1857,6 +1858,9 @@ fn prefill_query(prefill: &PrefillData) -> String {
             if let Some(d) = p.expires_in_days {
                 parts.push(format!("expires_in_days={d}"));
             }
+            if p.allow_auto_connected_services {
+                parts.push("allow_auto_connected_services=1".to_string());
+            }
             if p.allow_all_services {
                 parts.push("allow_all_services=1".to_string());
             }
@@ -1976,6 +1980,10 @@ fn prefill_to_json(prefill: &PrefillData) -> serde_json::Value {
             obj.insert(
                 "allow_all_nodes".to_string(),
                 Value::Bool(p.allow_all_nodes),
+            );
+            obj.insert(
+                "allow_auto_connected_services".into(),
+                Value::Bool(p.allow_auto_connected_services),
             );
             put_opt(&mut obj, "allowed_services_csv", &p.allowed_services_csv);
             put_opt(&mut obj, "allowed_nodes_csv", &p.allowed_nodes_csv);
@@ -3037,11 +3045,13 @@ mod tests {
     fn prefill_query_api_key_create_with_booleans() {
         let prefill = PrefillData::ApiKeyCreate(ApiKeyCreatePrefill {
             allow_all_services: true,
+            allow_auto_connected_services: true,
             allow_all_nodes: true,
             ..Default::default()
         });
         let q = prefill_query(&prefill);
         assert!(q.contains("allow_all_services=1"));
+        assert!(q.contains("allow_auto_connected_services=1"));
         assert!(q.contains("allow_all_nodes=1"));
     }
 
@@ -3107,10 +3117,12 @@ mod tests {
     fn prefill_to_json_api_key_create_includes_bools() {
         let prefill = PrefillData::ApiKeyCreate(ApiKeyCreatePrefill {
             allow_all_services: true,
+            allow_auto_connected_services: true,
             ..Default::default()
         });
         let json = prefill_to_json(&prefill);
         assert_eq!(json["allow_all_services"], true);
+        assert_eq!(json["allow_auto_connected_services"], true);
         assert_eq!(json["allow_all_nodes"], false);
     }
 

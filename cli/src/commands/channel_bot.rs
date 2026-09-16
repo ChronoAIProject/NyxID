@@ -11,6 +11,91 @@ use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
+        ChannelBotCommands::Platforms { auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api.get("/channel-platforms").await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => {
+                    let mut table = Table::new();
+                    table.load_preset(UTF8_FULL_CONDENSED);
+                    table.set_header([
+                        "Platform",
+                        "Enabled",
+                        "Ingestion",
+                        "Required fields",
+                        "Media in",
+                        "Media out",
+                        "Edit",
+                    ]);
+                    for p in result["platforms"].as_array().into_iter().flatten() {
+                        let joined = |values: &Value| {
+                            values
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        let required = p["registration"]["fields"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|f| f["required"] == true)
+                            .filter_map(|f| f["name"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        table.add_row([
+                            p["platform"].as_str().unwrap_or("-").to_string(),
+                            p["enabled"].to_string(),
+                            p["ingestion"]["mode"].as_str().unwrap_or("-").to_string(),
+                            required,
+                            joined(&p["capabilities"]["media"]["inbound"]),
+                            joined(&p["capabilities"]["media"]["outbound"]),
+                            p["capabilities"]["edit"].to_string(),
+                        ]);
+                    }
+                    println!("{table}");
+                }
+            }
+            Ok(())
+        }
+
+        ChannelBotCommands::Send {
+            conversation,
+            text,
+            idempotency_key,
+            auth,
+        } => {
+            uuid::Uuid::parse_str(&conversation)
+                .map_err(|_| anyhow::anyhow!("--conversation must be a UUID"))?;
+            if text.trim().is_empty() {
+                bail!("--text must not be empty");
+            }
+            if idempotency_key
+                .as_ref()
+                .is_some_and(|key| key.is_empty() || key.chars().count() > 128)
+            {
+                bail!("--idempotency-key must contain 1 to 128 characters");
+            }
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api.post("/channel-relay/send", &serde_json::json!({
+                "conversation_id": conversation, "message": { "text": text }, "idempotency_key": idempotency_key,
+            })).await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => println!(
+                    "Platform accepted message {} (receipt: {}).",
+                    result["message_id"].as_str().unwrap_or("-"),
+                    result["platform_message_id"]
+                        .as_str()
+                        .unwrap_or("unavailable")
+                ),
+            }
+            Ok(())
+        }
+
         ChannelBotCommands::Register {
             platform,
             managed,
@@ -29,9 +114,6 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             auth,
         } => {
             if managed {
-                if platform != "whatsapp" {
-                    bail!("Managed onboarding is not supported for this platform");
-                }
                 if [
                     bot_token.as_ref(),
                     token_env.as_ref(),
@@ -48,6 +130,21 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 .any(|value| value.is_some())
                 {
                     bail!("--managed cannot be combined with credential flags");
+                }
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
+                let bootstrap_path = if platform == "telegram-new" {
+                    "/channel-bots/telegram-new".to_string()
+                } else {
+                    format!(
+                        "/channel-bots/managed-onboarding/{}",
+                        urlencoding::encode(&platform)
+                    )
+                };
+                let bootstrap: Value = api.get(&bootstrap_path).await?;
+                if bootstrap["available"] != true {
+                    bail!(
+                        "Managed onboarding is not supported or not configured for this platform"
+                    );
                 }
                 let frontend = crate::auth::fetch_frontend_url(
                     &auth.resolved_base_url()?,
@@ -71,12 +168,23 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     ),
                     OutputFormat::Table => {
                         println!("{url}");
-                        eprintln!(
-                            "Open this URL, sign in to NyxID, and complete Connect with Meta in your browser. Meta will ask you to choose a business and phone number."
-                        );
+                        if platform == "telegram-new" {
+                            eprintln!(
+                                "Open this URL, sign in to NyxID, and choose Telegram. Create and approve your bot in Telegram, then return to connect it."
+                            );
+                        } else {
+                            eprintln!(
+                                "Open this URL, sign in to NyxID, and complete the account connection in your browser."
+                            );
+                        }
                     }
                 }
                 return Ok(());
+            }
+            if platform == "telegram-new" {
+                bail!(
+                    "Telegram requires browser approval for new bot creation. Use --managed to get its creation link."
+                );
             }
             let label = label.ok_or_else(|| anyhow::anyhow!("--label is required"))?;
             let token = resolve_secret(bot_token.as_deref(), token_env.as_deref(), "bot token")?;
@@ -399,7 +507,28 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Bot ID:         {bot_user_id}");
                     eprintln!("Username:       {username}");
                     eprintln!("Status:         {status}");
-                    eprintln!("Webhook:        {webhook}");
+                    if bot["webhook_ingestion"] == false {
+                        eprintln!("Ingestion:      polling");
+                        for (field, label) in [
+                            ("connection_id", "Connection"),
+                            ("last_polled_at", "Last polled"),
+                            ("last_poll_notice", "Last poll notice"),
+                            ("next_poll_at", "Next poll"),
+                            ("poll_cursor", "Cursor"),
+                            ("poll_backoff_until", "Backoff until"),
+                        ] {
+                            eprintln!("{label}: {}", bot[field].as_str().unwrap_or("-"));
+                        }
+                        eprintln!(
+                            "Poll errors: {}",
+                            bot["poll_error_count"].as_u64().unwrap_or(0)
+                        );
+                    } else {
+                        eprintln!("Webhook:        {webhook}");
+                    }
+                    if let Some(error) = bot["error"].as_str() {
+                        eprintln!("Error: {error}");
+                    }
                     eprintln!("Active:         {active}");
                     eprintln!("Conversations:  {conversations}");
                     eprintln!("Created:        {created}");
@@ -494,6 +623,7 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             conversation_type,
             sender_id,
             default_agent,
+            allow_agent_initiated,
             org,
             auth,
         } => {
@@ -516,6 +646,9 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             }
             if let Some(sid) = &sender_id {
                 body["platform_sender_id"] = Value::String(sid.clone());
+            }
+            if allow_agent_initiated {
+                body["allow_agent_initiated"] = Value::Bool(true);
             }
             if default_agent {
                 body["default_agent"] = Value::Bool(true);
@@ -631,6 +764,7 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             id,
             agent_key_id,
             default_agent,
+            allow_agent_initiated,
             active,
             auth,
         } => {
@@ -644,13 +778,16 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
             if let Some(v) = default_agent {
                 body.insert("default_agent".into(), Value::Bool(v));
             }
+            if let Some(v) = allow_agent_initiated {
+                body.insert("allow_agent_initiated".into(), Value::Bool(v));
+            }
             if let Some(v) = active {
                 body.insert("is_active".into(), Value::Bool(v));
             }
 
             if body.is_empty() {
                 bail!(
-                    "No update fields provided. Use --agent-key-id, --default-agent, or --active."
+                    "No update fields provided. Use --agent-key-id, --default-agent, --allow-agent-initiated, or --active."
                 );
             }
 
@@ -861,8 +998,90 @@ mod tests {
     const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
 
     #[tokio::test]
+    async fn platforms_fetches_authoritative_catalog_in_both_output_modes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/v1/channel-platforms"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"platforms":[{
+                "platform":"telegram","enabled":true,"ingestion":{"mode":"webhook"},
+                "registration":{"fields":[{"name":"bot_token","required":true}]},
+                "capabilities":{"edit":true,"media":{"inbound":["image","file"],"outbound":["image","file"]}}
+            }]}))).expect(2).mount(&server).await;
+        for output in [OutputFormat::Json, OutputFormat::Table] {
+            let mut auth = mock_auth(server.uri());
+            auth.output = output;
+            run(ChannelBotCommands::Platforms { auth }).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn x_managed_arguments_bootstrap_and_show_are_generic() {
+        use clap::Parser;
+        crate::cli::Cli::try_parse_from([
+            "nyxid",
+            "channel-bot",
+            "register",
+            "--platform",
+            "x",
+            "--managed",
+        ])
+        .unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/managed-onboarding/x"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"available": true, "flow": "oauth_connection"}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/public/config"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"frontend_url": "https://nyxid.example"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/v1/channel-bots/x-bot"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "x-bot", "platform": "x", "webhook_ingestion": false,
+                "credential_source": "connection", "connection_id": "connection", "poll_cursor": "100", "poll_error_count": 5,
+                "last_polled_at": "2026-09-08T00:00:00Z", "next_poll_at": null, "status": "failed", "error": "Reconnect the channel account."})))
+            .expect(1).mount(&server).await;
+        let mut command = register(server.uri(), "x", None, None);
+        if let ChannelBotCommands::Register { managed, .. } = &mut command {
+            *managed = true;
+        }
+        run(command).await.unwrap();
+        run(ChannelBotCommands::Show {
+            id: "x-bot".into(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn managed_signup_discovers_browser_url_without_posting_credentials() {
         let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/managed-onboarding/whatsapp"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "available": true })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/managed-onboarding/telegram"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "available": false })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
         Mock::given(method("GET"))
             .and(path("/api/v1/public/config"))
             .respond_with(
@@ -878,7 +1097,7 @@ mod tests {
             *label = None;
         }
         run(command).await.unwrap();
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
         let mut command = register(server.uri(), "telegram", None, None);
         if let ChannelBotCommands::Register { managed, .. } = &mut command {
             *managed = true;
@@ -889,6 +1108,44 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("not supported")
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_new_signup_discovers_browser_url_without_requesting_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/telegram-new"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"available": true})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/public/config"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "frontend_url": "https://nyxid.example" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut command = register(server.uri(), "telegram-new", None, None);
+        if let ChannelBotCommands::Register { managed, label, .. } = &mut command {
+            *managed = true;
+            *label = None;
+        }
+        run(command).await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        let command = register(server.uri(), "telegram-new", None, None);
+        assert!(
+            run(command)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("--managed")
         );
     }
 
@@ -1017,7 +1274,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn register_lark_without_verification_token_fails() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         // SAFETY: env mutation serialized by env_lock.
         unsafe {
@@ -1062,7 +1319,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn update_with_no_fields_fails() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         // SAFETY: env mutation serialized by env_lock.
         unsafe {
@@ -1197,12 +1454,16 @@ mod tests {
                 conversation_type: None,
                 sender_id: None,
                 default_agent: false,
+                allow_agent_initiated: false,
                 org: None,
                 auth: mock_auth(server.uri()),
             },
         })
         .await
         .expect("route create should succeed");
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = requests[0].body_json().unwrap();
+        assert!(body.get("allow_agent_initiated").is_none());
     }
 
     #[tokio::test]
@@ -1213,6 +1474,7 @@ mod tests {
                 id: "route-1".to_string(),
                 agent_key_id: None,
                 default_agent: None,
+                allow_agent_initiated: None,
                 active: None,
                 auth: mock_auth(server.uri()),
             },
@@ -1259,7 +1521,7 @@ mod tests {
 
     #[test]
     fn resolve_secret_reads_env_var() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         // SAFETY: env mutation serialized by env_lock.
         unsafe {
             std::env::set_var("NYXID_TEST_BOT_TOKEN", "from-env");
@@ -1392,7 +1654,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn update_blank_verification_token_is_rejected() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         // SAFETY: env mutation serialized by env_lock.
         unsafe {
@@ -1537,6 +1799,7 @@ mod tests {
                 "platform_conversation_type": "group",
                 "platform_sender_id": "user-9",
                 "default_agent": true,
+                "allow_agent_initiated": true,
                 "target_org_id": ORG_UUID
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1554,6 +1817,7 @@ mod tests {
                 conversation_type: Some("group".to_string()),
                 sender_id: Some("user-9".to_string()),
                 default_agent: true,
+                allow_agent_initiated: true,
                 org: Some(ORG_UUID.to_string()),
                 auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
             },
@@ -1632,11 +1896,104 @@ mod tests {
                 id: "route-1".to_string(),
                 agent_key_id: Some("key-2".to_string()),
                 default_agent: Some(true),
+                allow_agent_initiated: None,
                 active: Some(false),
                 auth: mock_auth(server.uri()),
             },
         })
         .await
         .expect("route update should succeed");
+    }
+    #[tokio::test]
+    async fn send_posts_target_text_and_idempotency_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/api/v1/channel-relay/send"))
+            .and(body_partial_json(serde_json::json!({ "conversation_id": ORG_UUID, "message": { "text": "hello" }, "idempotency_key": "job-done" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "message_id": "message", "platform_message_id": "receipt" })))
+            .expect(1).mount(&server).await;
+        run(ChannelBotCommands::Send {
+            conversation: ORG_UUID.into(),
+            text: "hello".into(),
+            idempotency_key: Some("job-done".into()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_update_can_enable_and_disable_initiated_messages_alone() {
+        for enabled in [true, false] {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT"))
+                .and(path("/api/v1/channel-conversations/route"))
+                .and(body_partial_json(
+                    serde_json::json!({ "allow_agent_initiated": enabled }),
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": "route" })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            run(ChannelBotCommands::Route {
+                command: ChannelRouteCommands::Update {
+                    id: "route".into(),
+                    agent_key_id: None,
+                    default_agent: None,
+                    allow_agent_initiated: Some(enabled),
+                    active: None,
+                    auth: mock_auth(server.uri()),
+                },
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn initiated_flags_parse_for_create_update_and_send() {
+        use clap::Parser;
+        for args in [
+            vec![
+                "nyxid",
+                "channel-bot",
+                "route",
+                "create",
+                "--bot-id",
+                "bot",
+                "--agent-key-id",
+                "key",
+                "--allow-agent-initiated",
+            ],
+            vec![
+                "nyxid",
+                "channel-bot",
+                "route",
+                "update",
+                "route",
+                "--allow-agent-initiated",
+            ],
+            vec![
+                "nyxid",
+                "channel-bot",
+                "route",
+                "update",
+                "route",
+                "--allow-agent-initiated",
+                "false",
+            ],
+            vec![
+                "nyxid",
+                "channel-bot",
+                "send",
+                "--conversation",
+                ORG_UUID,
+                "--text",
+                "hello",
+            ],
+        ] {
+            assert!(crate::cli::Cli::try_parse_from(args).is_ok());
+        }
     }
 }

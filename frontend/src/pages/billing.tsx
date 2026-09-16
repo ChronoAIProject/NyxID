@@ -8,6 +8,7 @@ import {
   type BillingMetric,
   type BillingUsagePeriod,
   type BillingUsageRow,
+  type BillingUsageTotals,
 } from "@/schemas/billing";
 import {
   useBillingUsage,
@@ -316,15 +317,7 @@ function UsageSummary({
   loading,
 }: {
   readonly rows: readonly BillingUsageRow[];
-  readonly totals:
-    | {
-        readonly quantity: number;
-        readonly requests: number;
-        readonly bytes: number;
-        readonly events: number;
-        readonly estimated_credits_micros?: number | null;
-      }
-    | undefined;
+  readonly totals: BillingUsageTotals | undefined;
   readonly loading: boolean;
 }) {
   const services = useMemo(() => groupByService(rows), [rows]);
@@ -349,7 +342,8 @@ function UsageSummary({
         <CardTitle>Usage</CardTitle>
         <p className="mt-1 text-[12px] text-muted-foreground">
           Estimated cost per service. Expand a row for the model, agent, and
-          layer behind it.
+          layer behind it. Platform costs use the service price for your selected
+          key; your own key can be free or billed. Resale fees are separate.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -368,6 +362,7 @@ function UsageSummary({
           />
           <MetricBlock label="Bytes" value={formatNumber(metricTotals.bytes)} />
         </div>
+        {totals && <FundingSplit funding={totals} totals />}
         <div className="overflow-hidden rounded-lg border border-border">
           <Table>
             <TableHeader>
@@ -420,13 +415,29 @@ function UsageSummary({
                           {describeUsage(service)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
-                          {formatEstimatedCredits(service.costMicros)}
+                          {service.billable
+                            ? formatEstimatedCredits(service.costMicros)
+                            : "—"}
+                          <FundingSplit
+                            funding={service}
+                            metric={
+                              service.metrics.length === 1
+                                ? service.metrics[0]
+                                : undefined
+                            }
+                          />
                         </TableCell>
                         <TableCell>
                           <UsageStatusBadge
                             billable={service.billable}
                             acked={service.allAcked}
                           />
+                          {service.billable &&
+                            service.rows.some((row) => !row.billable) && (
+                              <span className="ml-1.5 text-[11px] text-text-tertiary">
+                                Includes free usage
+                              </span>
+                            )}
                         </TableCell>
                       </TableRow>
                       {isOpen &&
@@ -465,6 +476,12 @@ function UsageSummary({
                                 : formatEstimatedCredits(
                                     row.estimated_credits_micros,
                                   )}
+                              {row.billable && (
+                                <FundingSplit
+                                  funding={row}
+                                  metric={row.metric}
+                                />
+                              )}
                             </TableCell>
                             <TableCell className="py-2 align-top">
                               <UsageStatusBadge
@@ -503,7 +520,15 @@ function UsageStatusBadge({
   );
 }
 
-type ServiceGroup = {
+type FundingBreakdown = Pick<
+  BillingUsageTotals,
+  | "wallet_credits_micros"
+  | "grant_credits_micros"
+  | "allowance_credits_micros"
+  | "allowance_quantity"
+>;
+
+type ServiceGroup = FundingBreakdown & {
   readonly key: string;
   readonly label: string;
   readonly rows: readonly BillingUsageRow[];
@@ -537,22 +562,86 @@ function groupByService(
   }
 
   return [...groups.entries()].map(([key, groupRows]) => {
-    const costs = groupRows
-      .map((row) => row.estimated_credits_micros)
-      .filter((value): value is number => typeof value === "number");
     const metrics = [...new Set(groupRows.map((row) => row.metric))];
     return {
       key,
       label:
         groupRows[0]?.service_slug ?? groupRows[0]?.service_id ?? "Unknown",
       rows: groupRows,
-      costMicros: costs.length > 0 ? costs.reduce((a, b) => a + b, 0) : null,
+      costMicros: sumOptional(
+        groupRows.map((row) => row.estimated_credits_micros),
+      ),
       metrics,
       quantity: groupRows.reduce((total, row) => total + row.quantity, 0),
-      allAcked: groupRows.every((row) => row.lago_acked),
+      wallet_credits_micros: sumOptional(
+        groupRows.map((row) => row.wallet_credits_micros),
+      ),
+      grant_credits_micros: sumOptional(
+        groupRows.map((row) => row.grant_credits_micros),
+      ),
+      allowance_credits_micros: sumOptional(
+        groupRows.map((row) => row.allowance_credits_micros),
+      ),
+      allowance_quantity: groupRows.reduce(
+        (total, row) => total + (row.allowance_quantity ?? 0),
+        0,
+      ),
+      allAcked: groupRows.every(
+        (row) => row.billable === false || row.lago_acked,
+      ),
       billable: groupRows.some((row) => row.billable !== false),
     };
   });
+}
+
+function sumOptional(
+  values: readonly (number | null | undefined)[],
+): number | null {
+  const known = values.filter(
+    (value): value is number => typeof value === "number",
+  );
+  return known.length ? known.reduce((a, b) => a + b, 0) : null;
+}
+
+function FundingSplit({
+  funding,
+  metric,
+  totals = false,
+}: {
+  readonly funding: FundingBreakdown;
+  readonly metric?: BillingMetric;
+  readonly totals?: boolean;
+}) {
+  if (
+    !funding.grant_credits_micros &&
+    !funding.allowance_credits_micros &&
+    !funding.allowance_quantity
+  ) {
+    return null;
+  }
+  const parts: string[] = [];
+  if (funding.grant_credits_micros) {
+    parts.push(
+      `${totals ? "Funded by grants" : "grants"} ${formatEstimatedCredits(funding.grant_credits_micros)}`,
+    );
+  }
+  if (funding.allowance_quantity || funding.allowance_credits_micros) {
+    const units =
+      metric && funding.allowance_quantity
+        ? ` (${formatNumber(funding.allowance_quantity)} ${metric})`
+        : "";
+    parts.push(
+      `${totals ? "Funded by allowances" : "allowance"} ${formatEstimatedCredits(funding.allowance_credits_micros)}${units}`,
+    );
+  }
+  parts.push(
+    `${totals ? "Charged to wallet" : "wallet"} ${formatEstimatedCredits(funding.wallet_credits_micros)}`,
+  );
+  return (
+    <div className="mt-0.5 text-[11px] text-text-tertiary">
+      {parts.join(" · ")}
+    </div>
+  );
 }
 
 /** Per-metric totals, so unlike units are never added into one number. */

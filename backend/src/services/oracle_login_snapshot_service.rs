@@ -67,7 +67,7 @@ fn snapshot_aad(pool_id: &str, snapshot_id: &str, format_version: u32) -> String
     format!("oracle-login-snapshot:{pool_id}:{snapshot_id}:v{format_version}")
 }
 
-fn verify_worker_token_hash(pool: &OraclePool, verifier: &str) -> AppResult<()> {
+pub(super) fn verify_worker_token_hash(pool: &OraclePool, verifier: &str) -> AppResult<()> {
     let valid_shape = verifier.len() == 64
         && verifier
             .bytes()
@@ -137,7 +137,7 @@ pub async fn create_and_fanout(
                 .capabilities
                 .iter()
                 .any(|capability| capability == "session_import_v1");
-        if !capable {
+        if !capable || worker.enrollment.is_some() {
             skipped_workers.push(worker.worker_label);
             continue;
         }
@@ -198,6 +198,7 @@ mod tests {
     fn pool() -> OraclePool {
         let now = Utc::now();
         OraclePool {
+            require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: format!("login-test-{}", uuid::Uuid::new_v4()),

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoginClientContext {
+    pub requested_profile: Option<String>,
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
     pub client_ip: Option<String>,

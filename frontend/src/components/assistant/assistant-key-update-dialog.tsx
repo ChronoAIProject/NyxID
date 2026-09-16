@@ -1,3 +1,4 @@
+import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -33,6 +34,8 @@ const authorizationEvidenceSchema = z
     name: z.string().min(1).max(200),
     platform: z.string().min(1).max(100).nullish(),
     is_active: z.literal(true),
+    allowed_service_ids: z.array(z.string()).optional(),
+    allow_auto_connected_services: z.boolean().optional(),
     state_version: z.number().int().positive(),
   })
   .passthrough();
@@ -101,6 +104,17 @@ export function AssistantKeyUpdateDialog({
   readonly params: AssistantKeyUpdateParams;
   readonly onComplete: (keyId: string) => void;
 }) {
+  const [platformGrant, setPlatformGrant] = useState(
+    params.allowAutoConnectedServices,
+  );
+  const [platformIds, setPlatformIds] = useState<readonly string[] | undefined>(
+    params.allowedServiceIds,
+  );
+  const reviewedParams = {
+    ...params,
+    allowedServiceIds: platformIds,
+    allowAutoConnectedServices: platformGrant,
+  };
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -144,6 +158,28 @@ export function AssistantKeyUpdateDialog({
     setVerified(false);
     try {
       const snapshot = await readEvidence(keyId);
+      if (
+        expected.allowAutoConnectedServices !== undefined &&
+        (snapshot.allow_auto_connected_services ?? false) !==
+          expected.allowAutoConnectedServices
+      ) {
+        throw new Error(
+          "NyxID key verification did not match the platform-services grant.",
+        );
+      }
+      if (
+        expected.allowedServiceIds &&
+        (snapshot.allowed_service_ids?.length !==
+          expected.allowedServiceIds.length ||
+          expected.allowedServiceIds.some(
+            (id) => !snapshot.allowed_service_ids?.includes(id),
+          ))
+      ) {
+        throw new Error(
+          "NyxID key verification did not match the selected services.",
+        );
+      }
+
       if (expected.name && snapshot.name !== expected.name) {
         throw new Error("NyxID key verification did not match this action.");
       }
@@ -168,7 +204,7 @@ export function AssistantKeyUpdateDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const expected = keyUpdateActionParamsSchema.parse(params);
+      const expected = keyUpdateActionParamsSchema.parse(reviewedParams);
       if (expected.name && SECRET_VALUE.test(expected.name)) {
         throw new Error("The requested key name is not safe to store.");
       }
@@ -180,6 +216,8 @@ export function AssistantKeyUpdateDialog({
           name: expected.name,
           platform: expected.platform,
           description: expected.description,
+          allowedServiceIds: expected.allowedServiceIds,
+          allowAutoConnectedServices: expected.allowAutoConnectedServices,
           expectedStateVersion: before.state_version,
         }),
       );
@@ -209,7 +247,7 @@ export function AssistantKeyUpdateDialog({
           <DialogDescription>
             {resultKeyId
               ? "NyxID updated this exact key. The assistant receives only the safe key reference."
-              : "Confirm the display metadata change. This does not widen what the key can reach."}
+              : "Confirm the key settings and service access."}
           </DialogDescription>
         </DialogHeader>
 
@@ -242,6 +280,17 @@ export function AssistantKeyUpdateDialog({
             ) : null}
           </div>
         ) : null}
+
+        {!resultKeyId && (
+          <AssistantPlatformServiceFields
+            keyId={params.keyId}
+            selectedIds={platformIds}
+            allowAll={platformGrant}
+            onAllowAllChange={setPlatformGrant}
+            onIdsChange={setPlatformIds}
+            disabled={submitting || verifying}
+          />
+        )}
 
         {error ? (
           <p role="alert" className="text-[11px] text-destructive">
@@ -279,7 +328,8 @@ export function AssistantKeyUpdateDialog({
                   variant="outline"
                   isLoading={verifying}
                   onClick={() => {
-                    const expected = keyUpdateActionParamsSchema.parse(params);
+                    const expected =
+                      keyUpdateActionParamsSchema.parse(reviewedParams);
                     void verifyUpdate(resultKeyId, expected);
                   }}
                 >

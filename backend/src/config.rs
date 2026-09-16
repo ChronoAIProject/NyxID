@@ -3,6 +3,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
 };
 
+pub const DEFAULT_CHANNEL_MEDIA_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
 const DEFAULT_INTERNAL_BIND_ADDR: &str = "127.0.0.1:3002";
 
 fn resolve_internal_advertise_url(
@@ -501,13 +503,20 @@ pub struct AppConfig {
     /// Timeout in seconds for delivering inbound messages to agent callback URLs (default: 30)
     pub channel_relay_callback_timeout_secs: u32,
     /// Maximum number of channel bots a single user can register (default: 5)
+    pub channel_poll_interval_secs: u64,
     pub channel_relay_max_bots_per_user: u32,
     /// TTL in days for channel messages before automatic expiry (default: 30)
     pub channel_relay_message_ttl_days: u32,
+    pub channel_media_max_bytes: u64,
     /// Per-message edit rate limit for channel relay replies (default: 10/s).
     pub channel_relay_edit_rate_limit_per_second: u32,
     /// Burst capacity for per-message edit rate limiting (default: 20).
     pub channel_relay_edit_rate_limit_burst: u32,
+
+    /// Per-conversation unsolicited message rate (default: 1/s).
+    pub channel_relay_initiate_rate_limit_per_second: u32,
+    /// Unsolicited message burst capacity (default: 5).
+    pub channel_relay_initiate_rate_limit_burst: u32,
 
     // HTTP Event Gateway (NyxID#221 / ADR-013)
     /// Per-channel event rate limit (events per second, default 100).
@@ -861,6 +870,7 @@ impl std::fmt::Debug for AppConfig {
                 "channel_relay_max_bots_per_user",
                 &self.channel_relay_max_bots_per_user,
             )
+            .field("channel_media_max_bytes", &self.channel_media_max_bytes)
             .field(
                 "channel_relay_message_ttl_days",
                 &self.channel_relay_message_ttl_days,
@@ -872,6 +882,14 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "channel_relay_edit_rate_limit_burst",
                 &self.channel_relay_edit_rate_limit_burst,
+            )
+            .field(
+                "channel_relay_initiate_rate_limit_per_second",
+                &self.channel_relay_initiate_rate_limit_per_second,
+            )
+            .field(
+                "channel_relay_initiate_rate_limit_burst",
+                &self.channel_relay_initiate_rate_limit_burst,
             )
             .field(
                 "channel_event_rate_limit_per_second",
@@ -1379,10 +1397,15 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            channel_poll_interval_secs: env::var("CHANNEL_POLL_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30),
             channel_relay_max_bots_per_user: env::var("CHANNEL_RELAY_MAX_BOTS_PER_USER")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            channel_media_max_bytes: env::var("CHANNEL_MEDIA_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_CHANNEL_MEDIA_MAX_BYTES),
             channel_relay_message_ttl_days: env::var("CHANNEL_RELAY_MESSAGE_TTL_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1397,6 +1420,16 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(20),
+            channel_relay_initiate_rate_limit_per_second: env::var(
+                "CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+            channel_relay_initiate_rate_limit_burst: env::var("CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
             channel_event_rate_limit_per_second: env::var("CHANNEL_EVENT_RATE_LIMIT_PER_SECOND")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1967,10 +2000,14 @@ mod tests {
             public_mcp_rate_limit_per_minute:
                 crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
+            channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_media_max_bytes: DEFAULT_CHANNEL_MEDIA_MAX_BYTES,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
+            channel_relay_initiate_rate_limit_per_second: 1,
+            channel_relay_initiate_rate_limit_burst: 5,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_ttl_secs: 300,

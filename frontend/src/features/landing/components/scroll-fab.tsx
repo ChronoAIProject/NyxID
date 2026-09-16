@@ -6,7 +6,9 @@ export function ScrollFab() {
   const [visible, setVisible] = useState(false);
 
   useScroll((scrollY, vh) => {
-    setVisible(scrollY > vh);
+    const installer = document.getElementById("install")?.getBoundingClientRect();
+    const overlapsInstaller = window.innerWidth < 640 && installer && installer.top < vh && installer.bottom > 0;
+    setVisible(scrollY > vh && !overlapsInstaller);
     const docHeight = document.documentElement.scrollHeight - vh;
     const fillStart = vh;
     const p =
@@ -44,6 +46,7 @@ export function ScrollFab() {
         pointerEvents: visible ? "auto" : "none",
       }}
       aria-label="Scroll to top"
+      tabIndex={visible ? 0 : -1}
     >
       <svg
         width={size}

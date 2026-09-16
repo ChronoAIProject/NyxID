@@ -6,8 +6,11 @@ use crate::cli::{OutputFormat, ProviderCommands};
 use crate::commands::grant_cascade::{append_revocation_query, report_if_confirmation_required};
 use crate::org_resolver::resolve_org_id;
 
+mod codex;
+
 pub async fn run(command: ProviderCommands) -> Result<()> {
     match command {
+        ProviderCommands::ConnectCodex(args) => codex::run(args).await,
         ProviderCommands::Disconnect {
             provider_id,
             org,

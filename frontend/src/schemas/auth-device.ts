@@ -15,7 +15,7 @@ const AUTH_DEVICE_CONNECTION_ERROR_MESSAGE =
 export const userCodeSchema = z
   .string()
   .transform((value) => value.replace(/[-\s]/g, "").toUpperCase())
-  .pipe(z.string().regex(/^[0-9A-HJKMNP-TV-Z]{8}$/, "Invalid code"));
+  .pipe(z.string().regex(/^(?:2)?[0-9A-HJKMNP-TV-Z]{8}$/, "Invalid code"));
 
 export const approveBodySchema = z.object({
   user_code: userCodeSchema,
@@ -60,9 +60,12 @@ export const pollBodySchema = z.object({
   device_code: z.string().min(1),
 });
 
-export const pollWebResponseSchema = z.object({
-  ok: z.literal(true),
-});
+export const pollWebResponseSchema = z.union([
+  z.object({ ok: z.literal(true), auth_kind: z.literal("account_session").optional() }),
+  z.object({ ok: z.literal(false), auth_kind: z.literal("agent_key"), login_code: z.object({
+    request_id: z.string(), code: z.string(), expires_at: z.string(),
+  }) }),
+]);
 
 function boundedNullableString(maxLength: number) {
   return z
@@ -175,12 +178,29 @@ export type AuthDevicePollWebResponse = z.infer<typeof pollWebResponseSchema>;
 export type PreviewAuthDeviceResponse = z.infer<typeof previewResponseSchema>;
 export type AuthDeviceErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
 
+export function authDeviceUserCodePlaceholder(flow: "device" | "agent-key"): string {
+  return formatAuthDeviceUserCodeInput(flow === "device" ? "2XXXXXXXX" : "XXXXXXXX");
+}
+
+export function parseAuthDeviceSearch(
+  search: Record<string, unknown>,
+): { user_code?: string } {
+  if (search.user_code === undefined) return {};
+  // Preserve invalid input for the page's error message, including non-string
+  // values decoded by the router. Validate before the lossy input formatter.
+  return { user_code: typeof search.user_code === "string" ? search.user_code : "" };
+}
+
 export function formatAuthDeviceUserCodeInput(value: string): string {
   const compact = value
     .replace(/[-\s]/g, "")
     .toUpperCase()
     .replace(/[^0-9A-Z]/g, "")
-    .slice(0, 8);
+    .slice(0, value.replace(/[-\s]/g, "").startsWith("2") ? 9 : 8);
+
+  if (compact.length === 9 && compact.startsWith("2")) {
+    return `2-${compact.slice(1, 5)}-${compact.slice(5)}`;
+  }
 
   return compact.length > 4
     ? `${compact.slice(0, 4)}-${compact.slice(4)}`

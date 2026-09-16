@@ -18,6 +18,7 @@ pub(crate) const INITIATING_ORIGIN_MAX_LEN: usize = 256;
 
 #[derive(Clone, PartialEq)]
 pub struct PreviewOutput {
+    pub requested_profile: Option<String>,
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
     pub client_ip: Option<String>,
@@ -52,6 +53,7 @@ pub struct PreviewOutput {
 
 pub(crate) fn sanitize_context(input: LoginClientContext) -> LoginClientContext {
     LoginClientContext {
+        requested_profile: sanitize_optional(input.requested_profile, 64),
         client_label: sanitize_optional(input.client_label, 64),
         client_user_agent: sanitize_optional(input.client_user_agent, 256),
         client_ip: input.client_ip,
@@ -110,6 +112,7 @@ pub(crate) fn context_preview(
         .flatten();
 
     PreviewOutput {
+        requested_profile: row.requested_profile,
         client_label: row.client_label,
         client_user_agent: row.client_user_agent,
         client_ip: row.client_ip,

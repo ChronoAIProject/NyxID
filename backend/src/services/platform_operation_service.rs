@@ -73,9 +73,8 @@ pub const PLATFORM_OPERATION_VENDOR_CONTRACTS: [PlatformOperationVendorContract;
     },
 ];
 
-/// Seed data for the admin-managed template collection. Duffel deliberately
-/// has no operation binding yet; a future operation adds a code contract and
-/// sets this row's `operation` to that operation name before it can be bound.
+/// Seed data for the admin-managed template collection. Templates without an
+/// operation provision credentials until a code-owned operation is added.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SeededPlatformVendorTemplate {
     pub vendor: &'static str,
@@ -91,7 +90,7 @@ pub struct SeededPlatformVendorTemplate {
     pub restriction_summary: &'static str,
 }
 
-pub const DEFAULT_PLATFORM_VENDOR_TEMPLATES: [SeededPlatformVendorTemplate; 4] = [
+pub const DEFAULT_PLATFORM_VENDOR_TEMPLATES: [SeededPlatformVendorTemplate; 5] = [
     SeededPlatformVendorTemplate {
         vendor: "twilio",
         display_name: "Twilio",
@@ -130,6 +129,19 @@ pub const DEFAULT_PLATFORM_VENDOR_TEMPLATES: [SeededPlatformVendorTemplate; 4] =
         operation: Some("x_search"),
         capability_summary: "Searches recent posts through the bounded x_search operation.",
         restriction_summary: "Does not publish, modify accounts, or expose X's general API.",
+    },
+    SeededPlatformVendorTemplate {
+        vendor: "telnyx",
+        display_name: "Telnyx",
+        slug: "platform-telnyx",
+        base_url: "https://api.telnyx.com/v2",
+        auth_method: "bearer",
+        auth_key_name: None,
+        credential_label: "API key",
+        credential_note: "Create an API key at https://portal.telnyx.com/#/app/api-keys and paste the raw key. NyxID adds the Bearer prefix.",
+        operation: None,
+        capability_summary: "Stores a platform-owned Telnyx key for a future platform operation. Personal keys can be used with the Telnyx catalog connection.",
+        restriction_summary: "No Telnyx platform operation is shipped yet. Adding a key does not enable platform-funded AI, calls, or messaging.",
     },
     SeededPlatformVendorTemplate {
         vendor: "duffel",
@@ -1200,8 +1212,7 @@ mod tests {
 
         for template in DEFAULT_PLATFORM_VENDOR_TEMPLATES {
             let Some(operation) = template.operation else {
-                // Duffel is intentionally a credential template until a code
-                // operation is shipped; there is no contract to cross-check.
+                // Unbound templates provision credentials for future operations.
                 continue;
             };
             let operation = parse_operation_name(operation).expect("seeded operation name");

@@ -1,3 +1,4 @@
+import { inferenceMetadataSchema, platformKeyConfigSchema, lanePricingViewSchema } from "./platform-keys";
 import { z } from "zod";
 import { isValidHttpUrl } from "./http-url";
 import {
@@ -279,6 +280,11 @@ export type WsFrameInjection = z.infer<typeof wsFrameInjectionSchema>;
 
 export const updateServiceSchema = z
   .object({
+    inference: inferenceMetadataSchema.nullish(),
+    platform_key: platformKeyConfigSchema.optional(),
+    credential: z.string().optional(),
+    byok_pricing: lanePricingViewSchema.nullish(),
+    platform_key_pricing: lanePricingViewSchema.nullish(),
     service_type: z.enum(SERVICE_TYPES),
     visibility: z.enum(VISIBILITY_OPTIONS).optional(),
     name: z
@@ -309,6 +315,7 @@ export const updateServiceSchema = z
     forward_access_token: z.boolean().optional(),
     inject_delegation_token: z.boolean().optional(),
     platform_billable: z.boolean().optional(),
+    platform_charge_nyxid_credentials_only: z.boolean().optional(),
     platform_metric: z.enum(["auto", "tokens", "requests", "bytes"]).optional(),
     platform_price: z
       .string()

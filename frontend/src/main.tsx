@@ -1,3 +1,4 @@
+import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -57,15 +58,19 @@ if (import.meta.env.DEV) {
   (window as { __nyxQueryClient?: QueryClient }).__nyxQueryClient = queryClient;
 }
 
+function isLoginApprovalPage() {
+  return ["/login/agent-key", "/login/device", "/login/code"].includes(window.location.pathname);
+}
+
 function Root() {
   const [ready, setReady] = useState(false);
   const [agentKeyLogin, setAgentKeyLogin] = useState(
-    () => window.location.pathname === "/login/agent-key",
+    isLoginApprovalPage,
   );
   useEffect(
     () =>
       router.subscribe("onResolved", () => {
-        setAgentKeyLogin(window.location.pathname === "/login/agent-key");
+        setAgentKeyLogin(isLoginApprovalPage());
       }),
     [],
   );
@@ -93,7 +98,7 @@ function Root() {
   useEffect(() => {
     useAuthStore
       .getState()
-      .checkAuth({ ephemeral: window.location.pathname === "/login/agent-key" })
+      .checkAuth({ ephemeral: isLoginApprovalPage() })
       .finally(() => {
         setReady(true);
       });
@@ -143,7 +148,11 @@ function Root() {
         router.getMatchedRoutes(path).foundRoute,
       );
       if (pathMatchesRoute && !isPublicPath(path)) {
-        router.navigate({ to: "/login" });
+        preserveTelegramClaimForLogin();
+        router.navigate({
+          to: "/login",
+          search: { return_to: window.location.origin + path + window.location.search },
+        });
       }
     }
   }, [ready, isAuthenticated]);

@@ -20,6 +20,7 @@ This document describes the system architecture, component design, data flows, a
 - [Delegated Access](#delegated-access)
 - [Service Accounts](#service-accounts)
 - [Transaction Approval](#transaction-approval)
+- [Telegram New Channels](#telegram-new-channels)
 - [Deployment Architecture](#deployment-architecture)
 
 ---
@@ -1951,6 +1952,18 @@ Approval is triggered for **all non-session authentication methods** (API keys, 
 - `Delegated` -- Delegated access token (from token exchange or MCP injection), approval required
 - `ServiceAccount` -- Service account client credentials, approval required
 - `AccessToken` -- Access token cookie (non-session), approval required
+
+---
+
+## Telegram New Channels
+
+`telegram-new` adds manager-assisted bot creation alongside the existing manual-token `telegram` adapter. After connection, it uses the same [channel relay](CHANNEL_BOT_RELAY.md), conversation routing, and asynchronous replies. It does not change the general onboarding wizard.
+
+The `telegram_new` handler delegates creation and Telegram consent to `telegram_new_service`, administrator configuration to `telegram_new_admin`, and token acquisition and connection recovery to `telegram_new_connect`. `telegram_new_api` bounds and sanitizes Telegram API responses. Credentials use the existing envelope encryption; the manager is configured through admin platform credentials.
+
+Two collections hold setup metadata: `telegram_bot_requests` stores actor/destination bindings, hashed challenges, revisions, and request expiry; `telegram_managed_bot_events` stores immutable creation provenance and subsequent management revisions. Neither stores ordinary chat content or raw updates. The registration transaction checks shared Telegram identity and owner quota, inserts the pending `ChannelBot`, consumes creation provenance, and transitions the request to provisioning. Durable pending state and renewable per-bot leases support retries without duplicate registration. Observed management changes suspend both incoming messages and outgoing replies.
+
+See [Telegram New](TELEGRAM_NEW.md) for the state machine, administrator steps, MongoDB and rollout requirements, and staging checks that must pass before customer enablement.
 
 ---
 

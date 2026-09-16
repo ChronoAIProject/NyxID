@@ -2,10 +2,77 @@ use crate::models::downstream_service::DownstreamService;
 use crate::models::service_billing::BillingMetric;
 
 /// Resolve the service-level metric used by allowances and catalog UIs.
-/// This is the metric for the service's plain HTTP path; an actual WebSocket
-/// connection may be byte-metered independently at request time.
+/// Prefer BYOK's configured unit, then platform key, then the legacy default.
+/// Each request independently selects its actual credential lane and transport.
 pub fn effective_platform_metric(service: &DownstreamService) -> BillingMetric {
-    resolve_platform_metric(service, false)
+    configured_lane_metrics(service)
+        .first()
+        .copied()
+        .unwrap_or_else(|| resolve_platform_metric(service, false))
+}
+
+/// Configured allowance units, BYOK first then platform key, without duplicates.
+/// Pending lanes are included so allowances can be prepared before price sync.
+pub fn configured_lane_metrics(service: &DownstreamService) -> Vec<BillingMetric> {
+    let mut metrics = Vec::new();
+    if let Some(billing) = &service.billing {
+        for lane in [
+            billing.byok_pricing.as_ref(),
+            billing.platform_key_pricing.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !metrics.contains(&lane.metric) {
+                metrics.push(lane.metric);
+            }
+        }
+    }
+    metrics
+}
+
+pub fn allowance_metric(
+    service: &DownstreamService,
+    requested: Option<BillingMetric>,
+) -> crate::errors::AppResult<BillingMetric> {
+    let default = effective_platform_metric(service);
+    let Some(requested) = requested else {
+        return Ok(default);
+    };
+    let mut metrics = configured_lane_metrics(service);
+    // Pending/failed lanes can still charge the legacy metric during sync.
+    if metrics.is_empty()
+        || service.billing.as_ref().is_some_and(|b| {
+            [b.byok_pricing.as_ref(), b.platform_key_pricing.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|lane| {
+                    lane.sync_status != crate::models::service_billing::PricingSyncStatus::Synced
+                })
+        })
+    {
+        metrics.push(resolve_platform_metric(service, false));
+    }
+    if metrics.contains(&requested) {
+        Ok(requested)
+    } else {
+        Err(crate::errors::AppError::ValidationError(
+            "Allowance metric must match a configured billing lane or the current fallback metric"
+                .into(),
+        ))
+    }
+}
+
+/// Usage capture is independent of the chosen lane's sync state and slug.
+/// Preserve historical LLM capture and include both configured lanes and resale.
+pub fn captures_tokens(service: &DownstreamService) -> bool {
+    service.slug.starts_with("llm-")
+        || resolve_platform_metric(service, false) == BillingMetric::Tokens
+        || configured_lane_metrics(service).contains(&BillingMetric::Tokens)
+        || service
+            .billing
+            .as_ref()
+            .is_some_and(|b| b.resale_billable && b.resale_metric == BillingMetric::Tokens)
 }
 
 /// Resolve the metric for one proxy request. Only an actual WebSocket

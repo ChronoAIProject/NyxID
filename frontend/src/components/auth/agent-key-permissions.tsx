@@ -30,8 +30,17 @@ export function AgentKeyPermissions({ apiKey }: { apiKey: AgentKeySummary }) {
         <dd>
           {apiKey.allow_all_services
             ? "All services"
-            : apiKey.allowed_services.map((item) => item.name).join(", ") ||
-              "None"}
+            : [
+                apiKey.allow_auto_connected_services
+                  ? "All auto-connected platform services (including future additions)"
+                  : "",
+                ...apiKey.allowed_services.map(
+                  (item) =>
+                    `${item.name}${item.auto_connected ? " (Platform)" : ""}`,
+                ),
+              ]
+                .filter(Boolean)
+                .join(", ") || "None"}
         </dd>
         <dt>Nodes</dt>
         <dd>

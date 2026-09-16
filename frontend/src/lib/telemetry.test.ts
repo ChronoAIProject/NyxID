@@ -43,6 +43,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  window.history.replaceState(null, '', '/');
   // Return `telemetry.ts` module state to pre-init. Safe to call
   // unconditionally — it's a no-op when `inited === false`.
   disableTelemetry();
@@ -264,6 +265,29 @@ describe("before_send privacy hook", () => {
     const config = mockPosthog.init.mock.calls[0]?.[1] as { before_send: BeforeSend };
     return config.before_send;
   }
+
+  it("suppresses SPA login-grant capture after init and resumes on return", () => {
+    window.history.replaceState(null, '', '/settings');
+    const beforeSend = getBeforeSend();
+    for (const route of ['code', 'device', 'agent-key']) {
+      window.history.pushState(null, '', `/login/${route}`);
+      expect(isTelemetryActive()).toBe(false);
+      capture({ name: 'test_event', props: {} } as never);
+      captureException(new Error('private fixture'));
+      identify('private-fixture');
+      expect(beforeSend({ properties: {} })).toBeNull();
+      expect(beforeSend({ properties: { $pathname: '/settings' } })).toBeNull();
+    }
+    expect(mockPosthog.capture).not.toHaveBeenCalled();
+    expect(mockPosthog.captureException).not.toHaveBeenCalled();
+    expect(mockPosthog.identify).not.toHaveBeenCalled();
+    window.history.pushState(null, '', '/settings');
+    expect(isTelemetryActive()).toBe(true);
+    expect(beforeSend({ properties: { $current_url: `${window.location.origin}/login/code?code=fixture` } })).toBeNull();
+    capture({ name: 'test_event', props: {} } as never);
+    expect(mockPosthog.capture).toHaveBeenCalledTimes(1);
+    expect(mockPosthog.opt_out_capturing).not.toHaveBeenCalled();
+  });
 
   it("returns null for a null event", () => {
     expect(getBeforeSend()(null)).toBeNull();

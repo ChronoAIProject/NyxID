@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import {
   approveBodySchema,
+  authDeviceUserCodePlaceholder,
   denyBodySchema,
   errorEnvelopeSchema,
   formatAuthDeviceUserCodeInput,
@@ -301,5 +302,16 @@ describe("friendlyAuthDeviceStatusMessage", () => {
 
   it("returns no message for a pending preview", () => {
     expect(friendlyAuthDeviceStatusMessage("pending")).toBeNull();
+  });
+});
+
+
+describe("authDeviceUserCodePlaceholder", () => {
+  it.each([
+    ["device", "2-XXXX-XXXX"],
+    ["agent-key", "XXXX-XXXX"],
+  ] as const)("matches the issued %s code format", (flow, placeholder) => {
+    expect(authDeviceUserCodePlaceholder(flow)).toBe(placeholder);
+    expect(userCodeSchema.safeParse(placeholder).success).toBe(true);
   });
 });

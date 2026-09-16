@@ -275,6 +275,13 @@ async fn fixed_window_counter_never_admits_above_the_global_limit() {
         return;
     };
     let db = Arc::new(db);
+    // Windows are epoch-aligned 30 s bins: a burst that straddles a boundary
+    // would legitimately admit five more, so start it with headroom.
+    crate::test_utils::ensure_rate_window_headroom(
+        Duration::from_secs(30),
+        Duration::from_secs(10),
+    )
+    .await;
     let attempts = (0..24).map(|_| {
         let db = Arc::clone(&db);
         tokio::spawn(async move {

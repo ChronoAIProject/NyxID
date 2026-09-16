@@ -58,6 +58,41 @@ const STALE_TEST_DB_DROP_TIMEOUT: Duration = Duration::from_secs(3);
 const STALE_TEST_DB_DROP_CLAIM_LEASE: Duration = Duration::from_secs(30);
 const STALE_TEST_DB_SWEEP_BUDGET: Duration = Duration::from_secs(45);
 const STALE_TEST_DB_SWEEP_LEASE: Duration = Duration::from_secs(90);
+
+/// Shared DB-backed rate limiters (`RateWindowStore`) bin their windows to
+/// epoch-aligned `$dateTrunc` boundaries. A burst that straddles a boundary
+/// observes a fresh window and gets an extra admission exactly where a test
+/// expects a denial. Tests that burst against such a limiter call this first so
+/// the whole burst runs inside one bin: when fewer than `min_remaining` remain
+/// in the current bin, sleep past the boundary. The wall clock is the same
+/// source the server's `$$NOW` uses, so the bin arithmetic matches.
+pub(crate) async fn ensure_rate_window_headroom(window: Duration, min_remaining: Duration) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis();
+    if let Some(sleep_ms) =
+        rate_window_headroom_sleep_ms(now_ms, window.as_millis(), min_remaining.as_millis())
+    {
+        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+    }
+}
+
+/// Milliseconds to sleep so that at least `min_remaining_ms` of the current
+/// epoch-aligned bin remain afterwards, or `None` when there is already enough
+/// headroom. Sleeping lands 50 ms into the next bin.
+fn rate_window_headroom_sleep_ms(
+    now_ms: u128,
+    window_ms: u128,
+    min_remaining_ms: u128,
+) -> Option<u64> {
+    let window_ms = window_ms.max(1);
+    let remaining_ms = window_ms - (now_ms % window_ms);
+    if remaining_ms >= min_remaining_ms {
+        return None;
+    }
+    Some(u64::try_from(remaining_ms + 50).expect("window remainder fits u64"))
+}
 const STALE_TEST_DB_SWEEP_COOLDOWN: Duration = Duration::from_secs(30);
 const TEST_DB_EXIT_CLEANUP_BUDGET: Duration = Duration::from_secs(30);
 const TEST_DB_CLEANUP_CLIENT_PARSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -117,9 +152,8 @@ const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
 /// dev docker-compose mongod on `127.0.0.1:27018` first, then the CI-style mongod
 /// on `127.0.0.1:27017`. Default candidates are gated by a fast TCP reachability
 /// check, so a port with no listener is skipped in milliseconds instead of
-/// stalling on the driver's server-selection timeout. Returns `None` when neither
-/// default candidate is reachable so non-transactional integration tests retain
-/// their existing optional-Mongo behavior. A configured override fails loudly
+/// stalling on the driver's server-selection timeout. Fails when neither
+/// default candidate is reachable. A configured override fails loudly
 /// when unusable instead of silently falling back to a different database.
 ///
 /// Deliberately NOT cached: a per-test client is required for correct llvm-cov
@@ -133,7 +167,9 @@ const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
 /// and the cross-process stale sweep remain crash recovery.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
     let db_name = new_test_db_name(prefix);
-    let client = probe_test_mongo_client(&db_name, None).await?;
+    let client = probe_test_mongo_client(&db_name, None).await.expect(
+        "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
+    );
 
     Some(client.database(&db_name))
 }
@@ -147,7 +183,9 @@ pub(crate) async fn connect_test_database_with_command_handler(
     handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
 ) -> Option<mongodb::Database> {
     let db_name = new_test_db_name(prefix);
-    let client = probe_test_mongo_client(&db_name, Some(handler)).await?;
+    let client = probe_test_mongo_client(&db_name, Some(handler)).await.expect(
+        "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
+    );
     Some(client.database(&db_name))
 }
 
@@ -1715,10 +1753,14 @@ pub(crate) fn test_app_config() -> AppConfig {
         public_mcp_rate_limit_per_minute:
             crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
         channel_relay_callback_timeout_secs: 30,
+        channel_poll_interval_secs: 30,
         channel_relay_max_bots_per_user: 5,
         channel_relay_message_ttl_days: 30,
+        channel_media_max_bytes: crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES,
         channel_relay_edit_rate_limit_per_second: 10,
         channel_relay_edit_rate_limit_burst: 20,
+        channel_relay_initiate_rate_limit_per_second: 1,
+        channel_relay_initiate_rate_limit_burst: 5,
         channel_event_rate_limit_per_second: 100,
         channel_event_rate_limit_burst: 200,
         channel_event_dedup_ttl_secs: 300,
@@ -2064,6 +2106,14 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
                 config.channel_event_rate_limit_burst,
             ),
         ),
+        per_conversation_initiate_limiter: Arc::new(
+            crate::mw::rate_limit::PerChannelEventLimiter::with_db(
+                db.clone(),
+                "channel_initiate",
+                config.channel_relay_initiate_rate_limit_per_second,
+                config.channel_relay_initiate_rate_limit_burst,
+            ),
+        ),
         per_message_edit_limiter: Arc::new(
             crate::mw::rate_limit::PerMessageEditRateLimiter::with_db(
                 db.clone(),
@@ -2387,6 +2437,7 @@ pub(crate) fn test_user_service(
         slug: slug.to_string(),
         endpoint_id: endpoint_id.to_string(),
         api_key_id: None,
+        credential_binding: None,
         auth_method: "none".to_string(),
         auth_key_name: String::new(),
         catalog_service_id: catalog_service_id.map(str::to_string),
@@ -2480,6 +2531,64 @@ pub(crate) fn aevatar_secret_free_violation(value: &serde_json::Value) -> Option
     }
 
     visit(value, &secret_value)
+}
+
+pub(crate) fn test_auto_connected_catalog_service()
+-> crate::models::downstream_service::DownstreamService {
+    use crate::models::downstream_service::DownstreamService;
+    DownstreamService {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "Catalog".to_string(),
+        slug: "autoplatform".to_string(),
+        description: None,
+        base_url: "https://example.com".to_string(),
+        service_type: "http".to_string(),
+        visibility: "public".to_string(),
+        auth_method: "none".to_string(),
+        auth_key_name: "Authorization".to_string(),
+        credential_encrypted: vec![],
+        platform_key: None,
+        auth_type: None,
+        openapi_spec_url: None,
+        asyncapi_spec_url: None,
+        streaming_supported: false,
+        ssh_config: None,
+        oauth_client_id: None,
+        service_category: "connection".to_string(),
+        requires_user_credential: false,
+        is_active: true,
+        created_by: "system".to_string(),
+        identity_propagation_mode: "none".to_string(),
+        identity_include_user_id: true,
+        identity_include_email: true,
+        identity_include_name: false,
+        identity_jwt_audience: Some("https://aud.example.com".to_string()),
+        forward_access_token: false,
+        inject_delegation_token: false,
+        delegation_token_scope: "proxy:* llm:status".to_string(),
+        provider_config_id: None,
+        homepage_url: None,
+        repository_url: None,
+        issues_url: None,
+        capabilities: None,
+        inference: None,
+        inference_admin_modified: false,
+        billing: None,
+        auth_notes: None,
+        known_limitations: None,
+        required_permissions: None,
+        examples_url: None,
+        recommended_skills: None,
+        custom_user_agent: None,
+        default_request_headers: None,
+        ws_frame_injections: Vec::new(),
+        developer_app_ids: None,
+        token_exchange_config: None,
+        anonymous_endpoints: Vec::new(),
+        proxy_operation_policy: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
 }
 
 #[cfg(test)]
@@ -3339,5 +3448,42 @@ mod tests {
     #[tokio::test]
     async fn transaction_test_database_supports_atomic_writes() {
         let _db = connect_transaction_test_database("transaction_topology").await;
+    }
+    #[test]
+    fn rate_window_headroom_sleeps_only_inside_the_tail_of_a_bin() {
+        let window = 60_000;
+        // 12 s into a bin: 48 s remain, no sleep.
+        assert_eq!(rate_window_headroom_sleep_ms(12_000, window, 10_000), None);
+        // Exactly the minimum remaining is enough.
+        assert_eq!(rate_window_headroom_sleep_ms(50_000, window, 10_000), None);
+        // 55 s into a bin: 5 s remain, sleep past the boundary plus 50 ms.
+        assert_eq!(
+            rate_window_headroom_sleep_ms(55_000, window, 10_000),
+            Some(5_050)
+        );
+        // Multi-window timestamps use the bin remainder, not the absolute time.
+        assert_eq!(
+            rate_window_headroom_sleep_ms(7 * window + 59_990, window, 10_000),
+            Some(60)
+        );
+        // A degenerate window never divides by zero.
+        assert_eq!(rate_window_headroom_sleep_ms(123, 0, 10_000), Some(51));
+    }
+
+    #[tokio::test]
+    async fn rate_window_headroom_leaves_the_requested_remainder() {
+        let window = Duration::from_millis(400);
+        let min_remaining = Duration::from_millis(150);
+        ensure_rate_window_headroom(window, min_remaining).await;
+        let into_bin = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_millis()
+            % window.as_millis();
+        let remaining = window.as_millis() - into_bin;
+        assert!(
+            remaining >= min_remaining.as_millis() - 50,
+            "expected at least ~{min_remaining:?} left in the bin, got {remaining} ms"
+        );
     }
 }

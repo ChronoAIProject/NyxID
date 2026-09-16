@@ -93,21 +93,35 @@ db.billing_rate_cache.insertOne({
 
 ## 4. What gets charged
 
-Charging is **opt-in per catalog service**. Everything is metered for
-observability, but credits are only reserved and Lago events only pushed
-for services whose billing config has `platform_billable: true` (admin
-Services page -> Edit -> Billing, or `PUT /api/v1/services/{id}` with
-`{"billing": {"platform_billable": true}}`).
+Charging is **opt-in per catalog service and credential lane**. Admins configure
+“Your own key” and “NyxID platform key” in Services → Edit → Billing lanes, or
+send `billing.byok_pricing` / `billing.platform_key_pricing` to
+`PUT /api/v1/services/{id}`. Each accepts a metric (`tokens`, `requests`, `bytes`)
+and exact decimal `credits_per_unit`; null selects Free.
 
-- User-added keys (BYOK) and custom endpoints are never charged.
-- Token metering applies to `/llm` routes and to proxied services whose
-  slug starts with `llm-`; other services meter requests/bytes.
+- BYOK is free when its lane is absent in lane mode. It can be billed when a
+  BYOK lane is configured. Node credentials and agent-owned overrides use BYOK.
+- Platform-held credentials use the platform-key lane. Public and restricted
+  platform grants affect access independently of price. No-auth requests have
+  no lane charge. Custom services without a catalog retain their existing behavior.
+- Setting either lane supersedes legacy platform billing. A missing matching
+  lane is free; a pending/failed matching lane uses legacy billing until synced.
+  Clearing the last lane restores legacy `platform_billable` / `platform_pricing`
+  behavior. With no lanes, existing services and Lago prices are unchanged.
+- Stable standard-charge metrics are `platform_svc_{slug}_byok` and
+  `platform_svc_{slug}_pk`. NyxID creates/synchronizes them on `LAGO_PLAN_CODE`.
+  The legacy `platform_svc_{slug}` metric remains separate. Plan updates retain
+  all charge IDs; sync and cleared-charge cleanup retry during reconciliation.
+- Token lanes use provider-reported usage, including xAI and Chrono LLM, through
+  direct proxy, LLM gateway, WebSocket usage events, and MCP execution.
 - Token counts use the provider-reported `usage` object (Chat Completions
   and Responses API shapes, JSON and SSE), falling back to bytes/4.
 - The resale layer (charging for the platform's own upstream key at a
   markup) is separate and additionally gated by `BILLING_RESALE_ENABLED`,
   `resale_billable` on the service, and a final credential class of
   `nyxid_managed_master`. See the spec for details.
+
+Token capture and allowance units follow the selected billing lane; see [the metering specification](USAGE_BILLING_LAGO_SPEC.md#40-metadata-only-route-context-r1).
 
 ## 5. OSS Lago limitations
 

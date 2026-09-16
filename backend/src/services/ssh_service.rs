@@ -531,11 +531,19 @@ mod tests {
 
         let billing = BillingOwnerResolver::new(db);
         let personal_payer = billing
-            .resolve_for_resource(&personal_owner_id, &personal_context.owner_user_id)
+            .resolve_for_execution(
+                &personal_owner_id,
+                &personal_context.owner_user_id,
+                crate::models::usage_meter::CredentialClass::NodeManaged,
+            )
             .await
             .expect("resolve personal SSH payer");
         let org_payer = billing
-            .resolve_for_resource(&org_member_id, &org_context.owner_user_id)
+            .resolve_for_execution(
+                &org_member_id,
+                &org_context.owner_user_id,
+                crate::models::usage_meter::CredentialClass::NodeManaged,
+            )
             .await
             .expect("resolve org SSH payer");
         assert_eq!(personal_payer.owner_id, personal_owner_id);

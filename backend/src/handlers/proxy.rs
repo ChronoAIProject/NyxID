@@ -549,6 +549,7 @@ struct PreResolved {
     user_service_id: Option<String>,
     has_server_credential: bool,
     master_credential: bool,
+    credential_source: Option<String>,
     /// The user_id that owns the resolved UserService. For personal
     /// resolutions this is the actor; for org-routed resolutions this is
     /// the org's user_id. Used to scope NodeServiceBinding fallback
@@ -1023,6 +1024,7 @@ async fn proxy_request_inner(
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
                     master_credential: resolved.master_credential,
+                    credential_source: resolved.credential_source,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
@@ -1088,6 +1090,7 @@ async fn proxy_request_inner(
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
                 master_credential: resolved.master_credential,
+                credential_source: resolved.credential_source,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
@@ -1260,6 +1263,7 @@ async fn proxy_request_by_slug_inner(
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
                     master_credential: resolved.master_credential,
+                    credential_source: resolved.credential_source,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
@@ -1325,6 +1329,7 @@ async fn proxy_request_by_slug_inner(
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
                 master_credential: resolved.master_credential,
+                credential_source: resolved.credential_source,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
@@ -1597,6 +1602,10 @@ async fn resolve_via_downstream_service(
         }
     };
 
+    // Server-held master credentials never travel through owner-managed nodes.
+    if proxy_service::uses_server_held_master(&t) {
+        return Ok((None, t, has_cred, None, false));
+    }
     Ok((nr, t, has_cred, None, node_routing_required))
 }
 
@@ -1846,6 +1855,7 @@ async fn execute_proxy_inner(
         resolved_user_service_id,
         node_routing_required,
         catalog_service_slug,
+        credential_source,
     ) = if let Some(mut pre) = pre_resolved {
         effective_owner_for_approval = Some(pre.effective_owner_id.clone());
         is_auto_connected_for_approval = pre.is_auto_connected;
@@ -1987,6 +1997,7 @@ async fn execute_proxy_inner(
             pre.user_service_id,
             required,
             catalog_service_slug,
+            pre.credential_source,
         )
     } else if target_mode == TargetMode::AdminManaged {
         // Server-chosen platform target: resolve the admin row alone, with
@@ -2007,6 +2018,7 @@ async fn execute_proxy_inner(
             None,
             false,
             catalog_service_slug,
+            None,
         )
     } else {
         // Old DownstreamService path -- scoped keys must use configured
@@ -2057,6 +2069,7 @@ async fn execute_proxy_inner(
             resolved_user_service_id,
             node_routing_required,
             catalog_service_slug,
+            None,
         )
     };
 
@@ -2093,20 +2106,25 @@ async fn execute_proxy_inner(
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
-    let billing_owner = state
-        .billing
-        .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
-        .await?;
-    let billing_request_id = uuid::Uuid::new_v4().to_string();
     let credential_class = final_credential_class(
         resolved_user_service_id.as_deref(),
         node_route.is_some(),
         agent_override_applied,
         has_server_credential,
         master_credential,
+        credential_source.as_deref(),
         &target,
     );
+    let billing_owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
+        .await?;
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
     let is_ws_candidate = is_ws_upgrade_request(&request);
     let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
     let node_intent = match &node_route {
@@ -2198,7 +2216,13 @@ async fn execute_proxy_inner(
     // Direct and node-routed HTTP requests share one admission policy. WS
     // handshakes retain their protocol-specific base allowlist while reusing
     // the same downstream-owned namespace rules.
-    let node_forward_headers = proxy_service::collect_forward_headers(&all_headers);
+    let node_forward_headers = proxy_service::collect_forward_headers_with_defaults(
+        &all_headers,
+        &[
+            target.catalog_default_headers.as_slice(),
+            target.user_service_default_headers.as_slice(),
+        ],
+    );
     let ws_forward_headers = collect_ws_forward_headers(&all_headers);
 
     // === Request body handling ===
@@ -3634,19 +3658,18 @@ async fn execute_proxy_inner(
         },
         &all_headers,
     );
-    let usage_context =
-        should_capture_llm_usage(&target.service.slug, platform_metric).then(|| {
-            llm_usage_service::UsageAuditContext {
-                db: state.db.clone(),
-                user_id: user_id_str.clone(),
-                provider_slug: None,
-                service_id: Some(service_id.to_string()),
-                model: None,
-                path: path.to_string(),
-                api_key_id: auth_user.api_key_id.clone(),
-                api_key_name: auth_user.api_key_name.clone(),
-            }
-        });
+    let usage_context = should_capture_llm_usage(&target.service, platform_metric).then(|| {
+        llm_usage_service::UsageAuditContext {
+            db: state.db.clone(),
+            user_id: user_id_str.clone(),
+            provider_slug: None,
+            service_id: Some(service_id.to_string()),
+            model: None,
+            path: path.to_string(),
+            api_key_id: auth_user.api_key_id.clone(),
+            api_key_name: auth_user.api_key_name.clone(),
+        }
+    });
 
     let mut response_builder = Response::builder().status(status);
 
@@ -4133,6 +4156,7 @@ fn final_credential_class(
     agent_override_applied: bool,
     has_server_credential: bool,
     master_credential: bool,
+    credential_source: Option<&str>,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if node_route_active && !has_server_credential {
@@ -4150,6 +4174,8 @@ fn final_credential_class(
         // not by which resolution path matched.
         return if master_credential {
             CredentialClass::NyxidManagedMaster
+        } else if credential_source == Some("platform") {
+            CredentialClass::NyxidPlatformOauthApp
         } else {
             CredentialClass::UserOwned
         };
@@ -4170,8 +4196,12 @@ fn platform_metric_for_target(
     )
 }
 
-fn should_capture_llm_usage(service_slug: &str, platform_metric: BillingMetric) -> bool {
-    platform_metric == BillingMetric::Tokens || service_slug.starts_with("llm-")
+fn should_capture_llm_usage(
+    service: &crate::models::downstream_service::DownstreamService,
+    platform_metric: BillingMetric,
+) -> bool {
+    platform_metric == BillingMetric::Tokens
+        || crate::services::billing::metric_resolution::captures_tokens(service)
 }
 
 fn resale_usage_from_optional_reported(
@@ -4284,7 +4314,10 @@ fn websocket_resale_usage(
 }
 
 fn service_supports_stream_options_include_usage(service_slug: &str) -> bool {
-    matches!(service_slug, "llm-openai" | "llm-deepseek")
+    matches!(
+        service_slug,
+        "llm-openai" | "llm-deepseek" | "llm-xai" | "chrono-llm" | "chrono-llm-public"
+    )
 }
 
 fn force_stream_usage_for_service(
@@ -4506,7 +4539,7 @@ fn is_ws_upgrade_request(request: &Request<Body>) -> bool {
 
 /// Build a downstream WebSocket URL from the proxy target, applying
 /// credential injection (path, query) via `prepare_delegated_request`.
-fn build_downstream_ws_url(
+pub(crate) fn build_downstream_ws_url(
     target: &proxy_service::ProxyTarget,
     path: &str,
     query: Option<&str>,
@@ -4550,17 +4583,14 @@ fn build_downstream_ws_url(
     Ok(url)
 }
 
-/// Connect to a downstream WebSocket, injecting credentials and identity
-/// headers into the upgrade request.
-async fn connect_downstream_ws(
+pub(crate) fn build_downstream_ws_request(
     url: &str,
     target: &proxy_service::ProxyTarget,
     delegated: &[delegation_service::DelegatedCredential],
     identity_headers: &[(String, String)],
     forward_headers: &[(String, String)],
     caller_token: Option<&str>,
-    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-) -> AppResult<DownstreamWsConnection> {
+) -> AppResult<axum::http::Request<()>> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let mut request = url
@@ -4723,6 +4753,29 @@ async fn connect_downstream_ws(
             )));
         }
     }
+
+    Ok(request)
+}
+
+/// Connect to a downstream WebSocket, injecting credentials and identity
+/// headers into the upgrade request.
+async fn connect_downstream_ws(
+    url: &str,
+    target: &proxy_service::ProxyTarget,
+    delegated: &[delegation_service::DelegatedCredential],
+    identity_headers: &[(String, String)],
+    forward_headers: &[(String, String)],
+    caller_token: Option<&str>,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> AppResult<DownstreamWsConnection> {
+    let request = build_downstream_ws_request(
+        url,
+        target,
+        delegated,
+        identity_headers,
+        forward_headers,
+        caller_token,
+    )?;
 
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
@@ -6230,9 +6283,14 @@ mod tests {
     fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
         let billing = ServiceBilling {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -6903,6 +6961,7 @@ mod tests {
         let allowance = crate::services::billing::allowances::create_allowance(
             &db,
             crate::services::billing::allowances::CreateAllowanceInput {
+                metric: None,
                 service_ref: target.service.id.clone(),
                 quantity: 1_000,
                 recurrence: crate::models::usage_allowance::AllowanceRecurrence::Monthly,
@@ -6922,17 +6981,70 @@ mod tests {
     #[test]
     fn llm_usage_capture_preserves_slug_allowlist_and_adds_token_metrics() {
         assert!(super::should_capture_llm_usage(
-            "llm-admin-override",
+            &crate::models::downstream_service::DownstreamService {
+                slug: "llm-admin-override".into(),
+                ..crate::models::downstream_service::test_helpers::dummy_service()
+            },
             BillingMetric::Requests
         ));
         assert!(super::should_capture_llm_usage(
-            "chrono-llm-public",
+            &crate::models::downstream_service::DownstreamService {
+                slug: "chrono-llm-public".into(),
+                ..crate::models::downstream_service::test_helpers::dummy_service()
+            },
             BillingMetric::Tokens
         ));
         assert!(!super::should_capture_llm_usage(
-            "ordinary-service",
+            &crate::models::downstream_service::test_helpers::dummy_service(),
             BillingMetric::Requests
         ));
+    }
+
+    #[test]
+    fn oauth_credential_source_classification_preserves_override_and_node_precedence() {
+        let mut target = make_target("https://api.x.com/2");
+        target.auth_method = "bearer".into();
+        target.credential = "test-token".into();
+        for (source, expected) in [
+            (Some("platform"), CredentialClass::NyxidPlatformOauthApp),
+            (Some("byo"), CredentialClass::UserOwned),
+            (None, CredentialClass::UserOwned),
+        ] {
+            assert_eq!(
+                final_credential_class(Some("us"), false, false, true, false, source, &target),
+                expected
+            );
+            assert_eq!(
+                final_credential_class(Some("us"), true, false, true, false, source, &target),
+                expected
+            );
+            assert_eq!(
+                final_credential_class(Some("us"), false, true, true, false, source, &target),
+                CredentialClass::AgentOverrideUserOwned
+            );
+            assert_eq!(
+                final_credential_class(Some("us"), true, true, false, false, source, &target),
+                CredentialClass::NodeManaged
+            );
+            assert_eq!(
+                final_credential_class(Some("us"), false, false, true, true, source, &target),
+                CredentialClass::NyxidManagedMaster
+            );
+        }
+        target.auth_method = "none".into();
+        target.credential.clear();
+        assert_eq!(
+            final_credential_class(
+                Some("us"),
+                false,
+                true,
+                true,
+                false,
+                Some("platform"),
+                &target
+            ),
+            CredentialClass::NoAuth
+        );
     }
 
     #[test]
@@ -6944,12 +7056,12 @@ mod tests {
         // Auto-provisioned UserService (no user key) injecting the catalog
         // master credential: the platform's key, not the user's.
         assert_eq!(
-            final_credential_class(Some("us-1"), false, false, true, true, &target),
+            final_credential_class(Some("us-1"), false, false, true, true, None, &target),
             CredentialClass::NyxidManagedMaster
         );
         // A UserService backed by the user's own key stays user-owned.
         assert_eq!(
-            final_credential_class(Some("us-1"), false, false, true, false, &target),
+            final_credential_class(Some("us-1"), false, false, true, false, None, &target),
             CredentialClass::UserOwned
         );
     }
@@ -8536,6 +8648,8 @@ mod proxy_resolution_integration_tests {
         body: Bytes,
     ) -> Json<serde_json::Value> {
         Json(serde_json::json!({
+            "notion_versions": headers.get_all("notion-version").iter().map(|value| value.to_str().unwrap()).collect::<Vec<_>>(),
+            "anthropic_versions": headers.get_all("anthropic-version").iter().map(|value| value.to_str().unwrap()).collect::<Vec<_>>(),
             "content_type": headers
                 .get("content-type")
                 .and_then(|value| value.to_str().ok()),
@@ -8598,7 +8712,7 @@ mod proxy_resolution_integration_tests {
                 serde_json::json!({
                     "type": "auth",
                     "node_id": node.id,
-                    "token": "test-node-auth-token",
+                    "token": format!("test-node-auth-{}", node.id),
                 })
                 .to_string()
                 .into(),
@@ -8947,6 +9061,80 @@ mod proxy_resolution_integration_tests {
         api_key_id
     }
 
+    #[tokio::test]
+    async fn legacy_master_ignores_dispatchable_owner_node_binding() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as CATALOG, DownstreamService, test_helpers::dummy_service,
+        };
+        use crate::models::node_service_binding::{
+            COLLECTION_NAME as BINDINGS, NodeServiceBinding,
+        };
+        let db =
+            crate::test_utils::connect_transaction_test_database("review_legacy_master_node").await;
+        let user = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user, UserType::Person))
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let node = insert_online_node(&state, &user, "owner-node").await;
+        let (tx, mut rx) = mpsc::channel(8);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
+        let mut catalog = dummy_service();
+        catalog.id = Uuid::new_v4().to_string();
+        catalog.platform_key = None;
+        catalog.service_category = "internal".into();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".into();
+        catalog.auth_method = "bearer".into();
+        catalog.credential_encrypted = state
+            .encryption_keys
+            .encrypt(b"operator-secret")
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(CATALOG)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        db.collection::<NodeServiceBinding>(BINDINGS)
+            .insert_one(NodeServiceBinding {
+                id: Uuid::new_v4().to_string(),
+                node_id: node.id.clone(),
+                user_id: user.clone(),
+                service_id: catalog.id.clone(),
+                is_active: true,
+                priority: 0,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        assert!(
+            crate::services::node_routing_service::resolve_node_route(
+                &db,
+                &user,
+                &catalog.id,
+                &state.node_ws_manager
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        let (route, target, _, _, _) = Box::pin(super::resolve_via_downstream_service(
+            &state,
+            &crate::test_utils::test_auth_user(&user),
+            &user,
+            &catalog.id,
+        ))
+        .await
+        .unwrap();
+        assert!(route.is_none());
+        assert_eq!(target.credential, "operator-secret");
+        assert!(rx.try_recv().is_err());
+        db.drop().await.unwrap();
+    }
+
     async fn insert_online_node(state: &AppState, owner_user_id: &str, name: &str) -> Node {
         let raw_signing_secret = "11".repeat(32);
         let signing_secret_encrypted = state
@@ -8955,12 +9143,13 @@ mod proxy_resolution_integration_tests {
             .await
             .expect("encrypt node signing secret");
         let now = Utc::now();
+        let node_id = Uuid::new_v4().to_string();
         let node = Node {
-            id: Uuid::new_v4().to_string(),
+            auth_token_hash: hash_token(&format!("test-node-auth-{node_id}")),
+            id: node_id,
             user_id: owner_user_id.to_string(),
             name: name.to_string(),
             status: NodeStatus::Online,
-            auth_token_hash: hash_token("test-node-auth-token"),
             signing_secret_encrypted: Some(signing_secret_encrypted),
             signing_secret_hash: hash_token(&raw_signing_secret),
             last_heartbeat_at: Some(now),
@@ -9112,6 +9301,133 @@ mod proxy_resolution_integration_tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(resolved_slug, service.slug);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_service_version_headers_reach_downstream_via_direct_and_node_http() {
+        use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+        use crate::services::provider_service;
+        let db = connect_test_database("proxy_version_wire")
+            .await
+            .expect("MongoDB required");
+        let enc = crate::test_utils::test_encryption_keys();
+        provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        provider_service::seed_default_services(&db, &enc)
+            .await
+            .unwrap();
+        let org_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
+        let state = test_app_state(db.clone());
+        let (base_url, echo_server) = start_node_echo_downstream().await;
+        for (catalog_slug, header_name, response_field, default_version) in [
+            (
+                "api-notion",
+                "notion-version",
+                "notion_versions",
+                "2022-06-28",
+            ),
+            (
+                "llm-anthropic",
+                "anthropic-version",
+                "anthropic_versions",
+                "2023-06-01",
+            ),
+        ] {
+            let catalog = db
+                .collection::<DownstreamService>(SERVICES)
+                .find_one(doc! { "slug": catalog_slug })
+                .await
+                .unwrap()
+                .unwrap();
+            let default = catalog
+                .default_request_headers
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|header| header.name.eq_ignore_ascii_case(header_name))
+                .unwrap();
+            assert!(default.overridable);
+            assert_eq!(default.value, default_version);
+            for via_node in [false, true] {
+                for explicit_version in [None, Some("2025-09-03")] {
+                    let node = if via_node {
+                        Some(insert_online_node(&state, &org_id, "version-node").await)
+                    } else {
+                        None
+                    };
+                    let endpoint = test_user_endpoint(
+                        &Uuid::new_v4().to_string(),
+                        &org_id,
+                        "Version target",
+                        &base_url,
+                        None,
+                        Some(&catalog.id),
+                    );
+                    let service = test_user_service(
+                        &Uuid::new_v4().to_string(),
+                        &org_id,
+                        &format!("version-{}", Uuid::new_v4()),
+                        &endpoint.id,
+                        Some(&catalog.id),
+                        node.as_ref().map(|node| node.id.as_str()),
+                    );
+                    db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                        .insert_one(endpoint)
+                        .await
+                        .unwrap();
+                    db.collection::<UserService>(USER_SERVICES)
+                        .insert_one(&service)
+                        .await
+                        .unwrap();
+                    let executor = if let Some(node) = node.as_ref() {
+                        Some(
+                            start_node_executor(state.clone(), node, &service.slug, &base_url)
+                                .await,
+                        )
+                    } else {
+                        None
+                    };
+                    let mut request =
+                        proxy_json_request(&format!("/proxy/s/{}/commands", service.slug), "{}");
+                    if let Some(version) = explicit_version {
+                        request.headers_mut().insert(
+                            axum::http::HeaderName::from_static(header_name),
+                            version.parse().unwrap(),
+                        );
+                    }
+                    let response = proxy_request_by_slug_inner(
+                        &state,
+                        &access_token_auth(&member_id),
+                        &service.slug,
+                        "commands",
+                        request,
+                        &mut String::new(),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{catalog_slug}: node={via_node}, explicit={explicit_version:?}"
+                    );
+                    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                    let observed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(
+                        observed[response_field],
+                        serde_json::json!([explicit_version.unwrap_or(default_version)]),
+                        "{catalog_slug}: node={via_node}"
+                    );
+                    if let Some((executor, ws_server)) = executor {
+                        executor.await.unwrap();
+                        ws_server.abort();
+                    }
+                }
+            }
+        }
+        echo_server.abort();
     }
 
     #[tokio::test]
@@ -9504,6 +9820,104 @@ mod proxy_resolution_integration_tests {
     }
 
     #[tokio::test]
+    async fn auto_connected_proxy_scope_tracks_live_flag_through_both_auth_headers() {
+        use axum::extract::FromRequestParts;
+        let db = crate::test_utils::connect_transaction_test_database("auto_connected_proxy").await;
+        let (base_url, server) = start_downstream().await;
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.base_url = base_url.clone();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+        let service = insert_user_service(&db, &owner, "autoplatform", &base_url, None).await;
+        db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "source": crate::models::user_service::AUTO_PROVISION_SOURCE, "catalog_service_id": &catalog.id } },
+            )
+            .await
+            .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &db,
+            &owner,
+            "platform agent",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+        for (flag, header) in [
+            (false, "x-api-key"),
+            (true, "x-api-key"),
+            (true, "authorization"),
+            (false, "authorization"),
+        ] {
+            let body = serde_json::from_value(
+                serde_json::json!({ "allow_auto_connected_services": flag }),
+            )
+            .unwrap();
+            let _ = crate::handlers::api_keys::update_key(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                axum::extract::Path(key.id.clone()),
+                axum::Json(body),
+            )
+            .await
+            .unwrap();
+            let value = if header == "authorization" {
+                format!("Bearer {}", key.full_key)
+            } else {
+                key.full_key.clone()
+            };
+            let (mut parts, _) = axum::http::Request::builder()
+                .uri("/api/v1/proxy/s/autoplatform/status")
+                .header(header, value)
+                .body(())
+                .unwrap()
+                .into_parts();
+            let auth = AuthUser::from_request_parts(&mut parts, &state)
+                .await
+                .unwrap();
+            assert_eq!(auth.allowed_service_ids.contains(&service.id), flag);
+            let result = proxy_request_by_slug_inner(
+                &state,
+                &auth,
+                &service.slug,
+                "status",
+                proxy_request("/proxy/s/autoplatform/status"),
+                &mut String::new(),
+            )
+            .await;
+            if flag {
+                assert_eq!(result.unwrap().status(), StatusCode::OK);
+            } else {
+                assert!(matches!(result, Err(AppError::ApiKeyScopeForbidden(_))));
+            }
+        }
+        server.abort();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn created_scope_admits_listed_service_and_node_and_rejects_others() {
         let Some(db) = connect_test_database("proxy_created_scope_enforcement").await else {
             eprintln!("skipping proxy integration test: no local MongoDB available");
@@ -9535,6 +9949,7 @@ mod proxy_resolution_integration_tests {
                 allowed_service_ids: vec![allowed_service.id.clone()],
                 allowed_node_ids: vec![allowed_node.id.clone()],
                 allow_all_services: None,
+                allow_auto_connected_services: None,
                 allow_all_nodes: None,
                 rate_limit_per_second: None,
                 rate_limit_burst: None,

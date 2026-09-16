@@ -39,6 +39,7 @@ pub struct CreatedApiKey {
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
     pub allow_all_services: bool,
+    pub allow_auto_connected_services: bool,
     pub allow_all_nodes: bool,
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
@@ -111,6 +112,7 @@ fn created_api_key_from_model(key: ApiKey, full_key: String) -> AppResult<Create
         allowed_service_ids: key.allowed_service_ids,
         allowed_node_ids: key.allowed_node_ids,
         allow_all_services: key.allow_all_services,
+        allow_auto_connected_services: key.allow_auto_connected_services,
         allow_all_nodes: key.allow_all_nodes,
         rate_limit_per_second: key.rate_limit_per_second,
         rate_limit_burst: key.rate_limit_burst,
@@ -216,6 +218,7 @@ pub async fn create_api_key(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -233,6 +236,7 @@ pub async fn create_api_key(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -258,6 +262,7 @@ pub async fn create_api_key_with_scope_authorization(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -277,6 +282,7 @@ pub async fn create_api_key_with_scope_authorization(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -307,6 +313,7 @@ pub async fn create_api_key_with_scope_authorization_and_id(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -326,6 +333,7 @@ pub async fn create_api_key_with_scope_authorization_and_id(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -351,6 +359,7 @@ pub async fn create_api_key_with_security_class(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -372,6 +381,7 @@ pub async fn create_api_key_with_security_class(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -408,6 +418,7 @@ pub async fn create_login_api_key(
         Some(&input.allowed_service_ids),
         Some(&input.allowed_node_ids),
         Some(input.allow_all_services),
+        Some(input.allow_auto_connected_services),
         Some(input.allow_all_nodes),
         input.rate_limit_per_second,
         input.rate_limit_burst,
@@ -419,6 +430,75 @@ pub async fn create_login_api_key(
         Some(session),
     )
     .await
+}
+
+/// Validate a future login key without creating a credential or parent row.
+pub async fn validate_login_api_key(
+    db: &mongodb::Database,
+    actor: &str,
+    input: &crate::models::login_grant::NewKeyInput,
+) -> AppResult<Option<chrono::DateTime<Utc>>> {
+    if input.name.is_empty() || input.name.len() > 200 {
+        return Err(AppError::ValidationError(
+            "API key name must be between 1 and 200 characters".into(),
+        ));
+    }
+    validate_api_key_scopes(&input.scopes)?;
+    validate_platform(input.platform.as_deref())?;
+    let owner =
+        api_key_scope_service::resolve_scope_owner_id(db, actor, input.target_org_id.as_deref())
+            .await?;
+    let expiry = input
+        .expires_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(super::api_key_validation::parse_expires_at)
+        .transpose()?;
+    super::api_key_validation::resolve_create_allow_all(
+        &input.allowed_service_ids,
+        Some(input.allow_all_services),
+        "allow_all_services",
+        "allowed_service_ids",
+    )?;
+    super::api_key_validation::resolve_create_allow_all(
+        &input.allowed_node_ids,
+        Some(input.allow_all_nodes),
+        "allow_all_nodes",
+        "allowed_node_ids",
+    )?;
+    if !input.allow_all_services {
+        api_key_scope_service::validate_service_ids(
+            db,
+            &owner,
+            &input.allowed_service_ids,
+            ScopeAuthorization::for_actor(Some(actor)),
+        )
+        .await?;
+    }
+    if !input.allow_all_nodes {
+        api_key_scope_service::validate_node_ids(
+            db,
+            &owner,
+            &input.allowed_node_ids,
+            ScopeAuthorization::for_actor(Some(actor)),
+        )
+        .await?;
+    }
+    if let Some(digest) = &input.scope_plan_digest {
+        api_key_scope_service::verify_scope_plan_precondition(
+            db,
+            actor,
+            &owner,
+            &input.allowed_service_ids,
+            &input.allowed_node_ids,
+            input.allow_all_services,
+            input.allow_all_nodes,
+            digest,
+            input.allow_auto_connected_services,
+        )
+        .await?;
+    }
+    Ok(expiry)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -434,6 +514,7 @@ async fn create_api_key_with_security_class_and_id(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -458,7 +539,11 @@ async fn create_api_key_with_security_class_and_id(
     let all_svcs = allow_all_services.unwrap_or(true);
     let all_nodes = allow_all_nodes.unwrap_or(true);
 
-    if purpose == ApiKeyPurpose::ScheduledInvocation && (all_svcs || all_nodes || scopes != "proxy")
+    if purpose == ApiKeyPurpose::ScheduledInvocation
+        && (all_svcs
+            || all_nodes
+            || allow_auto_connected_services.unwrap_or(false)
+            || scopes != "proxy")
     {
         return Err(AppError::DurableGrantMismatch(
             "scheduled_invocation keys require exact service/node scopes and scopes='proxy'"
@@ -481,6 +566,7 @@ async fn create_api_key_with_security_class_and_id(
             all_svcs,
             all_nodes,
             expected_digest,
+            allow_auto_connected_services.unwrap_or(false),
         )
         .await?;
     }
@@ -540,6 +626,7 @@ async fn create_api_key_with_security_class_and_id(
         allowed_service_ids: svc_ids.clone(),
         allowed_node_ids: node_ids.clone(),
         allow_all_services: all_svcs,
+        allow_auto_connected_services: allow_auto_connected_services.unwrap_or(false),
         allow_all_nodes: all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -572,6 +659,7 @@ async fn create_api_key_with_security_class_and_id(
         allowed_service_ids: svc_ids,
         allowed_node_ids: node_ids,
         allow_all_services: all_svcs,
+        allow_auto_connected_services: allow_auto_connected_services.unwrap_or(false),
         allow_all_nodes: all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -579,6 +667,44 @@ async fn create_api_key_with_security_class_and_id(
         purpose,
         scheduled_write_enabled,
     })
+}
+
+/// Resolve the current service grant once when loading a key's authority.
+/// Only restricted keys with the durable platform grant need a database read.
+/// This deliberately does not provision services on the authentication path.
+pub async fn effective_allowed_service_ids(
+    db: &mongodb::Database,
+    key: &ApiKey,
+) -> AppResult<Vec<String>> {
+    let mut ids = key.allowed_service_ids.clone();
+    if key.allow_auto_connected_services && !key.allow_all_services {
+        ids.extend(active_auto_connected_service_ids(db, &key.user_id).await?);
+        ids.sort();
+        ids.dedup();
+    }
+    Ok(ids)
+}
+
+/// Owner-bound, active platform rows only. The compound index covers this query.
+pub async fn active_auto_connected_service_ids(
+    db: &mongodb::Database,
+    owner_id: &str,
+) -> AppResult<Vec<String>> {
+    use crate::models::user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME};
+    let rows: Vec<bson::Document> = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find(doc! { "user_id": owner_id, "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }], "is_active": true })
+        .projection(doc! { "_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    rows.into_iter()
+        .map(|row| {
+            row.get_str("_id")
+                .map(str::to_owned)
+                .map_err(|_| AppError::Internal("Invalid platform service id".into()))
+        })
+        .collect()
 }
 
 /// List all API keys for a user (without exposing the full key).
@@ -944,6 +1070,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     allowed_service_ids: old_key.allowed_service_ids.clone(),
                     allowed_node_ids: old_key.allowed_node_ids.clone(),
                     allow_all_services: old_key.allow_all_services,
+                    allow_auto_connected_services: old_key.allow_auto_connected_services,
                     allow_all_nodes: old_key.allow_all_nodes,
                     rate_limit_per_second: old_key.rate_limit_per_second,
                     rate_limit_burst: old_key.rate_limit_burst,
@@ -1051,6 +1178,7 @@ pub async fn update_api_key_scope_with_scope_authorization(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<Option<u32>>,
     rate_limit_burst: Option<Option<u32>>,
@@ -1069,6 +1197,7 @@ pub async fn update_api_key_scope_with_scope_authorization(
         allowed_service_ids,
         allowed_node_ids,
         allow_all_services,
+        allow_auto_connected_services,
         allow_all_nodes,
         rate_limit_per_second,
         rate_limit_burst,
@@ -1095,6 +1224,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
     allowed_service_ids: Option<&[String]>,
     allowed_node_ids: Option<&[String]>,
     allow_all_services: Option<bool>,
+    allow_auto_connected_services: Option<bool>,
     allow_all_nodes: Option<bool>,
     rate_limit_per_second: Option<Option<u32>>,
     rate_limit_burst: Option<Option<u32>>,
@@ -1115,7 +1245,8 @@ pub async fn update_api_key_scope_with_expected_state_version(
     }
 
     if existing.purpose == ApiKeyPurpose::ScheduledInvocation
-        && (scopes.is_some()
+        && (allow_auto_connected_services.is_some()
+            || scopes.is_some()
             || allowed_service_ids.is_some()
             || allowed_node_ids.is_some()
             || allow_all_services.is_some()
@@ -1141,6 +1272,8 @@ pub async fn update_api_key_scope_with_expected_state_version(
         validate_platform(platform)?;
     }
 
+    let effective_auto_svcs =
+        allow_auto_connected_services.unwrap_or(existing.allow_auto_connected_services);
     let effective_all_svcs = allow_all_services.unwrap_or(existing.allow_all_services);
     let effective_all_nodes = allow_all_nodes.unwrap_or(existing.allow_all_nodes);
 
@@ -1159,6 +1292,7 @@ pub async fn update_api_key_scope_with_expected_state_version(
             effective_all_svcs,
             effective_all_nodes,
             expected_digest,
+            effective_auto_svcs,
         )
         .await?;
     }
@@ -1202,6 +1336,9 @@ pub async fn update_api_key_scope_with_expected_state_version(
     }
     if let Some(nids) = allowed_node_ids {
         update.insert("allowed_node_ids", nids);
+    }
+    if let Some(v) = allow_auto_connected_services {
+        update.insert("allow_auto_connected_services", v);
     }
     if let Some(v) = allow_all_services {
         update.insert("allow_all_services", v);
@@ -1521,6 +1658,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let result = create_api_key(
             &db, &user_id, "", "read", None, None, None, None, None, None, None, None, None, None,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1537,7 +1675,7 @@ mod tests {
         let long_name = "a".repeat(201);
         let result = create_api_key(
             &db, &user_id, &long_name, "read", None, None, None, None, None, None, None, None,
-            None, None,
+            None, None, None,
         )
         .await;
         assert!(result.is_err());
@@ -1556,6 +1694,7 @@ mod tests {
             &user_id,
             "test",
             "invalid_scope",
+            None,
             None,
             None,
             None,
@@ -1586,6 +1725,7 @@ mod tests {
             "read write",
             None,
             Some("test key"),
+            None,
             None,
             None,
             None,
@@ -1629,6 +1769,7 @@ mod tests {
             None,
             None,
             Some(true),
+            None,
             Some(true),
             None,
             None,
@@ -1685,6 +1826,7 @@ mod tests {
             Some(&service_ids),
             Some(&node_ids),
             Some(false),
+            None,
             Some(false),
             None,
             None,
@@ -1736,6 +1878,7 @@ mod tests {
             Some(&service_ids),
             None,
             Some(false),
+            None,
             Some(true),
             None,
             None,
@@ -1783,6 +1926,7 @@ mod tests {
             None,
             Some(&node_ids),
             Some(true),
+            None,
             Some(false),
             None,
             None,
@@ -1826,6 +1970,7 @@ mod tests {
             Some(&service_ids),
             None,
             Some(false),
+            None,
             Some(true),
             None,
             None,
@@ -1859,13 +2004,13 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         create_api_key(
             &db, &user_id, "key-1", "read", None, None, None, None, None, None, None, None, None,
-            None,
+            None, None,
         )
         .await
         .expect("create key-1");
         create_api_key(
             &db, &user_id, "key-2", "write", None, None, None, None, None, None, None, None, None,
-            None,
+            None, None,
         )
         .await
         .expect("create key-2");
@@ -1907,6 +2052,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -1929,6 +2075,7 @@ mod tests {
             &user_id,
             "to-delete",
             "read",
+            None,
             None,
             None,
             None,
@@ -1990,6 +2137,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(50),
             Some(100),
             Some("codex"),
@@ -2029,6 +2177,7 @@ mod tests {
             "read write",
             None,
             Some("lineage evidence"),
+            None,
             None,
             None,
             None,
@@ -2164,6 +2313,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create owner key");
@@ -2211,6 +2361,7 @@ mod tests {
             Some(&service_ids),
             None,
             Some(false),
+            None,
             Some(true),
             None,
             None,
@@ -2271,6 +2422,7 @@ mod tests {
             Some(&service_ids),
             None,
             Some(false),
+            None,
             Some(true),
             None,
             None,
@@ -2335,6 +2487,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -2385,6 +2538,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -2402,7 +2556,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let created = create_api_key(
             &db, &user_id, "old-name", "read", None, None, None, None, None, None, None, None,
-            None, None,
+            None, None, None,
         )
         .await
         .expect("create key");
@@ -2412,6 +2566,7 @@ mod tests {
             None,
             &created.id,
             Some("new-name"),
+            None,
             None,
             None,
             None,
@@ -2457,6 +2612,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -2465,6 +2621,7 @@ mod tests {
             &user_id,
             None,
             &created.id,
+            None,
             None,
             None,
             None,
@@ -2501,6 +2658,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(10),
             Some(20),
             None,
@@ -2514,6 +2672,7 @@ mod tests {
             &user_id,
             None,
             &created.id,
+            None,
             None,
             None,
             None,
@@ -2555,6 +2714,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -2566,6 +2726,7 @@ mod tests {
             None,
             &created.id,
             Some("from-concurrent"),
+            None,
             None,
             None,
             None,
@@ -2590,6 +2751,7 @@ mod tests {
             None,
             &created.id,
             Some("from-stale"),
+            None,
             None,
             None,
             None,
@@ -2639,6 +2801,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("create key");
@@ -2648,6 +2811,7 @@ mod tests {
             None,
             &created.id,
             Some("renamed"),
+            None,
             None,
             None,
             None,
@@ -2672,5 +2836,235 @@ mod tests {
             .expect("key still active");
         assert!(stored.is_active);
         assert_eq!(stored.state_version, 2);
+    }
+}
+
+#[cfg(test)]
+mod auto_connected_scope_tests {
+    use super::*;
+    use crate::models::user::UserType;
+    use crate::models::user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME as SERVICES};
+    use crate::test_utils::{connect_transaction_test_database, test_user, test_user_service};
+
+    #[tokio::test]
+    async fn auto_connected_scope_is_live_owner_bound_and_persisted_across_rotation() {
+        let db = connect_transaction_test_database("auto_connected_key_scope").await;
+        let owner = Uuid::new_v4().to_string();
+        let other = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let manual_id = Uuid::new_v4().to_string();
+        let platform_id = Uuid::new_v4().to_string();
+        let mut platform = test_user_service(&platform_id, &owner, "platform", "ep", None, None);
+        platform.source = Some(AUTO_PROVISION_SOURCE.into());
+        let mut inactive = platform.clone();
+        inactive.id = Uuid::new_v4().to_string();
+        inactive.is_active = false;
+        let mut foreign = platform.clone();
+        foreign.id = Uuid::new_v4().to_string();
+        foreign.user_id = other;
+        db.collection::<crate::models::user_service::UserService>(SERVICES)
+            .insert_many([
+                test_user_service(&manual_id, &owner, "manual", "ep-manual", None, None),
+                platform.clone(),
+                inactive,
+                foreign,
+            ])
+            .await
+            .unwrap();
+        let created = create_api_key(
+            &db,
+            &owner,
+            "platform agent",
+            "proxy",
+            None,
+            None,
+            Some(std::slice::from_ref(&manual_id)),
+            None,
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(created.allow_auto_connected_services);
+        let (_, key, _) = validate_api_key(&db, &created.full_key).await.unwrap();
+        let mut expected = vec![manual_id.clone(), platform_id.clone()];
+        expected.sort();
+        assert_eq!(
+            effective_allowed_service_ids(&db, &key).await.unwrap(),
+            expected
+        );
+        assert_eq!(key.allowed_service_ids, vec![manual_id.clone()]);
+
+        // Reconciliation changes the row identity; the durable grant follows it.
+        db.collection::<bson::Document>(SERVICES)
+            .delete_one(doc! { "_id": &platform_id })
+            .await
+            .unwrap();
+        platform.id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user_service::UserService>(SERVICES)
+            .insert_one(&platform)
+            .await
+            .unwrap();
+        let effective = effective_allowed_service_ids(&db, &key).await.unwrap();
+        assert!(effective.contains(&platform.id));
+        assert!(!effective.contains(&platform_id));
+        assert_eq!(effective.len(), 2);
+
+        let updated = update_api_key_scope_with_scope_authorization(
+            &db,
+            &owner,
+            None,
+            &key.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!updated.allow_auto_connected_services);
+        assert_eq!(
+            effective_allowed_service_ids(&db, &updated).await.unwrap(),
+            vec![manual_id]
+        );
+        let updated = update_api_key_scope_with_scope_authorization(
+            &db,
+            &owner,
+            None,
+            &key.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // Storing both flags is valid and the unrestricted branch performs no expansion.
+        assert!(updated.allow_auto_connected_services && updated.allow_all_services);
+        assert_eq!(
+            effective_allowed_service_ids(&db, &updated).await.unwrap(),
+            updated.allowed_service_ids
+        );
+        let rotated = rotate_api_key(&db, &owner, &key.id).await.unwrap();
+        assert!(rotated.allow_auto_connected_services);
+        let (_, stored, _) = validate_api_key(&db, &rotated.full_key).await.unwrap();
+        assert!(stored.allow_auto_connected_services);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_connected_scope_org_key_rejects_personal_service_ids() {
+        let db = connect_transaction_test_database("auto_connected_org_scope").await;
+        let actor = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                test_user(&actor, UserType::Person),
+                test_user(&org, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &actor,
+            crate::models::org_membership::OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+        let id = Uuid::new_v4().to_string();
+        let mut service = test_user_service(&id, &actor, "personal-platform", "ep", None, None);
+        service.source = Some(AUTO_PROVISION_SOURCE.into());
+        db.collection::<crate::models::user_service::UserService>(SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        // Also exercise the actor-aware path used by org management handlers.
+        let error = api_key_scope_service::validate_service_ids(
+            &db,
+            &org,
+            std::slice::from_ref(&id),
+            ScopeAuthorization::for_actor(Some(&actor)),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::ValidationError(_)));
+        let error = create_api_key(
+            &db,
+            &org,
+            "org",
+            "proxy",
+            None,
+            None,
+            Some(&[id]),
+            None,
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(error, AppError::ValidationError(_)));
+        let created = create_api_key(
+            &db,
+            &org,
+            "org",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let (_, key, _) = validate_api_key(&db, &created.full_key).await.unwrap();
+        assert!(
+            effective_allowed_service_ids(&db, &key)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        db.drop().await.unwrap();
     }
 }

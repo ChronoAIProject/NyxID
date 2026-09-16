@@ -1,10 +1,5 @@
-export type ChannelPlatform =
-  | "telegram"
-  | "discord"
-  | "lark"
-  | "feishu"
-  | "slack"
-  | "whatsapp";
+/** Platform identifiers are supplied by the server catalog. */
+export type ChannelPlatform = string;
 
 /**
  * All platform values a conversation may report. `"device"` is for HTTP
@@ -18,7 +13,8 @@ export type ChannelBotStatus =
   | "pending_webhook"
   | "active"
   | "failed"
-  | "invalid";
+  | "invalid"
+  | "suspended";
 
 export type ConversationType = "private" | "group" | "channel" | "device";
 
@@ -37,7 +33,7 @@ export type ContentType =
   | "unknown";
 
 export interface ChannelBotItem {
-  readonly credential_source?: "user" | "platform";
+  readonly credential_source?: "user" | "platform" | "connection";
   readonly managed_setup?: ManagedBotSetup | null;
   readonly id: string;
   readonly platform: ChannelPlatform;
@@ -61,6 +57,15 @@ export interface ChannelBotListResponse {
 }
 
 export interface ChannelBotDetail extends ChannelBotItem {
+  readonly webhook_ingestion?: boolean;
+  readonly connection_id?: string | null;
+  readonly poll_cursor?: string | null;
+  readonly last_polled_at?: string | null;
+  readonly next_poll_at?: string | null;
+  readonly poll_backoff_until?: string | null;
+  readonly poll_error_count?: number;
+  readonly last_poll_notice?: string | null;
+  readonly error?: string | null;
   readonly phone_number_id?: string;
   readonly waba_id?: string;
   readonly webhook_url?: string;
@@ -80,6 +85,7 @@ export interface ChannelBotDetail extends ChannelBotItem {
 }
 
 export interface CreateChannelBotRequest {
+  readonly [field: string]: string | undefined;
   readonly platform: ChannelPlatform;
   readonly bot_token: string;
   readonly label: string;
@@ -100,6 +106,7 @@ export interface CreateChannelBotRequest {
 }
 
 export interface UpdateChannelBotRequest {
+  readonly [field: string]: string | undefined;
   readonly bot_token?: string;
   readonly label?: string;
   readonly verification_token?: string;
@@ -109,7 +116,9 @@ export interface UpdateChannelBotRequest {
 }
 
 export interface CreateChannelBotResponse {
-  readonly credential_source?: "user" | "platform";
+  readonly credential_source?: "user" | "platform" | "connection";
+  readonly webhook_ingestion?: boolean;
+  readonly connection_id?: string | null;
   readonly managed_setup?: ManagedBotSetup | null;
   readonly phone_number_id?: string;
   readonly waba_id?: string;
@@ -134,6 +143,14 @@ export interface ManagedBotSetup {
   readonly coexistence_sync?: Record<string, string>;
 }
 
+export interface OutboundCapabilities {
+  readonly media: MediaCapabilities;
+  readonly initiated_send: boolean;
+  readonly reply_to: boolean;
+  readonly thread: boolean;
+  readonly edit: boolean;
+}
+
 export interface ChannelConversationItem {
   readonly id: string;
   /** `null` or omitted for device channels (platform === "device"). */
@@ -144,6 +161,8 @@ export interface ChannelConversationItem {
   readonly platform_sender_id: string | null;
   readonly agent_api_key_id: string;
   readonly default_agent: boolean;
+  readonly allow_agent_initiated: boolean;
+  readonly capabilities: OutboundCapabilities;
   readonly is_active: boolean;
   readonly last_message_at: string | null;
   readonly created_at: string;
@@ -162,6 +181,7 @@ export interface CreateChannelConversationRequest {
   readonly platform_conversation_type?: ConversationType;
   readonly platform_sender_id?: string;
   readonly default_agent?: boolean;
+  readonly allow_agent_initiated?: boolean;
   /** Create this conversation under the given org (caller must be admin). */
   readonly target_org_id?: string;
 }
@@ -182,6 +202,7 @@ export interface CreateDeviceConversationRequest {
 export interface UpdateChannelConversationRequest {
   readonly agent_api_key_id?: string;
   readonly default_agent?: boolean;
+  readonly allow_agent_initiated?: boolean;
   readonly is_active?: boolean;
 }
 
@@ -196,6 +217,7 @@ export interface UpdateChannelConversationRequest {
  * and NyxID retains only routing metadata.
  */
 export interface ChannelMessageItem {
+  readonly attachments?: readonly ChannelAttachment[];
   readonly id: string;
   /** `null` for messages on device channels. */
   readonly channel_bot_id: string | null;
@@ -224,5 +246,80 @@ export interface ChannelRelayReplyRequest {
   readonly reply: {
     readonly text?: string;
     readonly metadata?: Record<string, unknown>;
+    readonly attachments?: readonly OutboundAttachment[];
   };
 }
+
+export interface SendChannelMessageRequest {
+  readonly conversation_id: string;
+  readonly message: {
+    readonly text?: string;
+    readonly metadata?: Record<string, unknown>;
+    readonly attachments?: readonly OutboundAttachment[];
+  };
+  readonly idempotency_key?: string;
+}
+
+export interface SendChannelMessageResponse {
+  readonly message_id: string;
+  /** Platform acceptance receipt, not proof that the recipient saw the message. */
+  readonly platform_message_id?: string;
+}
+
+export type MediaKind = "image" | "file" | "audio" | "video";
+export interface MediaCapabilities { readonly inbound: readonly MediaKind[]; readonly outbound: readonly MediaKind[] }
+export interface OutboundAttachment {
+  readonly kind: MediaKind;
+  readonly source: { readonly type: "url"; readonly url: string } | { readonly type: "base64"; readonly data: string };
+  readonly filename?: string;
+  readonly mime_type?: string;
+  readonly caption?: string;
+}
+export interface ChannelAttachment {
+  readonly content_type: string;
+  readonly url: string;
+  readonly download_url: string;
+  readonly platform_message_id?: string | null;
+  readonly file_key?: string | null;
+  readonly image_key?: string | null;
+  readonly filename?: string | null;
+  readonly mime_type?: string | null;
+  readonly size_bytes?: number | null;
+}
+export interface ChannelRegistrationField {
+  readonly hint: string | null;
+  readonly name: string;
+  readonly label: string;
+  readonly secret: boolean;
+  readonly required: boolean;
+  readonly patchable: boolean;
+  readonly clearable: boolean;
+  readonly storage: string;
+  readonly webhook_secret: boolean;
+  readonly platform_fallback: string | null;
+}
+export interface ChannelPlatformDescriptor {
+  readonly platform: ChannelPlatform;
+  readonly display_name: string;
+  readonly enabled: boolean;
+  readonly managed_only: boolean;
+  readonly managed_only_message: string;
+  readonly ingestion: { readonly mode: "webhook" } | { readonly mode: "poll"; readonly min_interval_secs: number };
+  readonly registration: {
+    readonly documentation_url?: string | null;
+    readonly fields: readonly ChannelRegistrationField[];
+    readonly extra_fields: readonly ChannelRegistrationField[];
+    readonly token_fields: readonly string[];
+    readonly required_suffix: string;
+    readonly automatic_webhook: boolean;
+    readonly webhook_ingestion: boolean;
+    readonly webhook_secret_label: string | null;
+    readonly create_response_status: string;
+    readonly setup_instructions: readonly string[];
+  };
+  readonly managed_onboarding: { readonly flow: string; readonly provider: string; readonly bootstrap_fields: readonly string[]; readonly completion_fields: readonly string[] } | null;
+  readonly platform_credentials: { readonly provider: string; readonly configured: boolean } | null;
+  readonly capabilities: OutboundCapabilities;
+  readonly webhook_path: string | null;
+}
+export interface ChannelPlatformsResponse { readonly platforms: readonly ChannelPlatformDescriptor[] }

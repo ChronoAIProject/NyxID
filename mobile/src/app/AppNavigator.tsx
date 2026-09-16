@@ -24,7 +24,7 @@ export type RootStackParamList = {
   TermsOfService: undefined;
   PrivacyPolicy: undefined;
   DeviceLogin: { user_code?: string; start_scanner?: boolean } | undefined;
-  AgentKeyLogin: { user_code?: string } | undefined;
+  AgentKeyLogin: { user_code?: string; flow?: "agent-key" | "device"; mint?: boolean } | undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();

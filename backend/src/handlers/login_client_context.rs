@@ -9,6 +9,20 @@ use crate::{
 use axum::http::{HeaderMap, header};
 use std::net::{IpAddr, SocketAddr};
 
+pub(super) fn require_first_party_human(user: &crate::mw::auth::AuthUser) -> AppResult<()> {
+    use crate::mw::auth::AuthMethod;
+    if !matches!(
+        user.auth_method,
+        AuthMethod::Session | AuthMethod::AccessToken
+    ) || user.oauth_client_id.is_some()
+    {
+        return Err(AppError::Forbidden(
+            "A first-party human account session is required".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn resolve_client_ip(
     headers: &HeaderMap,
     addr: SocketAddr,
@@ -86,6 +100,7 @@ pub(super) fn capture_client_context(
     );
 
     Ok(InitiateInput {
+        requested_profile: body.requested_profile,
         client_label: body.client_label,
         client_user_agent: body.client_user_agent,
         client_ip: Some(client_ip.to_string()),

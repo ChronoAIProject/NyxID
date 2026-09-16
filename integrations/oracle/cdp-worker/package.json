@@ -8,7 +8,8 @@
   "scripts": {
     "start": "node worker.mjs",
     "check": "node --check worker.mjs",
-    "test": "node --test worker.test.mjs"
+    "test": "node --test worker.test.mjs",
+    "test:browser": "node --test session.browser.test.mjs"
   },
   "engines": { "node": ">=18" },
   "dependencies": {

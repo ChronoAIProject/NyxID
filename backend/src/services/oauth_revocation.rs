@@ -73,6 +73,7 @@ pub fn effective_revocation(provider: &ProviderConfig) -> Option<RevocationConfi
             .revocation_url
             .as_ref()
             .map(|url| RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: url.clone(),
                 auth: "inherit".to_string(),
@@ -218,10 +219,10 @@ async fn revoke_rfc7009_token(
         return Some(TokenOutcome::Skipped("no_credentials"));
     }
 
-    let mut params = vec![
-        ("token".to_string(), token.to_string()),
-        ("token_type_hint".to_string(), token_type_hint.to_string()),
-    ];
+    let mut params = vec![("token".to_string(), token.to_string())];
+    if config.request_encoding == "form" {
+        params.push(("token_type_hint".to_string(), token_type_hint.to_string()));
+    }
     let mut request = REVOCATION_CLIENT.post(&config.url);
 
     match (auth, creds) {
@@ -244,7 +245,11 @@ async fn revoke_rfc7009_token(
         _ => {}
     }
 
-    request = request.form(&params);
+    let Ok(request) =
+        oauth_flow::encode_oauth_request(request, provider, &config.request_encoding, &params)
+    else {
+        return Some(TokenOutcome::Skipped("unsupported_encoding"));
+    };
     Some(match send_revocation_request(request).await {
         Ok(response) if response.status.is_success() => TokenOutcome::Delivered,
         Ok(_) | Err(_) => TokenOutcome::SendFailed,
@@ -527,6 +532,7 @@ mod tests {
             token_url: Some("https://example.com/token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: style.to_string(),
                 url,
                 auth: auth.to_string(),
@@ -547,6 +553,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -564,6 +573,50 @@ mod tests {
             client_secret: Some("client-secret".to_string()),
             credential_user_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn notion_revocation_sends_json_basic_auth_and_version() {
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let mut provider = provider(
+            "rfc7009",
+            format!("{}/v1/oauth/revoke", server.uri()),
+            "inherit",
+            false,
+        );
+        provider.token_endpoint_auth_method = "client_secret_basic".into();
+        provider.revocation.as_mut().unwrap().request_encoding = "json".into();
+        provider
+            .oauth_request_headers
+            .insert("Notion-Version".into(), "2022-06-28".into());
+        for token in ["notion-access", "notion-refresh"] {
+            Mock::given(method("POST"))
+                .and(path("/v1/oauth/revoke"))
+                .and(header("content-type", "application/json"))
+                .and(header(
+                    "authorization",
+                    "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ=",
+                ))
+                .and(header("notion-version", "2022-06-28"))
+                .and(body_json(serde_json::json!({ "token": token })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let outcome = revoke_remote(request(
+            &provider,
+            RevocationScope::Token,
+            Some(credentials()),
+            Some("notion-access"),
+            Some("notion-refresh"),
+        ))
+        .await;
+        assert_eq!(outcome.access, Some(TokenOutcome::Delivered));
+        assert_eq!(outcome.refresh, Some(TokenOutcome::Delivered));
+        server.verify().await;
     }
 
     fn request<'a>(

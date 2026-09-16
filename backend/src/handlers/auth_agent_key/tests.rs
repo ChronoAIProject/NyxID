@@ -29,9 +29,23 @@ impl Drop for Server {
 }
 impl Server {
     async fn new(name: &str) -> Self {
+        Self::new_configured(name, |_| {}).await
+    }
+    async fn with_request_budget(name: &str) -> Self {
+        Self::new_configured(name, |state| {
+            // These handler assertions count admissions, not UTC window resets.
+            // Use the existing local limiter without rollover during the test;
+            // leave room for its cleanup path's window_secs * 2 calculation.
+            state.auth_agent_key_request_limiter =
+                crate::mw::rate_limit::PerIpRateLimiter::new(5, u64::MAX / 2).into();
+        })
+        .await
+    }
+    async fn new_configured(name: &str, configure: impl FnOnce(&mut AppState)) -> Self {
         let db = connect_transaction_test_database(name).await;
         crate::db::ensure_indexes(&db).await.unwrap();
-        let state = test_app_state(db);
+        let mut state = test_app_state(db);
+        configure(&mut state);
         let (_, private) = crate::routes::build_router();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -175,10 +189,82 @@ impl std::io::Write for TraceCapture {
     }
 }
 
+const ISOLATED_TRACE_TEST_ENV: &str = "NYXID_TEST_AGENT_KEY_TRACE_CHILD";
+
+async fn isolate_trace_test(test_name: &str) -> bool {
+    if std::env::var(ISOLATED_TRACE_TEST_ENV).as_deref() == Ok(test_name) {
+        return false;
+    }
+    // tracing-core's single-dispatcher cache can register a callsite as disabled
+    // from another libtest thread. A fresh process isolates that global cache.
+    // Inherit the database URI and LLVM_PROFILE_FILE (%p keeps child coverage).
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture", "--color", "never"])
+            .env(ISOLATED_TRACE_TEST_ENV, test_name)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("isolated tracing test timed out")
+    .expect("start isolated tracing test");
+    // Never forward captured output: a failing privacy assertion may mean it
+    // contains fixture secrets. Check the summary so a wrong filter cannot pass.
+    assert!(
+        output.status.success(),
+        "isolated tracing assertions failed: {test_name} ({})",
+        output.status
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;"),
+        "isolated tracing test must execute exactly one test"
+    );
+    true
+}
+
+#[tokio::test]
+async fn trace_capture_keeps_events_first_used_on_an_unsubscribed_thread() {
+    const TEST_NAME: &str = "handlers::auth_agent_key::tests::trace_capture_keeps_events_first_used_on_an_unsubscribed_thread";
+    fn emit() {
+        tracing::info!(outcome = "requested", "scoped_capture.first_use");
+    }
+
+    let capture = TraceCapture(Default::default());
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    if std::env::var(ISOLATED_TRACE_TEST_ENV).as_deref() != Ok(TEST_NAME) {
+        std::thread::spawn(|| {
+            tracing::dispatcher::with_default(&tracing::Dispatch::none(), emit);
+        })
+        .join()
+        .unwrap();
+    }
+    if isolate_trace_test(TEST_NAME).await {
+        return;
+    }
+    tracing::dispatcher::with_default(&dispatch, emit);
+    let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("scoped_capture.first_use"));
+    assert!(logs.contains("requested"));
+}
+
 #[tokio::test]
 async fn traces_record_hashed_ip_identifiers_and_outcomes_without_secrets() {
     use tracing::instrument::WithSubscriber;
-    let server = Server::new("akl_observability").await;
+    if isolate_trace_test(
+        "handlers::auth_agent_key::tests::traces_record_hashed_ip_identifiers_and_outcomes_without_secrets",
+    )
+    .await
+    {
+        return;
+    }
+    let server = Server::with_request_budget("akl_observability").await;
     let (actor, _) = server.human().await;
     let state = server.state.clone();
     let capture = TraceCapture(Default::default());
@@ -514,7 +600,7 @@ async fn enrolled_credential_executes_only_allowed_proxy_with_live_parent_bindin
 
 #[tokio::test]
 async fn public_request_preview_and_poll_need_no_account_and_never_return_browser_secrets() {
-    let server = Server::new("akl_public_http").await;
+    let server = Server::with_request_budget("akl_public_http").await;
     let (status, request) = server
         .post(
             "request",
@@ -548,7 +634,8 @@ async fn public_request_preview_and_poll_need_no_account_and_never_return_browse
         .await;
     assert_eq!(slow["error_code"], 11903);
     for _ in 0..4 {
-        server.post("request", None, json!({})).await;
+        let (status, _) = server.post("request", None, json!({})).await;
+        assert_eq!(status, StatusCode::OK);
     }
     let (status, limited) = server.post("request", None, json!({})).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);

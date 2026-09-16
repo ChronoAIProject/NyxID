@@ -334,8 +334,7 @@ mod tests {
     fn seeded_templates_match_code_contracts() {
         for seed in DEFAULT_PLATFORM_VENDOR_TEMPLATES {
             let Some(operation) = seed.operation else {
-                // Duffel is intentionally a credential template until a code
-                // operation is shipped; there is no contract to cross-check.
+                // Unbound templates provision credentials for future operations.
                 continue;
             };
             let operation =

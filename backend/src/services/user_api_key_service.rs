@@ -317,6 +317,17 @@ pub async fn create_api_key_from_provider_token(
         return Ok(existing);
     }
 
+    let api_key = api_key_from_provider_token(user_id, label, provider_config_id, provider_token)?;
+    collection.insert_one(&api_key).await?;
+    Ok(api_key)
+}
+
+pub(crate) fn api_key_from_provider_token(
+    user_id: &str,
+    label: &str,
+    provider_config_id: &str,
+    provider_token: &UserProviderToken,
+) -> AppResult<UserApiKey> {
     let credential_type = provider_token_type_to_api_key_type(&provider_token.token_type)?;
     let now = Utc::now();
 
@@ -346,8 +357,6 @@ pub async fn create_api_key_from_provider_token(
         created_at: now,
         updated_at: now,
     };
-
-    collection.insert_one(&api_key).await?;
 
     Ok(api_key)
 }
@@ -390,6 +399,45 @@ pub async fn sync_provider_token_to_api_keys_after_authorization(
 ) -> AppResult<()> {
     let authorized_at = bson::DateTime::from_chrono(Utc::now());
     sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, Some(authorized_at)).await
+}
+
+/// Apply an explicitly authorized API-key replacement in the transaction that
+/// stores its provider token. The supplied snapshot avoids syncing a later login.
+pub(crate) async fn replace_provider_api_key_in_transaction(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    token: &UserProviderToken,
+) -> AppResult<()> {
+    let filter = doc! {
+        "user_id": &token.user_id, "provider_config_id": &token.provider_config_id,
+        "connection_id": null, "status": {"$nin": ["revoked", "failed"]},
+        "credential_type": {"$ne": "node_managed"},
+    };
+    let keys = db.collection::<UserApiKey>(COLLECTION_NAME);
+    keys.update_many(
+        filter.clone(),
+        vec![doc! {"$set": {
+            "credential_epoch": credential_epoch_add_expr(),
+        }}],
+    )
+    .session(&mut *session)
+    .await?;
+    keys.update_many(
+        filter,
+        doc! {"$set": {
+            "credential_type": "api_key",
+            "credential_encrypted": optional_binary_bson(token.api_key_encrypted.as_ref()),
+            "access_token_encrypted": bson::Bson::Null,
+            "refresh_token_encrypted": bson::Bson::Null,
+            "token_scopes": bson::Bson::Null, "expires_at": bson::Bson::Null,
+            "status": "active", "error_message": bson::Bson::Null,
+            "updated_at": bson::DateTime::from_chrono(token.updated_at),
+            "last_authorized_at": bson::DateTime::from_chrono(token.updated_at),
+        }},
+    )
+    .session(&mut *session)
+    .await?;
+    Ok(())
 }
 
 async fn sync_provider_token_to_api_keys_impl(
@@ -940,6 +988,19 @@ pub async fn fail_oauth_placeholders(
                 .await
         }
     }
+}
+
+/// Expire abandoned channel attempts without touching completed OAuth connections.
+pub async fn expire_pending_channel_connections(db: &mongodb::Database) -> AppResult<u64> {
+    let result = db.collection::<UserApiKey>(COLLECTION_NAME)
+        .delete_many(doc! {
+            "source": "channel_onboarding",
+            "credential_type": "oauth2",
+            "status": "pending_auth",
+            "created_at": { "$lt": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::hours(1)) },
+        })
+        .await?;
+    Ok(result.deleted_count)
 }
 
 /// Lazy reconciliation of a single `pending_auth` OAuth placeholder. Called

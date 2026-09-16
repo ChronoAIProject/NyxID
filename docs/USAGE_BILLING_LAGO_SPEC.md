@@ -93,6 +93,7 @@ pub enum UsageStatus { Reserved, Forwarded, Finalized, Failed, Abandoned, DeadLe
 #[serde(rename_all = "snake_case")]
 pub enum CredentialClass {
     NyxidManagedMaster,        // catalog master credential NyxID owns/pays for → resale-eligible
+    NyxidPlatformOauthApp,     // shared OAuth app, user-authorized token  → platform only
     UserOwned,                 // user-stored BYO key (UserApiKey)        → platform only
     AgentOverrideUserOwned,    // per-agent binding swapped in a user key  → platform only
     NodeManaged,               // credential lives on the node            → platform only
@@ -104,36 +105,56 @@ pub struct ResaleUsage   { pub metric: BillingMetric, pub quantity: i64 }
 pub struct ResaleSpec    { pub metric: BillingMetric, pub lago_metric_code: String }
 ```
 
-### 3.1 `ServiceBilling` (resale layer; sub-struct on `DownstreamService`)
+### 3.1 `ServiceBilling` (catalog pricing and resale)
 
-Mirrors the `ServiceCapabilities` pattern (`models/downstream_service.rs:14-30, 266-268`). **There is
-no `billable` field** — resale is `resale_billable`; the platform layer is plan-level (Lago plan), not
-catalog config.
+The stored optional `DownstreamService.billing` retains all legacy fields:
+`platform_billable`, `platform_metric`, `platform_pricing`,
+`platform_pricing_cleanup_metric_code`, `resale_billable`, `resale_metric`, and
+`lago_resale_metric_code`. Absent billing remains free. NyxID-authored legacy
+platform prices use `platform_svc_{slug}`; legacy plan-authored rates remain valid.
 
-```rust
-// models/service_billing.rs
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
-pub struct ServiceBilling {
-    /// Resale (downstream value) charges — only honored when the FINAL CredentialClass is
-    /// NyxidManagedMaster (§3.0). Default false.
-    #[serde(default)]
-    pub resale_billable: bool,
-    #[serde(default)]
-    pub resale_metric: BillingMetric,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lago_resale_metric_code: Option<String>,
-}
-```
+Version 0.20 adds defaulted `byok_pricing: Option<LanePricing>` and
+`platform_key_pricing: Option<LanePricing>`, with independent optional cleanup
+markers `byok_pricing_cleanup_metric_code` and
+`platform_key_pricing_cleanup_metric_code`. `LanePricing` contains `metric`, exact
+decimal `credits_per_unit`, server-owned `lago_metric_code`, `sync_status`, and
+`sync_error`. Admin inputs use the same normalization, precision and bounds as
+legacy prices. Omitted lane fields on an update preserve existing lanes, so older
+admin clients cannot silently erase them. Explicit null clears a lane and records
+cleanup intent. The credential remains in the existing encrypted catalog master
+credential; pricing never stores a secret.
 
-On `DownstreamService`, sibling to `capabilities`:
+| Final credential class | Selected lane |
+| --- | --- |
+| `UserOwned`, `NyxidPlatformOauthApp`, `AgentOverrideUserOwned`, `NodeManaged` | `byok_pricing` |
+| `NyxidManagedMaster` | `platform_key_pricing` |
+| `NoAuth` | None; meter only |
 
-```rust
-#[serde(default, skip_serializing_if = "Option::is_none")]
-pub billing: Option<ServiceBilling>,
-```
+When either lane is present, lane mode supersedes the legacy platform block. A
+missing matching lane is free. A synced lane selects its configured metric and
+standard charge; a pending/failed matching lane falls back to the prior legacy
+configuration or free. No lanes preserves legacy billing unchanged. Resale remains
+independent with its existing master-credential and rollout gates.
 
-Platform metric codes are global constants: `platform_requests`, `platform_bytes`. `UserService`
-inherits resale config through `catalog_service_id`.
+Stable metric codes are `platform_svc_{slug}_byok` and `platform_svc_{slug}_pk`.
+Synchronization reuses the Lago standard-charge path on `LAGO_PLAN_CODE`, retaining
+the full plan charge array and every existing ID. Reconciliation retries pending,
+failed and removed lanes. Writes fence completion against price, metric and code;
+a stale sync after a clear recreates cleanup intent. Client responses expose the
+unit, decimal price and sync status without new Lago internals.
+
+Lane selection occurs in `BillingRouteContext` after final credential resolution
+and before the §4 meter and §5 wallet gate. Provider-reported tokens stay authoritative
+for JSON, SSE, and supported realtime usage events. Allowances fund actual units,
+then expiring grants fund microcredits, then the wallet funds the remainder. Only
+wallet-funded quantities reach Lago. Existing usage rows record the selected metric
+code and credential class; billing ledger entries reference those rows without any
+change to canonical field encoding, order, hash construction or verification.
+
+
+Lane-only admin updates preserve omitted legacy platform and resale fields, including
+the pending-sync fallback. Legacy billing-only updates retain their existing full-block
+semantics; omitted new lanes are always preserved, and explicit null clears a lane.
 
 **"Billing-active" rollup (R7).** A request is *billing-active* iff `ServiceBilling.resale_billable`
 (and the resolved credential is `NyxidManagedMaster`) **OR** the resolved billing owner is on a
@@ -153,6 +174,16 @@ endpoint when `resale_billable` (in `admin_anonymous_endpoints.rs`) — extend
 `validate_*_anonymous_compatibility` (`anonymous_endpoint_service.rs:104/113`). Returns 11304 (HTTP
 400) at write time. Public/anonymous proxy (`public_proxy.rs`, no `AuthUser`) can therefore never be
 billing-active.
+
+For shared OAuth apps (including X), admins can opt into
+`ServiceBilling.platform_charge_nyxid_credentials_only` alongside `platform_billable`
+and a per-request `platform_pricing`. The flag defaults to false, preserving existing
+platform billing. When true, only `NyxidManagedMaster` and `NyxidPlatformOauthApp`
+(`UserApiKey.credential_source = "platform"`) qualify for platform charges; BYO and
+legacy untagged keys, agent overrides, node-managed credentials and no-auth requests
+remain metered without platform charges. Apply the restriction after lane selection,
+so a configured BYOK lane cannot bypass it. Shared-app OAuth retains its prior
+user-token price lane for compatibility. Resale still requires `NyxidManagedMaster`.
 
 ### 3.2 `usage_meter` — durable ledger + reservation lifecycle
 
@@ -287,6 +318,18 @@ metadata pass out of it (or compute the context from the already-resolved `pre`/
 **after** the agent-credential override at `proxy.rs:1289-1300`, where the final credential is known —
 do **not** read the pre-override `has_server_credential`).
 
+Token capture checks both configured lanes, regardless of catalog slug or price sync
+state. JSON/SSE provider usage is authoritative. MCP keeps zero tokens for non-token
+services unless a response actually reports usage; token-metered responses without
+reported usage retain the existing estimate.
+
+Mixed billing lanes may use different units. Allowances match the actual request's
+selected platform metric at reservation and settlement. Admin allowance create/update
+accepts optional `metric`, validated against configured lane units (plus a legacy
+fallback unit while sync is pending/failed). Omitted `metric` defaults to BYOK's unit,
+otherwise platform key's unit, otherwise the legacy service default. Existing allowance
+rows retain their original unit; the UI offers a unit selector for mixed lanes.
+
 ### 4.1 `MeteredProxyContext`
 
 The emit-side handle, derived from `BillingRouteContext` + measured usage. `billing_request_id` is
@@ -414,8 +457,13 @@ pub enum PaysFrom { Personal, OrgWallet { org_id: String } }  // MemberWallet DE
 ```
 
 - `Direct` → personal wallet.
-- `AsOrg*` → **org wallet** (P1/P3 default). Per-member wallets + per-member spend caps are DEFERRED
-  (no org-billing-policy field exists yet — ADR open question).
+- `AsOrg*` → **org wallet** for org-owned credentials (`UserOwned`, `AgentOverrideUserOwned`,
+  `NodeManaged`, and `NyxidPlatformOauthApp`).
+- **Platform-key exception:** execution uses `BillingOwnerResolver::resolve_for_execution` with
+  the final credential class, after agent overrides. `NyxidManagedMaster` always selects the
+  requesting person's personal wallet and billing rollout, even when an org grant supplies
+  access through an org-owned service. Other classes delegate to the resource-owner resolver
+  and retain its org ACL. Approval ownership and rate limiting are independent and unchanged.
 - **Legacy `DownstreamService` path (R9):** `effective_owner_for_approval` is `None` there (set only in
   the `pre_resolved` arm, `proxy.rs:1187`). Fall back to the **actor's personal wallet**, and treat
   legacy-path requests as platform-metered only (never resale). Document this; the legacy path is still
@@ -544,8 +592,10 @@ rate-cache reservation sizing; entitlement decision table (incl. Unknown → fai
 - **Idempotent replay + dedup:** re-push same `transaction_id` → Lago dedups; `transaction_id_taken`
   422 → `lago_acked=true`, not dead-letter; per-layer + per-flush ids never collide.
 - **Connection-flush:** a WS session with K flushes emits K distinct `transaction_id`s → all K billed.
-- **Owner attribution:** org-member request bills the org wallet (`billing_owner_id`), not the actor;
-  legacy-path request bills the actor's personal wallet, platform-only.
+- **Owner attribution:** org-member BYOK requests bill the org wallet (`billing_owner_id`).
+  Platform-master-key requests bill the requesting person, including org-routed requests,
+  and use that person's rollout flag. An agent override retains org billing when its final
+  credential class is `AgentOverrideUserOwned`. Legacy-path requests use the personal wallet.
 - **Resale classification:** BYO key (and agent-override BYO) on a resale-billable catalog service →
   `CredentialClass != NyxidManagedMaster` → platform-only, no resale charge.
 - **Path coverage:** a billing-active service over each path (`/proxy` direct/node/WS, `/llm`,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useUserServices } from "@/hooks/use-user-services";
+import { useKeys } from "@/hooks/use-keys";
 import {
   Card,
   CardContent,
@@ -53,7 +53,7 @@ export function VerifyKeyCard({
   const firedSuccessRef = useRef(false);
   const loadingStartDispatchedRef = useRef(false);
 
-  const { data: userServices } = useUserServices();
+  const { data: userServices } = useKeys();
 
   useEffect(() => {
     return () => {
@@ -86,11 +86,22 @@ export function VerifyKeyCard({
       ),
     );
     return activeUserServices
-      .filter((s) => allowedSet.has(s.slug))
+      .filter(
+        (s) =>
+          allowedSet.has(s.slug) ||
+          (apiKey.allow_auto_connected_services &&
+            s.auto_connected &&
+            (apiKey.credential_source?.type === "org"
+              ? s.credential_source?.type === "org" &&
+                s.credential_source.org_id === apiKey.credential_source.org_id
+              : s.credential_source?.type !== "org")),
+      )
       .map((s) => ({ slug: s.slug, label: s.slug }));
   }, [
     apiKey.allow_all_services,
     apiKey.allowed_services,
+    apiKey.allow_auto_connected_services,
+    apiKey.credential_source,
     userServices,
   ]);
 

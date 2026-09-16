@@ -187,6 +187,8 @@ pub struct AppState {
     /// Per-channel rate limiter keyed by conversation_id, for the HTTP Event
     /// Gateway (NyxID#221). Distinct from `per_agent_limiter`.
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
+    /// Per-conversation admission for unsolicited channel messages.
+    pub per_conversation_initiate_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
     /// Per-upstream-message edit limiter for progressive channel relay edits.
     pub per_message_edit_limiter: mw::rate_limit::SharedPerMessageEditRateLimiter,
     /// Per-trigger token bucket for public trigger ingress.
@@ -541,6 +543,10 @@ async fn main() {
         .await
         .expect("Failed to seed default services");
 
+    services::inference_service::backfill(&db)
+        .await
+        .expect("Failed to backfill inference metadata");
+
     // Seed the admin-managed platform vendor provisioning templates. Existing
     // rows are never overwritten so operators can edit or disable templates.
     services::platform_vendor_template_service::seed_default_templates(&db, "system")
@@ -730,6 +736,14 @@ async fn main() {
         config.channel_relay_edit_rate_limit_burst,
     ));
 
+    let per_conversation_initiate_limiter =
+        Arc::new(mw::rate_limit::PerChannelEventLimiter::with_db(
+            db.clone(),
+            "channel_initiate",
+            config.channel_relay_initiate_rate_limit_per_second,
+            config.channel_relay_initiate_rate_limit_burst,
+        ));
+
     // Create shared state
     let billing = Arc::new(services::billing::BillingService::new(
         db.clone(),
@@ -918,6 +932,7 @@ async fn main() {
         billing_ledger_hmac_key,
         per_channel_event_limiter,
         per_message_edit_limiter,
+        per_conversation_initiate_limiter,
         per_trigger_limiter,
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         cloud_response_cache: Arc::new(
@@ -939,6 +954,20 @@ async fn main() {
         config.billing_reconcile_interval_secs,
     );
     spawn_broker_policy_refresh_task(state.clone());
+
+    let login_cleanup_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) =
+                services::oracle_login_profile_service::purge_expired(&login_cleanup_db).await
+            {
+                tracing::warn!(%error, "Oracle saved login cleanup failed");
+            }
+        }
+    });
 
     // Create rate limiters
     let global_rate_limiter = mw::rate_limit::create_rate_limiter(
@@ -963,6 +992,12 @@ async fn main() {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
+                if let Err(error) = services::auth_device_service::sweep_expired(&sweep_db).await {
+                    tracing::error!(
+                        error_code = error.error_code(),
+                        "Device login expiry sweep failed"
+                    );
+                }
                 if let Err(error) =
                     services::auth_agent_key_login_service::sweep_expired(&sweep_db).await
                 {
@@ -1085,6 +1120,45 @@ async fn main() {
                 .await
                 {
                     tracing::warn!("OAuth refresh sweep error: {e}");
+                }
+            }
+        });
+    }
+
+    if config.channel_poll_interval_secs > 0 {
+        let poll_state = state.clone();
+        let poll_interval = config.channel_poll_interval_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if services::channel_poll_service::sweep(&poll_state)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Channel poll sweep failed; retrying on the next tick");
+                }
+            }
+        });
+    }
+
+    {
+        let creation_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let service = services::telegram_new_service::TelegramNewService {
+                    db: &creation_state.db,
+                    keys: &creation_state.encryption_keys,
+                    config: &creation_state.config,
+                    api: services::telegram_new_api::TelegramApi::new(&creation_state.http_client),
+                };
+                if service.complete_pending_creations().await.is_err() {
+                    tracing::warn!("Telegram creation sweep failed; retrying on the next tick");
                 }
             }
         });
