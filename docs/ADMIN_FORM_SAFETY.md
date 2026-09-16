@@ -101,34 +101,40 @@ creation/provisioning workflow has a generic change-review dialog.
 
 Validation on 2026-09-17 covers the integrated changes, including the independent
 Astra and Fable review corrections. Both reviews closed with no known unresolved
-finding in the audited scope. Final source hashes were checked against Fable's
-review manifest.
+finding in the audited scope.
 
-- The final focused frontend run passed 103 tests in 18 files. These exercise
-  populated saved values, selections that become inactive or unavailable, exact
-  sparse bodies, cancellation, source switches, edited authorization conflicts,
-  unrelated renames after revocation, structured revocation preservation/clear,
-  secret redaction, delayed reads, failed refresh after successful DELETE,
-  deferred metadata hydration, rollout partial failures, SSH transitions, and
-  billing/platform metadata integration.
-- The initial full frontend sweep passed 3,270 tests and failed one outdated
-  provider-editor expectation. That test was corrected for the review step and
-  exact sparse body, then passed in the final focused run. The full suite was not
-  rerun after the final corrections; these overlapping counts are not additive.
+- Both final full frontend runs under Node 22 (normal and coverage) passed
+  3,284 tests in 329 files. Measured line coverage was 68.87%.
+  Regressions exercise populated saved values, selections that become inactive
+  or unavailable, exact sparse bodies, cancellation, source switches, edited
+  authorization conflicts, unrelated renames after revocation, structured
+  revocation preservation/clear, secret redaction, delayed reads, failed refresh
+  after successful DELETE, deferred metadata hydration, rollout partial
+  failures, SSH transitions, and billing/platform metadata integration.
+- CI exposed a native multiple-select interaction failure in the DOM simulation
+  after cancelling a nested dialog. The unit tests now cover conflict recovery
+  through reload and separately prove that a name-only edit preserves a
+  concurrent authorization revocation without reopening. The permanent Chromium
+  regression covers cancelling the review and deselecting a role in place.
+  No production code changed for this test-environment correction.
 - The final production build passed TypeScript, the main Vite build, the separate
   credential-accept build, and the mock-footprint assertion. Full ESLint passed
   with 27 existing warnings outside the change; lint also passed on the final
   changed frontend files.
-- Nine Chromium checks passed: six credential scenarios, two role-editor checks
-  at desktop and mobile widths, and successful credential deletion followed by a
-  failed read and read-only retry. They verify redaction, confirmation before
-  writes, cancellation preserving drafts, exact sparse requests, and a DELETE
-  count of one through recovery.
+- Eleven Chromium checks passed: six credential scenarios, four role/group
+  editor checks at desktop and mobile widths, and successful credential deletion
+  followed by a failed read and read-only retry. They verify redaction,
+  confirmation before writes, cancellation preserving drafts, exact sparse
+  requests, and a DELETE count of one through recovery. The group checks also
+  observe a remote role revocation, block the pending authorization change, and
+  allow a subsequent name-only save without restoring that role.
 - All 349 selected backend tests passed across 15 affected handler/service
   modules against an isolated MongoDB 8.0.12 replica set, with no ignored tests
   or database skips. The test executable was compiled from the final backend
   source with debug symbols disabled for the backend crate; test assertions
-  were unchanged.
+  were unchanged. Full backend CI subsequently passed all 6,120 tests with zero
+  skips; backend coverage and Clippy also passed. Backend source did not change
+  during the frontend test correction.
 - Workspace Clippy passed with warnings denied (`cargo clippy --workspace
   --all-targets -- -D warnings`). Rust formatting and whitespace checks passed.
 
