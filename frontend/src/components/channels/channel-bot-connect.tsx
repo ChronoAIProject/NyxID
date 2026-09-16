@@ -1,5 +1,4 @@
-import { useEffect, useState, type ComponentType, type ReactNode } from "react";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { useState, type ComponentType, type ReactNode } from "react";
 import type { UseFormReturn } from "react-hook-form";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
 import { CHANNEL_PLATFORMS } from "@/lib/channel-platforms";
@@ -29,7 +28,7 @@ const CONNECT_COMPONENTS: Partial<
 
 export function ChannelBotConnect(props: ChannelBotConnectProps) {
   const Connect = CONNECT_COMPONENTS[props.platform] ?? ManagedBotConnect;
-  return <Connect {...props} />;
+  return <Connect key={props.platform} {...props} />;
 }
 
 function ManagedBotConnect({
@@ -50,19 +49,6 @@ function ManagedBotConnect({
   const Connect = descriptor.managedFlow
     ? MANAGED_FLOW_COMPONENTS[descriptor.managedFlow].Connect
     : undefined;
-  const navigate = useNavigate();
-  const search = useSearch({ strict: false });
-
-  useEffect(() => {
-    if (search.connect === "telegram-new") {
-      void navigate({
-        to: "/channel-bots",
-        search: { connect: descriptor.managedFlow ? platform : undefined },
-        replace: true,
-      });
-    }
-  }, [search.connect, descriptor.managedFlow, platform, navigate]);
-
   return (
     <>
       {renderFields({ disabled: false })}

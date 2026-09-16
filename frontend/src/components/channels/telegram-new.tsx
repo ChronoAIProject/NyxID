@@ -166,7 +166,7 @@ export function TelegramNew({
     request?.status === "ready" || request?.status === "provisioning";
   const connected = request?.status === "connected";
   return (
-    <div className="space-y-4 rounded-xl border border-border bg-card p-4 sm:p-5">
+    <div className="space-y-4 break-words rounded-xl border border-border bg-card p-4 sm:p-5">
       {error && <ErrorBanner message={error.message} />}
       {(connecting && request?.auto_connect) || connected ? (
         <div className="space-y-3">
@@ -211,7 +211,7 @@ export function TelegramNew({
               <p className="text-xs text-muted-foreground">
                 Telegram didn’t open?{" "}
                 <a
-                  className="underline"
+                  className="ph-no-capture underline"
                   href={launchUrl}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -330,6 +330,7 @@ export function TelegramNew({
                 void cancel
                   .mutateAsync(request.id)
                   .then(async () => {
+                    if (!active.current || currentActor.current !== actor) return;
                     setHandoff(null);
                     await onCancelled?.();
                   })

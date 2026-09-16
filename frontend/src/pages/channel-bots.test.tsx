@@ -308,3 +308,164 @@ it("shows the manager configuration message inside the modal without managed onb
   ).toBe(false);
   expect(dialog.queryByLabelText("Bot Token")).not.toBeInTheDocument();
 });
+
+it("locks the destination and label while the start request is still being saved", async () => {
+  let finish!: () => void;
+  post.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = () => {
+          saved = request;
+          resolve({
+            request,
+            launch_url: "https://t.me/NyxSetupBot?start=private-challenge",
+          });
+        };
+      }),
+  );
+  const user = userEvent.setup();
+  await setup(
+    `/channel-bots?connect=telegram-new&label=Saved&target_org_id=${orgId}`,
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  await user.click(
+    await dialog.findByRole("button", { name: "Continue in Telegram" }),
+  );
+  try {
+    expect(dialog.getByLabelText("Label", { exact: true })).toBeDisabled();
+    expect(dialog.getByRole("combobox", { name: "Scope" })).toBeDisabled();
+  } finally {
+    await act(async () => finish());
+  }
+});
+
+it("does not reopen a dismissed modal when a slow cancellation completes", async () => {
+  saved = request;
+  let finish!: () => void;
+  remove.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = () => {
+          saved = null;
+          resolve({});
+        };
+      }),
+  );
+  const user = userEvent.setup();
+  const view = await setup(
+    `/channel-bots?connect=telegram-new&request_id=${request.id}`,
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  await user.click(await dialog.findByRole("button", { name: "Cancel setup" }));
+  await user.click(dialog.getByRole("button", { name: "Close" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await act(async () => finish());
+  await waitFor(() => expect(view.client.isMutating()).toBe(0));
+  expect(view.router.state.location.search.connect).toBeUndefined();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(remove).toHaveBeenCalledExactlyOnceWith(
+    `${root}/requests/${request.id}`,
+  );
+});
+
+it("honors a later Telegram entry while the Add Bot dialog is already open", async () => {
+  const user = userEvent.setup();
+  const view = await setup("/channel-bots");
+  await user.click(screen.getByRole("button", { name: "Add Bot" }));
+  expect(
+    within(await screen.findByRole("dialog")).getByLabelText("Bot Token"),
+  ).toBeVisible();
+  await act(() =>
+    view.router.navigate({
+      to: "/channel-bots",
+      search: {
+        connect: "telegram-new",
+        label: "Incoming draft",
+        target_org_id: orgId,
+      },
+    }),
+  );
+  const dialog = within(screen.getByRole("dialog"));
+  expect(
+    await dialog.findByRole("button", { name: "Continue in Telegram" }),
+  ).toBeVisible();
+  expect(dialog.getByLabelText("Label", { exact: true })).toHaveValue(
+    "Incoming draft",
+  );
+  expect(dialog.getByRole("combobox", { name: "Scope" })).toHaveValue(orgId);
+});
+
+it("a slow start finishing after dismissal stays saved without reopening or cancelling", async () => {
+  let finish!: () => void;
+  post.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = () => {
+          saved = request;
+          resolve({
+            request,
+            launch_url: "https://t.me/NyxSetupBot?start=private-challenge",
+          });
+        };
+      }),
+  );
+  const user = userEvent.setup();
+  const view = await setup(
+    `/channel-bots?connect=telegram-new&label=Saved&target_org_id=${orgId}`,
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  await user.click(
+    await dialog.findByRole("button", { name: "Continue in Telegram" }),
+  );
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await act(async () => finish());
+  await waitFor(() => expect(view.client.isMutating()).toBe(0));
+  expect(view.router.state.location.search.connect).toBeUndefined();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(remove).not.toHaveBeenCalled();
+  await user.click(
+    await screen.findByRole("button", { name: "Resume Telegram setup" }),
+  );
+  expect(
+    within(await screen.findByRole("dialog")).getByLabelText("Label", {
+      exact: true,
+    }),
+  ).toHaveValue(request.label);
+  expect(post).toHaveBeenCalledTimes(1);
+});
+
+it("re-seeds scope when reopening Add Bot after changing the list scope", async () => {
+  const user = userEvent.setup();
+  await setup("/channel-bots");
+  await user.click(screen.getByRole("button", { name: "Add Bot" }));
+  let dialog = within(await screen.findByRole("dialog"));
+  expect(dialog.getByRole("combobox", { name: "Scope" })).toHaveValue("");
+  await user.click(dialog.getByRole("button", { name: /^Cancel$/ }));
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Scope" }),
+    orgId,
+  );
+  await user.click(screen.getByRole("button", { name: "Add Bot" }));
+  dialog = within(await screen.findByRole("dialog"));
+  expect(dialog.getByRole("combobox", { name: "Scope" })).toHaveValue(orgId);
+  await user.type(dialog.getByLabelText("Label", { exact: true }), "Org bot");
+  await user.type(
+    dialog.getByLabelText("Bot Token", { exact: true }),
+    "fixture-token",
+  );
+  post.mockResolvedValue({ id: "org-bot", platform_bot_username: "OrgBot" });
+  await user.click(
+    dialog.getByRole("button", { name: /^Add Bot$/ }),
+  );
+  expect(post).toHaveBeenCalledExactlyOnceWith("/channel-bots", {
+    platform: "telegram",
+    label: "Org bot",
+    target_org_id: orgId,
+    bot_token: "fixture-token",
+  });
+});

@@ -20,7 +20,7 @@ import {
   type CreateDeviceConversationFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { CHANNEL_PLATFORMS, channelBotRegistrationPayload } from "@/lib/channel-platforms";
+import { CHANNEL_PLATFORMS, channelBotRegistrationPayload, managedConnectPlatform } from "@/lib/channel-platforms";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -256,11 +256,22 @@ function EmptyState() {
   );
 }
 
+const EMPTY_BOT_CREDENTIALS = {
+  bot_token: "",
+  app_id: "",
+  app_secret: "",
+  verification_token: "",
+  encrypt_key: "",
+  public_key: "",
+  phone_number_id: "",
+  waba_id: "",
+};
+
 function CreateBotDialog({
   open,
   onOpenChange,
   defaultOrgId,
-  defaultPlatform = "telegram",
+  defaultPlatform,
   defaultLabel = "",
 }: {
   readonly open: boolean;
@@ -282,11 +293,9 @@ function CreateBotDialog({
     mode: "onChange",
     resolver: zodResolver(createChannelBotSchema),
     defaultValues: {
-      platform: defaultPlatform,
-      bot_token: "",
+      ...EMPTY_BOT_CREDENTIALS,
+      platform: defaultPlatform ?? "telegram",
       label: defaultLabel,
-      verification_token: "",
-      encrypt_key: "",
       target_org_id: defaultOrgId ?? undefined,
     },
   });
@@ -297,6 +306,7 @@ function CreateBotDialog({
     setValue,
     control,
     reset,
+    getValues,
     formState: { errors, isDirty, isValid },
   } = form;
 
@@ -304,6 +314,35 @@ function CreateBotDialog({
   const setupNote = CHANNEL_PLATFORMS[platform].setupNote;
   const targetOrgId = useWatch({ control, name: "target_org_id" }) ?? null;
   const label = useWatch({ control, name: "label" });
+  const previousPlatform = useRef(defaultPlatform);
+
+  // Opening remounts the form with the current page scope. A new deep link
+  // can also select a flow while this dialog is already open.
+  useEffect(() => {
+    const changed = previousPlatform.current !== defaultPlatform;
+    previousPlatform.current = defaultPlatform;
+    if (!changed || !defaultPlatform || defaultPlatform === getValues("platform")) return;
+    reset({
+      ...EMPTY_BOT_CREDENTIALS,
+      platform: defaultPlatform,
+      label: defaultLabel,
+      target_org_id: defaultOrgId ?? undefined,
+    });
+  }, [defaultPlatform, defaultLabel, defaultOrgId, getValues, reset]);
+
+  function changePlatform(next: ChannelPlatform) {
+    reset({
+      ...EMPTY_BOT_CREDENTIALS,
+      platform: next,
+      label,
+      target_org_id: targetOrgId ?? undefined,
+    }, { keepDefaultValues: true });
+    void navigate({
+      to: "/channel-bots",
+      search: { connect: managedConnectPlatform(next), label, target_org_id: targetOrgId ?? undefined },
+      replace: true,
+    });
+  }
 
   function onSubmit(data: CreateChannelBotFormData) {
     if (CHANNEL_PLATFORMS[data.platform].fields.length === 0) return;
@@ -403,9 +442,9 @@ function CreateBotDialog({
                   <Label htmlFor="platform">Platform</Label>
                   <Select
                     value={platform}
-                    onValueChange={(value) => setValue("platform", value as ChannelPlatform)}
+                    onValueChange={(value) => changePlatform(value as ChannelPlatform)}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id="platform">
                       <SelectValue placeholder="Select platform" />
                     </SelectTrigger>
                     <SelectContent>
@@ -983,7 +1022,7 @@ function DeviceChannelsSection({
 
 function ChannelBotsList() {
   const navigate = useNavigate();
-  const telegram = useTelegramNewConfiguration();
+  const telegram = useTelegramNewConfiguration(undefined, false);
   const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; label?: string; target_org_id?: string; request_id?: string };
   const [scopeOrgId, setScopeOrgId] = useState<string | null>(search.target_org_id ?? null);
   const { data: bots, isLoading, error, refetch } = useChannelBots({ orgId: scopeOrgId });

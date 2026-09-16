@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useIsMutating } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useTelegramNewConfiguration } from "@/hooks/use-telegram-new";
 import { useAuthStore } from "@/stores/auth-store";
@@ -15,7 +16,8 @@ export function TelegramNewConnect({
   const navigate = useNavigate();
   const search = useSearch({ strict: false });
   const actor = useAuthStore((state) => state.user?.id);
-  const configuration = useTelegramNewConfiguration(search.request_id);
+  const configuration = useTelegramNewConfiguration(search.request_id, false);
+  const pending = useIsMutating({ mutationKey: ["telegram-new", actor] }) > 0;
   const saved = configuration.data?.request;
   const request =
     saved && !["cancelled", "expired"].includes(saved.status)
@@ -84,7 +86,7 @@ export function TelegramNewConnect({
   return (
     <>
       {renderFields({
-        disabled: Boolean(request) || configuration.isPending,
+        disabled: Boolean(request) || configuration.isPending || pending,
         scopeDescription: request
           ? request.status === "provisioning" || request.status === "connected"
             ? "These details are saved. You can manage the bot once it is connected."
