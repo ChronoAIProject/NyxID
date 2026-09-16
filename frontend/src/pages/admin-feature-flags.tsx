@@ -570,8 +570,8 @@ function FlagCard({
 /**
  * Inline editor for a flag's admin-authored description and owner.
  *
- * Seeded once when the card opens: a background list refetch must never
- * overwrite what an admin is mid-way through typing. Saving sends only changed fields;
+ * Pristine editors follow refreshed metadata, including before first expansion.
+ * Once editing begins, refetches preserve the draft. Saving sends only changed fields;
  * a blank field explicitly clears that side of the metadata (description falls back to
  * the code-declared text).
  */
@@ -591,6 +591,7 @@ function FlagMetadataEditor({
     owner: flag.owner ?? null,
   };
   const [baseline, setBaseline] = useState(current);
+  const [observed, setObserved] = useState(current);
   const next = {
     description: description.trim() || null,
     owner: owner.trim() || null,
@@ -617,6 +618,21 @@ function FlagMetadataEditor({
     (pending) => hasFieldConflicts(pending.before, current, pending.body),
     flag.key,
   );
+
+  if (
+    observed.description !== current.description ||
+    observed.owner !== current.owner
+  ) {
+    setObserved(current);
+    const pristine =
+      description === (baseline.description ?? "") &&
+      owner === (baseline.owner ?? "");
+    if (pristine && !review.saving && !update.isPending) {
+      setBaseline(current);
+      setDescription(current.description ?? "");
+      setOwner(current.owner ?? "");
+    }
+  }
 
   function save() {
     review.review(

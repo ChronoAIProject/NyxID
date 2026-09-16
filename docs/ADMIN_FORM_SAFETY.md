@@ -3,7 +3,8 @@
 Admin edit forms capture saved values when editing begins. Service and provider
 pages mount their controls after the first successful load. Background loading,
 refetch failures with cached data, and same-record refreshes retain open drafts.
-Feature-flag cards retain drafts when collapsed or filtered out. Switching the
+Feature-flag cards retain drafts when collapsed or filtered out. Pristine metadata
+editors follow refreshed saved values, including before a card is first opened. Switching the
 record ID ends that editor's lifetime, including any pending review; endpoint
 editors also include the parent service ID in their identity.
 

@@ -420,7 +420,7 @@ describe("AdminFeatureFlagsPage", () => {
     expect(screen.getByText("experimental:ai-assistant")).toBeInTheDocument();
   });
 
-  it("saves an edited description and owner as a full replace", async () => {
+  it("PATCHes only the edited description and owner after review", async () => {
     mockUseFlags.mockReturnValue({
       data: { flags: [flagFixture()] },
       isLoading: false,
@@ -591,6 +591,96 @@ describe("AdminFeatureFlagsPage", () => {
     ).toBeDisabled();
     expect(screen.queryByText("Apply changes")).not.toBeInTheDocument();
   });
+});
+
+it.each([false, true])(
+  "hydrates pristine metadata after a refetch (previously opened: %s)",
+  (opened) => {
+    mockUseFlags.mockReturnValue({
+      data: {
+        flags: [
+          flagFixture({
+            owner: "Old owner",
+            custom_description: "Old description",
+          }),
+        ],
+      },
+      isLoading: false,
+      error: null,
+    });
+    const view = render(<AdminFeatureFlagsPage />);
+    if (opened) fireEvent.click(screen.getByText("experimental:ai-assistant"));
+    mockUseFlags.mockReturnValue({
+      data: {
+        flags: [
+          flagFixture({
+            owner: "New owner",
+            custom_description: "New description",
+          }),
+        ],
+      },
+      isLoading: false,
+      error: null,
+    });
+    view.rerender(<AdminFeatureFlagsPage />);
+    if (!opened) fireEvent.click(screen.getByText("experimental:ai-assistant"));
+    expect(screen.getByLabelText("Owner — who to ask about it")).toHaveValue(
+      "New owner",
+    );
+    expect(
+      screen.getByLabelText("Description — what this flag controls"),
+    ).toHaveValue("New description");
+    expect(screen.getByRole("button", { name: "Save details" })).toBeDisabled();
+    expect(
+      screen.queryByText(/Saved values changed while/),
+    ).not.toBeInTheDocument();
+    expect(mockSetMeta).not.toHaveBeenCalled();
+  },
+);
+
+it("retains a dirty metadata draft through a changed refetch while collapsed and filtered", () => {
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [flagFixture({ owner: "Old owner", custom_description: "Saved" })],
+    },
+    isLoading: false,
+    error: null,
+  });
+  const view = render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.change(screen.getByLabelText("Owner — who to ask about it"), {
+    target: { value: "Draft owner" },
+  });
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.change(screen.getByLabelText("Search feature flags"), {
+    target: { value: "hidden" },
+  });
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Remote owner",
+          custom_description: "Remote description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  fireEvent.change(screen.getByLabelText("Search feature flags"), {
+    target: { value: "" },
+  });
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  expect(screen.getByLabelText("Owner — who to ask about it")).toHaveValue(
+    "Draft owner",
+  );
+  expect(
+    screen.getByLabelText("Description — what this flag controls"),
+  ).toHaveValue("Saved");
+  expect(screen.getByRole("button", { name: "Save details" })).toBeDisabled();
+  expect(screen.getByText(/Saved values changed while/)).toBeInTheDocument();
+  expect(mockSetMeta).not.toHaveBeenCalled();
 });
 
 it("retains metadata drafts across cached errors, filtering and collapse, and patches only the edited field", async () => {
