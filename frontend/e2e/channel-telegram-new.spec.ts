@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mockDashboard } from "./managed-onboarding-fixtures";
+import { managedBot, mockDashboard } from "./managed-onboarding-fixtures";
 import type { TelegramNewRequest } from "../src/schemas/telegram-new";
 
 const requestId = "3c638c7f-210a-44fc-9b67-f6c878d67c54";
@@ -16,6 +16,12 @@ for (const width of [1440, 390]) {
     const starts: unknown[] = [];
     const launches: string[] = [];
     const connects: unknown[] = [];
+    const cancellations: string[] = [];
+    const managedRequests: string[] = [];
+    page.on("request", (request) => {
+      if (request.url().includes("managed-onboarding/telegram-new"))
+        managedRequests.push(request.url());
+    });
     // Keep the external handoff inside the browser harness.
     await context.route("https://t.me/**", (route) =>
       route.fulfill({
@@ -25,6 +31,20 @@ for (const width of [1440, 390]) {
     );
     async function mockSetup(target: Page) {
       await mockDashboard(target);
+      await target.route(`**/api/v1/channel-bots/${requestId}`, (route) =>
+        route.fulfill({
+          json: {
+            ...managedBot,
+            id: requestId,
+            platform: "telegram-new",
+            label: "Mobile support",
+            platform_bot_username: "MobileSupportBot",
+            status: "active",
+            webhook_registered: true,
+            managed_setup: null,
+          },
+        }),
+      );
       await target.route("**/api/v1/orgs", (route) =>
         route.fulfill({
           json: {
@@ -52,6 +72,10 @@ for (const width of [1440, 390]) {
                     : request,
               },
             });
+          } else if (method === "DELETE") {
+            cancellations.push(path);
+            request = null;
+            await route.fulfill({ json: {} });
           } else if (path.endsWith("/connect")) {
             connects.push(route.request().postDataJSON());
             await route.fulfill({
@@ -107,21 +131,28 @@ for (const width of [1440, 390]) {
       .click();
     await page.getByRole("option", { name: "Telegram", exact: true }).click();
     await expect(page).toHaveURL(/connect=telegram-new/);
-    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(dialog).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "Create a Telegram bot" }),
+      dialog.getByRole("heading", { name: "Add Channel Bot" }),
     ).toBeVisible();
-    await page.getByLabel("Bot label in NyxID").fill("Mobile support");
-    await page.getByRole("combobox", { name: "Connect to" }).click();
+    await expect(
+      page.getByRole("heading", {
+        name: "Channel Bots",
+        exact: true,
+        includeHidden: true,
+      }),
+    ).toBeAttached();
+    await dialog.getByLabel("Label", { exact: true }).fill("Mobile support");
+    await dialog.getByRole("combobox", { name: "Scope" }).click();
     await page.getByRole("option", { name: "Support team" }).click();
     await expect(page).toHaveURL(new RegExp(orgId));
     await page.reload();
-    await expect(page.getByLabel("Bot label in NyxID")).toHaveValue(
+    await expect(dialog.getByLabel("Label", { exact: true })).toHaveValue(
       "Mobile support",
     );
-    await expect(
-      page.getByRole("combobox", { name: "Connect to" }),
-    ).toContainText("Support team");
+    await expect(dialog.getByRole("combobox", { name: "Scope" })).toContainText(
+      "Support team",
+    );
     const popupOpened = page.waitForEvent("popup");
     await page
       .getByRole("button", { name: "Continue in Telegram", exact: true })
@@ -146,9 +177,9 @@ for (const width of [1440, 390]) {
         .getByRole("list", { name: "Telegram setup steps" })
         .getByRole("listitem"),
     ).toHaveCount(2);
-    await expect(page.getByLabel("Bot label in NyxID")).toBeDisabled();
+    await expect(dialog.getByLabel("Label", { exact: true })).toBeDisabled();
     await expect(
-      page.getByRole("combobox", { name: "Connect to" }),
+      dialog.getByRole("combobox", { name: "Scope" }),
     ).toBeDisabled();
     await page.reload();
     const reopened = page.waitForEvent("popup");
@@ -177,10 +208,52 @@ for (const width of [1440, 390]) {
         () => document.documentElement.scrollWidth <= window.innerWidth,
       ),
     ).toBe(true);
-    await page.setViewportSize({ width, height: 2100 });
-    await page
-      .getByRole("region", { name: "Telegram bot setup" })
-      .screenshot({ path: `/tmp/nyxbot-creation-setup-${width}.png` });
+    await page.setViewportSize({ width, height: 700 });
+    await expect
+      .poll(() =>
+        dialog.evaluate((element) => element.getBoundingClientRect().height),
+      )
+      .toBeLessThanOrEqual(700 * 0.9 + 1);
+    const dimensions = await dialog.evaluate((element) => ({
+      height: element.getBoundingClientRect().height,
+      width: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
+      overflowY: getComputedStyle(element).overflowY,
+    }));
+    expect(dimensions.height).toBeLessThanOrEqual(700 * 0.9 + 1);
+    expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.width);
+    expect(dimensions.overflowY).toBe("auto");
+    await dialog.hover();
+    await page.mouse.wheel(0, 2000);
+    await dialog
+      .getByRole("button", { name: "Cancel setup", exact: true })
+      .scrollIntoViewIfNeeded();
+    await expect(
+      dialog.getByRole("button", { name: "Cancel setup", exact: true }),
+    ).toBeInViewport();
+    if (dimensions.scrollHeight > dimensions.clientHeight) {
+      await expect
+        .poll(() => dialog.evaluate((element) => element.scrollTop))
+        .toBeGreaterThan(0);
+    }
+    await page.screenshot({
+      path: `/tmp/nyxbot-creation-setup-bottom-${width}.png`,
+    });
+    await dialog.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await page.screenshot({ path: `/tmp/nyxbot-creation-setup-${width}.png` });
+
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page).not.toHaveURL(/connect=telegram-new/);
+    await page.reload();
+    await expect(dialog).toHaveCount(0);
+    await page.getByRole("button", { name: "Resume Telegram setup" }).click();
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("Label", { exact: true })).toBeDisabled();
 
     await page.close();
     const returned = await context.newPage();
@@ -191,11 +264,11 @@ for (const width of [1440, 390]) {
     await returned
       .getByRole("button", { name: "Resume Telegram setup" })
       .click();
-    await expect(returned.getByLabel("Bot label in NyxID")).toHaveValue(
-      "Mobile support",
-    );
     await expect(
-      returned.getByRole("combobox", { name: "Connect to" }),
+      returned.getByRole("dialog").getByLabel("Label", { exact: true }),
+    ).toHaveValue("Mobile support");
+    await expect(
+      returned.getByRole("dialog").getByRole("combobox", { name: "Scope" }),
     ).toContainText("Support team");
     request = {
       ...request!,
@@ -231,5 +304,84 @@ for (const width of [1440, 390]) {
     );
     expect(connects).toEqual([]);
     expect(starts).toHaveLength(1);
+    expect(cancellations).toEqual([]);
+    expect(managedRequests).toEqual([]);
   });
 }
+
+test("pending Telegram bot detail resumes in the modal and platform changes keep it open", async ({
+  page,
+}) => {
+  const writes: string[] = [];
+  await mockDashboard(page);
+  await page.route(`**/api/v1/channel-bots/${requestId}`, (route) =>
+    route.fulfill({
+      json: {
+        ...managedBot,
+        id: requestId,
+        platform: "telegram-new",
+        label: "Saved support",
+        status: "pending",
+        managed_setup: null,
+      },
+    }),
+  );
+  await page.route("**/api/v1/channel-bots/telegram-new**", async (route) => {
+    if (route.request().method() !== "GET")
+      writes.push(route.request().method());
+    await route.fulfill({
+      json: {
+        available: true,
+        manager_username: "NyxSetupBot",
+        request: {
+          id: requestId,
+          status: "waiting_telegram",
+          revision: 1,
+          owner_user_id: "test-user",
+          label: "Saved support",
+          auto_connect: true,
+          expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+          telegram_bot_id: null,
+          bot_username: null,
+          channel_bot_id: null,
+        },
+      },
+    });
+  });
+  await page.route("**/api/v1/channel-bots", async (route) => {
+    if (route.request().method() !== "GET")
+      writes.push(route.request().method());
+    await route.fulfill({ json: { bots: [], total: 0 } });
+  });
+  await page.goto(`/channel-bots/${requestId}`);
+  await page.getByRole("link", { name: "Continue Telegram setup" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Label", { exact: true })).toHaveValue(
+    "Saved support",
+  );
+  await expect(dialog.getByLabel("Label", { exact: true })).toBeDisabled();
+  await dialog
+    .getByRole("combobox")
+    .filter({ hasText: /^Telegram$/ })
+    .click();
+  await page
+    .getByRole("option", { name: "Telegram bot token", exact: true })
+    .click();
+  await expect(dialog).toBeVisible();
+  await expect(page).not.toHaveURL(/connect=telegram-new/);
+  await expect(dialog.getByLabel("Label", { exact: true })).toBeEnabled();
+  await dialog.getByLabel("Bot Token", { exact: true }).fill("existing-secret");
+  await dialog
+    .getByRole("combobox")
+    .filter({ hasText: "Telegram bot token" })
+    .click();
+  await page.getByRole("option", { name: "Telegram", exact: true }).click();
+  await expect(dialog.getByLabel("Label", { exact: true })).toBeDisabled();
+  await expect(page).toHaveURL(new RegExp(`request_id=${requestId}`));
+  await dialog.locator("form").dispatchEvent("submit");
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(writes).toEqual([]);
+  expect(page.url()).not.toContain("existing-secret");
+});
