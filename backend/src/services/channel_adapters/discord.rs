@@ -40,9 +40,10 @@ const CHANNEL_GROUP_DM: u64 = 3;
 ///
 /// Stateless -- all state lives in the [`ChannelBot`] document and the Discord
 /// API itself.
-/// Edits use the channel endpoint only. Interaction follow-ups sent through a
-/// webhook cannot be edited here after their interaction token expires; there
-/// is no webhook-edit path.
+/// NyxID always edits through `PATCH /channels/{channel_id}/messages/{message_id}`
+/// with the bot token and never through the interaction-webhook edit endpoint,
+/// so edits that Discord only permits via the interaction token (for example
+/// ephemeral interaction responses) are not supported and surface as a classified refusal.
 pub struct DiscordAdapter {
     base_url: String,
 }

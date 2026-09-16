@@ -316,7 +316,7 @@ Proactive sends require `addressable`, `allow_agent_initiated`, and `capabilitie
 - **Platform support:**
   - Lark / Feishu: text edits via `PUT /im/v1/messages/{id}`, card edits via `PATCH /im/v1/messages/{id}` (pass the new card in `reply.metadata.card`).
   - Telegram / telegram-new: `editMessageText` with Markdown, matching sends. Ordinary bot messages have a 48-hour edit window; identical edits succeed.
-  - Discord: `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token. Interaction follow-ups sent via a webhook are not editable through the channel endpoint after token expiry; there is no webhook-edit path.
+  - Discord: NyxID always edits through `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token and never through the interaction-webhook edit endpoint, so edits that Discord only permits via the interaction token (for example ephemeral interaction responses) are not supported and surface as a classified refusal.
   - Slack: `chat.update`; `reply.metadata.blocks` is passed through when present.
   - WhatsApp / X / OpenClaw: `501` with `code="edit_unsupported"`. Degrade to a final `/reply` at turn end.
   - Device channels: `400 device_channel_reply_not_allowed` (device conversations have no reply surface).

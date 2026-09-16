@@ -203,7 +203,7 @@ sequenceDiagram
 An assigned agent API key can edit both anchored replies and agent-initiated messages. A per-callback reply token can edit only replies anchored to its bound inbound message, and only after its JTI has been consumed by `/reply`; it cannot edit initiated rows. The existing authorization and per-message rate limit apply to every edit, with rate limiting before authentication. Discovery exposes native support as `capabilities.edit`.
 
 - **Telegram / telegram-new:** `editMessageText` with the chat ID, numeric message ID, and `parse_mode: "Markdown"`, matching sends. Ordinary bot messages are subject to Telegram's 48-hour edit window. An identical edit (`message is not modified`) succeeds idempotently.
-- **Discord:** `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token. Interaction follow-ups sent through a webhook are not editable through this channel endpoint after their interaction token expires. NyxID does not provide a webhook-edit path.
+- **Discord:** NyxID always edits through `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token and never through the interaction-webhook edit endpoint, so edits that Discord only permits via the interaction token (for example ephemeral interaction responses) are not supported and surface as a classified refusal.
 - **Slack:** `chat.update` with `channel`, `ts`, and `text`; `reply.metadata.blocks` passes through just as it does on sends. Existing Slack rate-limit error handling is preserved.
 - **Lark / Feishu:** unchanged text edits via `PUT /im/v1/messages/{id}` and card edits via `PATCH /im/v1/messages/{id}` using `reply.metadata.card`.
 - **WhatsApp / X / OpenClaw:** `501 edit_unsupported`. Device channels return `400 device_channel_reply_not_allowed`.

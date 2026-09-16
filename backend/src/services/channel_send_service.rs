@@ -111,10 +111,14 @@ pub async fn complete_send(
     Ok(())
 }
 
+pub fn is_concrete_platform_address(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && id != "*"
+}
+
 pub fn is_addressable(conversation: &ChannelConversation) -> bool {
     conversation.platform != "device"
-        && !conversation.platform_conversation_id.trim().is_empty()
-        && conversation.platform_conversation_id != "*"
+        && is_concrete_platform_address(&conversation.platform_conversation_id)
 }
 
 pub async fn list_agent_conversations(
@@ -140,6 +144,16 @@ pub async fn list_agent_conversations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concrete_platform_address_rejects_empty_and_wildcard_routes() {
+        for id in ["", " \t\n", "*", "  *  "] {
+            assert!(!is_concrete_platform_address(id), "{id:?}");
+        }
+        for id in ["chat_123", "-100123", "C123", "  chat_123  "] {
+            assert!(is_concrete_platform_address(id), "{id:?}");
+        }
+    }
 
     #[tokio::test]
     async fn channel_send_indexes_and_attempt_fences() {

@@ -36,7 +36,9 @@ use crate::mw::auth::{AuthMethod, AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, channel_bot_service,
     channel_platform::{OutboundEdit, OutboundReply},
-    channel_relay_service, channel_send_service, org_service,
+    channel_relay_service,
+    channel_send_service::{self, is_concrete_platform_address},
+    org_service,
 };
 use crate::telemetry::{
     TelemetryContext, TelemetryEvent, emit_event, hash_short_id, should_sample_event,
@@ -1234,7 +1236,7 @@ fn resolve_edit_conversation_id<'a>(
     [outbound, inbound, Some(conversation)]
         .into_iter()
         .flatten()
-        .find(|id| !id.trim().is_empty() && *id != "*")
+        .find(|id| is_concrete_platform_address(id))
         .ok_or(AppError::ChannelConversationNotAddressable)
 }
 
@@ -1252,19 +1254,20 @@ async fn edit_resolved_reply(
         attributed_api_key_id,
     } = context;
     validate_reply_for_adapter(&body.reply, adapter)?;
-    let inbound =
-        if resolve_edit_conversation_id(outbound.platform_conversation_id.as_deref(), None, "")
-            .is_err()
-            && let Some(inbound_id) = outbound.reply_to_message_id.as_deref()
-        {
-            match channel_relay_service::get_message(&state.db, inbound_id).await {
-                Ok(message) => Some(message),
-                Err(AppError::NotFound(_)) => None,
-                Err(error) => return Err(error),
-            }
-        } else {
-            None
-        };
+    let inbound = if !outbound
+        .platform_conversation_id
+        .as_deref()
+        .is_some_and(is_concrete_platform_address)
+        && let Some(inbound_id) = outbound.reply_to_message_id.as_deref()
+    {
+        match channel_relay_service::get_message(&state.db, inbound_id).await {
+            Ok(message) => Some(message),
+            Err(AppError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
     let platform_conversation_id = resolve_edit_conversation_id(
         outbound.platform_conversation_id.as_deref(),
         inbound
