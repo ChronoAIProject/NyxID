@@ -904,6 +904,15 @@ fn usage_costs(doc: &Document, billable: bool, rate: Option<i64>) -> UsageCosts 
         };
     }
     let value = |key| doc_i64(doc, key).unwrap_or(0);
+    let grant = Some(value("grant_funded_micros").saturating_add(value("legacy_grant_micros")));
+    if value("legacy_quantity") > 0 && rate.is_none() {
+        return UsageCosts {
+            total: None,
+            wallet: None,
+            grant,
+            allowance: None,
+        };
+    }
     let legacy_cost = rate.map(|rate| rate.saturating_mul(value("legacy_quantity")));
     let legacy_allowance = if value("legacy_allowance_quantity") == 0 {
         Some(0)
@@ -923,7 +932,7 @@ fn usage_costs(doc: &Document, billable: bool, rate: Option<i64>) -> UsageCosts 
     UsageCosts {
         total: combine("total_charge_micros", legacy_cost),
         wallet: combine("wallet_funded_micros", legacy_wallet),
-        grant: Some(value("grant_funded_micros").saturating_add(legacy_grant)),
+        grant,
         allowance: combine("allowance_funded_micros", legacy_allowance),
     }
 }

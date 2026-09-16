@@ -329,8 +329,22 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
     free.wallet_id = None;
     let mut unknown = meter(&owner, 99);
     unknown.lago_metric_code = "missing".into();
+    let mut mixed_exact = meter(&owner, 30);
+    mixed_exact.lago_metric_code = "missing_mixed".into();
+    mixed_exact.funding = exact.funding.clone();
+    let mut mixed_historical = meter(&owner, 100);
+    mixed_historical.lago_metric_code = mixed_exact.lago_metric_code.clone();
+    mixed_historical.funding = old.funding.clone();
     db.collection::<UsageMeterRow>(USAGE_METER)
-        .insert_many([old, legacy, exact, free, unknown])
+        .insert_many([
+            old,
+            legacy,
+            exact,
+            free,
+            unknown,
+            mixed_exact,
+            mixed_historical,
+        ])
         .await
         .unwrap();
     let result = read_usage(&state, &owner).await;
@@ -351,6 +365,17 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
         .unwrap();
     assert_eq!(missing.estimated_credits_micros, None);
     assert_eq!(missing.wallet_credits_micros, None);
+    let mixed = result
+        .rows
+        .iter()
+        .find(|row| row.lago_metric_code == "missing_mixed")
+        .unwrap();
+    assert_eq!(mixed.events, 2);
+    assert_eq!(mixed.estimated_credits_micros, None);
+    assert_eq!(mixed.wallet_credits_micros, None);
+    assert_eq!(mixed.allowance_credits_micros, None);
+    assert_eq!(mixed.grant_credits_micros, Some(60));
+    assert_eq!(mixed.allowance_quantity, 20);
     assert_eq!(result.totals.estimated_credits_micros, Some(250));
     assert_eq!(
         result.totals.estimated_credits_micros,
@@ -363,9 +388,9 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
         )
     );
     assert_eq!(result.totals.wallet_credits_micros, Some(150));
-    assert_eq!(result.totals.grant_credits_micros, Some(60));
+    assert_eq!(result.totals.grant_credits_micros, Some(120));
     assert_eq!(result.totals.allowance_credits_micros, Some(40));
-    assert_eq!(result.totals.allowance_quantity, 20);
+    assert_eq!(result.totals.allowance_quantity, 40);
     db.drop().await.unwrap();
 }
 

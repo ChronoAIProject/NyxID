@@ -212,9 +212,10 @@ For pre-change funded rows, grant funding is the sum of `grant_consumptions.amou
 allowance units are the sum of `allowance_consumptions.quantity`, valued at the current rate.
 Wallet funding is `max(0, estimated gross cost − grant funding − allowance funding)`.
 Rows without funding metadata use the same current-rate estimate, funded entirely by the wallet.
-Missing rates leave unknown estimates null. MongoDB aggregates the consumption arrays before
-responses are built. Costs are summed consistently from the API rows into both totals and service
-rows; non-billable rows contribute zero.
+Missing rates leave unknown estimates null, including groups mixing exact settlements with
+historical usage that cannot be priced. Grant micros remain known from consumption records.
+MongoDB aggregates the consumption arrays before responses are built. Costs are summed
+consistently from the API rows into both totals and service rows; non-billable rows contribute zero.
 
 Settlement stores this display metadata atomically with `funding.settled = true`. Retries reuse
 the stored settlement. Funding order (allowances → grants → wallet), rounded wallet debit,
@@ -299,8 +300,10 @@ Ranked by how likely a user is to be misled.
 7. **"Requests" and "Bytes" totals undercount.** They sum only rows whose *metric* is that unit
    (`handlers/billing.rs:264-273`). The Requests tile is not "requests you made".
 
-8. **Historical estimates can be partial when rates are missing.** New settlements persist exact
+8. **Totals can be partial when historical rates are missing.** New settlements persist exact
    gross cost and funding splits; older rows are recomputed from the current model/metric rate.
+   A group containing historical usage with no cached rate has null gross, wallet, and allowance
+   costs even when some of its settlements have exact figures; known grant micros are retained.
    `sum_optional` skips unknown costs, includes known zeroes, and shows `-` only if all are
    unknown. The table and totals consistently say Est. cost and sum the same visible rows.
 
