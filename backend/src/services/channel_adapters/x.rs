@@ -8,6 +8,9 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "not allowed to send a direct message",
 ];
 
+use crate::services::channel_media_service as media;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
+
 use std::time::Duration;
 
 use axum::http::{HeaderMap, StatusCode};
@@ -30,6 +33,7 @@ pub const REQUIRED_SCOPES: &[&str] = &[
     "users.read",
     "dm.read",
     "dm.write",
+    "media.write",
     "offline.access",
 ];
 const TEXT_LIMIT: usize = 10_000;
@@ -180,7 +184,7 @@ fn normalize(event: &Value, includes: &Value, own_id: &str) -> AppResult<Option<
             let kind = match media["type"].as_str() {
                 Some("photo") => "image",
                 Some("video" | "animated_gif") => "video",
-                _ => "file",
+                _ => return None,
             };
             let variant = media["variants"].as_array().and_then(|variants| {
                 variants
@@ -278,6 +282,15 @@ fn reply_bodies(reply: &OutboundReply) -> AppResult<Vec<Value>> {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for XAdapter {
+    fn display_name(&self) -> &str {
+        "X (Twitter)"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities {
+            inbound: &[MediaKind::Image, MediaKind::Video],
+            outbound: &[MediaKind::Image, MediaKind::Video],
+        }
+    }
     fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
         crate::services::channel_platform::OutboundCapabilities {
             initiated_send: true,
@@ -306,6 +319,7 @@ impl PlatformAdapter for XAdapter {
 
     fn registration(&self) -> RegistrationDescriptor {
         RegistrationDescriptor {
+            documentation_url: Some("https://docs.x.com/x-api/direct-messages/lookup/introduction"),
             fields: &[],
             extra_fields: &[],
             token_fields: &[],
@@ -510,6 +524,24 @@ impl PlatformAdapter for XAdapter {
         metadata.get("attachments").is_some()
     }
 
+    async fn fetch_attachment(
+        &self,
+        _http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        attachment: &InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        media::download(
+            &attachment.url,
+            &["pbs.twimg.com", "video.twimg.com", "ton.twitter.com"],
+            Some(base(self, credentials)),
+            Some(credentials.token),
+            attachment,
+            max_bytes,
+        )
+        .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
@@ -525,6 +557,91 @@ impl PlatformAdapter for XAdapter {
             return Err(AppError::ValidationError(
                 "Invalid X DM conversation ID".to_string(),
             ));
+        }
+        if !reply.attachments.is_empty() {
+            if reply.text.as_deref().is_some_and(|s| !s.is_empty())
+                || reply
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|m| self.supports_reply_metadata(m))
+            {
+                let mut text = reply.clone();
+                text.attachments.clear();
+                self.send_reply(http, credentials, conversation_id, &text)
+                    .await?;
+            }
+            let mut last = None;
+            for attachment in &reply.attachments {
+                let category = match (attachment.kind, attachment.mime_type.as_deref()) {
+                    (MediaKind::Image | MediaKind::Video, Some("image/gif")) => "dm_gif",
+                    (MediaKind::Image, _) => "dm_image",
+                    (MediaKind::Video, _) => "dm_video",
+                    _ => return Err(AppError::ChannelMediaUnsupported),
+                };
+                let upload = response_json(
+                    send(
+                        http.post(format!("{}/2/media/upload", base(self, credentials)))
+                            .bearer_auth(credentials.token)
+                            .multipart(
+                                reqwest::multipart::Form::new()
+                                    .text("media_category", category)
+                                    .part("media", media::multipart_part(attachment)?),
+                            ),
+                    )
+                    .await?,
+                )
+                .await?;
+                let media_id = upload["data"]["id"].as_str().ok_or_else(protocol_error)?;
+                if !numeric_id(media_id) {
+                    return Err(protocol_error());
+                }
+                // Video/GIF uploads may finish asynchronously. Never dispatch a
+                // DM before processing succeeds, and bound the entire wait.
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut processing = upload["data"]["processing_info"].clone();
+                    loop {
+                        match processing["state"].as_str() {
+                            None | Some("succeeded") => return Ok(()),
+                            Some("pending" | "in_progress") => {
+                                let delay = processing["check_after_secs"]
+                                    .as_u64()
+                                    .unwrap_or(1)
+                                    .clamp(1, 10);
+                                tokio::time::sleep(Duration::from_secs(delay)).await;
+                                let status = response_json(
+                                    send(
+                                        http.get(format!(
+                                            "{}/2/media/upload",
+                                            base(self, credentials)
+                                        ))
+                                        .bearer_auth(credentials.token)
+                                        .query(&[("media_id", media_id), ("command", "STATUS")]),
+                                    )
+                                    .await?,
+                                )
+                                .await?;
+                                processing = status["data"]["processing_info"].clone();
+                                if processing.is_null() {
+                                    return Err(protocol_error());
+                                }
+                            }
+                            _ => return Err(protocol_error()),
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| protocol_error())??;
+                let message = OutboundReply {
+                    attachments: vec![],
+                    text: attachment.caption.clone(),
+                    reply_to_platform_message_id: None,
+                    metadata: Some(json!({"attachments": [{"media_id": media_id}]})),
+                };
+                last = self
+                    .send_reply(http, credentials, conversation_id, &message)
+                    .await?;
+            }
+            return Ok(last);
         }
         let mut last = None;
         for body in reply_bodies(reply)? {
@@ -731,6 +848,7 @@ mod tests {
             .await;
         let text = "\u{1f642}".repeat(TEXT_LIMIT + 1);
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some(text.clone()),
             metadata: Some(json!({"attachments": [{"media_id": "123"}]})),
             reply_to_platform_message_id: None,
@@ -779,6 +897,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let reply = OutboundReply {
+                attachments: vec![],
                 text: Some("reply".into()),
                 metadata: None,
                 reply_to_platform_message_id: None,
@@ -818,6 +937,7 @@ mod tests {
     #[test]
     fn initiated_request_has_no_reply_or_thread_context() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".into()),
             reply_to_platform_message_id: None,
             metadata: None,
@@ -844,6 +964,7 @@ mod tests {
                 &credentials(),
                 "10-20",
                 &OutboundReply {
+                    attachments: vec![],
                     text: Some("hello".into()),
                     reply_to_platform_message_id: None,
                     metadata: None,

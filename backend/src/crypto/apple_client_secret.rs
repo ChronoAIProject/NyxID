@@ -237,6 +237,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_media_max_bytes: 20 * 1024 * 1024,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
             channel_relay_initiate_rate_limit_per_second: 1,

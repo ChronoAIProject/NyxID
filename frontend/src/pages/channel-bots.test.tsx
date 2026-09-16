@@ -1,3 +1,4 @@
+import { platformFixtures } from "@/test/fixtures/channel-platforms";
 import { StrictMode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -104,6 +105,7 @@ beforeEach(() => {
   saved = null;
   available = true;
   get.mockImplementation(async (path: string) => {
+    if (path === "/channel-platforms") return { platforms: platformFixtures };
     if (path.startsWith(root))
       return { available, manager_username: "NyxSetupBot", request: saved };
     if (path.startsWith("/channel-bots")) return { bots: [], total: 0 };
@@ -306,7 +308,7 @@ it("shows the manager configuration message inside the modal without managed onb
   expect(
     get.mock.calls.some(([path]) => path.includes("managed-onboarding")),
   ).toBe(false);
-  expect(dialog.queryByLabelText("Bot Token")).not.toBeInTheDocument();
+  expect(dialog.queryByLabelText("Bot token")).not.toBeInTheDocument();
 });
 
 it("locks the destination and label while the start request is still being saved", async () => {
@@ -375,7 +377,7 @@ it("honors a later Telegram entry while the Add Bot dialog is already open", asy
   const view = await setup("/channel-bots");
   await user.click(screen.getByRole("button", { name: "Add Bot" }));
   expect(
-    within(await screen.findByRole("dialog")).getByLabelText("Bot Token"),
+    within(await screen.findByRole("dialog")).getByLabelText("Bot token"),
   ).toBeVisible();
   await act(() =>
     view.router.navigate({
@@ -455,7 +457,7 @@ it("re-seeds scope when reopening Add Bot after changing the list scope", async 
   expect(dialog.getByRole("combobox", { name: "Scope" })).toHaveValue(orgId);
   await user.type(dialog.getByLabelText("Label", { exact: true }), "Org bot");
   await user.type(
-    dialog.getByLabelText("Bot Token", { exact: true }),
+    dialog.getByLabelText("Bot token", { exact: true }),
     "fixture-token",
   );
   post.mockResolvedValue({ id: "org-bot", platform_bot_username: "OrgBot" });
@@ -468,4 +470,36 @@ it("re-seeds scope when reopening Add Bot after changing the list scope", async 
     target_org_id: orgId,
     bot_token: "fixture-token",
   });
+});
+
+
+it("renders and validates required secret fields from the catalog, including new fields", async () => {
+  const getDefault = get.getMockImplementation()!;
+  get.mockImplementation(async (path: string) => {
+    if (path === "/channel-platforms") return { platforms: [{
+      ...platformFixtures[0], display_name: "Catalog-defined Telegram",
+      registration: { ...platformFixtures[0]!.registration, setup_instructions: ["Enable your workspace before connecting."], fields: [{
+        name: "future_secret", label: "Workspace credential", secret: true, required: true,
+        hint: "Copy the credential from workspace settings.",
+        patchable: false, clearable: false, storage: "future_secret_encrypted", webhook_secret: false, platform_fallback: null,
+      }] },
+    }] };
+    return getDefault(path);
+  });
+  post.mockResolvedValue({ id: "new-bot", platform: "telegram", status: "active" });
+  const user = userEvent.setup();
+  await setup("/channel-bots?connect=telegram");
+  const dialog = within(await screen.findByRole("dialog"));
+  const secret = await dialog.findByLabelText("Workspace credential");
+  expect(secret).toHaveAttribute("type", "password");
+  expect(dialog.getByText("Copy the credential from workspace settings.")).toBeVisible();
+  expect(dialog.getByText("Enable your workspace before connecting.")).toBeVisible();
+  expect(dialog.queryByLabelText("Bot token")).not.toBeInTheDocument();
+  const submit = dialog.getByRole("button", { name: "Add Bot" });
+  await user.type(dialog.getByLabelText("Label", { exact: true }), "Catalog bot");
+  expect(submit).toBeDisabled();
+  await user.type(secret, "private-field");
+  await waitFor(() => expect(submit).toBeEnabled());
+  await user.click(submit);
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/channel-bots", expect.objectContaining({ future_secret: "private-field", label: "Catalog bot" })));
 });

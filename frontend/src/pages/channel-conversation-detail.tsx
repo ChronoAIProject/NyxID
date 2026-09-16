@@ -199,6 +199,11 @@ export function InitiatedMessageSettings({
 
   return (
     <DetailSection title="Agent-initiated messages">
+      <div className="space-y-1 p-5 text-xs text-muted-foreground">
+        <p>Editing: {conversation.capabilities?.edit ? "Supported" : "Unavailable"}</p>
+        <p>Receive media: {conversation.capabilities?.media?.inbound.join(", ") || "None"}</p>
+        <p>Send media: {conversation.capabilities?.media?.outbound.join(", ") || "None"}</p>
+      </div>
       <form
         className="space-y-4 p-5"
         onSubmit={settings.handleSubmit(async (values) => {

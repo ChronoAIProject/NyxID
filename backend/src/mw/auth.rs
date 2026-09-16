@@ -427,6 +427,14 @@ fn delegated_read_denied_path(path: &str) -> bool {
         return true;
     }
 
+    // Media downloads deliver private content, unlike the platform catalog.
+    if matches!(
+        segments.as_slice(),
+        ["channel-relay", "messages", _, "attachments", _]
+    ) {
+        return true;
+    }
+
     // Node WebSocket transport and both pending-credential URL shapes are
     // protocols that deliver or advance one-time credential material.
     if matches!(segments.as_slice(), ["nodes", "ws"])
@@ -2016,6 +2024,117 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn channel_platform_catalog_accepts_all_management_auth_and_denies_media_delegation() {
+        use crate::{
+            crypto::jwt,
+            models::{service_account::ServiceAccount, user::UserType},
+        };
+        let Some(db) = crate::test_utils::connect_test_database("channel_catalog_auth").await
+        else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let actor = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor.to_string(),
+                UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let raw_key = "nyxid_ag_catalog_test_token";
+        let key = delegated_fixture_api_key(
+            &Uuid::new_v4().to_string(),
+            &actor.to_string(),
+            &hash_token(raw_key),
+        );
+        db.collection::<crate::models::api_key::ApiKey>(API_KEYS)
+            .insert_one(key)
+            .await
+            .unwrap();
+        let sa = ServiceAccount {
+            id: Uuid::new_v4().to_string(),
+            name: "Catalog reader".into(),
+            description: None,
+            client_id: "sa_catalog".into(),
+            client_secret_hash: "unused".into(),
+            secret_prefix: "unused".into(),
+            role_ids: vec![],
+            allowed_scopes: "account:read".into(),
+            is_active: true,
+            rate_limit_override: None,
+            created_by: actor.to_string(),
+            owner_user_id: Some(actor.to_string()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_authenticated_at: None,
+        };
+        db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+            .insert_one(&sa)
+            .await
+            .unwrap();
+        let session = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "account:read",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let delegated = jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "account:read",
+            "catalog-client",
+            3600,
+            None,
+        )
+        .unwrap();
+        let (service, _) = jwt::generate_service_account_token(
+            &state.jwt_keys,
+            &state.config,
+            &sa.id,
+            "account:read",
+            3600,
+        )
+        .unwrap();
+        let (_, private) = crate::routes::build_router();
+        let app = private.with_state(state);
+        for token in [&session, &delegated, &service, raw_key] {
+            let response =
+                delegated_router_response(&app, Method::GET, "/api/v1/channel-platforms", token)
+                    .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["platforms"].as_array().unwrap().len(), 9);
+        }
+        for token in [&delegated, &service] {
+            let response = delegated_router_response(
+                &app,
+                Method::GET,
+                "/api/v1/channel-relay/messages/nonexistent/attachments/0",
+                token,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        assert!(!delegated_read_denied_path("/api/v1/channel-platforms"));
+        assert!(delegated_read_denied_path(
+            "/api/v1/channel-relay/messages/id/attachments/0"
+        ));
+        db.drop().await.unwrap();
     }
 
     fn delegated_fixture_api_key(

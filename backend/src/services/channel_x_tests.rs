@@ -199,7 +199,10 @@ fn descriptors_keep_all_previous_adapters_on_stored_webhook_defaults() {
                 adapter.credential_resolution(),
                 CredentialResolution::StoredToken
             );
-            assert!(!adapter.registration().managed_only);
+            assert_eq!(
+                adapter.registration().managed_only,
+                adapter.platform_id() == "telegram-new"
+            );
             assert!(adapter.registration().webhook_ingestion);
             if let Some(descriptor) = adapter.platform_credentials() {
                 assert!(matches!(

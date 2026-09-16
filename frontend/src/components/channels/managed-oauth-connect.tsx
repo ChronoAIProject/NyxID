@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { CHANNEL_PLATFORMS } from "@/lib/channel-platforms";
+import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import {
   openOAuthPopup,
   openOAuthChannel,
@@ -37,7 +37,8 @@ export function ManagedOAuthConnect({
   const [error, setError] = useState<string | null>(null);
   const cleanup = useRef<(() => void) | null>(null);
   const queryClient = useQueryClient();
-  const descriptor = CHANNEL_PLATFORMS[platform];
+  const { getPlatform } = useChannelPlatformViews();
+  const descriptor = getPlatform(platform);
   useEffect(() => () => cleanup.current?.(), []);
 
   function connect() {
@@ -179,6 +180,7 @@ export function ManagedOAuthConnect({
 }
 
 export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
+  const { getPlatform } = useChannelPlatformViews();
   const bootstrap = useManagedOnboarding(bot.platform);
   return (
     <DetailSection title="Connected account">
@@ -226,7 +228,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         {bootstrap.data && !bootstrap.data.available && (
           <p className="text-xs text-muted-foreground">
             Account connection is not available until an admin configures{" "}
-            {CHANNEL_PLATFORMS[bot.platform].label}.
+            {getPlatform(bot.platform).label}.
           </p>
         )}
       </div>

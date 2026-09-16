@@ -4769,7 +4769,15 @@ pub enum AiSetupCommands {
 
 #[derive(Subcommand)]
 pub enum ChannelBotCommands {
+    /// Discover supported platforms, registration fields, and media capabilities
+    Platforms {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Register a new messaging platform bot
+    #[command(
+        after_help = "Discover required fields and capabilities with: nyxid channel-bot platforms --output json"
+    )]
     Register {
         /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp
         #[arg(long)]

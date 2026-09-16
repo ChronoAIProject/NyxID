@@ -1156,7 +1156,8 @@ mod tests {
             scopes.unwrap(),
             vec![
                 "im:message".to_string(),
-                "im:message:send_as_bot".to_string()
+                "im:message:send_as_bot".to_string(),
+                "im:resource".to_string()
             ]
         );
     }

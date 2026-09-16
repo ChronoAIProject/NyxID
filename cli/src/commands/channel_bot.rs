@@ -11,6 +11,57 @@ use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
+        ChannelBotCommands::Platforms { auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api.get("/channel-platforms").await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => {
+                    let mut table = Table::new();
+                    table.load_preset(UTF8_FULL_CONDENSED);
+                    table.set_header([
+                        "Platform",
+                        "Enabled",
+                        "Ingestion",
+                        "Required fields",
+                        "Media in",
+                        "Media out",
+                        "Edit",
+                    ]);
+                    for p in result["platforms"].as_array().into_iter().flatten() {
+                        let joined = |values: &Value| {
+                            values
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        let required = p["registration"]["fields"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|f| f["required"] == true)
+                            .filter_map(|f| f["name"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        table.add_row([
+                            p["platform"].as_str().unwrap_or("-").to_string(),
+                            p["enabled"].to_string(),
+                            p["ingestion"]["mode"].as_str().unwrap_or("-").to_string(),
+                            required,
+                            joined(&p["capabilities"]["media"]["inbound"]),
+                            joined(&p["capabilities"]["media"]["outbound"]),
+                            p["capabilities"]["edit"].to_string(),
+                        ]);
+                    }
+                    println!("{table}");
+                }
+            }
+            Ok(())
+        }
+
         ChannelBotCommands::Send {
             conversation,
             text,
@@ -945,6 +996,22 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
+
+    #[tokio::test]
+    async fn platforms_fetches_authoritative_catalog_in_both_output_modes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/v1/channel-platforms"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"platforms":[{
+                "platform":"telegram","enabled":true,"ingestion":{"mode":"webhook"},
+                "registration":{"fields":[{"name":"bot_token","required":true}]},
+                "capabilities":{"edit":true,"media":{"inbound":["image","file"],"outbound":["image","file"]}}
+            }]}))).expect(2).mount(&server).await;
+        for output in [OutputFormat::Json, OutputFormat::Table] {
+            let mut auth = mock_auth(server.uri());
+            auth.output = output;
+            run(ChannelBotCommands::Platforms { auth }).await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn x_managed_arguments_bootstrap_and_show_are_generic() {

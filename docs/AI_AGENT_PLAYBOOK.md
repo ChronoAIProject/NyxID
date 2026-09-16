@@ -3120,7 +3120,7 @@ See [`docs/OPENCLAW_INTEGRATION.md`](OPENCLAW_INTEGRATION.md) for the full integ
 
 ## 25. Channel Bot Relay
 
-> **ADR-013 update (2026-04-09):** Per ADR-013, NyxID is a **pure passthrough gateway**. It never stores message bodies, attachments, or raw webhook payloads — only routing metadata. Synchronous agent replies (HTTP 200 + body) are no longer supported; agents **must** return 202 to the callback and post replies via `POST /api/v1/channel-relay/reply`. The earlier NyxID#191 deprecation of channel relay has been recalled.
+> **ADR-013 update (2026-04-09):** Per ADR-013, NyxID is a **pure passthrough gateway**. It never stores message bodies, media bytes, or raw webhook payloads — only routing metadata. Synchronous agent replies (HTTP 200 + body) are no longer supported; agents **must** return 202 to the callback and post replies via `POST /api/v1/channel-relay/reply`. The earlier NyxID#191 deprecation of channel relay has been recalled.
 
 NyxID acts as a multi-platform messaging gateway. Users register their own bots (Telegram, Discord, Lark, Feishu), and NyxID receives messages via platform webhooks, routes each message to the correct AI agent's callback URL, and relays the agent's asynchronous reply back to the chat.
 
@@ -3277,4 +3277,21 @@ For full design details, see [`docs/CHANNEL_BOT_RELAY.md`](CHANNEL_BOT_RELAY.md)
 
 Discover your active assignments with `GET /api/v1/channel-relay/conversations?page=1&per_page=50`. Check `addressable`, `allow_agent_initiated`, and `capabilities.initiated_send` before sending. Only a human owner can opt in through `/channel-conversations`; API keys cannot change that permission.
 
-`POST /api/v1/channel-relay/send` accepts `{ "conversation_id": "<uuid>", "message": { "text": "Job finished", "metadata": null }, "idempotency_key": "job-123" }`. Use your assigned agent API key, not a callback reply/relay token. A repeated key with identical text/metadata returns the original acceptance IDs; changed content or an in-flight/uncertain claim returns 409. Claims expire after 24 hours. A known permanent target refusal returns 400 `channel_conversation_not_reachable`; generic upstream failures remain 502. No automatic retries, queues, or content storage. Platform message IDs prove acceptance, not that a person saw the message. See [Channel Bot Relay](CHANNEL_BOT_RELAY.md#agent-initiated-messages) for failure windows and capability contracts.
+`POST /api/v1/channel-relay/send` accepts `{ "conversation_id": "<uuid>", "message": { "text": "Job finished", "metadata": null }, "idempotency_key": "job-123" }`. Use your assigned agent API key, not a callback reply/relay token. A repeated key with identical text/metadata/attachments returns the original acceptance IDs; changed content or an in-flight/uncertain claim returns 409. Claims expire after 24 hours. A known permanent target refusal returns 400 `channel_conversation_not_reachable`; generic upstream failures remain 502. No automatic retries, queues, or content storage. Platform message IDs prove acceptance, not that a person saw the message. See [Channel Bot Relay](CHANNEL_BOT_RELAY.md#agent-initiated-messages) for failure windows and capability contracts.
+
+
+### Channel media and platform discovery
+
+Discover registration requirements before creating a bot with `nyxid channel-bot platforms --output json` or authenticated `GET /api/v1/channel-platforms`. Use `enabled`, `managed_only`, `registration.fields` (required/secret), `managed_onboarding`, and `capabilities.media`. The catalog accepts sessions, agent keys, service accounts and delegated `account:read`; credential values are never returned.
+
+Treat inbound `image`, `file`, `audio`, and `video` messages as attachment-bearing content, even without text. For each callback `content.attachments[]`, GET its absolute `download_url` with the assigned agent API key or the callback's `reply_token`. Provider `url`/handles remain for compatibility and often cannot be fetched directly. Downloads validate the exact message/conversation and live bot/agent, but do not consume the reply token. Keep that token for the one subsequent send. Device conversations cannot download or reply. Delegated, relay and service-account tokens cannot download private media.
+
+Send media using `reply.attachments` on `/channel-relay/reply` or `message.attachments` on `/channel-relay/send`:
+
+```json
+{"kind":"file","source":{"type":"base64","data":"aGVsbG8="},"filename":"report.txt","mime_type":"text/plain","caption":"Your report"}
+```
+
+A source can instead be `{"type":"url","url":"https://public.example/report.pdf"}`. Check declared outbound kinds, use at most ten attachments, and stay within `CHANNEL_MEDIA_MAX_BYTES` (default 20 MiB per attachment; the aggregate JSON body also has a base64-sized limit). Attachment-only messages are supported. `/reply/update` rejects attachments. X supports images/video with OAuth `media.write`; older connections require re-consent. OpenClaw declares no media.
+
+History contains only routing metadata plus inbound attachment descriptors/download URLs. ADR-013 still forbids persisted bytes, message bodies, outbound captions/filenames, or raw webhook content. Download URLs expire with retained rows/provider resources and are not archival storage. `/send` fingerprints media descriptors/content hashes; changing media under the same idempotency key returns 409. See [Channel Bot Relay](CHANNEL_BOT_RELAY.md#media) for transport details and SSRF protections.

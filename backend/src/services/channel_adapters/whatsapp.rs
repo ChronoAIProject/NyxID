@@ -6,6 +6,9 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "message undeliverable",
 ];
 
+use crate::services::channel_media_service as media;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
+
 use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
@@ -277,8 +280,159 @@ pub(super) async fn graph_response(response: reqwest::Response) -> AppResult<Val
     Ok(body)
 }
 
+async fn fetch_media_at(
+    http: &reqwest::Client,
+    credentials: &BotCredentials<'_>,
+    attachment: &InboundAttachment,
+    max_bytes: u64,
+    api_base: &str,
+) -> AppResult<FetchedMedia> {
+    // Verify the webhook reference before using any credential. Construct lookup
+    // paths from the numeric handle rather than following arbitrary Graph paths.
+    media::media_client(
+        &attachment.url,
+        Some(&["graph.facebook.com"]),
+        Some(api_base),
+    )
+    .await?;
+    let id = attachment
+        .file_key
+        .as_deref()
+        .ok_or_else(media::fetch_failed)?;
+    validate_id(id, "Media ID").map_err(|_| media::fetch_failed())?;
+    let response = media::response_json(super::whatsapp_managed::authenticate(
+        http.get(format!("{api_base}/{id}")),
+        credentials,
+    )?)
+    .await
+    .map_err(|_| media::fetch_failed())?;
+    if response["file_size"]
+        .as_u64()
+        .is_some_and(|size| size > max_bytes)
+    {
+        return Err(AppError::ChannelMediaTooLarge);
+    }
+    let url = response["url"].as_str().ok_or_else(media::fetch_failed)?;
+    media::download(
+        url,
+        &["lookaside.fbsbx.com", "graph.facebook.com"],
+        Some(api_base),
+        Some(credentials.token),
+        attachment,
+        max_bytes,
+    )
+    .await
+}
+
+async fn send_media_at(
+    http: &reqwest::Client,
+    credentials: &BotCredentials<'_>,
+    conversation_id: &str,
+    reply: &OutboundReply,
+    api_base: &str,
+) -> AppResult<Option<String>> {
+    let phone = credentials.platform_bot_id.unwrap_or_default();
+    validate_id(phone, "Phone Number ID")?;
+    let recipient: String = conversation_id
+        .chars()
+        .filter(|c| *c != ' ' && *c != '-')
+        .collect();
+    let recipient = recipient.strip_prefix('+').unwrap_or(&recipient);
+    validate_id(recipient, "Recipient")?;
+    let mut last = None;
+    for attachment in &reply.attachments {
+        let kind = match attachment.kind {
+            MediaKind::Image => "image",
+            MediaKind::File => "document",
+            MediaKind::Audio => "audio",
+            MediaKind::Video => "video",
+        };
+        let form = reqwest::multipart::Form::new()
+            .text("messaging_product", "whatsapp")
+            .text(
+                "type",
+                attachment
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "application/octet-stream".into()),
+            )
+            .part("file", media::multipart_part(attachment)?);
+        let upload = media::response_json(super::whatsapp_managed::authenticate(
+            http.post(format!("{api_base}/{phone}/media"))
+                .multipart(form),
+            credentials,
+        )?)
+        .await?;
+        let id = upload["id"].as_str().ok_or_else(media::upload_failed)?;
+        let mut content = json!({"id": id});
+        if let Some(filename) = &attachment.filename
+            && attachment.kind == MediaKind::File
+        {
+            content["filename"] = json!(filename);
+        }
+        if let Some(caption) = &attachment.caption
+            && attachment.kind != MediaKind::Audio
+        {
+            content["caption"] = json!(caption);
+        }
+        // WhatsApp audio has no caption field; send the caption separately.
+        if let Some(caption) = &attachment.caption
+            && attachment.kind == MediaKind::Audio
+        {
+            let text = OutboundReply {
+                attachments: vec![],
+                text: Some(caption.clone()),
+                metadata: None,
+                reply_to_platform_message_id: reply.reply_to_platform_message_id.clone(),
+            };
+            for body in reply_bodies(recipient, &text)? {
+                graph_response(
+                    super::whatsapp_managed::authenticate(
+                        http.post(format!("{api_base}/{phone}/messages"))
+                            .json(&body),
+                        credentials,
+                    )?
+                    .send()
+                    .await
+                    .map_err(|_| media::upload_failed())?,
+                )
+                .await?;
+            }
+        }
+        let mut body = json!({"messaging_product": "whatsapp", "recipient_type": "individual", "to": recipient, "type": kind, kind: content});
+        if let Some(id) = &reply.reply_to_platform_message_id {
+            body["context"] = json!({"message_id": id});
+        }
+        let response = graph_response(
+            super::whatsapp_managed::authenticate(
+                http.post(format!("{api_base}/{phone}/messages"))
+                    .json(&body),
+                credentials,
+            )?
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|_| media::upload_failed())?,
+        )
+        .await?;
+        last = Some(
+            response["messages"][0]["id"]
+                .as_str()
+                .ok_or_else(media::upload_failed)?
+                .to_string(),
+        );
+    }
+    Ok(last)
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for WhatsAppAdapter {
+    fn display_name(&self) -> &str {
+        "WhatsApp"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::ALL
+    }
     fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
         crate::services::channel_platform::OutboundCapabilities {
             initiated_send: true,
@@ -377,6 +531,9 @@ impl PlatformAdapter for WhatsAppAdapter {
 
     fn registration(&self) -> RegistrationDescriptor {
         RegistrationDescriptor {
+            documentation_url: Some(
+                "https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint",
+            ),
             extra_fields: &[],
             unsupported_patch_message: None,
             create_response_status: "pending_webhook",
@@ -384,6 +541,9 @@ impl PlatformAdapter for WhatsAppAdapter {
             fields: &[
                 RegistrationField {
                     label: "Access token",
+                    hint: Some(
+                        "Permanent System User token for the WhatsApp Business Platform (Meta Cloud API).",
+                    ),
                     patchable: true,
                     ..BOT_TOKEN_FIELD
                 },
@@ -396,6 +556,9 @@ impl PlatformAdapter for WhatsAppAdapter {
                     patchable: false,
                     clearable: false,
                     webhook_secret: false,
+                    hint: Some(
+                        "Meta phone number identifier, not the display phone number or App ID.",
+                    ),
                     platform_fallback: None,
                 },
                 RegistrationField {
@@ -407,6 +570,7 @@ impl PlatformAdapter for WhatsAppAdapter {
                     patchable: true,
                     clearable: false,
                     webhook_secret: true,
+                    hint: None,
                     platform_fallback: Some("app_secret"),
                 },
                 RegistrationField {
@@ -418,11 +582,13 @@ impl PlatformAdapter for WhatsAppAdapter {
                     patchable: false,
                     clearable: false,
                     webhook_secret: false,
+                    hint: Some("Optional WABA ID."),
                     platform_fallback: None,
                 },
             ],
             webhook_secret_label: Some("Verify Token"),
             setup_instructions: &[
+                "Find the Phone Number ID in WhatsApp > API Setup and the App Secret in Meta App Dashboard > Basic settings.",
                 "In Meta App Dashboard > WhatsApp > Configuration, enter the Callback URL and Verify Token shown here, then verify and save.",
                 "Subscribe to the messages webhook field. Subscribe this app to the WhatsApp Business Account (POST /{WABA_ID}/subscribed_apps with a system user token).",
                 "Use a permanent System User access token with whatsapp_business_messaging and whatsapp_business_management permissions and access to the phone number.",
@@ -586,6 +752,23 @@ impl PlatformAdapter for WhatsAppAdapter {
     ) {
     }
 
+    async fn fetch_attachment(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        attachment: &InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        fetch_media_at(
+            http,
+            credentials,
+            attachment,
+            max_bytes,
+            &format!("https://graph.facebook.com/{GRAPH_API_VERSION}"),
+        )
+        .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
@@ -593,6 +776,27 @@ impl PlatformAdapter for WhatsAppAdapter {
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        if !reply.attachments.is_empty() {
+            if reply.text.as_deref().is_some_and(|s| !s.is_empty())
+                || reply
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|m| self.supports_reply_metadata(m))
+            {
+                let mut text = reply.clone();
+                text.attachments.clear();
+                self.send_reply(http, credentials, conversation_id, &text)
+                    .await?;
+            }
+            return send_media_at(
+                http,
+                credentials,
+                conversation_id,
+                reply,
+                &format!("https://graph.facebook.com/{GRAPH_API_VERSION}"),
+            )
+            .await;
+        }
         let business_object_id = credentials.platform_bot_id.unwrap_or_default();
         validate_id(business_object_id, "Phone Number ID")?;
         let url = format!("{}/messages", graph_url(business_object_id));
@@ -1014,6 +1218,7 @@ mod tests {
 
     fn reply(text: Option<&str>, metadata: Option<Value>) -> OutboundReply {
         OutboundReply {
+            attachments: vec![],
             text: text.map(String::from),
             reply_to_platform_message_id: Some("wamid.parent".to_string()),
             metadata,
@@ -1188,6 +1393,7 @@ mod tests {
     #[test]
     fn initiated_request_has_no_reply_or_thread_context() {
         let outbound = OutboundReply {
+            attachments: vec![],
             text: Some("hello".into()),
             reply_to_platform_message_id: None,
             metadata: None,
@@ -1214,5 +1420,114 @@ mod tests {
             None,
         );
         assert!(error.to_string().contains("template message is required"));
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+    use crate::services::channel_platform::MaterializedAttachment;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_string_contains, header, method, path},
+    };
+    #[tokio::test]
+    async fn channel_whatsapp_media_download_and_upload_contracts() {
+        let server = MockServer::start().await;
+        let http = reqwest::Client::new();
+        let credentials = BotCredentials {
+            token: "token",
+            platform_bot_id: Some("123"),
+            platform_secrets: None,
+        };
+        Mock::given(method("GET"))
+            .and(path("/456"))
+            .and(header("Authorization", "Bearer token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"url":format!("{}/download",server.uri())})),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .and(header("Authorization", "Bearer token"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"document".to_vec()))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut attachment = InboundAttachment {
+            content_type: "file".into(),
+            url: format!("{}/456", server.uri()),
+            platform_message_id: None,
+            file_key: Some("456".into()),
+            image_key: None,
+            filename: None,
+            mime_type: None,
+            size_bytes: None,
+        };
+        assert_eq!(
+            fetch_media_at(&http, &credentials, &attachment, 20, &server.uri())
+                .await
+                .unwrap()
+                .bytes,
+            b"document"[..]
+        );
+        assert!(matches!(
+            fetch_media_at(&http, &credentials, &attachment, 2, &server.uri()).await,
+            Err(AppError::ChannelMediaTooLarge)
+        ));
+        attachment.url = "https://evil.example/media".into();
+        assert!(matches!(
+            fetch_media_at(&http, &credentials, &attachment, 20, &server.uri()).await,
+            Err(AppError::ChannelMediaFetchFailed(_))
+        ));
+        for (kind, native) in [
+            (MediaKind::Image, "image"),
+            (MediaKind::File, "document"),
+            (MediaKind::Audio, "audio"),
+            (MediaKind::Video, "video"),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/123/media"))
+                .and(header("Authorization", "Bearer token"))
+                .and(body_string_contains("media-bytes"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"789"})))
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/123/messages"))
+                .and(body_string_contains(native))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"messages":[{"id":"last"}]})),
+                )
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let reply = OutboundReply {
+                text: None,
+                metadata: None,
+                reply_to_platform_message_id: Some("parent".into()),
+                attachments: vec![MaterializedAttachment {
+                    kind,
+                    bytes: bytes::Bytes::from_static(b"media-bytes"),
+                    filename: Some("report.pdf".into()),
+                    mime_type: Some("application/pdf".into()),
+                    caption: None,
+                }],
+            };
+            assert_eq!(
+                send_media_at(&http, &credentials, "234", &reply, &server.uri())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("last")
+            );
+        }
+        server.verify().await;
     }
 }

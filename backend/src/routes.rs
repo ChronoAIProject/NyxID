@@ -1476,12 +1476,38 @@ fn build_router_internal(
         );
 
     let channel_relay_routes = Router::new()
-        .route("/send", post(handlers::channel_relay::send_message))
+        .route(
+            "/send",
+            post(handlers::channel_relay::send_message).layer(DefaultBodyLimit::max(
+                crate::services::channel_media_service::request_body_limit(
+                    platform_gate_state
+                        .as_ref()
+                        .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
+                            state.config.channel_media_max_bytes
+                        }),
+                ),
+            )),
+        )
         .route(
             "/conversations",
             get(handlers::channel_relay::list_agent_conversations),
         )
-        .route("/reply", post(handlers::channel_relay::async_reply))
+        .route(
+            "/reply",
+            post(handlers::channel_relay::async_reply).layer(DefaultBodyLimit::max(
+                crate::services::channel_media_service::request_body_limit(
+                    platform_gate_state
+                        .as_ref()
+                        .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
+                            state.config.channel_media_max_bytes
+                        }),
+                ),
+            )),
+        )
+        .route(
+            "/messages/{message_id}/attachments/{index}",
+            get(handlers::channel_relay::fetch_attachment),
+        )
         .route("/reply/update", post(handlers::channel_relay::update_reply))
         .route(
             "/messages/{conversation_id}",
@@ -1610,6 +1636,10 @@ fn build_router_internal(
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
+        .route(
+            "/channel-platforms",
+            get(handlers::channel_platforms::list_platforms),
+        )
         .nest("/llm", llm_routes)
         .nest("/delegation", delegation_routes)
         .merge(exact_service_approval_billing_routes!(

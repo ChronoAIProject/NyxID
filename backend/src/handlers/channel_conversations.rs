@@ -88,7 +88,7 @@ pub struct ConversationItem {
     pub agent_api_key_id: String,
     pub default_agent: bool,
     pub allow_agent_initiated: bool,
-    pub capabilities: crate::services::channel_platform::OutboundCapabilities,
+    pub capabilities: crate::services::channel_platform::ChannelCapabilities,
     pub is_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message_at: Option<String>,

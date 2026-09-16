@@ -1325,13 +1325,25 @@ const MODEL_LEVELS = [
 // Canonical levels only, with word boundaries so e.g. "Profile" is not Pro.
 // Preserve the existing Chinese aliases; structural discovery handles locale.
 export function detectPillLevel(text) {
-  const label = String(text || '').trim().split(/\r?\n/)[0]
+  const canonical = (value) => String(value || '')
     .replace(/^(?:(?:chatgpt|gpt)[\s._-]*)?\d+(?:\.\d+)*[\s._-]*/i, '')
     .toLowerCase().replace(/[·:()|/—._-]+/g, ' ').replace(/\s+/g, ' ').trim();
   // Accept only a vocabulary of level tokens, never prose containing "Pro".
-  if (/^(?:thinking|pro|专业|extended|standard|扩展|标准)(?: (?:thinking|pro|专业|extended|standard|扩展|标准))*$/.test(label) &&
-      /(?:^| )(?:pro|专业|extended|standard|扩展|标准)(?: |$)/.test(label)) return 'Pro';
-  return MODEL_LEVELS.find(aliases => aliases.some(alias => alias.toLowerCase() === label))?.[0] || null;
+  const classify = (label) => {
+    if (/^(?:thinking|pro|专业|extended|standard|扩展|标准)(?: (?:thinking|pro|专业|extended|standard|扩展|标准))*$/.test(label) &&
+        /(?:^| )(?:pro|专业|extended|standard|扩展|标准)(?: |$)/.test(label)) return 'Pro';
+    return MODEL_LEVELS.find(aliases => aliases.some(alias => alias.toLowerCase() === label))?.[0] || null;
+  };
+  const trimmed = String(text || '').trim();
+  // First line only, as before: a menu entry's second line is usually a
+  // description, and folding it in would wreck an otherwise exact match.
+  const firstLine = classify(canonical(trimmed.split(/\r?\n/)[0]));
+  if (firstLine) return firstLine;
+  // Only when that yields nothing, retry with the newlines flattened. The
+  // composer pill renders the family and the level as separate text nodes
+  // ("6\nPro"), so first-line-only reads "6", strips it as a version number,
+  // and reports the live GPT-6 Pro pill as unrecognized.
+  return trimmed.includes('\n') ? classify(canonical(trimmed.replace(/\s*\r?\n+\s*/g, ' '))) : null;
 }
 
 // Unrecognized composer controls can be explored but are not negative evidence.
@@ -1560,8 +1572,13 @@ export function preferredModelPillIndex(labels) {
   if (!labels.length) return -1;
   const recognized = labels.findIndex((text) => detectPillLevel(text) !== null);
   if (recognized >= 0) return recognized;
-  const legacy = labels.findIndex((text) => /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text));
-  return legacy >= 0 ? legacy : 0;
+  const legacy = labels.findIndex((text) => /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b\d(?:\.\d+)?\b/i.test(text));
+  if (legacy >= 0) return legacy;
+  // Never fall back to index 0 blindly. The composer region also holds
+  // icon-only menu buttons such as composer-plus-btn ("Add files and more"),
+  // whose label is empty; picking one clicks the wrong control and no model
+  // menu ever opens. Prefer the first candidate that at least has a label.
+  return labels.findIndex((text) => String(text || '').trim().length > 0);
 }
 
 export function modelSelectionDiagnostics(snapshot) {

@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test("preferredModelPillIndex never selects an unlabelled control", () => {
+  // The composer region also contains icon-only menu buttons such as
+  // composer-plus-btn ("Add files and more"), whose innerText is empty.
+  // Returning index 0 there makes the worker click the wrong button and no
+  // model menu opens (menu_not_opened, items=0).
+  assert.equal(preferredModelPillIndex(["", "6\nPro"]), 1);
+  assert.equal(preferredModelPillIndex(["", "Some Control"]), 1);
+  assert.equal(preferredModelPillIndex(["", ""]), -1);
+  assert.equal(preferredModelPillIndex([]), -1);
+  // A recognised level still wins outright.
+  assert.equal(preferredModelPillIndex(["", "GPT-5.5 High"]), 1);
+});
+
+
 import {
   PRE_SEND_ACTION_MS,
   retryPresendModelRead,
@@ -577,6 +591,20 @@ test("pill level detection prefers the longest alias", () => {
   assert.equal(detectPillLevel("GPT-5.5 Extra High"), "Extra High");
   assert.equal(detectPillLevel("GPT-5.5 High"), "High");
   assert.equal(detectPillLevel("Pro 扩展"), "Pro");
+  assert.equal(detectPillLevel("GPT-5.5"), null);
+
+  // Observed live on chatgpt.com 2026-09-16: the composer pill renders the
+  // family and the level as separate text nodes, so innerText is "6\nPro".
+  // First-line-only reads "6", strips it as a version, and reports the pill
+  // as unrecognized, after which the worker clicks the wrong control.
+  assert.equal(detectPillLevel("6\nPro"), "Pro");
+  assert.equal(detectPillLevel("GPT-6\nPro"), "Pro");
+  // "Thinking" is not in MODEL_LEVELS, so it is null on one line or two;
+  // the multi-line path must not invent a level that single-line lacks.
+  assert.equal(detectPillLevel("6\nThinking"), detectPillLevel("6 Thinking"));
+  // A single-line label must behave exactly as before.
+  assert.equal(detectPillLevel("6 Pro"), "Pro");
+  // A menu entry whose second line is a description must not be folded in.
   assert.equal(detectPillLevel("GPT-5.5"), null);
 });
 

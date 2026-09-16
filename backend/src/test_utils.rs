@@ -1756,6 +1756,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         channel_poll_interval_secs: 30,
         channel_relay_max_bots_per_user: 5,
         channel_relay_message_ttl_days: 30,
+        channel_media_max_bytes: crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES,
         channel_relay_edit_rate_limit_per_second: 10,
         channel_relay_edit_rate_limit_burst: 20,
         channel_relay_initiate_rate_limit_per_second: 1,

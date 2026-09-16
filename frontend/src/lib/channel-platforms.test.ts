@@ -1,39 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { CHANNEL_PLATFORMS, channelBotRegistrationPayload, editableChannelFields, managedConnectPlatform } from "./channel-platforms";
+import { channelPlatformViews, channelBotRegistrationPayload, editableChannelFields, managedConnectPlatform, platformView } from "./channel-platforms";
+import { platformFixtures } from "@/test/fixtures/channel-platforms";
+const platforms = channelPlatformViews(platformFixtures);
 
-describe("channel platform fields", () => {
-  it("keeps existing Telegram token setup separate from managed Telegram creation", () => {
-    expect(CHANNEL_PLATFORMS.telegram.label).toBe("Telegram bot token");
-    expect(CHANNEL_PLATFORMS.telegram.fields.map((field) => field.name)).toEqual(["bot_token"]);
-    expect(channelBotRegistrationPayload({ platform: "telegram", label: "Support", bot_token: "existing-token" }))
-      .toEqual({ platform: "telegram", label: "Support", bot_token: "existing-token", target_org_id: undefined });
-    expect(CHANNEL_PLATFORMS["telegram-new"].label).toBe("Telegram");
-    expect(CHANNEL_PLATFORMS["telegram-new"].fields).toEqual([]);
-    expect(managedConnectPlatform("telegram-new")).toBe("telegram-new");
-    expect(managedConnectPlatform("telegram")).toBeUndefined();
-    expect(managedConnectPlatform("whatsapp")).toBe("whatsapp");
-    expect(managedConnectPlatform("x")).toBe("x");
+describe("channel catalog presentation", () => {
+  it("uses API names and flags, including unknown or disabled descriptors", () => {
+    expect(platforms.telegram!.label).toBe("Telegram bot token");
+    expect(platforms["telegram-new"]!.label).toBe("Telegram");
+    expect(platforms.x!.managedOnly).toBe(true);
+    expect(platformView(undefined, "future").enabled).toBe(false);
+    expect(managedConnectPlatform("__proto__")).toBeUndefined();
   });
-  it("keeps platform setup guidance in the descriptor", () => {
-    for (const platform of ["lark", "feishu"] as const) {
-      expect(CHANNEL_PLATFORMS[platform].setupNote).toEqual({
-        title: "Lark webhook verification",
-        text: "In Lark/Feishu Event Subscriptions, copy the Verification Token from Security settings. Encrypt Key is optional and should match the Encrypt Key field from the same panel if you enabled encrypted callbacks.",
-      });
-    }
-    expect(CHANNEL_PLATFORMS.whatsapp.setupNote?.text).toContain("Phone Number ID");
-    expect(CHANNEL_PLATFORMS.whatsapp.setupNote?.text).toContain("App Secret");
-    expect(CHANNEL_PLATFORMS.telegram.setupNote).toBeUndefined();
+  it("preserves API field hints and setup instructions without platform-specific copy", () => {
+    const base = platformFixtures[0]!;
+    const view = platformView({
+      ...base,
+      registration: {
+        ...base.registration,
+        fields: [{ ...base.registration.fields[0]!, hint: "Copy this from the developer console." }],
+        setup_instructions: ["Grant permissions.", "Enable events."],
+      },
+    });
+    expect(view.fields[0]!.hint).toBe("Copy this from the developer console.");
+    expect(view.setupNote?.text).toBe("Grant permissions. Enable events.");
+    expect(platformView(base).fields[0]!.hint).toBeNull();
   });
-  it("does not submit hidden credentials after switching platform", () => {
-    expect(channelBotRegistrationPayload({ platform: "whatsapp", label: " Support ", bot_token: " token ", phone_number_id: "1234", app_secret: "secret", app_id: "old-lark-app", encrypt_key: "old-key", verification_token: "old-token", public_key: "old-key" }))
+  it("does not submit credentials hidden after switching platform", () => {
+    const descriptor = platformFixtures.find((p) => p.platform === "whatsapp")!;
+    expect(channelBotRegistrationPayload({ platform: "whatsapp", label: " Support ", bot_token: " token ", phone_number_id: "1234", app_secret: "secret", app_id: "hidden", encrypt_key: "hidden" }, descriptor))
       .toEqual({ platform: "whatsapp", label: "Support", bot_token: "token", phone_number_id: "1234", app_secret: "secret", target_org_id: undefined });
   });
-
-  it("only exposes mutable credentials on the edit form", () => {
-    expect(editableChannelFields("whatsapp").map((field) => field.name)).toEqual(["bot_token", "app_secret"]);
-    expect(editableChannelFields("slack").map((field) => field.name)).toEqual(["app_secret"]);
-    expect(editableChannelFields("telegram")).toEqual([]);
-    expect(CHANNEL_PLATFORMS.whatsapp.fields.find((field) => field.name === "phone_number_id")?.label).toBe("Phone Number ID");
+  it("shows only adapter-declared patchable fields", () => {
+    expect(editableChannelFields(platforms.whatsapp!).map((f) => f.name)).toEqual(["bot_token", "app_secret"]);
+    expect(editableChannelFields(platforms.telegram!)).toEqual([]);
   });
 });

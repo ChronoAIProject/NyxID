@@ -3,6 +3,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
 };
 
+pub const DEFAULT_CHANNEL_MEDIA_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
 const DEFAULT_INTERNAL_BIND_ADDR: &str = "127.0.0.1:3002";
 
 fn resolve_internal_advertise_url(
@@ -505,6 +507,7 @@ pub struct AppConfig {
     pub channel_relay_max_bots_per_user: u32,
     /// TTL in days for channel messages before automatic expiry (default: 30)
     pub channel_relay_message_ttl_days: u32,
+    pub channel_media_max_bytes: u64,
     /// Per-message edit rate limit for channel relay replies (default: 10/s).
     pub channel_relay_edit_rate_limit_per_second: u32,
     /// Burst capacity for per-message edit rate limiting (default: 20).
@@ -867,6 +870,7 @@ impl std::fmt::Debug for AppConfig {
                 "channel_relay_max_bots_per_user",
                 &self.channel_relay_max_bots_per_user,
             )
+            .field("channel_media_max_bytes", &self.channel_media_max_bytes)
             .field(
                 "channel_relay_message_ttl_days",
                 &self.channel_relay_message_ttl_days,
@@ -1398,6 +1402,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            channel_media_max_bytes: env::var("CHANNEL_MEDIA_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_CHANNEL_MEDIA_MAX_BYTES),
             channel_relay_message_ttl_days: env::var("CHANNEL_RELAY_MESSAGE_TTL_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1995,6 +2003,7 @@ mod tests {
             channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_media_max_bytes: DEFAULT_CHANNEL_MEDIA_MAX_BYTES,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
             channel_relay_initiate_rate_limit_per_second: 1,

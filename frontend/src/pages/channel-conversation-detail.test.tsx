@@ -28,7 +28,7 @@ const conversation: ChannelConversationItem = {
   default_agent: false,
   is_active: true,
   allow_agent_initiated: false,
-  capabilities: {
+  capabilities: { media: { inbound: ["image", "file"], outbound: ["image"] },
     initiated_send: true,
     reply_to: true,
     thread: true,
