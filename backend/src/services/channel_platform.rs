@@ -464,7 +464,8 @@ pub trait PlatformAdapter: Send + Sync {
     async fn edit_reply(
         &self,
         _http: &reqwest::Client,
-        _bot_token: &str,
+        _credentials: &BotCredentials<'_>,
+        _conversation_id: &str,
         _platform_message_id: &str,
         _edit: &OutboundEdit,
     ) -> AppResult<()> {

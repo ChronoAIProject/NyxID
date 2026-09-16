@@ -292,8 +292,8 @@ POST /api/v1/channel-relay/send
 POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
 
-# Edit a previously-sent reply (Lark/Feishu only in v1).
-# Addresses the upstream platform message returned by a prior /reply call
+# Edit a previously-sent reply (Telegram/Discord/Slack/Lark/Feishu).
+# Addresses the upstream platform message returned by a prior /reply or /send call
 # (e.g. Lark `om_xxx`). Same dual auth as /reply.
 POST /api/v1/channel-relay/reply/update
 { "message_id": "<upstream_platform_message_id>", "reply": { "text": "..." } }
@@ -309,16 +309,20 @@ Proactive sends require `addressable`, `allow_agent_initiated`, and `capabilitie
 
 #### Editing a sent reply (progressive / streaming renders)
 
-`POST /channel-relay/reply/update` lets an agent PATCH the text of a reply it already sent, which is how you implement progressive / streaming reply rendering on Lark/Feishu without flooding the chat with one message per token chunk.
+`POST /channel-relay/reply/update` lets an agent PATCH the text of a reply it already sent, which is how you implement progressive / streaming reply rendering on Telegram, Discord, Slack, Lark, and Feishu without flooding the chat with one message per token chunk.
 
-- **Body:** `{ "message_id": "<upstream_platform_message_id>", "reply": { "text": "...", "metadata": {...} } }`. `message_id` is the platform message id (e.g. Lark `om_xxx`) returned by the prior `/reply` call — **not** the inbound message id.
-- **Auth:** Same as `/reply`: agent API key OR the original per-callback reply token. The reply token is reusable for edits — see the reply-token section below for the JTI semantics.
-- **Platform support in v1:**
+- **Body:** `{ "message_id": "<upstream_platform_message_id>", "reply": { "text": "...", "metadata": {...} } }`. `message_id` is the platform message id (e.g. Lark `om_xxx`) returned by the prior `/reply` or `/send` call — **not** the inbound message id.
+- **Auth:** Same as `/reply`: agent API key OR the original per-callback reply token. The reply token is reusable for anchored edits — see the reply-token section below for the JTI semantics. Only an assigned agent API key can edit initiated rows from `/send`; reply tokens cannot.
+- **Platform support:**
   - Lark / Feishu: text edits via `PUT /im/v1/messages/{id}`, card edits via `PATCH /im/v1/messages/{id}` (pass the new card in `reply.metadata.card`).
-  - Telegram / Discord / Slack / OpenClaw: `501` with `code="edit_unsupported"`. Degrade to a final `/reply` at turn end.
+  - Telegram / telegram-new: `editMessageText` with Markdown, matching sends. Ordinary bot messages have a 48-hour edit window; identical edits succeed.
+  - Discord: `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token. Interaction follow-ups sent via a webhook are not editable through the channel endpoint after token expiry; there is no webhook-edit path.
+  - Slack: `chat.update`; `reply.metadata.blocks` is passed through when present.
+  - WhatsApp / X / OpenClaw: `501` with `code="edit_unsupported"`. Degrade to a final `/reply` at turn end.
   - Device channels: `400 device_channel_reply_not_allowed` (device conversations have no reply surface).
 - **Throttling is the caller's job.** NyxID only protects against abuse — per-upstream-message rate limit (default `10/s` burst `20`, configurable via `CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND` / `..._BURST`). `429 rate_limited` on exceed.
-- **Error classification:** Lark frequency-limit errors surface as `429`; "message not editable / wrong state" errors as `409`; malformed content as `400`. Anything else falls through to `502`.
+- **Address resolution:** NyxID uses the outbound row’s chat address, then the parent inbound address for legacy rows, then a concrete conversation address. Missing addresses on wildcard routes fail before dispatch with `channel_conversation_not_addressable`.
+- **Error classification:** Known Telegram/Discord/Slack target or edit refusals return `400 channel_conversation_not_reachable`; other upstream errors retain existing platform-error handling, including Slack rate-limit diagnostics. Lark frequency-limit errors surface as `429`; "message not editable / wrong state" errors as `409`; malformed content as `400`. Anything else falls through to `502`.
 
 > **ADR-013 note:** `GET /channel-relay/messages/...` returns only routing metadata (direction, platform, sender ids, delivery status, timestamps). Agents that need conversation bodies must retain their own history.
 

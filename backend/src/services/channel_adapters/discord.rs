@@ -13,6 +13,8 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "Missing Permissions",
     "Unknown Channel",
     "Cannot send messages to this user",
+    "Unknown Message",
+    "Cannot edit a message authored by another user",
 ];
 
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -20,7 +22,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
-    BotIdentity, InboundMessage, OutboundReply, PlatformAdapter,
+    BotIdentity, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
 };
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
@@ -38,11 +40,18 @@ const CHANNEL_GROUP_DM: u64 = 3;
 ///
 /// Stateless -- all state lives in the [`ChannelBot`] document and the Discord
 /// API itself.
-pub struct DiscordAdapter;
+/// Edits use the channel endpoint only. Interaction follow-ups sent through a
+/// webhook cannot be edited here after their interaction token expires; there
+/// is no webhook-edit path.
+pub struct DiscordAdapter {
+    base_url: String,
+}
 
 impl Default for DiscordAdapter {
     fn default() -> Self {
-        Self
+        Self {
+            base_url: DISCORD_API_BASE.to_string(),
+        }
     }
 }
 
@@ -251,6 +260,7 @@ pub(crate) fn apply_interaction_context(
 }
 
 fn build_message_request(
+    base_url: &str,
     conversation_id: &str,
     reply: &OutboundReply,
 ) -> (String, serde_json::Value) {
@@ -277,12 +287,24 @@ fn build_message_request(
 
     let url = if let Some((app_id, token)) = &interaction_info {
         // Interaction follow-up endpoint (for deferred responses)
-        format!("{DISCORD_API_BASE}/webhooks/{app_id}/{token}")
+        format!("{base_url}/webhooks/{app_id}/{token}")
     } else {
         // Regular channel message
-        format!("{DISCORD_API_BASE}/channels/{conversation_id}/messages")
+        format!("{base_url}/channels/{conversation_id}/messages")
     };
     (url, body)
+}
+
+fn build_edit_message_request(
+    base_url: &str,
+    conversation_id: &str,
+    platform_message_id: &str,
+    edit: &OutboundEdit,
+) -> (String, serde_json::Value) {
+    (
+        format!("{base_url}/channels/{conversation_id}/messages/{platform_message_id}"),
+        serde_json::json!({ "content": edit.text.as_deref().unwrap_or("") }),
+    )
 }
 
 #[async_trait::async_trait]
@@ -293,7 +315,7 @@ impl PlatformAdapter for DiscordAdapter {
             initiated_send: true,
             reply_to: false,
             thread: false,
-            edit: false,
+            edit: true,
         }
     }
 
@@ -458,7 +480,7 @@ impl PlatformAdapter for DiscordAdapter {
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
         let bot_token = credentials.token;
-        let (url, body) = build_message_request(conversation_id, reply);
+        let (url, body) = build_message_request(&self.base_url, conversation_id, reply);
         let resp: serde_json::Value = http
             .post(&url)
             .header("Authorization", format!("Bot {bot_token}"))
@@ -498,6 +520,48 @@ impl PlatformAdapter for DiscordAdapter {
         Ok(message_id)
     }
 
+    async fn edit_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+        platform_message_id: &str,
+        edit: &OutboundEdit,
+    ) -> AppResult<()> {
+        let (url, body) =
+            build_edit_message_request(&self.base_url, conversation_id, platform_message_id, edit);
+        let resp: serde_json::Value = http
+            .patch(&url)
+            .header("Authorization", format!("Bot {}", credentials.token))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::ChannelPlatformError(format!(
+                    "Discord edit message request failed: {}",
+                    e.without_url()
+                ))
+            })?
+            .json()
+            .await
+            .map_err(|e| {
+                AppError::ChannelPlatformError(format!(
+                    "Discord edit message response parse failed: {}",
+                    e.without_url()
+                ))
+            })?;
+        if let Some(error_msg) = resp.get("message").filter(|_| resp.get("code").is_some()) {
+            return Err(
+                crate::services::channel_platform::classify_upstream_refusal(
+                    "Discord",
+                    error_msg.as_str().unwrap_or("unknown error"),
+                    UNREACHABLE_TARGET_MARKERS,
+                ),
+            );
+        }
+        Ok(())
+    }
+
     async fn register_webhook(
         &self,
         _http: &reqwest::Client,
@@ -516,7 +580,7 @@ impl PlatformAdapter for DiscordAdapter {
         credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
         let bot_token = credentials.token;
-        let url = format!("{DISCORD_API_BASE}/users/@me");
+        let url = format!("{}/users/@me", self.base_url);
         let resp: serde_json::Value = http
             .get(&url)
             .header("Authorization", format!("Bot {bot_token}"))
@@ -569,11 +633,79 @@ impl PlatformAdapter for DiscordAdapter {
 mod tests {
     use super::*;
 
+    #[test]
+    fn edit_message_request_uses_channel_endpoint_and_content_only() {
+        let edit = OutboundEdit {
+            text: Some("updated".into()),
+            metadata: Some(serde_json::json!({"interaction_thread_id": "interaction:app:secret"})),
+        };
+        assert_eq!(
+            build_edit_message_request(DISCORD_API_BASE, "123", "456", &edit),
+            (
+                format!("{DISCORD_API_BASE}/channels/123/messages/456"),
+                serde_json::json!({"content": "updated"})
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn native_edit_success_and_classified_refusals() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, header, method, path},
+        };
+        let mut responses = vec![(
+            200,
+            serde_json::json!({"id": "456", "content": "updated"}),
+            None,
+        )];
+        for marker in UNREACHABLE_TARGET_MARKERS {
+            responses.push((
+                403,
+                serde_json::json!({"code": 50005, "message": format!("{marker}: private content")}),
+                Some(*marker),
+            ));
+        }
+        for (status, response, refusal) in responses {
+            let server = MockServer::start().await;
+            Mock::given(method("PATCH"))
+                .and(path("/channels/123/messages/456"))
+                .and(header("Authorization", "Bot test-token"))
+                .and(body_json(serde_json::json!({"content": "updated"})))
+                .respond_with(ResponseTemplate::new(status).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let adapter = DiscordAdapter {
+                base_url: server.uri(),
+            };
+            let result = adapter
+                .edit_reply(
+                    &reqwest::Client::new(),
+                    &"test-token".into(),
+                    "123",
+                    "456",
+                    &OutboundEdit {
+                        text: Some("updated".into()),
+                        metadata: None,
+                    },
+                )
+                .await;
+            if let Some(marker) = refusal {
+                assert!(
+                    matches!(result, Err(AppError::ChannelConversationNotReachable(reason)) if reason == format!("Discord: {marker}"))
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
     // -- platform_id ---------------------------------------------------------
 
     #[test]
     fn platform_id_is_discord() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         assert_eq!(adapter.platform_id(), "discord");
     }
 
@@ -581,7 +713,7 @@ mod tests {
 
     #[test]
     fn handle_challenge_ping_returns_pong() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let body = serde_json::json!({ "type": 1 }).to_string();
         let result = adapter.handle_challenge(body.as_bytes());
         assert!(result.is_some());
@@ -591,14 +723,14 @@ mod tests {
 
     #[test]
     fn handle_challenge_non_ping_returns_none() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let body = serde_json::json!({ "type": 2, "data": {} }).to_string();
         assert!(adapter.handle_challenge(body.as_bytes()).is_none());
     }
 
     #[test]
     fn handle_challenge_invalid_json_returns_none() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         assert!(adapter.handle_challenge(b"not json").is_none());
     }
 
@@ -606,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_ping_returns_empty() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let body = serde_json::json!({ "type": 1 });
         let raw = serde_json::to_vec(&body).unwrap();
         let msgs = adapter.parse_inbound(&raw).await.unwrap();
@@ -615,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_application_command() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let body = serde_json::json!({
             "type": 2,
             "id": "interaction_123",
@@ -650,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_message_component() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let body = serde_json::json!({
             "type": 4,
             "id": "comp_111",
@@ -676,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_gateway_message() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let body = serde_json::json!({
             "id": "msg_555",
             "channel_id": "ch_666",
@@ -703,7 +835,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_unhandled_interaction_returns_empty() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         // Type 5 = MODAL_SUBMIT -- not handled
         let body = serde_json::json!({ "type": 5, "data": {} });
         let raw = serde_json::to_vec(&body).unwrap();
@@ -713,7 +845,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_invalid_json_returns_error() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let result = adapter.parse_inbound(b"not json").await;
         assert!(result.is_err());
     }
@@ -737,7 +869,7 @@ mod tests {
     async fn verify_webhook_valid_signature() {
         use ed25519_dalek::{Signer, SigningKey};
 
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
 
         // Generate a test key pair
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);
@@ -768,7 +900,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_webhook_invalid_signature() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
 
         // Use a known public key but wrong signature
         let bot = make_test_bot(Some(&hex::encode([1u8; 32])));
@@ -785,7 +917,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_webhook_missing_public_key() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let bot = make_test_bot(None);
         let headers = axum::http::HeaderMap::new();
 
@@ -795,7 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_webhook_missing_headers() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let bot = make_test_bot(Some(&hex::encode([1u8; 32])));
         let headers = axum::http::HeaderMap::new();
 
@@ -844,7 +976,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_slash_command_no_options() {
-        let adapter = DiscordAdapter;
+        let adapter = DiscordAdapter::default();
         let body = serde_json::json!({
             "type": 2,
             "id": "int_no_opts",
@@ -868,15 +1000,18 @@ mod tests {
             reply_to_platform_message_id: None,
             metadata: None,
         };
-        let (url, body) = build_message_request("123", &reply);
+        let (url, body) = build_message_request(DISCORD_API_BASE, "123", &reply);
         assert!(url.ends_with("/channels/123/messages"));
         assert_eq!(body, serde_json::json!({ "content": "hello" }));
         reply.reply_to_platform_message_id = Some("ignored".into());
-        assert_eq!(build_message_request("123", &reply), (url, body));
+        assert_eq!(
+            build_message_request(DISCORD_API_BASE, "123", &reply),
+            (url, body)
+        );
         reply.metadata =
             Some(serde_json::json!({ "interaction_thread_id": "interaction:app:token" }));
         assert!(
-            build_message_request("123", &reply)
+            build_message_request(DISCORD_API_BASE, "123", &reply)
                 .0
                 .ends_with("/webhooks/app/token")
         );

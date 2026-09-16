@@ -192,6 +192,26 @@ sequenceDiagram
     H-->>AG: 200 OK { platform_message_id: "..." }
 ```
 
+### Editing a sent reply
+
+`POST /api/v1/channel-relay/reply/update` replaces a previously sent message using the `platform_message_id` returned by `/reply` or `/send`:
+
+```json
+{ "message_id": "<platform_message_id>", "reply": { "text": "Updated response", "metadata": null } }
+```
+
+An assigned agent API key can edit both anchored replies and agent-initiated messages. A per-callback reply token can edit only replies anchored to its bound inbound message, and only after its JTI has been consumed by `/reply`; it cannot edit initiated rows. The existing authorization and per-message rate limit apply to every edit, with rate limiting before authentication. Discovery exposes native support as `capabilities.edit`.
+
+- **Telegram / telegram-new:** `editMessageText` with the chat ID, numeric message ID, and `parse_mode: "Markdown"`, matching sends. Ordinary bot messages are subject to Telegram's 48-hour edit window. An identical edit (`message is not modified`) succeeds idempotently.
+- **Discord:** `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token. Interaction follow-ups sent through a webhook are not editable through this channel endpoint after their interaction token expires. NyxID does not provide a webhook-edit path.
+- **Slack:** `chat.update` with `channel`, `ts`, and `text`; `reply.metadata.blocks` passes through just as it does on sends. Existing Slack rate-limit error handling is preserved.
+- **Lark / Feishu:** unchanged text edits via `PUT /im/v1/messages/{id}` and card edits via `PATCH /im/v1/messages/{id}` using `reply.metadata.card`.
+- **WhatsApp / X / OpenClaw:** `501 edit_unsupported`. Device channels return `400 device_channel_reply_not_allowed`.
+
+The edit address comes first from the outbound row. For pre-0.21.0 rows without that address, NyxID reads the parent inbound row, then falls back to the conversation's concrete address. Wildcard (`"*"`) and empty addresses cannot reach a platform; no resolvable address returns `channel_conversation_not_addressable` before dispatch.
+
+Known permanent Telegram, Discord, and Slack refusals (including missing messages, messages the bot cannot edit, and closed edit windows) return `channel_conversation_not_reachable`; other upstream diagnostics use the existing bounded platform-error response. Lark/Feishu retain their existing error classification. Edits update only the outbound timestamp and routing-only audit metadata; message bodies and metadata are never persisted (ADR-013). Initiated edit audits retain a null `inbound_message_id`.
+
 ### Agent-initiated messages
 
 `POST /api/v1/channel-relay/send` sends to a configured conversation without an inbound message. Use it for an opted-in digest, alert, or job-completion notification. Existing and newly created conversations default to `allow_agent_initiated: false`. Only a human session can set this field through conversation create/update; the agent cannot grant itself permission. Organization sends require owner write access for human callers, or the exact assigned active agent key for agent callers.
@@ -272,12 +292,12 @@ This declaration-and-contract-test model follows OpenClaw's `ChannelOutboundAdap
 
 | Adapter | initiated_send | reply_to | thread | edit | Thread metadata |
 |---|---|---|---|---|---|
-| telegram | true | true | true | false | `message_thread_id` |
-| telegram-new | true | true | true | false | Delegates to Telegram |
-| discord | true | false | false | false | — (interaction follow-up is a reply-only mechanism) |
+| telegram | true | true | true | true | `message_thread_id` |
+| telegram-new | true | true | true | true | Delegates to Telegram |
+| discord | true | false | false | true | — (interaction follow-up is a reply-only mechanism) |
 | lark | true | false | false | true | — |
 | feishu | true | false | false | true | — |
-| slack | true | true | true | false | `thread_ts` |
+| slack | true | true | true | true | `thread_ts` |
 | whatsapp | true | true | false | false | — |
 | x | true | false | false | false | — |
 | openclaw | false | false | false | false | — |
@@ -496,6 +516,7 @@ classDiagram
         +reply_context(thread_id, created_at, metadata)
         +supports_reply_metadata(metadata) bool
         +send_reply(http, credentials, conversation_id, reply) Result~String~
+        +edit_reply(http, credentials, conversation_id, platform_message_id, edit) Result
         +register_webhook(http, bot, url, secret) Result
         +verify_bot_token(http, credentials) Result~BotIdentity~
     }
@@ -929,7 +950,7 @@ flowchart TD
 | `POST` | `/api/v1/channel-relay/reply` | API key **or** reply token | Agent sends async reply to a message. See [Reply Token](#reply-token). |
 | `POST` | `/api/v1/channel-relay/send` | Assigned API key or human owner | Initiate an opted-in target-addressed message; optional idempotency key. |
 | `GET` | `/api/v1/channel-relay/conversations` | API key | Paginated active assignments, addressability, opt-in, and outbound capabilities. |
-| `POST` | `/api/v1/channel-relay/reply/update` | API key **or** consumed reply token | Edit a prior anchored reply on supported adapters. |
+| `POST` | `/api/v1/channel-relay/reply/update` | API key **or** consumed reply token | Edit an anchored reply or API-key-authorized initiated message on Telegram, Discord, Slack, Lark, or Feishu. |
 | `GET` | `/api/v1/channel-relay/messages/{conversation_id}` | API key | Get conversation message history |
 | `GET` | `/api/v1/channel-relay/resolve-sender` | API key | Resolve a platform sender to a NyxID user (query params: `platform`, `platform_id`) |
 
