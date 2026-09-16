@@ -124,6 +124,10 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/telegram-bot.openapi.json"),
     ),
     (
+        "telnyx",
+        include_str!("../../specs/catalog/telnyx.openapi.json"),
+    ),
+    (
         "twitch",
         include_str!("../../specs/catalog/twitch.openapi.json"),
     ),
@@ -162,6 +166,7 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-slack-bot", "slack"),
     ("api-spotify", "spotify"),
     ("api-telegram-bot", "telegram-bot"),
+    ("api-telnyx", "telnyx"),
     ("api-twitch", "twitch"),
     ("api-twilio", "twilio"),
     ("api-twitter", "twitter"),

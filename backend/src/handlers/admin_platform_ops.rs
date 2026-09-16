@@ -481,7 +481,10 @@ mod tests {
     #[test]
     fn vendor_requirements_response_exposes_the_provisioning_contract() {
         let response = vendor_requirements_response(&seeded_templates(), &[]);
-        assert_eq!(response.vendors.len(), 4);
+        assert_eq!(
+            response.vendors.len(),
+            DEFAULT_PLATFORM_VENDOR_TEMPLATES.len()
+        );
 
         let elevenlabs = response
             .vendors
