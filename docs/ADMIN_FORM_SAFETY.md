@@ -99,38 +99,44 @@ creation/provisioning workflow has a generic change-review dialog.
 
 ## Verification and limits
 
-Focused regressions exercise real forms and mutation hooks: populated saved
-values, exact sparse bodies, cancellation, source switches (including endpoint
-parent identity), edited authorization conflicts, unrelated renames after
-revocation, structured revocation preservation/clear, secret redaction, own-save
-cache state, delayed reads, failed refresh after successful DELETE, metadata
-filter/refetch draft retention, rollout partial failures/newer drafts, SSH
-transitions, and upstream billing/platform metadata integration.
+Validation on 2026-09-17 covers the integrated changes, including the independent
+Astra and Fable review corrections. Both reviews closed with no known unresolved
+finding in the audited scope. Final source hashes were checked against Fable's
+review manifest.
 
-Added Rust tests cover sparse metadata/template persistence and PUT compatibility,
-nullable request parsing, optional-field storage shape, spec-discovery gating,
-merged-template validation, and disabling a broken vendor binding. New Rust code
-has been formatted; compilation/database execution is pending the parent's final
-integrated backend gate. The old backend executable cannot validate these changes.
+- The final focused frontend run passed 103 tests in 18 files. These exercise
+  populated saved values, selections that become inactive or unavailable, exact
+  sparse bodies, cancellation, source switches, edited authorization conflicts,
+  unrelated renames after revocation, structured revocation preservation/clear,
+  secret redaction, delayed reads, failed refresh after successful DELETE,
+  deferred metadata hydration, rollout partial failures, SSH transitions, and
+  billing/platform metadata integration.
+- The initial full frontend sweep passed 3,270 tests and failed one outdated
+  provider-editor expectation. That test was corrected for the review step and
+  exact sparse body, then passed in the final focused run. The full suite was not
+  rerun after the final corrections; these overlapping counts are not additive.
+- The final production build passed TypeScript, the main Vite build, the separate
+  credential-accept build, and the mock-footprint assertion. Full ESLint passed
+  with 27 existing warnings outside the change; lint also passed on the final
+  changed frontend files.
+- Nine Chromium checks passed: six credential scenarios, two role-editor checks
+  at desktop and mobile widths, and successful credential deletion followed by a
+  failed read and read-only retry. They verify redaction, confirmation before
+  writes, cancellation preserving drafts, exact sparse requests, and a DELETE
+  count of one through recovery.
+- All 349 selected backend tests passed across 15 affected handler/service
+  modules against an isolated MongoDB 8.0.12 replica set, with no ignored tests
+  or database skips. The test executable was compiled from the final backend
+  source with debug symbols disabled for the backend crate; test assertions
+  were unchanged.
+- Workspace Clippy passed with warnings denied (`cargo clippy --workspace
+  --all-targets -- -D warnings`). Rust formatting and whitespace checks passed.
 
-The previous 2026-09-16 validation (301 files/2,958 frontend tests and 53 focused
-backend tests) predates the independent-review fixes and main integration. Those
-numbers are superseded and are not evidence for the current source. Current
-focused runs passed 86 tests in 14 files, followed by 41 tests in six affected
-files and four new tests in two files (these sets overlap). The parent's first
-full frontend run passed 3,270 tests in 326 files and failed one outdated provider
-editor test. That test now passes with configured labels, saved URL fixtures,
-review confirmation, and an exact sparse credential body. Parent full ESLint
-passed with 27 existing warnings outside this change. Final integrated build,
-backend, and review status are recorded separately by the parent.
-
-Parent-provided real Chromium evidence: two role-editor tests passed at 1440px
-and 390px (saved fields, stacked dialogs, Cancel preserving draft/no request,
-confirmation sending exactly `{name:'Renamed operators'}`, no page errors).
-A credential-clear browser test also passed: DELETE succeeds, the following GET
-fails, confirmation closes, and Retry reads restored credentials with total
-DELETE count still exactly one. Credential E2E specs now include the review step
-and field-clear intent; their final integrated browser run is pending.
+Backend regressions cover sparse metadata/template persistence and PUT
+compatibility, nullable request parsing, optional-field storage shape,
+spec-discovery gating, merged-template validation, and disabling a broken vendor
+binding. The CLI wizard's source manifest has no overlap with the changed source,
+and its committed closure hash matches; no wizard bundle rebuild is required.
 
 Observed-conflict checks do not prevent an unseen concurrent write after the
 last browser read. Same-field writes and changed replacement arrays/blocks can
