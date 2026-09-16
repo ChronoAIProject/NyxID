@@ -1174,7 +1174,13 @@ mod tests {
         };
         assert!(matches!(
             WhatsAppAdapter
-                .edit_reply(&reqwest::Client::new(), "token", "wamid", &edit)
+                .edit_reply(
+                    &reqwest::Client::new(),
+                    &"token".into(),
+                    "chat",
+                    "wamid",
+                    &edit
+                )
                 .await,
             Err(AppError::ChannelPlatformEditUnsupported)
         ));

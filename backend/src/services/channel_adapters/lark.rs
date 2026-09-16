@@ -971,10 +971,12 @@ impl PlatformAdapter for LarkFamilyAdapter {
     async fn edit_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        _conversation_id: &str,
         platform_message_id: &str,
         edit: &OutboundEdit,
     ) -> AppResult<()> {
+        let bot_token = credentials.token;
         let (app_id, app_secret) = bot_token.split_once(':').ok_or_else(|| {
             AppError::ChannelPlatformError(format!(
                 "{} bot_token must be in app_id:app_secret format",
@@ -2002,7 +2004,8 @@ mod tests {
             adapter
                 .edit_reply(
                     &reqwest::Client::new(),
-                    "app:secret",
+                    &"app:secret".into(),
+                    "chat",
                     "message",
                     &OutboundEdit {
                         text: Some("updated".into()),

@@ -36,7 +36,9 @@ use crate::mw::auth::{AuthMethod, AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, channel_bot_service,
     channel_platform::{OutboundEdit, OutboundReply},
-    channel_relay_service, channel_send_service, org_service,
+    channel_relay_service,
+    channel_send_service::{self, is_concrete_platform_address},
+    org_service,
 };
 use crate::telemetry::{
     TelemetryContext, TelemetryEvent, emit_event, hash_short_id, should_sample_event,
@@ -1224,6 +1226,20 @@ pub async fn update_reply(
     edit_resolved_reply(&state, &headers, context, body, adapter.as_ref()).await
 }
 
+/// Pre-0.21.0 outbound rows lack the platform address; recover it from their
+/// inbound anchor, then from a concrete route when that anchor is unavailable.
+fn resolve_edit_conversation_id<'a>(
+    outbound: Option<&'a str>,
+    inbound: Option<&'a str>,
+    conversation: &'a str,
+) -> AppResult<&'a str> {
+    [outbound, inbound, Some(conversation)]
+        .into_iter()
+        .flatten()
+        .find(|id| is_concrete_platform_address(id))
+        .ok_or(AppError::ChannelConversationNotAddressable)
+}
+
 async fn edit_resolved_reply(
     state: &AppState,
     headers: &HeaderMap,
@@ -1238,6 +1254,27 @@ async fn edit_resolved_reply(
         attributed_api_key_id,
     } = context;
     validate_reply_for_adapter(&body.reply, adapter)?;
+    let inbound = if !outbound
+        .platform_conversation_id
+        .as_deref()
+        .is_some_and(is_concrete_platform_address)
+        && let Some(inbound_id) = outbound.reply_to_message_id.as_deref()
+    {
+        match channel_relay_service::get_message(&state.db, inbound_id).await {
+            Ok(message) => Some(message),
+            Err(AppError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let platform_conversation_id = resolve_edit_conversation_id(
+        outbound.platform_conversation_id.as_deref(),
+        inbound
+            .as_ref()
+            .and_then(|row| row.platform_conversation_id.as_deref()),
+        &conversation.platform_conversation_id,
+    )?;
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
         &state.encryption_keys,
@@ -1245,13 +1282,36 @@ async fn edit_resolved_reply(
         &bot,
     )
     .await?;
+    let platform_secrets = if bot.credential_source == "platform" {
+        Some(
+            crate::services::channel_managed::build_verify_secrets(
+                &state.db,
+                &state.encryption_keys,
+                adapter,
+                &bot,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let edit = OutboundEdit {
         text: body.reply.text,
         metadata: body.reply.metadata,
     };
 
     adapter
-        .edit_reply(&state.http_client, &bot_token, &body.message_id, &edit)
+        .edit_reply(
+            &state.http_client,
+            &crate::services::channel_platform::BotCredentials {
+                token: &bot_token,
+                platform_bot_id: Some(&bot.platform_bot_id),
+                platform_secrets: platform_secrets.as_ref(),
+            },
+            platform_conversation_id,
+            &body.message_id,
+            &edit,
+        )
         .await?;
 
     let edited_at = Utc::now();
@@ -1411,35 +1471,51 @@ mod tests {
     struct RecordingSendAdapter {
         calls: std::sync::atomic::AtomicUsize,
         fail: std::sync::atomic::AtomicBool,
-        /// Mock the native Lark edit contract when enabled.
-        editable: bool,
+        /// Select the native edit contract to record when enabled.
+        edit_platform: Option<&'static str>,
+        edit_calls: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     #[async_trait::async_trait]
     impl crate::services::channel_platform::PlatformAdapter for RecordingSendAdapter {
         fn platform_id(&self) -> &str {
-            if self.editable { "lark" } else { "telegram" }
+            self.edit_platform.unwrap_or("telegram")
+        }
+        fn platform_credentials(
+            &self,
+        ) -> Option<crate::services::channel_managed::PlatformCredentialDescriptor> {
+            (self.edit_platform == Some("telegram-new"))
+                .then(crate::services::channel_adapters::telegram_new::credential_descriptor)
         }
         fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
             crate::services::channel_platform::OutboundCapabilities {
                 initiated_send: true,
-                reply_to: !self.editable,
-                thread: !self.editable,
-                edit: self.editable,
+                reply_to: self.edit_platform.is_none(),
+                thread: self.edit_platform.is_none(),
+                edit: self.edit_platform.is_some(),
             }
         }
         async fn edit_reply(
             &self,
             _http: &reqwest::Client,
-            token: &str,
+            credentials: &crate::services::channel_platform::BotCredentials<'_>,
+            conversation_id: &str,
             message_id: &str,
             edit: &OutboundEdit,
         ) -> AppResult<()> {
-            if !self.editable {
+            if self.edit_platform.is_none() {
                 return Err(AppError::ChannelPlatformEditUnsupported);
             }
-            assert_eq!(token, "bot-token");
-            assert_eq!(message_id, "initiated-receipt");
+            assert_eq!(credentials.token, "bot-token");
+            assert_eq!(credentials.platform_bot_id, Some("bot_123"));
+            assert_eq!(
+                credentials.platform_secrets.is_some(),
+                self.edit_platform == Some("telegram-new")
+            );
+            self.edit_calls
+                .lock()
+                .unwrap()
+                .push((conversation_id.into(), message_id.into()));
             assert_eq!(edit.text.as_deref(), Some("Updated digest"));
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
@@ -1922,6 +1998,235 @@ mod tests {
         fixture.state.db.drop().await.unwrap();
     }
 
+    #[test]
+    fn edit_conversation_id_resolution_prefers_message_addresses() {
+        for (outbound, inbound, route, expected) in [
+            (Some("outbound"), Some("inbound"), "route", Some("outbound")),
+            (None, Some("inbound"), "route", Some("inbound")),
+            (None, None, "route", Some("route")),
+            (Some(""), Some("inbound"), "*", Some("inbound")),
+            (Some("*"), Some(""), "route", Some("route")),
+            (None, None, "*", None),
+            (None, None, "", None),
+            (None, None, "   ", None),
+        ] {
+            let result = resolve_edit_conversation_id(outbound, inbound, route);
+            match expected {
+                Some(id) => assert_eq!(result.unwrap(), id),
+                None => assert!(matches!(
+                    result,
+                    Err(AppError::ChannelConversationNotAddressable)
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_edit_resolves_initiated_and_legacy_addresses_before_dispatch() {
+        use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+        // Exercise actual auth/context loading and dispatch for all new native
+        // platforms, including legacy anchors on wildcard routes.
+        for (platform, initiated, outbound_address, inbound_address, route, expected) in [
+            (
+                "telegram",
+                true,
+                Some("outbound-chat"),
+                Some("other-chat"),
+                "*",
+                Some("outbound-chat"),
+            ),
+            (
+                "discord",
+                true,
+                Some("outbound-chat"),
+                None,
+                "*",
+                Some("outbound-chat"),
+            ),
+            (
+                "telegram-new",
+                true,
+                Some("outbound-chat"),
+                None,
+                "*",
+                Some("outbound-chat"),
+            ),
+            (
+                "slack",
+                true,
+                Some("outbound-chat"),
+                None,
+                "*",
+                Some("outbound-chat"),
+            ),
+            (
+                "telegram",
+                false,
+                None,
+                Some("inbound-chat"),
+                "*",
+                Some("inbound-chat"),
+            ),
+            (
+                "discord",
+                false,
+                None,
+                Some("inbound-chat"),
+                "*",
+                Some("inbound-chat"),
+            ),
+            (
+                "slack",
+                false,
+                None,
+                Some("inbound-chat"),
+                "*",
+                Some("inbound-chat"),
+            ),
+            (
+                "telegram",
+                false,
+                None,
+                None,
+                "route-chat",
+                Some("route-chat"),
+            ),
+            ("telegram", false, None, None, "*", None),
+            ("telegram", true, None, None, "*", None),
+        ] {
+            let Some(mut fixture) = setup_reply_token_fixture("channel_edit_address").await else {
+                eprintln!("no local MongoDB available");
+                return;
+            };
+            fixture.bot.platform = platform.into();
+            if platform == "telegram-new" {
+                fixture.bot.credential_source = "platform".into();
+            }
+            fixture.conversation.platform = platform.into();
+            fixture.conversation.platform_conversation_id = route.into();
+            fixture.message.platform = platform.into();
+            fixture.message.platform_conversation_id = inbound_address.map(str::to_string);
+            fixture.outbound_message.platform = platform.into();
+            fixture.outbound_message.platform_conversation_id =
+                outbound_address.map(str::to_string);
+            if initiated {
+                fixture.outbound_message.reply_to_message_id = None;
+            }
+            let db = &fixture.state.db;
+            for (collection, row) in [
+                (
+                    crate::models::channel_bot::COLLECTION_NAME,
+                    bson::to_document(&fixture.bot).unwrap(),
+                ),
+                (
+                    CONVERSATIONS,
+                    bson::to_document(&fixture.conversation).unwrap(),
+                ),
+                (
+                    crate::models::channel_message::COLLECTION_NAME,
+                    bson::to_document(&fixture.message).unwrap(),
+                ),
+                (
+                    crate::models::channel_message::COLLECTION_NAME,
+                    bson::to_document(&fixture.outbound_message).unwrap(),
+                ),
+            ] {
+                db.collection::<bson::Document>(collection)
+                    .replace_one(doc! {"_id": row.get_str("_id").unwrap()}, row.clone())
+                    .await
+                    .unwrap();
+            }
+            let auth = api_key_auth_user(&fixture.api_key);
+            let request = UpdateReplyRequest {
+                message_id: fixture
+                    .outbound_message
+                    .platform_message_id
+                    .clone()
+                    .unwrap(),
+                reply: body(Some("Updated digest"), None),
+            };
+            let context = resolve_edit_request_context(
+                &fixture.state,
+                &HeaderMap::new(),
+                Some(&auth),
+                &request,
+            )
+            .await
+            .unwrap();
+            let adapter = RecordingSendAdapter {
+                edit_platform: Some(platform),
+                ..Default::default()
+            };
+            let audit_written = audit_service::notify_on_audit_write_for_user(
+                "channel_relay.reply.edit",
+                &fixture.bot.user_id,
+            );
+            let result = edit_resolved_reply(
+                &fixture.state,
+                &HeaderMap::new(),
+                context,
+                request,
+                &adapter,
+            )
+            .await;
+            if let Some(address) = expected {
+                let response = result.unwrap().0;
+                assert_eq!(response.upstream_message_id, "platform_reply_123");
+                assert_eq!(
+                    *adapter.edit_calls.lock().unwrap(),
+                    vec![(address.into(), "platform_reply_123".into())]
+                );
+                assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                let audit_id =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), audit_written)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let audit = db
+                    .collection::<AuditLog>(AUDIT_LOG)
+                    .find_one(doc! {"_id": audit_id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let data = audit.event_data.unwrap();
+                assert_eq!(
+                    data["inbound_message_id"],
+                    serde_json::json!(fixture.outbound_message.reply_to_message_id)
+                );
+                assert!(!data.to_string().contains("Updated digest"));
+                let stored = db
+                    .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+                    .find_one(doc! {"_id": &fixture.outbound_message.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!stored.to_string().contains("Updated digest"));
+                if initiated {
+                    let claims = valid_reply_claims(&fixture);
+                    insert_reply_token_use(&fixture, &claims).await;
+                    let error = resolve_reply_token_edit_context(
+                        &fixture.state,
+                        &encode_reply_claims(&fixture.state, &claims),
+                        &update_reply_request("platform_reply_123"),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(
+                        matches!(error, AppError::Unauthorized(message) if message.contains("inbound_message_id mismatch"))
+                    );
+                }
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(AppError::ChannelConversationNotAddressable)
+                ));
+                assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert!(adapter.edit_calls.lock().unwrap().is_empty());
+            }
+            db.drop().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn channel_initiated_edit_updates_timestamp_and_audits_null_inbound_id() {
         use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
@@ -1965,7 +2270,7 @@ mod tests {
                 .await
                 .unwrap();
         let adapter = RecordingSendAdapter {
-            editable: true,
+            edit_platform: Some("lark"),
             ..Default::default()
         };
         let audit_written = audit_service::notify_on_audit_write_for_user(
@@ -1983,6 +2288,10 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *adapter.edit_calls.lock().unwrap(),
+            vec![("chat_123".into(), "initiated-receipt".into())]
+        );
         let updated = channel_relay_service::get_message(db, &fixture.outbound_message.id)
             .await
             .unwrap();
@@ -3286,16 +3595,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_reply_returns_501_on_telegram() {
+    async fn update_reply_returns_501_on_whatsapp() {
         let cache = std::sync::Arc::new(
             crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
         );
-        let adapter = resolve_adapter("telegram", &cache).expect("telegram adapter");
+        let adapter = resolve_adapter("whatsapp", &cache).expect("whatsapp adapter");
 
         let err = adapter
             .edit_reply(
                 &reqwest::Client::new(),
-                "bot-token",
+                &"bot-token".into(),
+                "chat",
                 "platform-msg-id",
                 &OutboundEdit {
                     text: Some("hello".to_string()),
@@ -3454,6 +3764,24 @@ mod tests {
             return;
         };
         let db = fixture.state.db.clone();
+        // Use a platform with no edit API so the first request cannot make an
+        // external call. Telegram now implements native editing.
+        for (collection, id) in [
+            (crate::models::channel_bot::COLLECTION_NAME, &fixture.bot.id),
+            (CONVERSATIONS, &fixture.conversation.id),
+            (
+                crate::models::channel_message::COLLECTION_NAME,
+                &fixture.outbound_message.id,
+            ),
+        ] {
+            db.collection::<bson::Document>(collection)
+                .update_one(
+                    doc! { "_id": id },
+                    doc! { "$set": { "platform": "whatsapp" } },
+                )
+                .await
+                .unwrap();
+        }
 
         let mut state = fixture.state.clone();
         state.per_message_edit_limiter =
@@ -3481,7 +3809,7 @@ mod tests {
         let second = update_reply(
             State(state),
             HeaderMap::new(),
-            OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))),
+            OptionalAuthUser(None),
             Json(update_reply_request(&platform_message_id)),
         )
         .await;

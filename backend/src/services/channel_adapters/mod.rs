@@ -50,12 +50,12 @@ pub fn outbound_capabilities(
 
 pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn PlatformAdapter>> {
     vec![
-        Box::new(telegram::TelegramAdapter),
+        Box::new(telegram::TelegramAdapter::default()),
         Box::new(telegram_new::TelegramNewAdapter),
-        Box::new(discord::DiscordAdapter),
+        Box::new(discord::DiscordAdapter::default()),
         Box::new(lark::LarkFamilyAdapter::lark(cache.clone())),
         Box::new(lark::LarkFamilyAdapter::feishu(cache.clone())),
-        Box::new(slack::SlackAdapter),
+        Box::new(slack::SlackAdapter::default()),
         Box::new(whatsapp::WhatsAppAdapter),
         Box::new(x::XAdapter::default()),
         Box::new(openclaw::OpenClawAdapter),
@@ -90,7 +90,13 @@ mod tests {
         use crate::services::channel_platform::{OutboundCapabilities, OutboundEdit};
         let adapters = registered_adapters(&Arc::new(TokenExchangeCache::new()));
         assert_eq!(adapters.len(), 9);
-        let http = reqwest::Client::new();
+        // Force all native network attempts to an unreachable local proxy.
+        // No real platform receives the dummy credentials used by this contract.
+        let http = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .unwrap();
         let edit = OutboundEdit {
             text: Some("updated".into()),
             metadata: None,
@@ -111,13 +117,24 @@ mod tests {
                     initiated_send: adapter.platform_id() != "openclaw",
                     reply_to,
                     thread,
-                    edit: matches!(adapter.platform_id(), "lark" | "feishu"),
+                    edit: matches!(
+                        adapter.platform_id(),
+                        "telegram" | "telegram-new" | "discord" | "slack" | "lark" | "feishu"
+                    ),
                 }
             );
-            // Invalid credentials stop the native Lark override before HTTP; the
-            // default implementation always returns EditUnsupported. Successful
-            // native HTTP edit contracts are covered in lark's wiremock test.
-            let result = adapter.edit_reply(&http, "", "message", &edit).await;
+            // Native overrides must fail with a transport/credential error, not
+            // EditUnsupported. Wiremock tests separately prove platform acceptance.
+            let result = adapter
+                .edit_reply(&http, &"".into(), "chat", "123", &edit)
+                .await;
+            if capabilities.edit {
+                assert!(
+                    matches!(&result, Err(AppError::ChannelPlatformError(_))),
+                    "{}: {result:?}",
+                    adapter.platform_id()
+                );
+            }
             assert_eq!(
                 matches!(result, Err(AppError::ChannelPlatformEditUnsupported)),
                 !capabilities.edit,

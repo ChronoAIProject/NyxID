@@ -461,10 +461,17 @@ pub trait PlatformAdapter: Send + Sync {
     ) -> AppResult<Option<String>>;
 
     /// Edit a previously-sent platform message.
+    /// `credentials` are the same as for `send_reply`: token plus managed platform secrets.
+    /// `conversation_id` is the platform chat/channel ID already resolved by the handler
+    /// (outbound row → parent inbound row → concrete route), never a wildcard.
+    /// `platform_message_id` is the upstream ID returned by the original send.
+    /// The default returns `ChannelPlatformEditUnsupported`; adapters that override
+    /// this method must declare `edit: true` in their outbound capabilities.
     async fn edit_reply(
         &self,
         _http: &reqwest::Client,
-        _bot_token: &str,
+        _credentials: &BotCredentials<'_>,
+        _conversation_id: &str,
         _platform_message_id: &str,
         _edit: &OutboundEdit,
     ) -> AppResult<()> {
