@@ -663,6 +663,57 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // Aurinko account bearer tokens; managed OAuth requires documented PKCE support.
+    if !slug_exists!("aurinko") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "aurinko".to_string(),
+            name: "Aurinko".to_string(),
+            description: Some(
+                "Aurinko unified email API for a user-connected mailbox."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Paste an Aurinko account access token (not an application API key or signing secret). Authorize Mail.Read for reading, Mail.Send for sending, and Mail.Drafts for drafts. NyxID sends Authorization: Bearer. Channel bots are configured separately."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://app.aurinko.io/".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://docs.aurinko.io/unified-apis/email-api".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "aurinko", "Seeded default provider: Aurinko");
+        seeded_count += 1;
+    }
+
     // 7d. Twilio (API Key / HTTP Basic)
     if !slug_exists!("twilio") {
         let provider = ProviderConfig {
@@ -2911,7 +2962,7 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             true,
         )),
-        "api-twilio" => Some((
+        "api-twilio" | "api-aurinko" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
                 supports_proxy_write: true,
@@ -3212,6 +3263,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "The hosted overlay covers core AI, speech, calling, and messaging REST operations. Inbound webhooks and call media streams require a separate application receiver. Calls require a Telnyx voice connection and an authorized caller ID; messaging requires a configured sender and applicable registration.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "aurinko",
+        service_slug: "api-aurinko",
+        service_name: "Aurinko Email",
+        base_url: "https://api.aurinko.io",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Read, search, and reply to email, inspect threads and attachments, and manage drafts in your connected Aurinko mailbox.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.aurinko.io"),
+        auth_notes: Some(
+            "Use a mailbox account access token, not an application credential. Mail.Read permits reads; Mail.Send permits send/reply; Mail.Drafts permits drafts. Channel bot credentials are managed separately.",
+        ),
+        known_limitations: Some(
+            "Managed OAuth onboarding is unavailable until Aurinko documents PKCE support. Account-token onboarding is supported. Send IDs are best effort; processingStatus Incomplete can follow successful submission. Never blindly retry uncertain sends. Provider mailbox setup and consent remain required.",
         ),
     },
     DefaultServiceSeed {

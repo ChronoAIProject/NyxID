@@ -9,6 +9,21 @@ use crate::cli::{ChannelBotCommands, ChannelRouteCommands, OutputFormat};
 use crate::commands::lark_permission::print_permission_block;
 use crate::org_resolver::resolve_org_id;
 
+async fn delete_bot_result(api: &mut ApiClient, id: &str) -> Result<Value> {
+    if let Some(result) = api
+        .delete_optional::<Value>(&format!("/channel-bots/{id}"))
+        .await?
+    {
+        let cleanup = result["webhook_cleanup"]
+            .as_str()
+            .filter(|value| matches!(*value, "removed" | "failed"))
+            .ok_or_else(|| anyhow::anyhow!("Invalid Aurinko deletion cleanup response"))?;
+        Ok(serde_json::json!({"ok": true, "webhook_cleanup": cleanup}))
+    } else {
+        Ok(serde_json::json!({"ok": true}))
+    }
+}
+
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
         ChannelBotCommands::Platforms { auth } => {
@@ -197,12 +212,12 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 resolved_app_secret.as_deref(),
             )?;
             let resolved_verification_token = verification_token.or_else(|| {
-                (platform != "whatsapp")
+                (platform != "whatsapp" && platform != "aurinko")
                     .then(|| env_secret("NYXID_LARK_VERIFICATION_TOKEN"))
                     .flatten()
             });
             let resolved_encrypt_key = encrypt_key.or_else(|| {
-                (platform != "whatsapp")
+                (platform != "whatsapp" && platform != "aurinko")
                     .then(|| env_secret("NYXID_LARK_ENCRYPT_KEY"))
                     .flatten()
             });
@@ -379,7 +394,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 || (!explicit_encrypt_key && body.get("encrypt_key").is_some())
             {
                 let bot: Value = api.get(&format!("/channel-bots/{id}")).await?;
-                if bot["platform"] == "whatsapp" {
+                if matches!(bot["platform"].as_str(), Some("whatsapp" | "aurinko")) {
                     let fields = body.as_object_mut().expect("update body is an object");
                     if !explicit_verification_token {
                         fields.remove("verification_token");
@@ -571,12 +586,14 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             }
 
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            api.delete_empty(&format!("/channel-bots/{id}")).await?;
+            let result = delete_bot_result(&mut api, &id).await?;
+            if result["webhook_cleanup"] == "failed" {
+                eprintln!(
+                    "Bot deleted locally. Remove its remaining subscription in the Aurinko dashboard."
+                );
+            }
             match auth.output {
-                OutputFormat::Json => println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
-                ),
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
                 OutputFormat::Table => eprintln!("Bot deleted."),
             }
             Ok(())
@@ -839,6 +856,11 @@ fn validate_platform_fields(
     waba_id: Option<&str>,
     app_secret: Option<&str>,
 ) -> Result<()> {
+    if platform == "aurinko" && app_secret.is_none_or(|secret| secret.trim().is_empty()) {
+        bail!(
+            "--app-secret-env is required for Aurinko (application signing secret, distinct from the account access token)"
+        );
+    }
     if platform == "whatsapp" {
         let phone_number_id = phone_number_id.ok_or_else(|| {
             anyhow::anyhow!("--phone-number-id is required for WhatsApp Cloud API")
@@ -1399,6 +1421,38 @@ mod tests {
         })
         .await
         .expect("delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn aurinko_delete_json_preserves_cleanup_outcome_and_legacy_204() {
+        for outcome in [Some("removed"), Some("failed"), None] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(403))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let response = match outcome {
+                Some(value) => ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"webhook_cleanup":value})),
+                None => ResponseTemplate::new(204),
+            };
+            Mock::given(method("DELETE"))
+                .and(path("/api/v1/channel-bots/bot-1"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut api = ApiClient::from_auth_checked(&mock_auth(server.uri()))
+                .await
+                .unwrap();
+            let json_output = delete_bot_result(&mut api, "bot-1").await.unwrap();
+            let expected = match outcome {
+                Some(value) => serde_json::json!({"ok":true, "webhook_cleanup":value}),
+                None => serde_json::json!({"ok":true}),
+            };
+            assert_eq!(json_output, expected);
+        }
     }
 
     #[tokio::test]
@@ -1995,5 +2049,45 @@ mod tests {
         ] {
             assert!(crate::cli::Cli::try_parse_from(args).is_ok());
         }
+    }
+}
+
+#[cfg(test)]
+mod aurinko_tests {
+    use super::*;
+    use clap::Parser;
+    #[test]
+    fn aurinko_registration_and_rotation_accept_account_token_and_signing_secret() {
+        assert!(validate_platform_fields("aurinko", None, None, Some("signing-secret")).is_ok());
+        assert!(validate_platform_fields("aurinko", None, None, None).is_err());
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "nyxid",
+                "channel-bot",
+                "register",
+                "--platform",
+                "aurinko",
+                "--label",
+                "Mailbox",
+                "--token-env",
+                "AURINKO_ACCOUNT_TOKEN",
+                "--app-secret-env",
+                "AURINKO_SIGNING_SECRET"
+            ])
+            .is_ok()
+        );
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "nyxid",
+                "channel-bot",
+                "update",
+                "bot-id",
+                "--token-env",
+                "AURINKO_ACCOUNT_TOKEN",
+                "--app-secret-env",
+                "AURINKO_SIGNING_SECRET"
+            ])
+            .is_ok()
+        );
     }
 }

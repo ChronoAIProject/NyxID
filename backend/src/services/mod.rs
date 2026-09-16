@@ -166,3 +166,5 @@ pub mod platform_key_service;
 pub mod service_account_scope_service;
 
 pub mod channel_platform_catalog_service;
+
+pub mod channel_retry_ingress;

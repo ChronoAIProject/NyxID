@@ -254,3 +254,7 @@ The Step 2 block now sets these permissions automatically; this note is for chec
 ## Production deployment
 
 For production deployment (TLS (Transport Layer Security), custom domain, email verification), see [DEPLOYMENT.md](DEPLOYMENT.md).
+
+## Aurinko mailbox connections
+
+For Aurinko account-token AI Services and native email channel bots, follow [Aurinko integration](./AURINKO_INTEGRATION.md). Bot setup requires an HTTPS callback reachable during signed validation, an account token, and the separate application signing secret. Managed OAuth is not exposed until interoperable PKCE support is documented.

@@ -226,3 +226,18 @@ describe("agent-initiated message settings", () => {
     );
   });
 });
+
+
+describe("Aurinko account-token onboarding", () => {
+  const input = { platform: "aurinko", label: "Mailbox", bot_token: "account-token", app_secret: "signing-secret" };
+  it("requires both account token and distinct signing-secret input", () => {
+    expect(createChannelBotSchema.safeParse(input).success).toBe(true);
+    expect(createChannelBotSchema.safeParse({ ...input, app_secret: "" }).success).toBe(false);
+    expect(createChannelBotSchema.safeParse({ ...input, bot_token: "" }).success).toBe(false);
+  });
+  it("accepts mailbox conversations and credential rotation", () => {
+    expect(conversationPlatformSchema.parse("aurinko")).toBe("aurinko");
+    expect(updateChannelBotSchema.safeParse({ bot_token: "replacement", app_secret: "replacement-secret" }).success).toBe(true);
+    expect(createChannelConversationSchema.safeParse({ channel_bot_id: UUID, agent_api_key_id: UUID, platform_conversation_id: `42:${"a".repeat(64)}` }).success).toBe(true);
+  });
+});
