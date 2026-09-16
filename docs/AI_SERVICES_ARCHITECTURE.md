@@ -536,3 +536,7 @@ Provider eligibility is batch-loaded once for the request. Catalog, MCP and LLM
 listings likewise reuse grants and provider rows rather than issuing ACL queries per
 service. These snapshots last for one request only; the next request rechecks live
 membership, owner activity, provider eligibility and catalog configuration.
+
+## Aurinko account credentials
+
+`api-aurinko` is a normal owner-scoped catalog connection backed by an encrypted account bearer credential. Existing active-service, agent-binding, scope, and approval rules apply. The AI Services UI and CLI support account-token entry and the authenticated `/v1/account` probe. The email channel bot stores its own encrypted account token plus the separate application signing secret; credential rotation and deletion are independent across these surfaces. Managed OAuth is not exposed because official Aurinko contracts do not document the PKCE support required by NyxID. See [Aurinko integration](./AURINKO_INTEGRATION.md) for the documented contracts and decision.

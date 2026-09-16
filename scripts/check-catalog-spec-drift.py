@@ -32,6 +32,11 @@ except ImportError:  # pragma: no cover
 # official paths so they align with overlay paths, which are relative to
 # the seeded base_url)
 OFFICIAL_SPECS = {
+    "aurinko.openapi.json": (
+        "https://apirefs.aurinko.io/assets/swagger.json",
+        False,
+        "",
+    ),
     "notion.openapi.json": (
         "https://developers.notion.com/openapi.json",
         False,
