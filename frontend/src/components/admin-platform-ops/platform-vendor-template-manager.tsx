@@ -26,7 +26,13 @@ import {
   useAppForm,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
   useCreatePlatformVendorTemplate,
@@ -62,7 +68,9 @@ const EMPTY_FORM: PlatformVendorTemplateForm = {
   is_active: true,
 };
 
-function templateToForm(template: PlatformVendorRequirement): PlatformVendorTemplateForm {
+function templateToForm(
+  template: PlatformVendorRequirement,
+): PlatformVendorTemplateForm {
   return {
     vendor: template.vendor,
     display_name: template.display_name,
@@ -102,13 +110,18 @@ export function PlatformVendorTemplateManager({
     defaultValues: EMPTY_FORM,
   });
 
-  const editing = templates.data?.vendors.find((template) => template.id === editingId);
+  const editing = templates.data?.vendors.find(
+    (template) => template.id === editingId,
+  );
 
   useEffect(() => {
     if (open && !editingId) form.reset(EMPTY_FORM);
   }, [editingId, form, open]);
 
   const close = () => {
+    if (create.isPending || update.isPending || disable.isPending) return;
+    review.cancel();
+    disableReview.cancel();
     setEditingId(null);
     form.reset(EMPTY_FORM);
     onOpenChange(false);
@@ -121,20 +134,30 @@ export function PlatformVendorTemplateManager({
 
   const baseline = form.formState.defaultValues as PlatformVendorTemplateForm;
   const stale = Boolean(
-    editing && !sameValue(baseline, templateToForm(editing)),
+    editingId && (!editing || !sameValue(baseline, templateToForm(editing))),
   );
-  const review = useChangeReview<PlatformVendorTemplateForm>(async (data) => {
-    if (!editingId) return;
-    await update.mutateAsync({ id: editingId, data });
-    toast.success("Vendor template updated");
-    setEditingId(null);
-    form.reset(EMPTY_FORM);
-  }, stale);
+  const review = useChangeReview<{
+    id: string;
+    data: Partial<PlatformVendorTemplateForm>;
+  }>(
+    async (variables) => {
+      await update.mutateAsync(variables);
+      toast.success("Vendor template updated");
+      setEditingId(null);
+      form.reset(EMPTY_FORM);
+    },
+    stale,
+    `${open}:${editingId ?? "new"}`,
+  );
 
   const onSubmit = async (data: PlatformVendorTemplateForm) => {
     try {
       if (editingId) {
-        review.review(data, describeChanges(baseline, changedFields(baseline, data)));
+        const patch = changedFields(baseline, data);
+        review.review(
+          { id: editingId, data: patch },
+          describeChanges(baseline, patch),
+        );
         return;
       } else {
         await create.mutateAsync(data);
@@ -147,28 +170,33 @@ export function PlatformVendorTemplateManager({
     }
   };
 
-  const onDisable = async (template: PlatformVendorRequirement) => {
-    try {
-      await disable.mutateAsync(template.id);
-      toast.success(`${template.display_name} template disabled`);
-      if (editingId === template.id) {
+  const disableReview = useChangeReview<{ id: string; displayName: string }>(
+    async ({ id, displayName }) => {
+      await disable.mutateAsync(id);
+      toast.success(`${displayName} template disabled`);
+      if (editingId === id) {
         setEditingId(null);
         form.reset(EMPTY_FORM);
       }
-    } catch (error) {
-      toast.error(errorMessage(error, "Failed to disable vendor template"));
-    }
-  };
+    },
+    false,
+    String(open),
+  );
 
   return (
-    <Dialog open={open} onOpenChange={(nextOpen) => (nextOpen ? onOpenChange(true) : close())}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => (nextOpen ? onOpenChange(true) : close())}
+    >
       {review.dialog}
+      {disableReview.dialog}
       <DialogContent className="max-w-3xl" scrollMode="body">
         <DialogHeader>
           <DialogTitle>Vendor templates</DialogTitle>
           <DialogDescription>
-            Manage the provisioning forms operators see. A template controls display
-            metadata only; operation binding still enforces the server contract.
+            Manage the provisioning forms operators see. A template controls
+            display metadata only; operation binding still enforces the server
+            contract.
           </DialogDescription>
         </DialogHeader>
 
@@ -178,28 +206,69 @@ export function PlatformVendorTemplateManager({
               Current templates
             </p>
             {templates.error ? (
-              <p className="text-sm text-destructive">{errorMessage(templates.error, "Failed to load vendor templates")}</p>
+              <p className="text-sm text-destructive">
+                {errorMessage(
+                  templates.error,
+                  "Failed to load vendor templates",
+                )}
+              </p>
             ) : (
               <div className="divide-y divide-border/50 rounded-lg border border-border/60">
                 {templates.data?.vendors.map((template) => (
-                  <div key={template.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                  <div
+                    key={template.id}
+                    className="flex items-center justify-between gap-3 px-3 py-2.5"
+                  >
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="truncate text-sm font-medium">{template.display_name}</span>
-                        <Badge variant={template.is_active ? "success" : "secondary"}>
+                        <span className="truncate text-sm font-medium">
+                          {template.display_name}
+                        </span>
+                        <Badge
+                          variant={template.is_active ? "success" : "secondary"}
+                        >
                           {template.is_active ? "Active" : "Disabled"}
                         </Badge>
-                        {template.is_seeded ? <Badge variant="secondary">Seeded</Badge> : null}
+                        {template.is_seeded ? (
+                          <Badge variant="secondary">Seeded</Badge>
+                        ) : null}
                       </div>
-                      <p className="truncate font-mono text-[11px] text-muted-foreground">{template.vendor} · {template.slug}</p>
+                      <p className="truncate font-mono text-[11px] text-muted-foreground">
+                        {template.vendor} · {template.slug}
+                      </p>
                     </div>
                     <div className="flex shrink-0 gap-1.5">
-                      <Button type="button" variant="outline" size="sm" onClick={() => startEdit(template)}>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => startEdit(template)}
+                      >
                         <Pencil className="size-3.5" />
                         Edit
                       </Button>
                       {template.is_active ? (
-                        <Button type="button" variant="ghost" size="sm" onClick={() => void onDisable(template)} disabled={disable.isPending}>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            disableReview.review(
+                              {
+                                id: template.id,
+                                displayName: template.display_name,
+                              },
+                              [
+                                {
+                                  field: `${template.display_name} template`,
+                                  before: "Active",
+                                  after: "Disabled",
+                                },
+                              ],
+                            )
+                          }
+                          disabled={disable.isPending}
+                        >
                           <Ban className="size-3.5" />
                           Disable
                         </Button>
@@ -208,49 +277,271 @@ export function PlatformVendorTemplateManager({
                   </div>
                 ))}
                 {!templates.isLoading && !templates.data?.vendors.length ? (
-                  <p className="px-3 py-4 text-sm text-muted-foreground">No templates yet.</p>
+                  <p className="px-3 py-4 text-sm text-muted-foreground">
+                    No templates yet.
+                  </p>
                 ) : null}
               </div>
             )}
           </div>
 
           {stale && editing && (
-          <StaleFormNotice onReload={() => { form.reset(templateToForm(editing)); review.cancel(); }} />
-        )}
-        <Form {...form}>
+            <StaleFormNotice
+              onReload={() => {
+                form.reset(templateToForm(editing));
+                review.cancel();
+              }}
+            />
+          )}
+          <Form {...form}>
             <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
               <div className="flex items-center justify-between border-y border-border/50 py-3">
                 <div>
-                  <p className="text-sm font-medium">{editing ? `Edit ${editing.display_name}` : "Add a template"}</p>
-                  <p className="text-xs text-muted-foreground">Use a stable `platform-` slug for rows created from this form.</p>
+                  <p className="text-sm font-medium">
+                    {editing
+                      ? `Edit ${editing.display_name}`
+                      : "Add a template"}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Use a stable `platform-` slug for rows created from this
+                    form.
+                  </p>
                 </div>
                 {editing ? (
-                  <Button type="button" variant="ghost" size="sm" onClick={() => { setEditingId(null); form.reset(EMPTY_FORM); }}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setEditingId(null);
+                      form.reset(EMPTY_FORM);
+                    }}
+                  >
                     <RotateCcw className="size-3.5" />
                     New template
                   </Button>
-                ) : <Plus className="size-4 text-muted-foreground" />}
+                ) : (
+                  <Plus className="size-4 text-muted-foreground" />
+                )}
               </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
-                <FormField control={form.control} name="vendor" render={({ field }) => <FormItem><FormLabel>Vendor key</FormLabel><FormControl><Input {...field} placeholder="acme" /></FormControl><FormMessage /></FormItem>} />
-                <FormField control={form.control} name="display_name" render={({ field }) => <FormItem><FormLabel>Display name</FormLabel><FormControl><Input {...field} placeholder="Acme Voice" /></FormControl><FormMessage /></FormItem>} />
-                <FormField control={form.control} name="slug" render={({ field }) => <FormItem><FormLabel>Canonical slug</FormLabel><FormControl><Input {...field} className="font-mono" /></FormControl><FormMessage /></FormItem>} />
-                <FormField control={form.control} name="base_url" render={({ field }) => <FormItem><FormLabel>Base URL</FormLabel><FormControl><Input {...field} type="url" /></FormControl><FormMessage /></FormItem>} />
-                <FormField control={form.control} name="auth_method" render={({ field }) => <FormItem><FormLabel>Auth method</FormLabel><Select value={field.value} onValueChange={(value) => field.onChange(value)}><FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl><SelectContent><SelectItem value="bearer">Bearer</SelectItem><SelectItem value="header">Header</SelectItem><SelectItem value="basic">Basic</SelectItem></SelectContent></Select><FormMessage /></FormItem>} />
-                <FormField control={form.control} name="auth_key_name" render={({ field }) => <FormItem><FormLabel>Required auth key name</FormLabel><FormControl><Input value={field.value ?? ""} onChange={(event) => field.onChange(event.target.value || null)} placeholder="Optional for bearer/basic" /></FormControl><FormMessage /></FormItem>} />
-                <FormField control={form.control} name="credential_label" render={({ field }) => <FormItem><FormLabel>Credential label</FormLabel><FormControl><Input {...field} /></FormControl><FormMessage /></FormItem>} />
-                <FormField control={form.control} name="operation" render={({ field }) => <FormItem><FormLabel>Served operation</FormLabel><Select value={field.value ?? "none"} onValueChange={(value) => field.onChange(value === "none" ? null : value)}><FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl><SelectContent><SelectItem value="none">No operation yet</SelectItem>{OPERATION_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select><FormMessage /></FormItem>} />
+                <FormField
+                  control={form.control}
+                  name="vendor"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Vendor key</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder="acme" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="display_name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Display name</FormLabel>
+                      <FormControl>
+                        <Input {...field} placeholder="Acme Voice" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="slug"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Canonical slug</FormLabel>
+                      <FormControl>
+                        <Input {...field} className="font-mono" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="base_url"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Base URL</FormLabel>
+                      <FormControl>
+                        <Input {...field} type="url" />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="auth_method"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Auth method</FormLabel>
+                      <Select
+                        value={field.value}
+                        onValueChange={(value) => field.onChange(value)}
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          <SelectItem value="bearer">Bearer</SelectItem>
+                          <SelectItem value="header">Header</SelectItem>
+                          <SelectItem value="basic">Basic</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="auth_key_name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Required auth key name</FormLabel>
+                      <FormControl>
+                        <Input
+                          value={field.value ?? ""}
+                          onChange={(event) =>
+                            field.onChange(event.target.value || null)
+                          }
+                          placeholder="Optional for bearer/basic"
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="credential_label"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Credential label</FormLabel>
+                      <FormControl>
+                        <Input {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="operation"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Served operation</FormLabel>
+                      <Select
+                        value={field.value ?? "none"}
+                        onValueChange={(value) =>
+                          field.onChange(value === "none" ? null : value)
+                        }
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          <SelectItem value="none">No operation yet</SelectItem>
+                          {OPERATION_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
               </div>
 
-              <FormField control={form.control} name="credential_note" render={({ field }) => <FormItem><FormLabel>Credential help text</FormLabel><FormControl><Input {...field} /></FormControl><FormMessage /></FormItem>} />
-              <FormField control={form.control} name="capability_summary" render={({ field }) => <FormItem><FormLabel>Capability summary</FormLabel><FormControl><Input {...field} /></FormControl><FormMessage /></FormItem>} />
-              <FormField control={form.control} name="restriction_summary" render={({ field }) => <FormItem><FormLabel>Restriction summary</FormLabel><FormControl><Input {...field} /></FormControl><FormMessage /></FormItem>} />
-              <FormField control={form.control} name="is_active" render={({ field }) => <FormItem className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2"><div><FormLabel>Available to operators</FormLabel><p className="text-xs text-muted-foreground">Disabled templates stay visible here but cannot provision new rows.</p></div><FormControl><Switch checked={field.value} onCheckedChange={field.onChange} /></FormControl></FormItem>} />
+              <FormField
+                control={form.control}
+                name="credential_note"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Credential help text</FormLabel>
+                    <FormControl>
+                      <Input {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="capability_summary"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Capability summary</FormLabel>
+                    <FormControl>
+                      <Input {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="restriction_summary"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Restriction summary</FormLabel>
+                    <FormControl>
+                      <Input {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="is_active"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
+                    <div>
+                      <FormLabel>Available to operators</FormLabel>
+                      <p className="text-xs text-muted-foreground">
+                        Disabled templates stay visible here but cannot
+                        provision new rows.
+                      </p>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
               <FormSubmitErrors />
               <DialogFooter>
-                <Button type="button" variant="outline" onClick={close}>Close</Button>
-                <Button type="submit" variant="primary" disabled={!form.formState.isDirty || create.isPending || update.isPending} isLoading={create.isPending || update.isPending}>
+                <Button type="button" variant="outline" onClick={close}>
+                  Close
+                </Button>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={
+                    !form.formState.isDirty ||
+                    create.isPending ||
+                    update.isPending
+                  }
+                  isLoading={create.isPending || update.isPending}
+                >
                   <Check className="size-4" />
                   {editing ? "Save template" : "Add template"}
                 </Button>

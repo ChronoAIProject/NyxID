@@ -1,18 +1,33 @@
 import type { DownstreamService, UpdateServicePayload } from "@/types/api";
 import type { UpdateServiceFormData } from "@/schemas/services";
+import { changedFields, normalizedSet, sameValue } from "@/lib/form-changes";
 import { inferSshAuthMode } from "@/lib/ssh-auth-mode";
 import { parseAllowedPrincipals } from "@/lib/ssh";
+
+type ServiceFields = Extract<UpdateServicePayload, { base_url?: string }> &
+  Extract<UpdateServicePayload, { ssh_config?: unknown }>;
+export type ServiceFormPayload = {
+  -readonly [K in keyof ServiceFields]: ServiceFields[K];
+};
 
 export function serviceFormValues(
   service: DownstreamService,
 ): UpdateServiceFormData {
   return {
     inference: service.inference ?? null,
-    platform_key: service.platform_key ?? undefined,
+    platform_key: service.platform_key
+      ? {
+          ...service.platform_key,
+          allowed_owner_ids: normalizedSet(
+            service.platform_key.allowed_owner_ids,
+          ),
+        }
+      : undefined,
     credential: "",
-    byok_pricing: service.billing?.byok_pricing ?? null,
-    platform_key_pricing: service.billing?.platform_key_pricing ?? null,
-    platform_charge_nyxid_credentials_only: service.billing?.platform_charge_nyxid_credentials_only ?? false,
+    byok_pricing: laneValues(service.billing?.byok_pricing),
+    platform_key_pricing: laneValues(service.billing?.platform_key_pricing),
+    platform_charge_nyxid_credentials_only:
+      service.billing?.platform_charge_nyxid_credentials_only ?? false,
     service_type: service.service_type === "ssh" ? "ssh" : "http",
     visibility: service.visibility === "private" ? "private" : "public",
     name: service.name,
@@ -44,7 +59,7 @@ export function serviceFormValues(
     required_permissions: service.required_permissions?.join(", ") ?? "",
     examples_url: service.examples_url ?? "",
     recommended_skills: service.recommended_skills?.join(", ") ?? "",
-    developer_app_ids: [...(service.developer_app_ids ?? [])],
+    developer_app_ids: normalizedSet(service.developer_app_ids ?? []),
     supports_proxy_read: service.capabilities?.supports_proxy_read ?? false,
     supports_proxy_write: service.capabilities?.supports_proxy_write ?? false,
     supports_proxy_binary_upload:
@@ -79,7 +94,7 @@ export function serviceFormValues(
 export function serviceFormPayload(
   data: UpdateServiceFormData,
   service: DownstreamService,
-): UpdateServicePayload {
+): ServiceFormPayload {
   return service.service_type === "ssh"
     ? {
         name: data.name,
@@ -130,10 +145,19 @@ export function serviceFormPayload(
           .split(/[,\n]/)
           .map((s) => s.trim())
           .filter(Boolean),
-        developer_app_ids: data.developer_app_ids ?? [],
+        developer_app_ids: normalizedSet(data.developer_app_ids ?? []),
         inference: data.inference,
-        platform_key: data.platform_key,
-        ...(data.credential?.trim() ? { credential: data.credential.trim() } : {}),
+        platform_key: data.platform_key
+          ? {
+              ...data.platform_key,
+              allowed_owner_ids: normalizedSet(
+                data.platform_key.allowed_owner_ids,
+              ),
+            }
+          : undefined,
+        ...(data.credential?.trim()
+          ? { credential: data.credential.trim() }
+          : {}),
         capabilities: {
           supports_proxy_read: data.supports_proxy_read ?? false,
           supports_proxy_write: data.supports_proxy_write ?? false,
@@ -151,7 +175,8 @@ export function serviceFormPayload(
           ...(service?.billing ?? {}),
           byok_pricing: data.byok_pricing,
           platform_key_pricing: data.platform_key_pricing,
-          platform_charge_nyxid_credentials_only: data.platform_charge_nyxid_credentials_only ?? false,
+          platform_charge_nyxid_credentials_only:
+            data.platform_charge_nyxid_credentials_only ?? false,
           platform_billable: data.platform_billable ?? false,
           platform_metric:
             data.platform_metric && data.platform_metric !== "auto"
@@ -174,4 +199,56 @@ export function serviceFormPayload(
           ? data.default_request_headers
           : null,
       };
+}
+
+function laneValues(lane: UpdateServiceFormData["byok_pricing"]) {
+  return lane
+    ? { metric: lane.metric, credits_per_unit: lane.credits_per_unit }
+    : null;
+}
+
+export function serviceFormPatch(
+  data: UpdateServiceFormData,
+  service: DownstreamService,
+): ServiceFormPayload {
+  const values = serviceFormValues(service);
+  const before = serviceFormPayload(values, service);
+  const after = serviceFormPayload(data, service);
+  const patch = changedFields(before, after);
+  if (patch.billing) {
+    const lanes = changedFields(
+      {
+        byok_pricing: values.byok_pricing,
+        platform_key_pricing: values.platform_key_pricing,
+      },
+      {
+        byok_pricing: laneValues(data.byok_pricing),
+        platform_key_pricing: laneValues(data.platform_key_pricing),
+      },
+    );
+    const legacyChanged = [
+      "platform_billable",
+      "platform_metric",
+      "platform_price",
+      "platform_charge_nyxid_credentials_only",
+    ].some(
+      (key) =>
+        !sameValue(
+          values[key as keyof typeof values],
+          data[key as keyof typeof data],
+        ),
+    );
+    if (legacyChanged) {
+      const {
+        byok_pricing: _byok,
+        platform_key_pricing: _platform,
+        ...legacy
+      } = after.billing!;
+      void _byok;
+      void _platform;
+      patch.billing = { ...legacy, ...lanes };
+    } else if (Object.keys(lanes).length) patch.billing = lanes;
+    else delete patch.billing;
+  }
+  return patch;
 }

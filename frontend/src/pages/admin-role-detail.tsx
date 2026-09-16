@@ -1,4 +1,9 @@
-import { changedFields, describeChanges } from "@/lib/form-changes";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+  normalizedSet,
+} from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -46,11 +51,15 @@ import { Checkbox } from "@/components/ui/checkbox";
 
 export function AdminRoleDetailPage() {
   const { roleId } = useParams({ strict: false }) as { roleId: string };
+  return <AdminRoleDetailPageEditor key={roleId} roleId={roleId} />;
+}
+
+function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
 
-  const { data: role, isLoading, error } = useRole(roleId);
+  const { data: role, isLoading } = useRole(roleId);
   const updateMutation = useUpdateRole();
   const deleteMutation = useDeleteRole();
   const bulkAssignMutation = useBulkAssignRole();
@@ -72,40 +81,53 @@ export function AdminRoleDetailPage() {
     },
   });
 
-  function openEditDialog() {
-    if (!role) return;
-    form.reset({
+  const normalize = (value: UpdateRoleFormData) => ({
+    ...value,
+    description: value.description ?? "",
+    permissions: normalizedSet((value.permissions ?? "").split(",")),
+  });
+  function editValues(): UpdateRoleFormData {
+    if (!role) return form.getValues();
+    return {
       name: role.name,
       slug: role.slug,
       description: role.description ?? "",
       permissions: role.permissions.join(", "),
       is_default: role.is_default,
-    });
+    };
+  }
+
+  function openEditDialog() {
+    if (!role) return;
+    form.reset(editValues());
+    editReview.cancel();
     setEditOpen(true);
   }
 
   const editReview = useChangeReview<
-    Parameters<typeof updateMutation.mutateAsync>[0]["data"]
-  >(async (data) => {
-    await updateMutation.mutateAsync({ roleId, data });
-    toast.success("Role updated successfully");
-    setEditOpen(false);
-  });
+    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...variables }) => {
+      void _before;
+      await updateMutation.mutateAsync(variables);
+      toast.success("Role updated successfully");
+      setEditOpen(false);
+    },
+    (pending) =>
+      !role ||
+      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+    roleId,
+  );
 
   function handleEdit(data: UpdateRoleFormData) {
-    const normalize = (value: UpdateRoleFormData) => ({
-      ...value,
-      description: value.description ?? "",
-      permissions: (value.permissions ?? "")
-        .split(",")
-        .map((p) => p.trim())
-        .filter(Boolean),
-    });
     const before = normalize(
       form.formState.defaultValues as UpdateRoleFormData,
     );
     const patch = changedFields(before, normalize(data));
-    editReview.review(patch, describeChanges(before, patch));
+    editReview.review(
+      { roleId, data: patch, before },
+      describeChanges(before, patch),
+    );
   }
 
   async function handleDelete() {
@@ -137,7 +159,7 @@ export function AdminRoleDetailPage() {
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !role) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -146,7 +168,7 @@ export function AdminRoleDetailPage() {
     );
   }
 
-  if (error || !role) {
+  if (!role) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />

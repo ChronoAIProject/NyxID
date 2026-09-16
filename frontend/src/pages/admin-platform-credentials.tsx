@@ -36,52 +36,27 @@ import { ApiError } from "@/lib/api-client";
 
 function CredentialForm({
   provider: source,
+  onRefresh,
 }: {
   readonly provider: PlatformCredentials;
+  readonly onRefresh: () => Promise<PlatformCredentials | undefined>;
 }) {
+  const [refreshRequired, setRefreshRequired] = useState(false);
   const [provider, setProvider] = useState(source);
   const update = useUpdatePlatformCredentials(provider.provider);
   const clear = useClearPlatformCredentials(provider.provider);
   const [confirm, setConfirm] = useState<"clear" | "regenerate" | null>(null);
-  const sharedProvider = provider.backing?.type === "provider_oauth"
-    ? provider.backing.provider_slug
-    : null;
+  const sharedProvider =
+    provider.backing?.type === "provider_oauth"
+      ? provider.backing.provider_slug
+      : null;
   const form = useAppForm<PlatformCredentialForm>({
     resolver: zodResolver(platformCredentialFormSchema),
     defaultValues: credentialFormValues(provider),
     mode: "onChange",
   });
   const { isDirty, isValid } = form.formState;
-  const stale = !sameValue(provider, source);
-  const review = useChangeReview<Record<string, string | null>>(save, stale);
-  const pending = update.isPending || clear.isPending;
-
-  function onSubmit(values: PlatformCredentialForm) {
-    const before = credentialFormValues(provider).fields;
-    const fields = changedFields(before, values.fields) as Record<
-      string,
-      string | null
-    >;
-    // A blank secret input keeps the stored secret; only the clear button sends null.
-    for (const field of provider.fields) {
-      if (fields[field.name] === "") {
-        if (field.secret) delete fields[field.name];
-        else fields[field.name] = null;
-      }
-    }
-    review.review(
-      fields,
-      [...(sharedProvider && Object.values(fields).includes(null) ? [{ field: "Shared OAuth credentials", before: sharedProvider, after: `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.` }] : []), ...describeChanges(before, fields, {
-        labels: Object.fromEntries(
-          provider.fields.map((field) => [field.name, field.label]),
-        ),
-        secretFields: provider.fields
-          .filter((field) => field.secret)
-          .map((field) => field.name),
-      })],
-    );
-  }
-
+  const stale = !refreshRequired && !sameValue(provider, source);
   async function save(fields: Record<string, string | null>) {
     try {
       const saved = await update.mutateAsync({ fields });
@@ -100,13 +75,69 @@ function CredentialForm({
     }
   }
 
+  const review = useChangeReview<{
+    providerId: string;
+    fields: Record<string, string | null>;
+  }>(
+    ({ providerId, fields }) =>
+      providerId === provider.provider ? save(fields) : Promise.resolve(),
+    stale || refreshRequired,
+    provider.provider,
+  );
+  const pending = update.isPending || clear.isPending;
+  const unavailable = pending || refreshRequired;
+
+  function onSubmit(values: PlatformCredentialForm) {
+    const before = credentialFormValues(provider).fields;
+    const fields = changedFields(before, values.fields) as Record<
+      string,
+      string | null
+    >;
+    // A blank secret input keeps the stored secret; only the clear button sends null.
+    for (const field of provider.fields) {
+      if (fields[field.name] === "") {
+        if (field.secret) delete fields[field.name];
+        else fields[field.name] = null;
+      }
+    }
+    review.review({ providerId: provider.provider, fields }, [
+      ...(sharedProvider && Object.values(fields).includes(null)
+        ? [
+            {
+              field: "Shared OAuth credentials",
+              before: sharedProvider,
+              after: `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.`,
+            },
+          ]
+        : []),
+      ...describeChanges(before, fields, {
+        labels: Object.fromEntries(
+          provider.fields.map((field) => [field.name, field.label]),
+        ),
+        secretFields: provider.fields
+          .filter((field) => field.secret)
+          .map((field) => field.name),
+      }),
+    ]);
+  }
+
   async function confirmAction() {
     if (pending || stale || !confirm) return;
     try {
       if (confirm === "clear") {
-        const saved = await clear.mutateAsync();
-        setProvider(saved);
-        form.reset(credentialFormValues(saved));
+        const { saved } = await clear.mutateAsync();
+        setConfirm(null);
+        form.reset({
+          fields: Object.fromEntries(
+            provider.fields.map((field) => [field.name, ""]),
+          ),
+        });
+        setRefreshRequired(!saved);
+        if (saved) {
+          setProvider(saved);
+          form.reset(credentialFormValues(saved));
+        }
+        toast.success("Platform credentials cleared");
       } else {
         const draft = changedFields(
           credentialFormValues(provider).fields,
@@ -138,9 +169,31 @@ function CredentialForm({
         <KeyRound className="size-4 text-muted-foreground" />
         <h2 className="text-[15px] font-semibold">{provider.label}</h2>
         <Badge variant={provider.available ? "success" : "secondary"}>
-          {provider.available ? "Configured" : "Not configured"}
+          {refreshRequired
+            ? "Refresh required"
+            : provider.available
+              ? "Configured"
+              : "Not configured"}
         </Badge>
       </div>
+      {sharedProvider && (
+        <p className="text-xs text-muted-foreground">
+          Shared with the {sharedProvider} provider.
+        </p>
+      )}
+      {refreshRequired && (
+        <ErrorBanner
+          message="Credentials cleared; current details could not be refreshed"
+          onRetry={async () => {
+            const saved = await onRefresh();
+            if (saved) {
+              setProvider(saved);
+              form.reset(credentialFormValues(saved));
+              setRefreshRequired(false);
+            }
+          }}
+        />
+      )}
       {stale && (
         <StaleFormNotice
           onReload={() => {
@@ -166,7 +219,9 @@ function CredentialForm({
               <Label htmlFor={`${provider.provider}-${field.name}`}>
                 {field.label}
               </Label>
-              {field.configured && <Badge variant="success">Configured</Badge>}
+              {!refreshRequired && field.configured && (
+                <Badge variant="success">Configured</Badge>
+              )}
             </div>
             <div className="flex items-start gap-2">
               <Input
@@ -174,7 +229,7 @@ function CredentialForm({
                 type={field.secret ? "password" : "text"}
                 inputMode={field.numeric ? "numeric" : undefined}
                 autoComplete="off"
-                disabled={pending}
+                disabled={unavailable}
                 placeholder={
                   field.secret && field.configured
                     ? "Enter a replacement to rotate"
@@ -188,7 +243,7 @@ function CredentialForm({
                 variant="ghost"
                 title={`Clear ${field.label}`}
                 aria-label={`Clear ${field.label}`}
-                disabled={pending || !field.configured}
+                disabled={unavailable || !field.configured}
                 onClick={() => form.setValue(`fields.${field.name}`, null)}
               >
                 <X className="size-3" />
@@ -212,9 +267,7 @@ function CredentialForm({
             variant="primary"
             type="submit"
             isLoading={pending}
-            disabled={
-              pending || stale || !isDirty || !isValid
-            }
+            disabled={unavailable || stale || !isDirty || !isValid}
           >
             <Save className="size-3" />
             Save credentials
@@ -222,7 +275,7 @@ function CredentialForm({
           <Button
             type="button"
             variant="ghost"
-            disabled={pending || stale || !provider.updated_at}
+            disabled={unavailable || stale || !provider.updated_at}
             onClick={() => setConfirm("clear")}
           >
             <Trash2 className="size-3" />
@@ -245,7 +298,7 @@ function CredentialForm({
             />
             <Button
               variant="outline"
-              disabled={pending || stale}
+              disabled={unavailable || stale}
               onClick={() => setConfirm("regenerate")}
             >
               <RotateCw className="size-3" />
@@ -291,7 +344,7 @@ function CredentialForm({
             <Button
               variant="primary"
               isLoading={pending}
-              disabled={pending || stale}
+              disabled={unavailable || stale}
               onClick={() => void confirmAction()}
             >
               Confirm
@@ -318,7 +371,18 @@ export function AdminPlatformCredentialsPage() {
         <Skeleton className="h-64 w-full" />
       ) : (
         query.data?.map((provider) => (
-          <CredentialForm key={provider.provider} provider={provider} />
+          <CredentialForm
+            key={provider.provider}
+            provider={provider}
+            onRefresh={async () => {
+              const result = await query.refetch();
+              return result.error
+                ? undefined
+                : result.data?.find(
+                    (item) => item.provider === provider.provider,
+                  );
+            }}
+          />
         ))
       )}
     </div>

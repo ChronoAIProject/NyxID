@@ -4,29 +4,10 @@ import { api } from "@/lib/api-client";
 import type { ServiceEndpoint, DiscoverEndpointsResponse } from "@/types/api";
 import type { CreateEndpointFormData } from "@/schemas/endpoints";
 
-interface CreateEndpointPayload {
-  readonly name: string;
-  readonly description?: string | null;
-  readonly method: string;
-  readonly path: string;
-  readonly parameters?: unknown | null;
-  readonly request_body_schema?: unknown | null;
-  readonly response_description?: string | null;
-}
-
-function formToPayload(data: CreateEndpointFormData): CreateEndpointPayload {
-  return {
-    name: data.name,
-    description: data.description || null,
-    method: data.method,
-    path: data.path,
-    parameters: data.parameters ? JSON.parse(data.parameters) : null,
-    request_body_schema: data.request_body_schema
-      ? JSON.parse(data.request_body_schema)
-      : null,
-    response_description: data.response_description || null,
-  };
-}
+import {
+  formToPayload,
+  type CreateEndpointPayload,
+} from "@/lib/endpoint-changes";
 
 export function useEndpoints(serviceId: string) {
   return useQuery({
@@ -74,28 +55,31 @@ export function useUpdateEndpoint() {
       endpointId,
       data,
       before,
+      patch,
     }: {
       readonly serviceId: string;
       readonly endpointId: string;
       readonly before?: ServiceEndpoint;
+      readonly patch?: Partial<CreateEndpointPayload>;
       readonly data: CreateEndpointFormData;
     }): Promise<void> => {
       return api.put<void>(
         `/services/${serviceId}/endpoints/${endpointId}`,
-        before
-          ? changedFields(
-              {
-                name: before.name,
-                description: before.description,
-                method: before.method,
-                path: before.path,
-                parameters: before.parameters,
-                request_body_schema: before.request_body_schema,
-                response_description: before.response_description,
-              },
-              formToPayload(data),
-            )
-          : formToPayload(data),
+        patch ??
+          (before
+            ? changedFields(
+                {
+                  name: before.name,
+                  description: before.description,
+                  method: before.method,
+                  path: before.path,
+                  parameters: before.parameters,
+                  request_body_schema: before.request_body_schema,
+                  response_description: before.response_description,
+                },
+                formToPayload(data),
+              )
+            : formToPayload(data)),
       );
     },
     onSuccess: (_data, variables) => {

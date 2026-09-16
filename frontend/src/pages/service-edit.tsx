@@ -1,9 +1,16 @@
 import { PlatformServiceFields } from "@/components/services/platform-service-fields";
-import { serviceFormPayload, serviceFormValues } from "./service-edit.helpers";
+import {
+  serviceFormPatch,
+  serviceFormPayload,
+  serviceFormValues,
+} from "./service-edit.helpers";
 import { useState } from "react";
 import type { DownstreamService, UpdateServicePayload } from "@/types/api";
-import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
-import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { describeChanges, sameValue } from "@/lib/form-changes";
+import {
+  useChangeReview,
+  useEditorMounted,
+} from "@/components/shared/change-review-dialog";
 import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -25,7 +32,11 @@ import {
   SERVICE_TYPE_LABELS,
   VISIBILITY_LABELS,
 } from "@/lib/constants";
-import { SSH_AUTH_MODE_LABELS } from "@/lib/ssh-auth-mode";
+import {
+  SSH_AUTH_MODE_LABELS,
+  getSshAuthModeChangeWarning,
+  inferSshAuthMode,
+} from "@/lib/ssh-auth-mode";
 import { flattenRowErrors, flattenRowFieldErrors } from "@/lib/form-errors";
 import { ApiError } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
@@ -62,7 +73,7 @@ import { toast } from "sonner";
 export function ServiceEditPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const { data: service, isLoading, error, refetch } = useService(serviceId);
-  if (isLoading) return <Skeleton className="h-96 w-full" />;
+  if (isLoading && !service) return <Skeleton className="h-96 w-full" />;
   if (!service)
     return (
       <ErrorBanner
@@ -78,6 +89,7 @@ export function ServiceEditPage() {
 function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
   const [service, setService] = useState(source);
   const serviceId = service.id;
+  const isMounted = useEditorMounted();
   const navigate = useNavigate();
   const updateMutation = useUpdateService();
   const user = useAuthStore((s) => s.user);
@@ -94,24 +106,56 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
     resolver: zodResolver(updateServiceSchema),
     defaultValues: serviceFormValues(service),
   });
-  const stale = !sameValue(service, source);
-  const review = useChangeReview<UpdateServicePayload>(saveChanges, stale);
+  const stale =
+    !sameValue(serviceFormValues(service), serviceFormValues(source)) ||
+    (!!form.watch("credential")?.trim() &&
+      service.updated_at !== source.updated_at);
+  type ReviewedService = { serviceId: string; data: UpdateServicePayload };
+  const review = useChangeReview<ReviewedService>(
+    saveChanges,
+    stale,
+    serviceId,
+  );
 
   function onSubmit(data: UpdateServiceFormData) {
     if (stale) return;
     const before = serviceFormPayload(serviceFormValues(service), service);
-    const patch = changedFields(before, serviceFormPayload(data, service));
-    review.review(
-      patch,
-      describeChanges(before, patch, {
-        secretFields: ["credential", "default_request_headers", "ws_frame_injections"],
+    const patch = serviceFormPatch(data, service);
+    if (!user?.is_admin) {
+      delete patch.inference;
+      delete patch.platform_key;
+      delete patch.credential;
+    }
+    const warning = patch.ssh_config
+      ? getSshAuthModeChangeWarning(
+          inferSshAuthMode(
+            service.ssh_config?.ssh_auth_mode,
+            service.ssh_config?.certificate_auth_enabled,
+          ),
+          inferSshAuthMode(
+            patch.ssh_config.ssh_auth_mode,
+            patch.ssh_config.certificate_auth_enabled,
+          ),
+        )
+      : null;
+    review.review({ serviceId, data: patch }, [
+      ...(warning
+        ? [{ field: "SSH mode transition", before: "Node Key", after: warning }]
+        : []),
+      ...describeChanges(before, patch, {
+        secretFields: [
+          "credential",
+          "default_request_headers",
+          "ws_frame_injections",
+        ],
       }),
-    );
+    ]);
   }
 
-  async function saveChanges(data: UpdateServicePayload) {
+  async function saveChanges({ serviceId: targetId, data }: ReviewedService) {
     try {
-      await updateMutation.mutateAsync({ serviceId: service.id, data });
+      await updateMutation.mutateAsync({ serviceId: targetId, data });
+      if (!isMounted()) return;
       toast.success("Service updated");
       void navigate({
         to: "/services/$serviceId",
@@ -814,7 +858,9 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     </div>
 
                     <Separator className="my-2" />
-                    {user?.is_admin && <PlatformServiceFields form={form} service={service} />}
+                    {user?.is_admin && (
+                      <PlatformServiceFields form={form} service={service} />
+                    )}
                     <div className="space-y-4">
                       <div className="space-y-1">
                         <h3 className="text-[13px] font-semibold">Billing</h3>
@@ -852,16 +898,23 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                             Charge only NyxID-provided credentials
                           </Label>
                           <p className="text-xs text-muted-foreground">
-                            Charge NyxID master keys and shared OAuth apps. Users
-                            bringing their own credentials are metered for
+                            Charge NyxID master keys and shared OAuth apps.
+                            Users bringing their own credentials are metered for
                             observability without platform charges.
                           </p>
                         </div>
                         <Switch
                           id="platform-charge-nyxid-credentials-only"
-                          checked={form.watch("platform_charge_nyxid_credentials_only") ?? false}
+                          checked={
+                            form.watch(
+                              "platform_charge_nyxid_credentials_only",
+                            ) ?? false
+                          }
                           onCheckedChange={(v) =>
-                            form.setValue("platform_charge_nyxid_credentials_only", v)
+                            form.setValue(
+                              "platform_charge_nyxid_credentials_only",
+                              v,
+                            )
                           }
                         />
                       </div>

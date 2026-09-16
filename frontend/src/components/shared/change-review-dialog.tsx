@@ -1,5 +1,5 @@
 import { toast } from "sonner";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,27 +13,47 @@ import type { FormChange } from "@/lib/form-changes";
 
 export function useChangeReview<T>(
   save: (payload: T) => Promise<void>,
-  stale = false,
+  conflict: boolean | ((payload: T) => boolean) = false,
+  sourceId = "",
 ) {
   const [pending, setPending] = useState<{
     payload: T;
     changes: FormChange[];
+    sourceId: string;
   } | null>(null);
+  const submitting = useRef(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reviewSource, setReviewSource] = useState(sourceId);
+  if (reviewSource !== sourceId) {
+    setReviewSource(sourceId);
+    setPending(null);
+    setError(null);
+  }
+
+  const stale =
+    typeof conflict === "function"
+      ? pending !== null && conflict(pending.payload)
+      : conflict;
+  const sameSource = pending?.sourceId === sourceId;
 
   function review(payload: T, changes: FormChange[]) {
-    if (stale) return;
+    if (submitting.current) return;
     if (!changes.length) {
       toast.info("No changes to save");
       return;
     }
     setError(null);
-    setPending({ payload: structuredClone(payload), changes });
+    setPending({
+      payload: structuredClone(payload),
+      changes: structuredClone(changes),
+      sourceId,
+    });
   }
 
   async function confirm() {
-    if (!pending || saving || stale) return;
+    if (!pending || !sameSource || submitting.current || stale) return;
+    submitting.current = true;
     setSaving(true);
     try {
       await save(pending.payload);
@@ -43,13 +63,14 @@ export function useChangeReview<T>(
         cause instanceof Error ? cause.message : "Unable to save changes",
       );
     } finally {
+      submitting.current = false;
       setSaving(false);
     }
   }
 
   const dialog = (
     <Dialog
-      open={pending !== null}
+      open={pending !== null && sameSource}
       onOpenChange={(open) => {
         if (!open && !saving) setPending(null);
       }}
@@ -118,5 +139,16 @@ export function useChangeReview<T>(
       </DialogContent>
     </Dialog>
   );
-  return { review, dialog, cancel: () => setPending(null) };
+  return { review, dialog, saving, cancel: () => setPending(null) };
+}
+
+export function useEditorMounted() {
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  return () => mounted.current;
 }

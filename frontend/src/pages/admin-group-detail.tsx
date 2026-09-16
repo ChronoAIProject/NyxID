@@ -1,4 +1,9 @@
-import { changedFields, describeChanges } from "@/lib/form-changes";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+  normalizedSet,
+} from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -57,11 +62,15 @@ import { toast } from "sonner";
 
 export function AdminGroupDetailPage() {
   const { groupId } = useParams({ strict: false }) as { groupId: string };
+  return <AdminGroupDetailPageEditor key={groupId} groupId={groupId} />;
+}
+
+function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
 
-  const { data: group, isLoading, error } = useGroup(groupId);
+  const { data: group, isLoading } = useGroup(groupId);
   const { data: membersData } = useGroupMembers(groupId);
   const { data: rolesData } = useRoles();
   const updateMutation = useUpdateGroup();
@@ -91,41 +100,54 @@ export function AdminGroupDetailPage() {
     },
   });
 
-  function openEditDialog() {
-    if (!group) return;
-    form.reset({
+  const normalize = (value: UpdateGroupFormData) => ({
+    ...value,
+    description: value.description ?? "",
+    parent_group_id: value.parent_group_id ?? "",
+    role_ids: normalizedSet((value.role_ids ?? "").split(",")),
+  });
+  function editValues(): UpdateGroupFormData {
+    if (!group) return form.getValues();
+    return {
       name: group.name,
       slug: group.slug,
       description: group.description ?? "",
       role_ids: group.roles.map((r) => r.id).join(","),
       parent_group_id: group.parent_group_id ?? "",
-    });
+    };
+  }
+
+  function openEditDialog() {
+    if (!group) return;
+    form.reset(editValues());
+    editReview.cancel();
     setEditOpen(true);
   }
 
   const editReview = useChangeReview<
-    Parameters<typeof updateMutation.mutateAsync>[0]["data"]
-  >(async (data) => {
-    await updateMutation.mutateAsync({ groupId, data });
-    toast.success("Group updated successfully");
-    setEditOpen(false);
-  });
+    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...variables }) => {
+      void _before;
+      await updateMutation.mutateAsync(variables);
+      toast.success("Group updated successfully");
+      setEditOpen(false);
+    },
+    (pending) =>
+      !group ||
+      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+    groupId,
+  );
 
   function handleEdit(data: UpdateGroupFormData) {
-    const normalize = (value: UpdateGroupFormData) => ({
-      ...value,
-      description: value.description ?? "",
-      parent_group_id: value.parent_group_id ?? "",
-      role_ids: (value.role_ids ?? "")
-        .split(",")
-        .map((p) => p.trim())
-        .filter(Boolean),
-    });
     const before = normalize(
       form.formState.defaultValues as UpdateGroupFormData,
     );
     const patch = changedFields(before, normalize(data));
-    editReview.review(patch, describeChanges(before, patch));
+    editReview.review(
+      { groupId, data: patch, before },
+      describeChanges(before, patch),
+    );
   }
 
   async function handleDelete() {
@@ -176,7 +198,7 @@ export function AdminGroupDetailPage() {
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !group) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -185,7 +207,7 @@ export function AdminGroupDetailPage() {
     );
   }
 
-  if (error || !group) {
+  if (!group) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
@@ -399,6 +421,21 @@ export function AdminGroupDetailPage() {
                         }}
                         style={{ minHeight: "80px" }}
                       >
+                        {(field.value ?? "")
+                          .split(",")
+                          .map((id) => id.trim())
+                          .filter(
+                            (id) =>
+                              id &&
+                              !availableRoles.some((role) => role.id === id),
+                          )
+                          .map((id) => (
+                            <option key={id} value={id}>
+                              {group.roles.find((role) => role.id === id)
+                                ?.name ?? id}{" "}
+                              (unavailable)
+                            </option>
+                          ))}
                         {availableRoles.map((role) => (
                           <option key={role.id} value={role.id}>
                             {role.name} ({role.slug})

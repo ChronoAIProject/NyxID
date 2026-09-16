@@ -316,7 +316,14 @@ pub async fn update_role(
         update.insert("slug", s);
     }
     if let Some(d) = description {
-        update.insert("description", d);
+        update.insert(
+            "description",
+            if d.trim().is_empty() {
+                bson::Bson::Null
+            } else {
+                bson::Bson::String(d.trim().to_string())
+            },
+        );
     }
     if let Some(p) = permissions {
         update.insert("permissions", p);
@@ -1004,6 +1011,18 @@ mod tests {
         assert_eq!(updated.description.as_deref(), Some("desc"));
         assert_eq!(updated.permissions, vec!["write".to_string()]);
         assert!(updated.is_default);
+        let cleared = update_role(&db, &role.id, None, None, Some("  "), None, None)
+            .await
+            .expect("clear description");
+        assert_eq!(cleared.description, None);
+        let raw = db
+            .collection::<mongodb::bson::Document>(ROLES)
+            .find_one(doc! { "_id": &role.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.get("description"), Some(&mongodb::bson::Bson::Null));
+        assert_eq!(cleared.permissions, updated.permissions);
     }
 
     #[tokio::test]

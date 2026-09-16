@@ -696,7 +696,9 @@ pub async fn patch_operation(
             .unwrap_or_else(|| default_operation_config(op))
     });
     validate_operation_config(op, &vendor_service_slug, &config)?;
-    validate_vendor_binding(db, encryption_keys, op, &vendor_service_slug).await?;
+    if enabled {
+        validate_vendor_binding(db, encryption_keys, op, &vendor_service_slug).await?;
+    }
 
     let config = bson::to_bson(&config).map_err(|error| {
         AppError::Internal(format!(
@@ -1563,6 +1565,43 @@ mod tests {
                 "voice_id": "voice-a",
                 "model_id": "caller-model",
             }))
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod admin_form_disable_tests {
+    use super::*;
+    #[tokio::test]
+    async fn admin_form_can_disable_an_operation_without_vendor_credentials() {
+        let db = crate::test_utils::connect_test_database("admin_form_disable_operation")
+            .await
+            .expect("Mongo required");
+        let keys = crate::test_utils::test_encryption_keys();
+        let saved = patch_operation(
+            &db,
+            &keys,
+            PlatformOperationName::XSearch,
+            Some(false),
+            None,
+            None,
+            "admin",
+        )
+        .await
+        .unwrap();
+        assert!(!saved.enabled);
+        assert!(
+            patch_operation(
+                &db,
+                &keys,
+                PlatformOperationName::XSearch,
+                Some(true),
+                None,
+                None,
+                "admin"
+            )
+            .await
             .is_err()
         );
     }

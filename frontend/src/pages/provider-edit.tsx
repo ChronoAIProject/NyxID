@@ -1,7 +1,10 @@
 import { useState } from "react";
 import type { ProviderConfig } from "@/types/api";
 import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
-import { useChangeReview } from "@/components/shared/change-review-dialog";
+import {
+  useChangeReview,
+  useEditorMounted,
+} from "@/components/shared/change-review-dialog";
 import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
@@ -46,7 +49,7 @@ import {
 export function ProviderEditPage() {
   const { providerId } = useParams({ strict: false }) as { providerId: string };
   const { data: provider, isLoading, error, refetch } = useProvider(providerId);
-  if (isLoading) return <Skeleton className="h-96 w-full" />;
+  if (isLoading && !provider) return <Skeleton className="h-96 w-full" />;
   if (!provider)
     return (
       <ErrorBanner
@@ -62,6 +65,7 @@ export function ProviderEditPage() {
 function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
   const [provider, setProvider] = useState(source);
   const providerId = provider.id;
+  const isMounted = useEditorMounted();
   const navigate = useNavigate();
   const updateMutation = useUpdateProvider(providerId);
 
@@ -69,10 +73,23 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
     resolver: zodResolver(updateProviderSchema),
     defaultValues: providerFormValues(provider),
   });
-  const stale = !sameValue(provider, source);
-  const review = useChangeReview<
-    Parameters<typeof updateMutation.mutateAsync>[0]
-  >(saveChanges, stale);
+  const stale =
+    !sameValue(providerFormValues(provider), providerFormValues(source)) ||
+    !sameValue(provider.revocation, source.revocation) ||
+    ((!!form.watch("client_id")?.trim() ||
+      !!form.watch("client_secret")?.trim()) &&
+      (provider.updated_at !== source.updated_at ||
+        provider.has_client_id !== source.has_client_id ||
+        provider.has_client_secret !== source.has_client_secret));
+  type ReviewedProvider = {
+    providerId: string;
+    data: Parameters<typeof updateMutation.mutateAsync>[0];
+  };
+  const review = useChangeReview<ReviewedProvider>(
+    saveChanges,
+    stale,
+    providerId,
+  );
 
   const watchedProviderType = useWatch({
     control: form.control,
@@ -82,6 +99,14 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
   function onSubmit(data: UpdateProviderFormData) {
     const before = providerFormPayload(providerFormValues(provider));
     const patch = changedFields(before, providerFormPayload(data));
+    for (const field of ["authorization_url", "token_url"] as const) {
+      if (patch[field] === "") {
+        form.setError(field, {
+          message: "This endpoint cannot be cleared; enter a valid URL.",
+        });
+        return;
+      }
+    }
     const payload: Parameters<typeof updateMutation.mutateAsync>[0] = {
       ...patch,
     };
@@ -97,18 +122,18 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
       payload.revocation = null;
     }
     review.review(
-      payload,
+      { providerId, data: payload },
       describeChanges(before, patch, {
         secretFields: ["client_id", "client_secret"],
       }),
     );
   }
 
-  async function saveChanges(
-    data: Parameters<typeof updateMutation.mutateAsync>[0],
-  ) {
+  async function saveChanges({ providerId: targetId, data }: ReviewedProvider) {
+    if (targetId !== providerId) return;
     try {
       await updateMutation.mutateAsync(data);
+      if (!isMounted()) return;
       toast.success("Provider updated");
       void navigate({
         to: "/providers/$providerId",
@@ -305,10 +330,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     <FormItem>
                       <FormLabel>Authorization URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="https://…"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -322,10 +344,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     <FormItem>
                       <FormLabel>Token URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="https://…"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -339,10 +358,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     <FormItem>
                       <FormLabel>Revocation URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="https://…"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -457,10 +473,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     <FormItem>
                       <FormLabel>Device Code URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="https://…"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
                         Endpoint to request a device code (RFC 8628 step 1).
@@ -477,10 +490,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     <FormItem>
                       <FormLabel>Device Token URL</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="https://…"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
                         Endpoint to poll for token (RFC 8628 step 3).
@@ -497,10 +507,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     <FormItem>
                       <FormLabel>Authorization URL (fallback)</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="https://…"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -514,10 +521,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     <FormItem>
                       <FormLabel>Token URL (fallback)</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="https://…"
-                          {...field}
-                        />
+                        <Input placeholder="https://…" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>

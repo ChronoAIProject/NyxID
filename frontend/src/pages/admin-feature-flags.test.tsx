@@ -1,4 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminFeatureFlagsPage } from "./admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
@@ -122,7 +129,17 @@ function operatorUser(): User {
 beforeEach(() => {
   mockSetFlag.mockReset().mockResolvedValue(undefined);
   mockClearFlag.mockReset().mockResolvedValue(undefined);
-  mockSetMeta.mockReset().mockResolvedValue(undefined);
+  mockSetMeta.mockReset().mockImplementation(async ({ body }) => {
+    const current = mockUseFlags().data.flags[0];
+    return {
+      ...current,
+      custom_description:
+        body.description === undefined
+          ? current.custom_description
+          : body.description,
+      owner: body.owner === undefined ? current.owner : body.owner,
+    };
+  });
   mockUseUsers.mockReset().mockReturnValue({
     data: { users: [], total: 201, page: 1, per_page: 20 },
     isLoading: false,
@@ -182,7 +199,7 @@ describe("AdminFeatureFlagsPage", () => {
     });
 
     render(<AdminFeatureFlagsPage />);
-    expect(screen.getByText("existing@example.com")).toBeInTheDocument();
+    expect(screen.getAllByText("existing@example.com")[0]).toBeInTheDocument();
   });
 
   it("renders org overrides with their display name and slug", () => {
@@ -208,7 +225,7 @@ describe("AdminFeatureFlagsPage", () => {
     });
 
     render(<AdminFeatureFlagsPage />);
-    expect(screen.getByText("Acme Corp (acme)")).toBeInTheDocument();
+    expect(screen.getAllByText("Acme Corp (acme)")[0]).toBeInTheDocument();
   });
 
   it("shows loading and error states", () => {
@@ -321,6 +338,10 @@ describe("AdminFeatureFlagsPage", () => {
     fireEvent.click(await screen.findByText("suggested-2@example.com"));
 
     fireEvent.click(screen.getByText("Apply changes"));
+    expect(mockSetFlag).not.toHaveBeenCalled();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
     await waitFor(() =>
       expect(mockSetFlag).toHaveBeenCalledWith({
         flagKey: "experimental:ai-assistant",
@@ -368,6 +389,10 @@ describe("AdminFeatureFlagsPage", () => {
     // The pick stages an enabled org override; applying must send an
     // org-scoped write, never a global one (regression: NyxID killswitch).
     fireEvent.click(screen.getByText("Apply changes"));
+    expect(mockSetFlag).not.toHaveBeenCalled();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
     await waitFor(() =>
       expect(mockSetFlag).toHaveBeenCalledWith({
         flagKey: "experimental:ai-assistant",
@@ -475,7 +500,7 @@ describe("AdminFeatureFlagsPage", () => {
     await waitFor(() =>
       expect(mockSetMeta).toHaveBeenCalledWith({
         flagKey: "experimental:ai-assistant",
-        body: { description: null, owner: "Growth team" },
+        body: { description: null },
       }),
     );
   });
@@ -498,7 +523,7 @@ describe("AdminFeatureFlagsPage", () => {
     });
 
     expect(screen.getByText("experimental:ai-assistant")).toBeInTheDocument();
-    expect(screen.queryByText("experimental:billing")).not.toBeInTheDocument();
+    expect(screen.getByText("experimental:billing")).not.toBeVisible();
   });
 
   it("shows operators the flag details read-only", () => {
@@ -565,5 +590,119 @@ describe("AdminFeatureFlagsPage", () => {
       screen.getByLabelText("All users (rollout / killswitch)"),
     ).toBeDisabled();
     expect(screen.queryByText("Apply changes")).not.toBeInTheDocument();
+  });
+});
+
+it("retains metadata drafts across cached errors, filtering and collapse, and patches only the edited field", async () => {
+  const data = {
+    flags: [
+      flagFixture({ owner: "Existing owner", custom_description: "Saved" }),
+    ],
+  };
+  mockUseFlags.mockReturnValue({ data, isLoading: false, error: null });
+  const view = render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.change(
+    screen.getByLabelText("Description — what this flag controls"),
+    { target: { value: "Draft" } },
+  );
+  mockUseFlags.mockReturnValue({
+    data,
+    isLoading: false,
+    error: new Error("Offline"),
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  fireEvent.change(screen.getByLabelText("Search feature flags"), {
+    target: { value: "hidden" },
+  });
+  fireEvent.change(screen.getByLabelText("Search feature flags"), {
+    target: { value: "" },
+  });
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  expect(
+    screen.getByLabelText("Description — what this flag controls"),
+  ).toHaveValue("Draft");
+  fireEvent.click(screen.getByText("Save details"));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mockSetMeta).toHaveBeenCalledExactlyOnceWith({
+      flagKey: "experimental:ai-assistant",
+      body: { description: "Draft" },
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Review changes" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(
+    screen.queryByText(/Saved values changed while/),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByLabelText("Description — what this flag controls"),
+  ).toHaveValue("Draft");
+});
+
+it("retains failed rollout changes and newer edits while consuming only the reviewed successes", async () => {
+  let finishFirst!: () => void;
+  mockSetFlag.mockImplementation(({ flagKey }) =>
+    flagKey === "experimental:ai-assistant"
+      ? new Promise<void>((resolve) => {
+          finishFirst = resolve;
+        })
+      : Promise.reject(new Error("Write failed")),
+  );
+  const flags = [
+    flagFixture(),
+    { ...flagFixture(), key: "experimental:billing" },
+  ];
+  mockUseFlags.mockReturnValue({
+    data: { flags },
+    isLoading: false,
+    error: null,
+  });
+  const view = render(<AdminFeatureFlagsPage />);
+  for (const flag of flags) fireEvent.click(screen.getByText(flag.key));
+  const globals = screen
+    .getAllByText("All users (rollout / killswitch)")
+    .map((label) => label.parentElement!);
+  // Scope buttons are deliberately exercised during the pending write as well:
+  // a newer draft must survive even when input reaches the page programmatically.
+  async function selectScope(index: number, name: string) {
+    fireEvent.pointerDown(
+      within(globals[index]!).getByRole("combobox", { hidden: true }),
+      { button: 0, ctrlKey: false, pointerType: "mouse" },
+    );
+    fireEvent.click(await screen.findByRole("option", { name, hidden: true }));
+  }
+  await selectScope(0, "Enabled");
+  await selectScope(1, "Enabled");
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+  expect(mockSetFlag).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Confirm changes" }));
+  await waitFor(() => expect(mockSetFlag).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm changes" }));
+  expect(mockSetFlag).toHaveBeenCalledTimes(2);
+  await selectScope(0, "Disabled");
+  flags[0] = flagFixture({ global_override: true });
+  await act(async () => {
+    finishFirst();
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  expect(screen.getByText("2 unsaved changes")).toBeInTheDocument();
+  mockSetFlag.mockResolvedValue(undefined);
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm changes" }));
+  await waitFor(() => expect(mockSetFlag).toHaveBeenCalledTimes(4));
+  expect(mockSetFlag.mock.calls[2]?.[0]).toEqual({
+    flagKey: "experimental:ai-assistant",
+    body: { target_kind: "global", target_key: null, enabled: false },
+  });
+  expect(mockSetFlag.mock.calls[3]?.[0]).toEqual({
+    flagKey: "experimental:billing",
+    body: { target_kind: "global", target_key: null, enabled: true },
   });
 });

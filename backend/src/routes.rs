@@ -831,6 +831,7 @@ fn build_router_internal(
         .route(
             "/platform-ops/vendor-templates/{template_id}",
             put(handlers::admin_platform_ops::update_vendor_template)
+                .patch(handlers::admin_platform_ops::patch_vendor_template)
                 .delete(handlers::admin_platform_ops::disable_vendor_template),
         )
         .route(
@@ -848,7 +849,8 @@ fn build_router_internal(
         )
         .route(
             "/feature-flags/{flag_key}/metadata",
-            put(handlers::admin_feature_flags::update_feature_flag_metadata),
+            put(handlers::admin_feature_flags::update_feature_flag_metadata)
+                .patch(handlers::admin_feature_flags::patch_feature_flag_metadata),
         )
         .route(
             "/users",

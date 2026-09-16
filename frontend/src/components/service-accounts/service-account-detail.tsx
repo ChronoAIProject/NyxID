@@ -1,4 +1,9 @@
-import { changedFields, describeChanges } from "@/lib/form-changes";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+  normalizedSet,
+} from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState, useEffect } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
@@ -62,14 +67,18 @@ interface ServiceAccountDetailProps {
   readonly showProviderSections?: boolean;
 }
 
-export function ServiceAccountDetail({
+export function ServiceAccountDetail(props: ServiceAccountDetailProps) {
+  return <ServiceAccountDetailEditor key={props.saId} {...props} />;
+}
+
+function ServiceAccountDetailEditor({
   saId,
   backTo,
   showProviderSections = true,
 }: ServiceAccountDetailProps) {
   const navigate = useNavigate();
 
-  const { data: sa, isLoading, error } = useServiceAccount(saId);
+  const { data: sa, isLoading } = useServiceAccount(saId);
 
   const updateMutation = useUpdateServiceAccount();
   const deleteMutation = useDeleteServiceAccount();
@@ -112,9 +121,17 @@ export function ServiceAccountDetail({
     },
   });
 
-  function openEditDialog() {
-    if (!sa) return;
-    form.reset({
+  const normalize = (value: UpdateServiceAccountFormData) => ({
+    ...value,
+    description: value.description ?? "",
+    role_ids: normalizedSet((value.role_ids ?? "").split(",")),
+    rate_limit_override: value.rate_limit_override
+      ? Number(value.rate_limit_override)
+      : null,
+  });
+  function editValues(): UpdateServiceAccountFormData {
+    if (!sa) return form.getValues();
+    return {
       name: sa.name,
       description: sa.description ?? "",
       allowed_scopes: sa.allowed_scopes,
@@ -123,36 +140,40 @@ export function ServiceAccountDetail({
         ? String(sa.rate_limit_override)
         : "",
       is_active: sa.is_active,
-    });
+    };
+  }
+
+  function openEditDialog() {
+    if (!sa) return;
+    form.reset(editValues());
+    editReview.cancel();
     setEditOpen(true);
   }
 
   const editReview = useChangeReview<
-    Parameters<typeof updateMutation.mutateAsync>[0]["data"]
-  >(async (data) => {
-    await updateMutation.mutateAsync({ saId, data });
-    toast.success("Service account updated");
-    setEditOpen(false);
-  });
+    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...variables }) => {
+      void _before;
+      await updateMutation.mutateAsync(variables);
+      toast.success("Service account updated");
+      setEditOpen(false);
+    },
+    (pending) =>
+      !sa ||
+      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+    saId,
+  );
 
   function handleEdit(formData: UpdateServiceAccountFormData) {
-    const normalize = (value: UpdateServiceAccountFormData) => ({
-      ...value,
-      description: value.description ?? "",
-      role_ids: (value.role_ids ?? "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .sort(),
-      rate_limit_override: value.rate_limit_override
-        ? Number(value.rate_limit_override)
-        : null,
-    });
     const before = normalize(
       form.formState.defaultValues as UpdateServiceAccountFormData,
     );
     const patch = changedFields(before, normalize(formData));
-    editReview.review(patch, describeChanges(before, patch));
+    editReview.review(
+      { saId, data: patch, before },
+      describeChanges(before, patch),
+    );
   }
 
   async function handleRotateSecret() {
@@ -200,7 +221,7 @@ export function ServiceAccountDetail({
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !sa) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -210,7 +231,7 @@ export function ServiceAccountDetail({
     );
   }
 
-  if (error || !sa) {
+  if (!sa) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />

@@ -1,4 +1,8 @@
-import { changedFields, describeChanges } from "@/lib/form-changes";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+} from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -101,10 +105,14 @@ const ROLE_LABEL: Record<PlatformRole, string> = {
 
 export function AdminUserDetailPage() {
   const { userId } = useParams({ strict: false }) as { userId: string };
+  return <AdminUserDetailPageEditor key={userId} userId={userId} />;
+}
+
+function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
 
-  const { data: user, isLoading, error } = useAdminUser(userId);
+  const { data: user, isLoading } = useAdminUser(userId);
   const { data: sessionsData } = useAdminUserSessions(userId);
 
   const updateMutation = useUpdateAdminUser();
@@ -137,35 +145,51 @@ export function AdminUserDetailPage() {
     },
   });
 
-  function openEditDialog() {
-    if (!user) return;
-    form.reset({
+  const normalize = (value: UpdateUserFormData) => ({
+    display_name: value.display_name ?? "",
+    email: value.email,
+    avatar_url: value.avatar_url ?? "",
+  });
+  function editValues(): UpdateUserFormData {
+    if (!user) return form.getValues();
+    return {
       display_name: user.display_name ?? "",
       email: user.email,
       avatar_url: user.avatar_url ?? "",
-    });
+    };
+  }
+
+  function openEditDialog() {
+    if (!user) return;
+    form.reset(editValues());
+    editReview.cancel();
     setEditOpen(true);
   }
 
   const editReview = useChangeReview<
-    Parameters<typeof updateMutation.mutateAsync>[0]["data"]
-  >(async (data) => {
-    await updateMutation.mutateAsync({ userId, data });
-    toast.success("User updated successfully");
-    setEditOpen(false);
-  });
+    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...variables }) => {
+      void _before;
+      await updateMutation.mutateAsync(variables);
+      toast.success("User updated successfully");
+      setEditOpen(false);
+    },
+    (pending) =>
+      !user ||
+      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+    userId,
+  );
 
   function handleEdit(data: UpdateUserFormData) {
-    const normalize = (value: UpdateUserFormData) => ({
-      display_name: value.display_name ?? "",
-      email: value.email,
-      avatar_url: value.avatar_url ?? "",
-    });
     const before = normalize(
       form.formState.defaultValues as UpdateUserFormData,
     );
     const patch = changedFields(before, normalize(data));
-    editReview.review(patch, describeChanges(before, patch));
+    editReview.review(
+      { userId, data: patch, before },
+      describeChanges(before, patch),
+    );
   }
 
   async function handleSetRole() {
@@ -262,7 +286,7 @@ export function AdminUserDetailPage() {
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !user) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -272,7 +296,7 @@ export function AdminUserDetailPage() {
     );
   }
 
-  if (error || !user) {
+  if (!user) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />

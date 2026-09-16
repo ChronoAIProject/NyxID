@@ -75,3 +75,24 @@ export function describeChanges(
     };
   });
 }
+
+/** Compare only values that a sparse write would replace. */
+export function hasFieldConflicts(
+  before: object,
+  current: object,
+  patch: object,
+): boolean {
+  return Object.keys(patch).some(
+    (key) =>
+      !sameValue(
+        (before as Record<string, unknown>)[key],
+        (current as Record<string, unknown>)[key],
+      ),
+  );
+}
+
+export function normalizedSet(values: readonly string[]): string[] {
+  return [
+    ...new Set(values.map((value) => value.trim()).filter(Boolean)),
+  ].sort();
+}

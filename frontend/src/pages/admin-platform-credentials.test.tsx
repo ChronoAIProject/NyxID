@@ -15,6 +15,7 @@ const mock = vi.hoisted(() => ({
   update: vi.fn(),
   clear: vi.fn(),
   reset: vi.fn(),
+  refetch: vi.fn(),
   isLoading: false,
   error: null as unknown,
 }));
@@ -23,6 +24,7 @@ vi.mock("@/hooks/use-admin-platform-credentials", () => ({
     data: mock.data,
     isLoading: mock.isLoading,
     error: mock.error,
+    refetch: mock.refetch,
   }),
   useUpdatePlatformCredentials: () => ({
     mutateAsync: mock.update,
@@ -243,4 +245,67 @@ it("blocks duplicate confirmation and retains the reviewed draft after a failed 
   expect(mock.update).toHaveBeenNthCalledWith(2, {
     fields: { tenant: "retry-tenant" },
   });
+});
+
+it("sends an explicit null for a cleared non-secret field", async () => {
+  const user = userEvent.setup();
+  render(<AdminPlatformCredentialsPage />);
+  await user.clear(screen.getByLabelText("Tenant ID"));
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mock.update).toHaveBeenCalledExactlyOnceWith({
+      fields: { tenant: null },
+    }),
+  );
+});
+
+it("enables review after one secret paste and warns for shared OAuth field clears", async () => {
+  mock.data[0] = {
+    ...mock.data[0]!,
+    backing: { type: "provider_oauth", provider_slug: "twitter" },
+  };
+  const user = userEvent.setup();
+  render(<AdminPlatformCredentialsPage />);
+  await user.click(screen.getByLabelText("Signing Key"));
+  await user.paste("one-paste-secret");
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Save credentials" }),
+    ).toBeEnabled(),
+  );
+  await user.click(screen.getByRole("button", { name: "Clear Signing Key" }));
+  expect(mock.update).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  const review = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(review).toHaveTextContent("OAuth connections and logins");
+  expect(review).not.toHaveTextContent("one-paste-secret");
+  await user.click(
+    within(review).getByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mock.update).toHaveBeenCalledWith({ fields: { signing_key: null } }),
+  );
+});
+
+it("offers only a read refresh after a successful clear with failed refresh", async () => {
+  mock.clear.mockResolvedValue({ saved: null });
+  mock.refetch.mockResolvedValue({
+    data: [{ ...mock.data[0]!, updated_at: "restored" }],
+    error: null,
+  });
+  const user = userEvent.setup();
+  render(<AdminPlatformCredentialsPage />);
+  await user.click(screen.getByRole("button", { name: "Clear provider" }));
+  await user.click(screen.getByRole("button", { name: "Confirm" }));
+  await screen.findByText(
+    "Credentials cleared; current details could not be refreshed",
+  );
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Clear provider" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: /Retry/ }));
+  await waitFor(() => expect(mock.refetch).toHaveBeenCalledTimes(1));
+  expect(mock.clear).toHaveBeenCalledTimes(1);
 });

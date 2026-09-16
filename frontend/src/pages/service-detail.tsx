@@ -1,4 +1,11 @@
-import { useEffect, useState } from "react";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
+import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -652,7 +659,7 @@ export function ServiceDetailPage() {
           </DetailSection>
 
           <Separator />
-          <AnonymousEndpointsSection serviceId={service.id} />
+          <AnonymousEndpointsSection key={service.id} serviceId={service.id} />
 
           <Separator />
           <DetailSection title="Provider Requirements">
@@ -905,19 +912,22 @@ function AnonymousEndpointsSection({
     }
   }
 
-  async function handleRuleUpdate(
-    rule: AnonymousEndpointRule,
-    data: Partial<AnonymousEndpointRuleFormData>,
-  ) {
+  async function handleRuleUpdate(variables: {
+    serviceId: string;
+    ruleId: string;
+    data: Partial<AnonymousEndpointRuleFormData>;
+  }) {
     try {
-      await updateMutation.mutateAsync({ ruleId: rule.id, data });
+      const saved = await updateMutation.mutateAsync(variables);
       toast.success("Anonymous endpoint updated");
+      return saved;
     } catch (err) {
       toast.error(
         err instanceof ApiError
           ? err.message
           : "Failed to update anonymous endpoint",
       );
+      throw err;
     }
   }
 
@@ -931,6 +941,7 @@ function AnonymousEndpointsSection({
           ? err.message
           : "Failed to delete anonymous endpoint",
       );
+      throw err;
     }
   }
 
@@ -1036,10 +1047,11 @@ function AnonymousEndpointsSection({
           )}
           {endpoints?.map((rule) => (
             <AnonymousEndpointRow
-              key={rule.id}
+              key={`${serviceId}:${rule.id}`}
+              serviceId={serviceId}
               rule={rule}
               onUpdate={handleRuleUpdate}
-              onDelete={(ruleId) => void handleDelete(ruleId)}
+              onDelete={handleDelete}
               isUpdating={updateMutation.isPending}
               isDeleting={deleteMutation.isPending}
             />
@@ -1083,120 +1095,185 @@ function WideOpenAnonymousWarning() {
 }
 
 function AnonymousEndpointRow({
+  serviceId,
   rule,
   onUpdate,
   onDelete,
   isUpdating,
   isDeleting,
 }: {
+  readonly serviceId: string;
   readonly rule: AnonymousEndpointRule;
-  readonly onUpdate: (
-    rule: AnonymousEndpointRule,
-    data: Partial<AnonymousEndpointRuleFormData>,
-  ) => Promise<void>;
-  readonly onDelete: (ruleId: string) => void;
+  readonly onUpdate: (variables: {
+    serviceId: string;
+    ruleId: string;
+    data: Partial<AnonymousEndpointRuleFormData>;
+  }) => Promise<AnonymousEndpointRule>;
+  readonly onDelete: (ruleId: string) => Promise<void>;
   readonly isUpdating: boolean;
   readonly isDeleting: boolean;
 }) {
+  const projection = (value: AnonymousEndpointRule) => ({
+    enabled: value.enabled,
+    method: value.method,
+    path_pattern: value.path_pattern,
+    daily_quota: value.daily_quota,
+  });
+  const [baseline, setBaseline] = useState(projection(rule));
+  const [enabled, setEnabled] = useState(rule.enabled);
   const [method, setMethod] = useState(rule.method);
   const [pathPattern, setPathPattern] = useState(rule.path_pattern);
   const [dailyQuota, setDailyQuota] = useState(String(rule.daily_quota));
-
-  useEffect(() => {
-    setMethod(rule.method);
-    setPathPattern(rule.path_pattern);
-    setDailyQuota(String(rule.daily_quota));
-  }, [rule]);
-
-  const dirty =
-    method !== rule.method ||
-    pathPattern !== rule.path_pattern ||
-    Number(dailyQuota) !== rule.daily_quota;
-
-  // Advisory only: surface the wide-open warning for an enabled rule whose
-  // (possibly edited) pattern is the root wildcard. Never blocks save.
+  const next = {
+    enabled,
+    method,
+    path_pattern: pathPattern,
+    daily_quota: Number(dailyQuota),
+  };
+  const patch = changedFields(baseline, next);
+  const dirty = Object.keys(patch).length > 0;
+  const conflicting = (data: Partial<AnonymousEndpointRuleFormData>) =>
+    hasFieldConflicts(baseline, projection(rule), {
+      ...data,
+      ...("enabled" in data || "method" in data || "path_pattern" in data
+        ? { enabled: true, method: true, path_pattern: true }
+        : {}),
+    });
+  const stale = conflicting(patch);
+  function reset(value: AnonymousEndpointRule) {
+    setBaseline(projection(value));
+    setEnabled(value.enabled);
+    setMethod(value.method);
+    setPathPattern(value.path_pattern);
+    setDailyQuota(String(value.daily_quota));
+  }
+  const review = useChangeReview<{
+    serviceId: string;
+    ruleId: string;
+    data: Partial<AnonymousEndpointRuleFormData>;
+  }>(
+    async (variables) => {
+      const saved = await onUpdate(variables);
+      reset(saved);
+    },
+    (variables) => conflicting(variables.data),
+    `${serviceId}:${rule.id}`,
+  );
+  const deletion = useChangeReview<{ serviceId: string; ruleId: string }>(
+    async (variables) => onDelete(variables.ruleId),
+    false,
+    `${serviceId}:${rule.id}`,
+  );
   const showWideOpenWarning =
-    rule.enabled && isWideOpenAnonymousPattern(pathPattern);
+    enabled && isWideOpenAnonymousPattern(pathPattern);
 
   return (
     <div className="space-y-2">
-    <div className="grid gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
-      <div className="flex items-center gap-2">
-        <Switch
-          checked={rule.enabled}
-          onCheckedChange={(enabled) =>
-            void onUpdate(rule, { enabled: Boolean(enabled) })
-          }
-          disabled={isUpdating}
+      {review.dialog}
+      {deletion.dialog}
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            reset(rule);
+            review.cancel();
+          }}
         />
-        <Badge variant={rule.enabled ? "success" : "secondary"}>
-          {rule.enabled ? "Enabled" : "Draft"}
-        </Badge>
-      </div>
-      <Select
-        value={method}
-        onValueChange={(value) =>
-          setMethod(value as AnonymousEndpointRule["method"])
-        }
-      >
-        <SelectTrigger>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {PUBLIC_METHODS.map((item) => (
-            <SelectItem key={item} value={item}>
-              {item}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Input
-        value={pathPattern}
-        onChange={(e) => setPathPattern(e.target.value)}
-      />
-      <Input
-        type="number"
-        min={1}
-        value={dailyQuota}
-        onChange={(e) => setDailyQuota(e.target.value)}
-      />
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={!dirty || isUpdating}
-        isLoading={isUpdating}
-        onClick={() => {
-          // Row edits must pass the same rules as creation — the backend
-          // rejects quota 0 / bad patterns with a bare 400 otherwise.
-          const parsed = anonymousEndpointUpdateSchema.safeParse({
-            method,
-            path_pattern: pathPattern,
-            daily_quota: dailyQuota,
-          });
-          if (!parsed.success) {
-            toast.error(
-              parsed.error.issues[0]?.message ?? "Invalid endpoint rule",
-            );
-            return;
+      )}
+      <div className="grid gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
+        <div className="flex items-center gap-2">
+          <Switch
+            checked={enabled}
+            onCheckedChange={setEnabled}
+            disabled={isUpdating || review.saving}
+          />
+          <Badge variant={rule.enabled ? "success" : "secondary"}>
+            {rule.enabled ? "Enabled" : "Draft"}
+          </Badge>
+        </div>
+        <Select
+          disabled={isUpdating || review.saving}
+          value={method}
+          onValueChange={(value) =>
+            setMethod(value as AnonymousEndpointRule["method"])
           }
-          void onUpdate(rule, parsed.data);
-        }}
-      >
-        Save
-      </Button>
-      <Button
-        size="sm"
-        variant="destructive"
-        disabled={isDeleting}
-        isLoading={isDeleting}
-        onClick={() => onDelete(rule.id)}
-      >
-        <ButtonIcon variant="destructive">
-          <Trash2 className="h-3 w-3 text-destructive" />
-        </ButtonIcon>
-        Delete
-      </Button>
-    </div>
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {PUBLIC_METHODS.map((item) => (
+              <SelectItem key={item} value={item}>
+                {item}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Input
+          disabled={isUpdating || review.saving}
+          value={pathPattern}
+          onChange={(e) => setPathPattern(e.target.value)}
+        />
+        <Input
+          disabled={isUpdating || review.saving}
+          type="number"
+          min={1}
+          value={dailyQuota}
+          onChange={(e) => setDailyQuota(e.target.value)}
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!dirty || isUpdating || stale}
+          isLoading={isUpdating}
+          onClick={() => {
+            // Row edits must pass the same rules as creation — the backend
+            // rejects quota 0 / bad patterns with a bare 400 otherwise.
+            const parsed = anonymousEndpointUpdateSchema.safeParse({
+              enabled,
+              method,
+              path_pattern: pathPattern,
+              daily_quota: dailyQuota,
+            });
+            if (!parsed.success) {
+              toast.error(
+                parsed.error.issues[0]?.message ?? "Invalid endpoint rule",
+              );
+              return;
+            }
+            const data = changedFields(baseline, parsed.data);
+            review.review({ serviceId, ruleId: rule.id, data }, [
+              {
+                field: "Public proxy rule",
+                before: `${baseline.method} ${baseline.path_pattern}`,
+                after: `${method} ${pathPattern}${showWideOpenWarning ? " — exposes every downstream path without authentication" : ""}`,
+              },
+              ...describeChanges(baseline, data),
+            ]);
+          }}
+        >
+          Save
+        </Button>
+        <Button
+          size="sm"
+          variant="destructive"
+          disabled={isDeleting || isUpdating || review.saving}
+          isLoading={isDeleting}
+          onClick={() =>
+            deletion.review({ serviceId, ruleId: rule.id }, [
+              {
+                field: "Delete public proxy rule",
+                before: `${rule.method} ${rule.path_pattern}`,
+                after: "Deleted",
+              },
+            ])
+          }
+        >
+          <ButtonIcon variant="destructive">
+            <Trash2 className="h-3 w-3 text-destructive" />
+          </ButtonIcon>
+          Delete
+        </Button>
+      </div>
       {showWideOpenWarning && <WideOpenAnonymousWarning />}
     </div>
   );

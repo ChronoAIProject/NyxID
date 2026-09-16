@@ -70,3 +70,49 @@ it("does not restore revoked permissions after a refresh when renaming an accoun
     }),
   );
 });
+
+it("cancels A's pending review when the source becomes B", async () => {
+  mock.update.mockClear();
+  const user = userEvent.setup();
+  const props = {
+    backTo: { to: "/admin/service-accounts", label: "Accounts" },
+    showProviderSections: false,
+  };
+  const view = render(<ServiceAccountDetail saId="sa-1" {...props} />);
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "A draft" },
+  });
+  await user.click(screen.getByRole("button", { name: "Save Changes" }));
+  await screen.findByRole("button", { name: "Confirm changes" });
+  mock.account = { ...mock.account, id: "sa-2", name: "B" };
+  view.rerender(<ServiceAccountDetail saId="sa-2" {...props} />);
+  expect(
+    screen.queryByRole("button", { name: "Confirm changes" }),
+  ).not.toBeInTheDocument();
+  expect(mock.update).not.toHaveBeenCalled();
+});
+
+it("blocks a reviewed role replacement after an observed revocation", async () => {
+  mock.update.mockClear();
+  mock.account = { ...mock.account, id: "sa-1", role_ids: ["role-a"] };
+  const user = userEvent.setup();
+  const props = {
+    saId: "sa-1",
+    backTo: { to: "/admin/service-accounts", label: "Accounts" },
+    showProviderSections: false,
+  };
+  const view = render(<ServiceAccountDetail {...props} />);
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Role IDs (comma-separated)"), {
+    target: { value: "role-a, role-b" },
+  });
+  await user.click(screen.getByRole("button", { name: "Save Changes" }));
+  await screen.findByRole("button", { name: "Confirm changes" });
+  mock.account = { ...mock.account, role_ids: [] };
+  view.rerender(<ServiceAccountDetail {...props} />);
+  expect(
+    screen.getByRole("button", { name: "Confirm changes" }),
+  ).toBeDisabled();
+  expect(mock.update).not.toHaveBeenCalled();
+});

@@ -76,7 +76,13 @@ export function UserPicker({
                   onChange(selected.filter((value) => value !== id))
                 }
               />
-              <span>Selected owner: {id} (outside current results)</span>
+              <span>
+                Selected owner:{" "}
+                {users.find((user) => user.id === id)?.display_name ||
+                  users.find((user) => user.id === id)?.email ||
+                  id}{" "}
+                (outside current results)
+              </span>
             </label>
           ))}
         {filtered.map((user) => {

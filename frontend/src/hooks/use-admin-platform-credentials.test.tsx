@@ -73,3 +73,27 @@ it("sends explicit field clears, token rotation and provider deletion", async ()
   await act(() => result.current.clear.mutateAsync());
   expect(mock.delete).toHaveBeenCalledWith("/admin/platform-credentials/meta");
 });
+
+it("records a committed clear even when the descriptor refresh fails", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const invalidation = vi.spyOn(client, "invalidateQueries");
+  mock.delete.mockResolvedValue(undefined);
+  mock.get.mockRejectedValue(new Error("GET unavailable"));
+  const { result } = renderHook(() => useClearPlatformCredentials("x"), {
+    wrapper: ({ children }: PropsWithChildren) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+  await act(async () => {
+    expect(await result.current.mutateAsync()).toEqual({ saved: null });
+  });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(mock.delete).toHaveBeenCalledTimes(1);
+  expect(invalidation).toHaveBeenCalledWith({
+    queryKey: ["admin", "platform-credentials"],
+    refetchType: "none",
+  });
+  expect(invalidation).toHaveBeenCalledWith({ queryKey: ["providers"] });
+});

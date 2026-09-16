@@ -76,6 +76,89 @@ pub struct PlatformVendorTemplateRequest {
     pub is_active: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatchPlatformVendorTemplateRequest {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub vendor: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_name: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub slug: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub base_url: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_method: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_label: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential_note: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub capability_summary: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub restriction_summary: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub is_active: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_key_name: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub operation: Option<Option<String>>,
+}
+
+fn deserialize_present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
 fn default_template_active() -> bool {
     true
 }
@@ -207,6 +290,43 @@ pub async fn update_vendor_template(
         "admin_platform_vendor_template_updated",
         Some(serde_json::json!({ "vendor": template.vendor, "slug": template.slug })),
     );
+    Ok(Json(vendor_template_response(
+        &template,
+        services
+            .iter()
+            .find(|service| service.slug == template.slug),
+    )))
+}
+
+/// PATCH /api/v1/admin/platform-ops/vendor-templates/{template_id}
+pub async fn patch_vendor_template(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(template_id): Path<String>,
+    Json(body): Json<PatchPlatformVendorTemplateRequest>,
+) -> AppResult<Json<AdminPlatformVendorRequirementResponse>> {
+    require_admin(&state, &auth_user).await?;
+    let patch =
+        bson::to_document(&body).map_err(|e| crate::errors::AppError::Internal(e.to_string()))?;
+    let fields: Vec<_> = patch.keys().cloned().collect();
+    let template = platform_vendor_template_service::patch_template(
+        &state.db,
+        &template_id,
+        patch,
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    let services = list_active_vendor_services(&state.db, std::slice::from_ref(&template)).await?;
+    if !fields.is_empty() {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "admin_platform_vendor_template_updated",
+            Some(
+                serde_json::json!({ "vendor": template.vendor, "slug": template.slug, "fields": fields }),
+            ),
+        );
+    }
     Ok(Json(vendor_template_response(
         &template,
         services
@@ -615,6 +735,43 @@ mod tests {
                 .await
                 .expect("count operation rows"),
             1
+        );
+    }
+}
+
+#[cfg(test)]
+mod sparse_template_request_tests {
+    use super::PatchPlatformVendorTemplateRequest;
+    #[test]
+    fn admin_form_template_patch_distinguishes_omission_null_and_value() {
+        let empty: PatchPlatformVendorTemplateRequest = serde_json::from_str("{}").unwrap();
+        assert!(bson::to_document(&empty).unwrap().is_empty());
+        let clear: PatchPlatformVendorTemplateRequest =
+            serde_json::from_str(r#"{"auth_key_name":null,"operation":null,"is_active":false}"#)
+                .unwrap();
+        assert_eq!(clear.auth_key_name, Some(None));
+        assert_eq!(clear.operation, Some(None));
+        assert_eq!(clear.is_active, Some(false));
+        for field in [
+            "vendor",
+            "display_name",
+            "slug",
+            "base_url",
+            "auth_method",
+            "credential_label",
+            "credential_note",
+            "capability_summary",
+            "restriction_summary",
+            "is_active",
+        ] {
+            let body = serde_json::json!({(field): null});
+            assert!(
+                serde_json::from_value::<PatchPlatformVendorTemplateRequest>(body).is_err(),
+                "{field}"
+            );
+        }
+        assert!(
+            serde_json::from_str::<PatchPlatformVendorTemplateRequest>(r#"{"typo":true}"#).is_err()
         );
     }
 }

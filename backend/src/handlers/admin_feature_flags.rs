@@ -374,6 +374,55 @@ pub async fn update_feature_flag_metadata(
     Ok(Json(AdminFeatureFlagMetadataResponse::build(def, row)))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PatchFeatureFlagMetadataRequest {
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub description: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub owner: Option<Option<String>>,
+}
+
+/// PATCH /api/v1/admin/feature-flags/{flag_key}/metadata
+pub async fn patch_feature_flag_metadata(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(flag_key): Path<String>,
+    Json(body): Json<PatchFeatureFlagMetadataRequest>,
+) -> AppResult<Json<AdminFeatureFlagMetadataResponse>> {
+    require_admin(&state, &auth_user).await?;
+    let def = feature_flag_service::find_flag(&flag_key)
+        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    let changed = body.description.is_some() || body.owner.is_some();
+    let row = feature_flag_service::patch_metadata(
+        &state.db,
+        &flag_key,
+        body.description.as_ref().map(|v| v.as_deref()),
+        body.owner.as_ref().map(|v| v.as_deref()),
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    if changed {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "admin_feature_flag_metadata_set",
+            Some(
+                serde_json::json!({ "flag_key": flag_key, "changed_fields": {
+                    "description": body.description.is_some(), "owner": body.owner.is_some()
+                }}),
+            ),
+        );
+    }
+    Ok(Json(AdminFeatureFlagMetadataResponse::build(def, row)))
+}
+
 /// DELETE /api/v1/admin/feature-flags/{flag_key}
 pub async fn clear_feature_flag(
     State(state): State<AppState>,
@@ -808,5 +857,23 @@ mod tests {
         )
         .await
         .expect("admin DELETE should succeed");
+    }
+}
+
+#[cfg(test)]
+mod sparse_metadata_request_tests {
+    use super::PatchFeatureFlagMetadataRequest;
+    #[test]
+    fn admin_form_metadata_patch_distinguishes_omission_null_and_value() {
+        let empty: PatchFeatureFlagMetadataRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.description, None);
+        assert_eq!(empty.owner, None);
+        let clear: PatchFeatureFlagMetadataRequest =
+            serde_json::from_str(r#"{"description":null,"owner":"Team"}"#).unwrap();
+        assert_eq!(clear.description, Some(None));
+        assert_eq!(clear.owner, Some(Some("Team".into())));
+        assert!(
+            serde_json::from_str::<PatchFeatureFlagMetadataRequest>(r#"{"typo":true}"#).is_err()
+        );
     }
 }

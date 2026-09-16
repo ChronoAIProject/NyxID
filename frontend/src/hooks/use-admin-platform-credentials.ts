@@ -36,14 +36,18 @@ export function useUpdatePlatformCredentials(provider: string) {
           body,
         ),
       ),
+    onMutate: () => client.cancelQueries({ queryKey: platformCredentialsKey }),
     onSuccess: async (saved) => {
+      await client.cancelQueries({ queryKey: platformCredentialsKey });
       client.setQueryData<PlatformCredentials[]>(
         platformCredentialsKey,
         (current) =>
           current?.map((item) => (item.provider === provider ? saved : item)),
       );
-      await client.invalidateQueries({ queryKey: platformCredentialsKey });
-      await client.invalidateQueries({ queryKey: ["managed-onboarding"] });
+      void client.invalidateQueries({ queryKey: platformCredentialsKey });
+      void client.invalidateQueries({ queryKey: ["managed-onboarding"] });
+      if (saved.backing?.type === "provider_oauth")
+        void client.invalidateQueries({ queryKey: ["providers"] });
     },
   });
 }
@@ -51,21 +55,33 @@ export function useUpdatePlatformCredentials(provider: string) {
 export function useClearPlatformCredentials(provider: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: async () => {
+    retry: false,
+    gcTime: 0,
+    onMutate: () => client.cancelQueries({ queryKey: platformCredentialsKey }),
+    mutationFn: async (): Promise<{ saved: PlatformCredentials | null }> => {
       await api.delete(
         `/admin/platform-credentials/${encodeURIComponent(provider)}`,
       );
-      const providers = platformCredentialsListSchema.parse(
-        await api.get("/admin/platform-credentials"),
-      );
-      client.setQueryData(platformCredentialsKey, providers);
-      const saved = providers.find((item) => item.provider === provider);
-      if (!saved) throw new Error("Unable to reload provider credentials");
-      return saved;
-    },
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: platformCredentialsKey });
-      await client.invalidateQueries({ queryKey: ["managed-onboarding"] });
+      // DELETE is committed. A descriptor refresh must never make it retryable.
+      await client.cancelQueries({ queryKey: platformCredentialsKey });
+      void client.invalidateQueries({ queryKey: ["managed-onboarding"] });
+      void client.invalidateQueries({ queryKey: ["providers"] });
+      void client.invalidateQueries({
+        queryKey: platformCredentialsKey,
+        refetchType: "none",
+      });
+      try {
+        const providers = platformCredentialsListSchema.parse(
+          await api.get("/admin/platform-credentials"),
+        );
+        await client.cancelQueries({ queryKey: platformCredentialsKey });
+        client.setQueryData(platformCredentialsKey, providers);
+        return {
+          saved: providers.find((item) => item.provider === provider) ?? null,
+        };
+      } catch {
+        return { saved: null };
+      }
     },
   });
 }

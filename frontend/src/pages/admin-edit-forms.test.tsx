@@ -15,7 +15,11 @@ import { beforeEach, expect, it, vi } from "vitest";
 import type { DownstreamService, ProviderConfig } from "@/types/api";
 import { ProviderEditPage } from "./provider-edit";
 import { ServiceEditPage } from "./service-edit";
-import { serviceFormPayload, serviceFormValues } from "./service-edit.helpers";
+import {
+  serviceFormPatch,
+  serviceFormPayload,
+  serviceFormValues,
+} from "./service-edit.helpers";
 import { changedFields } from "@/lib/form-changes";
 const mock = vi.hoisted(() => ({
   provider: { data: undefined as ProviderConfig | undefined, isLoading: false },
@@ -63,6 +67,9 @@ vi.mock("@/hooks/use-developer-apps", () => ({
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (select: (s: unknown) => unknown) =>
     select({ user: { is_admin: true } }),
+}));
+vi.mock("@/hooks/use-admin", () => ({
+  useAdminUsers: () => ({ data: { users: [] }, isFetching: false }),
 }));
 beforeEach(() => {
   vi.clearAllMocks();
@@ -116,12 +123,13 @@ beforeEach(() => {
   mock.updateService.mockResolvedValue(mock.service.data);
 });
 it("mounts populated provider controls only after loading", () => {
-  mock.provider.isLoading = true;
+  const loaded = mock.provider.data;
+  mock.provider = { isLoading: true, data: undefined };
   const view = render(<ProviderEditPage />);
   expect(
     screen.queryByRole("button", { name: "Save Changes" }),
   ).not.toBeInTheDocument();
-  mock.provider.isLoading = false;
+  mock.provider = { isLoading: false, data: loaded };
   view.rerender(<ProviderEditPage />);
   expect(screen.getByLabelText("Authorization URL")).toHaveValue(
     "https://example.com/authorize",
@@ -321,3 +329,146 @@ it.each([
     );
   },
 );
+
+it.each(["https://example.com/new-revoke", ""])(
+  "preserves structured revocation settings or explicitly clears: %s",
+  async (url) => {
+    mock.provider.data = {
+      ...mock.provider.data!,
+      revocation: {
+        url: "https://example.com/revoke",
+        style: "rfc7009",
+        auth: "basic",
+        revokes_grant: true,
+        request_encoding: "json",
+      },
+    } as ProviderConfig;
+    const user = userEvent.setup();
+    render(<ProviderEditPage />);
+    fireEvent.change(screen.getByLabelText("Revocation URL"), {
+      target: { value: url },
+    });
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
+    await waitFor(() =>
+      expect(mock.updateProvider).toHaveBeenCalledWith({
+        revocation: url ? { ...mock.provider.data!.revocation, url } : null,
+      }),
+    );
+  },
+);
+
+it("ignores server-owned provider timestamps unless replacing a hidden credential", async () => {
+  const view = render(<ProviderEditPage />);
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "Local" },
+  });
+  mock.provider.data = { ...mock.provider.data!, updated_at: "v2" };
+  view.rerender(<ProviderEditPage />);
+  expect(
+    screen.queryByText(/Saved values changed while/),
+  ).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText(/Client Secret/), {
+    target: { value: "replacement" },
+  });
+  expect(screen.getByText(/Saved values changed while/)).toBeInTheDocument();
+});
+
+it("ignores service pricing synchronization and viewer metadata during an unrelated draft", () => {
+  const view = render(<ServiceEditPage />);
+  fireEvent.change(screen.getByLabelText("Service Name"), {
+    target: { value: "Local" },
+  });
+  mock.service.data = {
+    ...mock.service.data!,
+    updated_at: "v2",
+    your_binding_count: 2,
+    billing: {
+      ...mock.service.data!.billing!,
+      platform_pricing: {
+        ...mock.service.data!.billing!.platform_pricing!,
+        sync_status: "failed",
+        sync_error: "temporary",
+      },
+    },
+  };
+  view.rerender(<ServiceEditPage />);
+  expect(
+    screen.queryByText(/Saved values changed while/),
+  ).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Service Name")).toHaveValue("Local");
+});
+
+it("preserves implicit platform access on rename and sends explicit inference/lane clears", () => {
+  const service = {
+    ...mock.service.data!,
+    inference: {
+      wire_protocol: "openai_responses" as const,
+      model_list: true,
+      realtime: false,
+    },
+    billing: {
+      ...mock.service.data!.billing!,
+      byok_pricing: {
+        metric: "requests" as const,
+        credits_per_unit: "3",
+        sync_status: "synced" as const,
+      },
+      platform_key_pricing: {
+        metric: "requests" as const,
+        credits_per_unit: "4",
+        sync_status: "synced" as const,
+      },
+      platform_charge_nyxid_credentials_only: true,
+      platform_pricing_cleanup_metric_code: "cleanup-retained",
+    },
+  };
+  const values = serviceFormValues(service);
+  expect(values.platform_key).toBeUndefined();
+  expect(values.credential).toBe("");
+  expect(values.platform_charge_nyxid_credentials_only).toBe(true);
+  expect(serviceFormPatch({ ...values, name: "Rename" }, service)).toEqual({
+    name: "Rename",
+  });
+  expect(
+    serviceFormPatch(
+      { ...values, inference: null, byok_pricing: null },
+      service,
+    ),
+  ).toEqual({ inference: null, billing: { byok_pricing: null } });
+  const patch = serviceFormPatch(
+    { ...values, platform_charge_nyxid_credentials_only: false },
+    service,
+  );
+  expect(patch.billing).toMatchObject({
+    platform_charge_nyxid_credentials_only: false,
+    resale_billable: true,
+    lago_resale_metric_code: "retained",
+    platform_pricing_cleanup_metric_code: "cleanup-retained",
+    platform_pricing: { credits_per_unit: "2" },
+  });
+  expect(patch.billing).not.toHaveProperty("byok_pricing");
+  expect(patch.billing).not.toHaveProperty("platform_key_pricing");
+});
+
+it("shows platform credential replacement only as a redacted review row", async () => {
+  render(<ServiceEditPage />);
+  fireEvent.change(screen.getByLabelText("Replace platform credential"), {
+    target: { value: "replacement-secret-material" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+  const dialog = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(dialog).not.toHaveTextContent("replacement-secret-material");
+  expect(mock.updateService).not.toHaveBeenCalled();
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mock.updateService).toHaveBeenCalledWith({
+      serviceId: "service-1",
+      data: { credential: "replacement-secret-material" },
+    }),
+  );
+});
