@@ -62,6 +62,11 @@ OFFICIAL_SPECS = {
         False,
         "",
     ),
+    "telnyx.openapi.json": (
+        "https://raw.githubusercontent.com/team-telnyx/openapi/master/openapi/spec3.json",
+        False,
+        "",
+    ),
     "twilio.openapi.json": (
         "https://raw.githubusercontent.com/twilio/twilio-oai/main/spec/json/twilio_api_v2010.json",
         False,

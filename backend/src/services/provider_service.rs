@@ -559,6 +559,53 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // Telnyx (API Key)
+    if !slug_exists!("telnyx") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "telnyx".to_string(),
+            name: "Telnyx".to_string(),
+            description: Some(
+                "Telnyx API access for AI inference, assistants, speech, voice calls, and messaging."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a Telnyx API key in Mission Control and paste the raw key. NyxID adds the Bearer prefix automatically."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://portal.telnyx.com/#/app/api-keys".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://developers.telnyx.com".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "telnyx", "Seeded default provider: Telnyx");
+        seeded_count += 1;
+    }
+
     // 7c. ElevenLabs (API Key)
     if !slug_exists!("elevenlabs") {
         let provider = ProviderConfig {
@@ -2848,6 +2895,18 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             true,
         )),
+        "api-telnyx" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: false,
+                supports_websocket: true,
+                supports_streaming: true,
+            },
+            true,
+        )),
         "api-twilio" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
@@ -3126,6 +3185,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "The hosted OpenAPI overlay covers core REST operations. OpenAPI cannot describe ElevenLabs' realtime WebSocket frame protocol, so realtime clients must follow the vendor's WebSocket message schema while connecting through the same NyxID proxy URL.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "telnyx",
+        service_slug: "api-telnyx",
+        service_name: "Telnyx",
+        base_url: "https://api.telnyx.com/v2",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Telnyx AI inference, assistants, speech, voice calls, and messaging. NyxID injects a bearer API key and relays streamed model responses and speech audio.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://telnyx.com"),
+        auth_notes: Some(
+            "Paste the raw API key from Telnyx Mission Control; NyxID adds `Authorization: Bearer`. OpenAI-compatible clients use the service proxy URL with `/ai/openai` appended as their base URL.",
+        ),
+        known_limitations: Some(
+            "The hosted overlay covers core AI, speech, calling, and messaging REST operations. Inbound webhooks and call media streams require a separate application receiver. Calls require a Telnyx voice connection and an authorized caller ID; messaging requires a configured sender and applicable registration.",
         ),
     },
     DefaultServiceSeed {
