@@ -35,3 +35,17 @@ describe("channel catalog presentation", () => {
     expect(editableChannelFields(platforms.telegram!)).toEqual([]);
   });
 });
+
+describe("Aurinko email setup", () => {
+  it("uses account-token onboarding without an OAuth launch", () => {
+    expect(platforms.aurinko!.managedFlow).toBeUndefined();
+    expect(platforms.aurinko!.label).toBe("Aurinko Email");
+    expect(platforms.aurinko!.setupNote?.text).toContain("stored separately");
+    expect(editableChannelFields(platforms.aurinko!).map((field) => field.name)).toEqual(["bot_token", "app_secret"]);
+  });
+  it("sends only the selected platform credentials and owner", () => {
+    const descriptor = platformFixtures.find((platform) => platform.platform === "aurinko")!;
+    expect(channelBotRegistrationPayload({ platform: "aurinko", label: " Mailbox ", bot_token: " account ", app_secret: " signing ", app_id: "lark-app", verification_token: "lark-token", encrypt_key: "lark-key", target_org_id: "owner" }, descriptor))
+      .toEqual({ platform: "aurinko", label: "Mailbox", bot_token: "account", app_secret: "signing", target_org_id: "owner" });
+  });
+});

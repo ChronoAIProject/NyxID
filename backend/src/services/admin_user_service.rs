@@ -467,6 +467,9 @@ async fn delete_user_cascade_internal(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    // Busy email effects must leave the user able to authenticate and retry.
+    crate::services::channel_bot_service::delete_owner_aurinko_channels(db, target_user_id).await?;
+
     // Phase 1: mark user inactive so they cannot authenticate during cleanup
     let now = Utc::now();
     db.collection::<User>(USERS)
@@ -483,6 +486,10 @@ async fn delete_user_cascade_internal(
     let user_filter = doc! { "user_id": target_user_id };
 
     let user_scoped_collections = [
+        crate::models::channel_email::SUBSCRIPTIONS,
+        crate::models::channel_email::SENDS,
+        crate::models::channel_email::BATCHES,
+        crate::models::channel_email::RECEIPTS,
         SESSIONS,
         REFRESH_TOKENS,
         API_KEYS,

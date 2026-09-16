@@ -18,6 +18,7 @@ export const conversationPlatformSchema = z.enum([
   "slack",
   "whatsapp",
   "x",
+  "aurinko",
   "device",
 ]);
 

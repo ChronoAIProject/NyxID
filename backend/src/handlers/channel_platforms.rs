@@ -160,7 +160,7 @@ mod tests {
         let adapters = registered_adapters(&cache);
         assert_eq!(entries.len(), adapters.len());
         let ids: std::collections::HashSet<_> = entries.iter().map(|e| &e.platform).collect();
-        assert_eq!(ids.len(), 9);
+        assert_eq!(ids.len(), 10);
         for adapter in adapters {
             let entry = entries
                 .iter()
@@ -186,6 +186,27 @@ mod tests {
         let telegram =
             serde_json::to_value(entries.iter().find(|e| e.platform == "telegram").unwrap())
                 .unwrap();
+        let aurinko =
+            serde_json::to_value(entries.iter().find(|e| e.platform == "aurinko").unwrap())
+                .unwrap();
+        assert_eq!(aurinko["display_name"], "Aurinko Email");
+        assert_eq!(aurinko["ingestion"], serde_json::json!({"mode":"webhook"}));
+        assert!(aurinko["managed_onboarding"].is_null());
+        assert_eq!(
+            aurinko["capabilities"],
+            serde_json::json!({"initiated_send":false,"reply_to":true,"thread":false,"edit":false,
+                "media":{"inbound":[],"outbound":[]}})
+        );
+        assert_eq!(
+            aurinko["registration"]["fields"].as_array().unwrap().len(),
+            2
+        );
+        for field in aurinko["registration"]["fields"].as_array().unwrap() {
+            assert_eq!(field["secret"], true);
+            assert_eq!(field["required"], true);
+            assert_eq!(field["patchable"], true);
+            assert!(field["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
+        }
         assert_eq!(
             telegram["registration"]["fields"],
             serde_json::json!([{

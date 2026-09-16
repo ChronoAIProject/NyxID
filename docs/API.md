@@ -7911,6 +7911,16 @@ The connect body uses a decimal string for `telegram_bot_id` and an integer for 
 
 ## Webhooks
 
+### Aurinko email channel
+
+The existing channel APIs accept `platform: "aurinko"`. The platform descriptor is available through `GET /api/v1/channel-platforms`, including account-token and signing-secret fields, setup instructions, and capabilities. Registration uses `POST /api/v1/channel-bots` with `label`, `bot_token`, `app_secret`, and optional `target_org_id`. Credential rotation uses the existing PATCH endpoint; `POST /api/v1/channel-bots/{id}/verify` repairs the bound subscription without changing its mailbox.
+
+`POST /api/v1/webhooks/channel/aurinko/{id}` verifies Aurinko's signed raw request before returning a plaintext `validationToken` challenge or processing a notification. Successful/ignored notifications return 200; verification failures return 401, malformed requests 400, and recoverable failures 503 with `Retry-After: 10`. It never returns Aurinko's unsubscribe signal, 422.
+
+Agents reply through `POST /api/v1/channel-relay/reply` with `{"message_id":"INBOUND_UUID","reply":{"text":"Reply text"}}`, using the assigned agent key or message-bound reply token. The original email determines the single recipient; recipient overrides, channel attachments, initiated sends, and edits are unsupported. A durable send barrier prevents automatic resubmission after an uncertain provider POST.
+
+Aurinko bot deletion returns HTTP 200 with `{"webhook_cleanup":"removed"}` or `{"webhook_cleanup":"failed"}`; existing platforms retain HTTP 204. Both outcomes deactivate the bot locally. Failed cleanup requires removal of the remaining exact callback subscription in Aurinko or a later deletion retry. See [Aurinko integration](AURINKO_INTEGRATION.md) for the complete contract and independent AI Service setup.
+
 ### Inbound Triggers
 
 Triggers provide a provider-neutral inbound event relay. Management routes accept a normal user token or agent API key and reject delegated, relay, and service-account tokens.

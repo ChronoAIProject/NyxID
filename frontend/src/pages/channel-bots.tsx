@@ -532,8 +532,12 @@ function DeleteBotDialog({
   async function handleDelete() {
     if (!botId) return;
     try {
-      await deleteMutation.mutateAsync(botId);
-      toast.success("Bot deleted");
+      const result = await deleteMutation.mutateAsync(botId);
+      if (result?.webhook_cleanup === "failed") {
+        toast.warning("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard.");
+      } else {
+        toast.success("Bot deleted");
+      }
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to delete bot",
