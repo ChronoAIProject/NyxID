@@ -607,11 +607,44 @@ async fn aurinko_platform_credentials_share_provider_pair_and_keep_signing_secre
         .insert_one(&provider)
         .await
         .unwrap();
-    let (_, Json(saved)) = admin::update(State(state.clone()), auth.clone(), Path("aurinko".into()),
-        Json(serde_json::from_value(json!({"fields": {
-            "client_id": "aurinko-application-id", "client_secret": "aurinko-application-secret",
-            "signing_secret": "aurinko-webhook-secret",
-        }})).unwrap())).await.unwrap();
+    let existing_pair = crate::services::provider_service::update_provider(
+        &state.db,
+        &state.encryption_keys,
+        &provider.id,
+        crate::services::provider_service::ProviderUpdateInput {
+            client_id: Some("aurinko-application-id".into()),
+            client_secret: Some("aurinko-application-secret".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(existing_pair.provider_type, "api_key");
+    let descriptor = credentials::descriptor(&state.token_exchange_cache, "aurinko")
+        .unwrap()
+        .1;
+    let imported = credentials::load_decrypted(&state.db, &state.encryption_keys, &descriptor)
+        .await
+        .unwrap();
+    assert_eq!(imported.get("client_id"), Some("aurinko-application-id"));
+    assert_eq!(
+        imported.get("client_secret"),
+        Some("aurinko-application-secret")
+    );
+    assert!(imported.get("signing_secret").is_none());
+    let (_, Json(saved)) = admin::update(
+        State(state.clone()),
+        auth.clone(),
+        Path("aurinko".into()),
+        Json(
+            serde_json::from_value(json!({"fields": {
+                "signing_secret": "aurinko-webhook-secret",
+            }}))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
     assert!(saved.available);
     assert!(
         saved
@@ -652,6 +685,14 @@ async fn aurinko_platform_credentials_share_provider_pair_and_keep_signing_secre
         .unwrap();
     assert_eq!(shared.provider_type, "api_key");
     assert_eq!(
+        shared.client_id_encrypted,
+        existing_pair.client_id_encrypted
+    );
+    assert_eq!(
+        shared.client_secret_encrypted,
+        existing_pair.client_secret_encrypted
+    );
+    assert_eq!(
         state
             .encryption_keys
             .decrypt(shared.client_id_encrypted.as_ref().unwrap())
@@ -667,9 +708,6 @@ async fn aurinko_platform_credentials_share_provider_pair_and_keep_signing_secre
             .unwrap(),
         b"aurinko-application-secret"
     );
-    let descriptor = credentials::descriptor(&state.token_exchange_cache, "aurinko")
-        .unwrap()
-        .1;
     let loaded = credentials::load_decrypted(&state.db, &state.encryption_keys, &descriptor)
         .await
         .unwrap();
