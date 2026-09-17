@@ -3748,7 +3748,7 @@ mod tests {
         let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
         catalog.id = catalog_id.clone();
         catalog.name = "Platform Service".to_string();
-        catalog.slug = "platform-service".to_string();
+        catalog.slug = "shared-service".to_string();
         catalog.base_url = "https://api.example.com".to_string();
         catalog.visibility = "public".to_string();
         catalog.service_category = "internal".to_string();

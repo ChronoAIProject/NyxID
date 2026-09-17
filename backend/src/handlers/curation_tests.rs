@@ -805,6 +805,33 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         .0,
         StatusCode::BAD_REQUEST
     );
+    // Main's retired-vendor guard also applies to the dedicated curation path,
+    // even if a stale writer re-enables the catalog row.
+    for (category, slug) in [
+        ("retired_platform_vendor", f.service.slug.as_str()),
+        ("internal", "platform-retired-curation"),
+    ] {
+        f.state
+            .db
+            .collection::<Document>(SERVICES)
+            .update_one(
+                doc! {"_id": &f.service.id},
+                doc! {"$set": {"service_category": category, "slug": slug}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            request(&f.state, "GET", &route, &bearer, None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            catalog.received_requests().await.unwrap().len(),
+            allowed_request_count
+        );
+    }
+    f.state.db.collection::<Document>(SERVICES).update_one(
+        doc! {"_id": &f.service.id}, doc! {"$set": {"service_category": &f.service.service_category, "slug": &f.service.slug}}
+    ).await.unwrap();
     f.state
         .db
         .collection::<Document>(SERVICES)
@@ -1024,12 +1051,13 @@ async fn curation_human_mixed_retry_nullable_noop_and_postcommit_oidc_repair() {
     );
     for field in [
         "inference",
+        "proxy_operation_policy",
         "byok_pricing",
         "platform_key_pricing",
         "platform_charge_nyxid_credentials_only",
     ] {
         let mut different = body.clone();
-        if field == "inference" {
+        if matches!(field, "inference" | "proxy_operation_policy") {
             different[field] = Value::Null;
         } else {
             different["billing"][field] = if field == "platform_charge_nyxid_credentials_only" {
@@ -1287,7 +1315,55 @@ async fn curation_human_mixed_retry_nullable_noop_and_postcommit_oidc_repair() {
 async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt() {
     use crate::services::api_key_mutation_service::TransactionCollisionHook;
     let f = fixture("curation_create_router", false).await;
-    let input = json!({"name":"Concurrent created","slug":"concurrent-created","base_url":"https://example.test","auth_method":"none","recommended_skills":["one"],"skills_request_id":Uuid::new_v4().to_string()});
+    use crate::models::{
+        catalog_skill_revision::{COLLECTION_NAME as HISTORY, OPERATIONS},
+        provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig},
+    };
+    let provider: ProviderConfig = bson::from_document(doc! {
+        "_id": Uuid::new_v4().to_string(), "slug": "linked-create-provider",
+        "name": "Linked provider", "provider_type": "api_key", "is_active": true,
+        "created_by": &f.owner, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
+    }).unwrap();
+    f.state
+        .db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .insert_one(&provider)
+        .await
+        .unwrap();
+    let input = json!({"name":"Concurrent created","slug":"concurrent-created","base_url":"https://example.test","auth_method":"bearer","provider_config_id":provider.id,"recommended_skills":["one"],"skills_request_id":Uuid::new_v4().to_string()});
+    // Provider validation runs after insertion, inside the same transaction as
+    // initial skills/history/receipt: a rejected link leaves none of them.
+    let mut invalid = input.clone();
+    invalid["auth_method"] = json!("none");
+    let (status, response) = request(
+        &f.state,
+        "POST",
+        "/api/v1/services",
+        &f.human_token,
+        Some(invalid),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(SERVICES)
+            .count_documents(doc! {"slug": "concurrent-created"})
+            .await
+            .unwrap(),
+        0
+    );
+    for collection in [HISTORY, OPERATIONS] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let a = TransactionCollisionHook::new(barrier.clone());
     let b = TransactionCollisionHook::new(barrier);
@@ -1316,6 +1392,36 @@ async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt
     assert_eq!(a.0, StatusCode::OK, "{}", a.1);
     assert_eq!(b.0, StatusCode::OK, "{}", b.1);
     assert_eq!(a.1["id"], b.1["id"]);
+    assert_eq!(a.1["provider_config_id"], provider.id);
+    assert_eq!(a.1["requires_user_credential"], true);
+    assert_eq!(a.1["recommended_skills"], json!(["one"]));
+    assert_eq!(a.1["skills_revision"], 1);
+    assert_eq!(a.1["credential_configured"], false);
+    for collection in [HISTORY, OPERATIONS] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    let mut different = input.clone();
+    different["provider_config_id"] = json!(Uuid::new_v4().to_string());
+    assert_eq!(
+        request(
+            &f.state,
+            "POST",
+            "/api/v1/services",
+            &f.human_token,
+            Some(different)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
     assert_eq!(
         f.state
             .db

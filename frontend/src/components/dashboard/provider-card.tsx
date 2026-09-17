@@ -12,6 +12,8 @@ import {
 import { ProviderStatusBadge } from "./provider-status-badge";
 import { LlmReadyBadge } from "./llm-ready-badge";
 import { getProviderBrand, hasKnownBrand } from "@/lib/provider-branding";
+import { ServiceIcon } from "@/components/service-icon";
+import { SERVICE_ICONS } from "@/components/service-icons";
 import { formatDate, sanitizeAvatarUrl } from "@/lib/utils";
 import {
   Card,
@@ -103,6 +105,8 @@ export function ProviderCard({
                 alt={provider.name}
                 className="h-4 w-4 rounded"
               />
+            ) : SERVICE_ICONS[provider.slug] ? (
+              <ServiceIcon slug={provider.slug} size="sm" />
             ) : hasBrand ? (
               <span className={`text-[13px] font-bold ${brand.textClass}`}>
                 {brand.initial}

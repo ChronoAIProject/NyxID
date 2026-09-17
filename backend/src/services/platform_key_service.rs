@@ -17,8 +17,35 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::services::org_service;
 
+/// Read-only status for management responses. Old creators encrypted even an
+/// absent credential. Decrypt through the version-aware API, never infer usable
+/// material from ciphertext length. None means stored material is unreadable.
+pub async fn credential_configured(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    service: &DownstreamService,
+) -> Option<bool> {
+    if service.credential_encrypted.is_empty() {
+        return Some(false);
+    }
+    match keys.decrypt(&service.credential_encrypted).await {
+        Ok(material) => Some(!zeroize::Zeroizing::new(material).is_empty()),
+        Err(_) => None,
+    }
+}
+
+pub fn legacy_master_credential(service: &DownstreamService) -> bool {
+    !super::retired_service_service::is_retired(service)
+        && service.service_category == "internal"
+        && service.auth_method != "none"
+        && !service.requires_user_credential
+        && service.service_type == "http"
+        && !service.credential_encrypted.is_empty()
+        && service.provider_config_id.is_none()
+}
+
 pub fn legacy_public_master(service: &DownstreamService) -> bool {
-    service.visibility == "public"
+    !super::retired_service_service::is_retired(service)
+        && service.visibility == "public"
         && service.service_category == "internal"
         && !matches!(service.auth_method.as_str(), "none" | "token_exchange")
         && !service.requires_user_credential
@@ -29,6 +56,9 @@ pub fn legacy_public_master(service: &DownstreamService) -> bool {
 }
 
 pub fn has_platform_key(service: &DownstreamService) -> bool {
+    if super::retired_service_service::is_retired(service) {
+        return false;
+    }
     match &service.platform_key {
         Some(config) => {
             config.enabled
@@ -208,7 +238,7 @@ pub async fn effective_auth(
 ) -> AppResult<(String, String)> {
     let requirement = db
         .collection::<ServiceProviderRequirement>(REQUIREMENTS)
-        .find_one(doc! { "service_id": &service.id })
+        .find_one(crate::services::provider_link_service::primary_requirement_filter(service))
         .await?;
     let auth = super::unified_key_service::derive_effective_auth(service, requirement.as_ref());
     if auth.0 == "none" {

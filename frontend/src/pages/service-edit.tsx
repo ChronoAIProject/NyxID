@@ -137,6 +137,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
       delete patch.inference;
       delete patch.platform_key;
       delete patch.credential;
+      delete patch.proxy_operation_policy;
     }
     const warning = patch.ssh_config
       ? getSshAuthModeChangeWarning(
@@ -908,7 +909,14 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
 
                     <Separator className="my-2" />
                     {user?.is_admin && (
-                      <PlatformServiceFields form={form} service={service} />
+                      <PlatformServiceFields
+                        service={service}
+                        credentialSupported={
+                          service.auth_method !== "oidc" &&
+                          (service.auth_method !== "none" ||
+                            Boolean(service.provider_config_id))
+                        }
+                      />
                     )}
                     <div className="space-y-4">
                       <div className="space-y-1">

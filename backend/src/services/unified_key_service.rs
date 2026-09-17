@@ -29,7 +29,7 @@ use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::{
     audit_service::{self, AuditActor},
-    catalog_spec_sync, node_service, oauth_revocation,
+    node_service, oauth_revocation,
     platform_key_service::{self, OwnerGrants},
     ssh_service, user_api_key_service, user_credentials_service, user_endpoint_service,
     user_service_service, user_token_service, ws_frame_injector,
@@ -65,7 +65,7 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
     if catalog.provider_config_id.as_deref() != Some(&token.provider_config_id)
         || !catalog.is_active
         || catalog.service_type != "http"
-        || catalog_spec_sync::is_platform_vendor_service(catalog)
+        || crate::services::retired_service_service::is_retired(catalog)
     {
         return Err(AppError::BadRequest(
             "A compatible personal API service is unavailable".into(),
@@ -77,7 +77,7 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
     }
     let requirement = db
         .collection::<ServiceProviderRequirement>(REQUIREMENTS)
-        .find_one(doc! {"service_id":&catalog.id})
+        .find_one(crate::services::provider_link_service::primary_requirement_filter(catalog))
         .session(&mut *session)
         .await?;
     let (auth_method, auth_key_name) = derive_effective_auth(catalog, requirement.as_ref());
@@ -351,6 +351,9 @@ fn is_auto_provisionable_catalog_service(
     service: &DownstreamService,
     has_provider_requirement: bool,
 ) -> bool {
+    if super::retired_service_service::is_retired(service) {
+        return false;
+    }
     let is_truly_no_auth = service.is_active
         && service.auth_method == "none"
         && !service.requires_user_credential
@@ -959,7 +962,7 @@ async fn create_key_inner(
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
 
-        if catalog_spec_sync::is_platform_vendor_service(&svc) {
+        if crate::services::retired_service_service::is_retired(&svc) {
             return Err(AppError::NotFound(format!(
                 "Catalog service '{slug}' not found"
             )));
@@ -993,7 +996,7 @@ async fn create_key_inner(
         }
         let provider_requirement = db
             .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
-            .find_one(doc! { "service_id": &svc.id })
+            .find_one(crate::services::provider_link_service::primary_requirement_filter(&svc))
             .await?;
         // Multi-connection: OAuth2 / device-code adds are ALWAYS
         // independent. We never reuse an existing provider token for

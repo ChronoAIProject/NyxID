@@ -309,6 +309,8 @@ pub async fn find_matching_enabled_rule(
         .await?
         .ok_or_else(|| AppError::NotFound("Public endpoint not found".to_string()))?;
 
+    super::retired_service_service::require_available(&service)?;
+
     let method = normalize_method(method)?;
     let path = normalize_runtime_path(path)?;
     let rule = service

@@ -728,6 +728,56 @@ pub async fn delete_provider(
     }))
 }
 
+/// Admin inventory includes both canonical links and legacy requirements.
+pub async fn list_linked_services(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+) -> AppResult<Json<super::services::ServiceListResponse>> {
+    require_admin(&state, &auth_user).await?;
+    let services =
+        crate::services::provider_link_service::list_linked(&state.db, &provider_id).await?;
+    let mut responses = Vec::with_capacity(services.len());
+    for service in services {
+        responses.push(
+            super::services_helpers::service_to_response_with_viewer(
+                Some(&state.encryption_keys),
+                service,
+                None,
+            )
+            .await,
+        );
+    }
+    Ok(Json(super::services::ServiceListResponse {
+        services: responses,
+    }))
+}
+
+pub async fn link_service(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((provider_id, service_id)): Path<(String, String)>,
+) -> AppResult<Json<super::services::ServiceResponse>> {
+    require_admin(&state, &auth_user).await?;
+    crate::services::provider_link_service::link(&state.db, &provider_id, &service_id, None)
+        .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "service_provider_linked",
+        Some(serde_json::json!({ "service_id": &service_id, "provider_id": &provider_id })),
+    );
+    let service = super::services_helpers::fetch_service(&state, &service_id).await?;
+    Ok(Json(
+        super::services_helpers::service_to_response_with_viewer(
+            Some(&state.encryption_keys),
+            service,
+            None,
+        )
+        .await,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;

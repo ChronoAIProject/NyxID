@@ -1,3 +1,4 @@
+import type { ProxyOperationPolicy } from "@/schemas/services";
 import type { InferenceMetadata, PlatformKeyConfig, LanePricingView } from "@/schemas/platform-keys";
 import type { BillingMetric } from "@/schemas/billing";
 
@@ -211,6 +212,9 @@ export interface OAuthClient {
 }
 
 export interface DownstreamService {
+  readonly provider_config_id?: string | null;
+  readonly credential_configured?: boolean | null;
+  readonly proxy_operation_policy?: ProxyOperationPolicy | null;
   readonly inference?: InferenceMetadata | null;
   readonly platform_key?: PlatformKeyConfig | null;
   readonly id: string;
@@ -392,6 +396,11 @@ export interface SshServiceConfigInput {
 
 export type CreateServicePayload =
   | {
+      readonly provider_config_id?: string;
+      readonly inference?: InferenceMetadata | null;
+      readonly platform_key?: PlatformKeyConfig;
+      readonly billing?: ServiceBilling;
+      readonly proxy_operation_policy?: ProxyOperationPolicy | null;
       readonly name: string;
       readonly description?: string;
       readonly service_type: "http";
@@ -417,6 +426,7 @@ export type CreateServicePayload =
 
 export type UpdateServicePayload =
   | {
+      readonly proxy_operation_policy?: ProxyOperationPolicy | null;
       readonly name?: string;
       readonly description?: string;
       readonly visibility?: string;

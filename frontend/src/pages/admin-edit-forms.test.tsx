@@ -49,6 +49,13 @@ vi.mock("@/hooks/use-providers", () => ({
     isPending: false,
   }),
 }));
+vi.mock("@/components/providers/provider-services", () => ({
+  ProviderServices: ({ provider }: { provider: ProviderConfig }) => (
+    <div role="region" aria-label="Linked services">
+      {provider.is_active ? "Provider enabled" : "Enable provider first"}
+    </div>
+  ),
+}));
 vi.mock("@/hooks/use-services", () => ({
   useService: () => mock.service,
   useUpdateService: () => ({
@@ -119,6 +126,9 @@ beforeEach(() => {
       visibility: "private",
       auth_type: "bearer",
       service_category: "internal",
+      proxy_operation_policy: {
+        rules: [{ method: "GET", path_template: "/messages/{id}" }],
+      },
       developer_app_ids: ["inactive-app", "unavailable-app"],
       billing: {
         platform_billable: true,
@@ -198,9 +208,29 @@ it("preserves a draft and blocks confirmation after a background update", async 
   ).toBeDisabled();
   expect(mock.updateProvider).not.toHaveBeenCalled();
 });
+it("keeps linked-service controls current while retaining the provider draft", () => {
+  const view = render(<ProviderEditPage />);
+  expect(
+    screen.getByRole("region", { name: "Linked services" }),
+  ).toHaveTextContent("Provider enabled");
+  fireEvent.change(screen.getByLabelText("Name"), {
+    target: { value: "My provider draft" },
+  });
+  mock.provider.data = {
+    ...mock.provider.data!,
+    is_active: false,
+    updated_at: "v2",
+  };
+  view.rerender(<ProviderEditPage />);
+  expect(screen.getByLabelText("Name")).toHaveValue("My provider draft");
+  expect(
+    screen.getByRole("region", { name: "Linked services" }),
+  ).toHaveTextContent("Enable provider first");
+});
 it("shows selected inactive and unavailable apps and patches only a service rename", async () => {
   const user = userEvent.setup();
   render(<ServiceEditPage />);
+  expect(screen.getByLabelText("Rule 1 path")).toHaveValue("/messages/{id}");
   expect(screen.getByLabelText("Old app (inactive)")).toBeChecked();
   expect(screen.getByText(/Selected app: unavailable-app/)).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Service Name"), {
@@ -217,6 +247,85 @@ it("shows selected inactive and unavailable apps and patches only a service rena
       data: { name: "Renamed service" },
     }),
   );
+});
+it("retains a canceled endpoint-policy draft and sends only its confirmed sparse patch", async () => {
+  const user = userEvent.setup();
+  render(<ServiceEditPage />);
+  expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("Rule 1 path"), {
+    target: { value: "/messages/{message_id}" },
+  });
+  await user.click(screen.getByRole("combobox", { name: "Rule 1 method" }));
+  await user.click(screen.getByRole("option", { name: "POST" }));
+  await user.click(screen.getByRole("button", { name: "Save Changes" }));
+  const dialog = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(dialog).toHaveTextContent("/messages/{message_id}");
+  expect(mock.updateService).not.toHaveBeenCalled();
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.getByLabelText("Rule 1 path")).toHaveValue(
+    "/messages/{message_id}",
+  );
+  expect(mock.updateService).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Save Changes" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mock.updateService).toHaveBeenCalledExactlyOnceWith({
+      serviceId: "service-1",
+      data: {
+        proxy_operation_policy: {
+          rules: [{ method: "POST", path_template: "/messages/{message_id}" }],
+        },
+      },
+    }),
+  );
+});
+it.each(["clear", "deny all"] as const)(
+  "confirms endpoint policy %s explicitly",
+  async (action) => {
+    const user = userEvent.setup();
+    render(<ServiceEditPage />);
+    await user.click(
+      action === "clear"
+        ? screen.getByRole("switch", { name: "Restrict allowed endpoints" })
+        : screen.getByRole("button", { name: "Remove" }),
+    );
+    expect(screen.queryByLabelText("Rule 1 path")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await screen.findByRole("dialog", { name: "Review changes" });
+    expect(mock.updateService).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Confirm changes" }));
+    await waitFor(() =>
+      expect(mock.updateService).toHaveBeenCalledExactlyOnceWith({
+        serviceId: "service-1",
+        data: {
+          proxy_operation_policy: action === "clear" ? null : { rules: [] },
+        },
+      }),
+    );
+  },
+);
+it("blocks a policy confirmation on background drift without replacing the draft", async () => {
+  const user = userEvent.setup();
+  const view = render(<ServiceEditPage />);
+  fireEvent.change(screen.getByLabelText("Rule 1 path"), {
+    target: { value: "/draft" },
+  });
+  await user.click(screen.getByRole("button", { name: "Save Changes" }));
+  await screen.findByRole("dialog", { name: "Review changes" });
+  mock.service.data = {
+    ...mock.service.data!,
+    proxy_operation_policy: { rules: [] },
+    updated_at: "v2",
+  };
+  view.rerender(<ServiceEditPage />);
+  expect(screen.getByLabelText("Rule 1 path")).toHaveValue("/draft");
+  expect(
+    screen.getByRole("button", { name: "Confirm changes" }),
+  ).toBeDisabled();
+  expect(mock.updateService).not.toHaveBeenCalled();
 });
 it.each(["inactive", "missing"] as const)(
   "keeps a newly selected app visible and removable when refetched as %s",
@@ -247,7 +356,9 @@ it.each(["inactive", "missing"] as const)(
     expect(selectedApp).toBeEnabled();
     expect(screen.getByLabelText("Old app (inactive)")).toBeChecked();
     expect(
-      screen.getByLabelText("Selected app: unavailable-app (details unavailable)"),
+      screen.getByLabelText(
+        "Selected app: unavailable-app (details unavailable)",
+      ),
     ).toBeChecked();
     expect(screen.getByLabelText("Service Name")).toHaveValue("Service draft");
 
@@ -515,7 +626,7 @@ it("preserves implicit platform access on rename and sends explicit inference/la
 it("shows platform credential replacement only as a redacted review row", async () => {
   render(<ServiceEditPage />);
   fireEvent.change(screen.getByLabelText("Replace platform credential"), {
-    target: { value: "replacement-secret-material" },
+    target: { value: "  replacement-secret-material  " },
   });
   fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
   const dialog = await screen.findByRole("dialog", { name: "Review changes" });
@@ -527,7 +638,25 @@ it("shows platform credential replacement only as a redacted review row", async 
   await waitFor(() =>
     expect(mock.updateService).toHaveBeenCalledWith({
       serviceId: "service-1",
-      data: { credential: "replacement-secret-material" },
+      data: { credential: "  replacement-secret-material  " },
     }),
   );
 });
+it.each(["private", "public"] as const)(
+  "preserves %s legacy master defaults and omits blank credential updates",
+  (visibility) => {
+    const service = {
+      ...mock.service.data!,
+      visibility,
+      platform_key: undefined,
+    };
+    const values = serviceFormValues(service);
+    expect(values.platform_key).toBeUndefined();
+    expect(
+      serviceFormPatch(
+        { ...values, name: "Renamed", credential: " \t " },
+        service,
+      ),
+    ).toEqual({ name: "Renamed" });
+  },
+);

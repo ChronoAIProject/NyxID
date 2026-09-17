@@ -573,10 +573,21 @@ pub async fn create(
             }
 
             let result: AppResult<()> = async {
-                db.collection::<DownstreamService>(SERVICES)
-                    .insert_one(&service)
-                    .session(&mut *session)
+                if let Some(provider_id) = service.provider_config_id.as_deref() {
+                    super::provider_link_service::link_in_session(
+                        db,
+                        provider_id,
+                        &service.id,
+                        Some(&service),
+                        session,
+                    )
                     .await?;
+                } else {
+                    db.collection::<DownstreamService>(SERVICES)
+                        .insert_one(&service)
+                        .session(&mut *session)
+                        .await?;
+                }
                 if changed {
                     db.collection::<CatalogSkillRevision>(HISTORY)
                         .insert_one(CatalogSkillRevision {
@@ -626,7 +637,10 @@ pub async fn create(
         }
         return Err(error);
     }
-    Ok(created)
+    db.collection::<DownstreamService>(SERVICES)
+        .find_one(doc! { "_id": &created.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Created service no longer exists".into()))
 }
 
 pub async fn has_human_operation(

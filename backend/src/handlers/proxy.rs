@@ -10260,7 +10260,7 @@ mod proxy_resolution_integration_tests {
             .insert_one(test_user(&user_id, UserType::Person))
             .await
             .unwrap();
-        let service = insert_platform_service(&db, "platform-assistant", &base_url).await;
+        let service = insert_platform_service(&db, "shared-assistant", &base_url).await;
 
         let state = test_app_state(db.clone());
         let mut auth = access_token_auth(&user_id);
@@ -10319,7 +10319,7 @@ mod proxy_resolution_integration_tests {
             .insert_one(test_user(&user_id, UserType::Person))
             .await
             .unwrap();
-        let service = insert_platform_service(&db, "platform-assistant-2", &base_url).await;
+        let service = insert_platform_service(&db, "shared-assistant-2", &base_url).await;
         let now = chrono::Utc::now();
         db.collection::<crate::models::user_service_connection::UserServiceConnection>(
             crate::models::user_service_connection::COLLECTION_NAME,
@@ -10392,7 +10392,7 @@ mod proxy_resolution_integration_tests {
             .insert_one(test_user(&user_id, UserType::Person))
             .await
             .unwrap();
-        let mut service = insert_platform_service(&db, "platform-needs-cred", &base_url).await;
+        let mut service = insert_platform_service(&db, "shared-needs-cred", &base_url).await;
         service.requires_user_credential = true;
         db.collection::<crate::models::downstream_service::DownstreamService>(
             crate::models::downstream_service::COLLECTION_NAME,

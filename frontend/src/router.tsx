@@ -74,7 +74,6 @@ import {
   AdminFeatureFlagsPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
-  AdminPlatformOpsPage,
   AdminCreditsPage,
   AdminInviteCodesPage,
   CliAuthPage,
@@ -888,18 +887,6 @@ const adminIntegrityRoute = createRoute({
   component: AdminIntegrityPage,
 });
 
-const adminPlatformOpsRoute = createRoute({
-  path: "platform-ops",
-  getParentRoute: () => adminLayout,
-  beforeLoad: () => {
-    const { user, isLoading } = useAuthStore.getState();
-    if (!isLoading && !canAdminWrite(user)) {
-      throw redirect({ to: "/dashboard" });
-    }
-  },
-  component: AdminPlatformOpsPage,
-});
-
 const adminCreditsRoute = createRoute({
   path: "credits",
   getParentRoute: () => adminLayout,
@@ -1018,7 +1005,6 @@ const routeTree = rootRoute.addChildren([
       adminNodesRoute,
       adminAuditLogRoute,
       adminIntegrityRoute,
-      adminPlatformOpsRoute,
       adminCreditsRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,

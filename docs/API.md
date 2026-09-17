@@ -5171,6 +5171,29 @@ curl -X POST http://localhost:3001/api/v1/auth/mfa/confirm \
 
 ---
 
+### Provider-linked service configuration
+
+Both provider/service endpoints require admin access:
+`GET /api/v1/providers/{provider_id}/services` lists canonical links and legacy
+provider requirements. `PUT /api/v1/providers/{provider_id}/services/{service_id}` links an existing catalog
+service; `POST /api/v1/services` also accepts `provider_config_id` for atomic
+creation/linking. A service already linked to another provider is not rebound.
+Direct-auth services retain their authentication method without adding provider
+requirements.
+
+Service updates accept a write-only `credential` (blank preserves), `platform_key`,
+credential-class billing lanes, and `proxy_operation_policy`. Omitted policy
+preserves; null clears; `{ "rules": [] }` denies every endpoint. Rules contain
+an HTTP `method` and absolute `path_template`, and apply to all service bindings.
+New shared keys default disabled/restricted. Admin response
+`credential_configured` is true/false after authorized inspection, or null when
+unreadable; non-admin responses return null without inspecting the credential.
+
+Platform Operations routes and its three named MCP operation tools are removed.
+See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md) for
+linking, access, billing, and migration behavior, and [Admin form save
+behavior](ADMIN_FORM_SAFETY.md) for sparse updates and confirmation.
+
 ### Admin
 
 All admin endpoints require the authenticated user to have `is_admin = true`. Admin endpoints include self-protection: admins cannot change their own role, disable themselves, or delete themselves.
@@ -5196,37 +5219,6 @@ An unknown flag key returns a bad-request error.
 For example, `{"owner":"Identity team"}` changes only the owner. The existing
 `PUT` route at this path keeps its replacement contract: omitted fields are
 cleared. Clients that need sparse updates should use `PATCH`.
-
----
-
-#### PATCH /api/v1/admin/platform-ops/vendor-templates/{template_id}
-
-Update only the supplied fields of a platform vendor template.
-
-**Auth:** Admin
-
-| Fields | Type | Required | Behavior |
-| --- | --- | --- | --- |
-| `vendor`, `display_name`, `slug`, `base_url`, `auth_method`, `credential_label`, `credential_note`, `capability_summary`, `restriction_summary` | string | No | Omission preserves; supplied values use the template's existing validation rules; null is rejected. |
-| `is_active` | boolean | No | Omission preserves; false disables the template; null is rejected. |
-| `auth_key_name`, `operation` | string/null | No | Omission preserves; null explicitly clears the field, subject to merged-template validation. |
-
-Unknown fields are rejected. Validation uses the merged saved and submitted
-configuration. The write checks the dependent operation, slug, URL, and auth
-fields again; a concurrent change retries validation or returns conflict rather
-than storing an invalid combination. This is not a general revision precondition
-for every field.
-
-**Response (200):** The saved vendor descriptor, including its `id`, editable
-fields above, `service_category`, `visibility`, `is_seeded`, and nullable
-`existing_service`. A missing template returns not found.
-
-For example, `{"credential_note":"Use a dedicated platform key"}` changes only
-the note. The existing `PUT` route retains its replacement contract. These
-updates do not replace credentials on an already provisioned service.
-
-See [Admin form save behavior](ADMIN_FORM_SAFETY.md) for editor review,
-explicit-clear, and concurrency behavior across admin forms.
 
 ---
 
