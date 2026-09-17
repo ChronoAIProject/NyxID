@@ -1308,6 +1308,29 @@ export function modelItemMatches(itemText, targets, exact) {
 const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
   Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
 const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
+// Clamp a composer bounding rect to the region actually on screen and return
+// the centre of what remains, or null when nothing is visible. Intersect the
+// rect with the viewport, then with each scroll/clip ancestor (clips: entries
+// of { x, y, left, right, top, bottom } where x/y say the axis is clipped).
+// A very long draft can push the composer's geometric centre tens of thousands
+// of pixels above the viewport, where elementFromPoint returns null and the
+// composer is wrongly judged obstructed (composer_unobstructed_failed).
+// NOTE: keep this in sync with the inline copy inside ensureComposerUnobstructed
+// (same maths, separate runtime), mirroring the fileMime split noted below.
+export function composerVisibleHitPoint(rect, clips = [], viewport = {}) {
+  if (!rect) return null;
+  let left = Math.max(0, rect.left);
+  let right = Math.min(viewport.width, rect.right);
+  let top = Math.max(0, rect.top);
+  let bottom = Math.min(viewport.height, rect.bottom);
+  for (const clip of clips) {
+    if (clip.x) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
+    if (clip.y) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+  }
+  if (!(right > left && bottom > top)) return null;
+  return { x: (left + right) / 2, y: (top + bottom) / 2 };
+}
+
 export const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
@@ -1930,9 +1953,35 @@ async function ensureComposerUnobstructed(page) {
       const state = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
         if (Date.now() >= deadline) return null;
         window.__nyx?.discoverControls();
-    const input = body.querySelector(composerSelector);
+        const input = body.querySelector(composerSelector);
         const rect = input?.getBoundingClientRect();
-        const hit = rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        // Hit-test the composer's VISIBLE centre, not its geometric centre. A
+        // long draft can make the composer taller than the viewport and push
+        // its midpoint far off screen, where elementFromPoint returns null and
+        // the composer is wrongly judged obstructed. Intersect the composer rect
+        // with the viewport and every scroll/clip ancestor, then test the middle
+        // of what remains. Keep this in sync with composerVisibleHitPoint (same
+        // maths, separate runtime: this copy runs in the page and cannot import).
+        let visible = rect && {
+          left: Math.max(0, rect.left),
+          right: Math.min(window.innerWidth, rect.right),
+          top: Math.max(0, rect.top),
+          bottom: Math.min(window.innerHeight, rect.bottom),
+        };
+        for (let ancestor = input?.parentElement; visible && ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          const bounds = ancestor.getBoundingClientRect();
+          if (/auto|scroll|hidden|clip/.test(style.overflowX)) {
+            visible.left = Math.max(visible.left, bounds.left);
+            visible.right = Math.min(visible.right, bounds.right);
+          }
+          if (/auto|scroll|hidden|clip/.test(style.overflowY)) {
+            visible.top = Math.max(visible.top, bounds.top);
+            visible.bottom = Math.min(visible.bottom, bounds.bottom);
+          }
+        }
+        const hasVisibleArea = !!visible && visible.right > visible.left && visible.bottom > visible.top;
+        const hit = hasVisibleArea && document.elementFromPoint((visible.left + visible.right) / 2, (visible.top + visible.bottom) / 2);
         const main = body.querySelector("main");
         const mainRect = main?.getBoundingClientRect();
         const neutral = mainRect && document.elementFromPoint(mainRect.x + 4, mainRect.y + 4) === main;

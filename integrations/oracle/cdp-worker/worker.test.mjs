@@ -17,6 +17,7 @@ test("preferredModelPillIndex never selects an unlabelled control", () => {
 
 import {
   PRE_SEND_ACTION_MS,
+  composerVisibleHitPoint,
   retryPresendModelRead,
   usageCooldownConfig,
   effortSelectionMismatch,
@@ -1024,4 +1025,45 @@ test('pre-send read-back shares PRE_SEND_ACTION_MS across retries and rejects la
   t.mock.timers.tick(PRE_SEND_ACTION_MS);
   await flush();
   assert.equal(attempts, 3);
+});
+
+
+test("composerVisibleHitPoint clamps a tall scrolled composer to its visible centre", () => {
+  // Live capture 2026-09-16 on the Heca worker: a 111,353-char draft made the
+  // composer 55,864px tall with its top at -55,316px in a 764px viewport, so
+  // the geometric centre sat ~27,000px above the viewport. elementFromPoint at
+  // that point returned null and the composer was wrongly judged obstructed
+  // (composer_unobstructed_failed@selecting_model).
+  const rect = { left: 0, right: 800, top: -55316, bottom: 548 };
+  const viewport = { width: 1000, height: 764 };
+  const geometricCentreY = rect.top + (rect.bottom - rect.top) / 2;
+  assert.ok(geometricCentreY < 0); // the old hit-test fell off screen
+  const point = composerVisibleHitPoint(rect, [], viewport);
+  assert.ok(point);
+  assert.ok(point.y >= 0 && point.y <= viewport.height); // the new one does not
+  assert.deepEqual(point, { x: 400, y: 274 });
+});
+
+test("composerVisibleHitPoint leaves a fully visible composer untouched", () => {
+  const rect = { left: 100, right: 900, top: 600, bottom: 700 };
+  assert.deepEqual(composerVisibleHitPoint(rect, [], { width: 1000, height: 764 }), { x: 500, y: 650 });
+});
+
+test("composerVisibleHitPoint intersects scroll/clip ancestor bounds", () => {
+  // Composer spans y 0..800 but a scroll container only reveals 100..500.
+  const clip = { y: true, top: 100, bottom: 500, left: 0, right: 1000 };
+  assert.deepEqual(
+    composerVisibleHitPoint({ left: 0, right: 400, top: 0, bottom: 800 }, [clip], { width: 1000, height: 764 }),
+    { x: 200, y: 300 },
+  );
+});
+
+test("composerVisibleHitPoint returns null when nothing is visible", () => {
+  // Entirely below the fold.
+  assert.equal(composerVisibleHitPoint({ left: 0, right: 800, top: 2000, bottom: 2100 }, [], { width: 1000, height: 764 }), null);
+  // A clipping ancestor hides it on the Y axis.
+  const clip = { y: true, top: 0, bottom: 100, left: 0, right: 1000 };
+  assert.equal(composerVisibleHitPoint({ left: 0, right: 800, top: 300, bottom: 500 }, [clip], { width: 1000, height: 764 }), null);
+  // No composer at all.
+  assert.equal(composerVisibleHitPoint(null, [], { width: 1000, height: 764 }), null);
 });
