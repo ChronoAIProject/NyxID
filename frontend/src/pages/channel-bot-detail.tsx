@@ -76,6 +76,7 @@ import {
   Loader2,
   MessageSquare,
   MoreVertical,
+  Pencil,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -667,6 +668,84 @@ function TelegramNewSetupSection({ bot }: { readonly bot: ChannelBotDetail }) {
   </DetailSection>;
 }
 
+function EditBotNameDialog({
+  bot,
+  onOpenChange,
+}: {
+  readonly bot: ChannelBotDetail;
+  readonly onOpenChange: (open: boolean) => void;
+}) {
+  const updateBot = useUpdateChannelBot();
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isDirty, isValid },
+  } = useAppForm<UpdateChannelBotFormData>({
+    mode: "onChange",
+    resolver: zodResolver(updateChannelBotSchema),
+    defaultValues: { label: bot.label },
+  });
+
+  function onSubmit(data: UpdateChannelBotFormData) {
+    const label = data.label?.trim();
+    if (!label || updateBot.isPending) return;
+    if (label === bot.label) {
+      onOpenChange(false);
+      return;
+    }
+    updateBot.mutate({ id: bot.id, data: { label } }, {
+      onSuccess: () => {
+        toast.success("Bot name updated");
+        onOpenChange(false);
+      },
+      onError: (err) => toast.error(
+        err instanceof ApiError ? err.message : "Failed to update bot name",
+      ),
+    });
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => {
+      if (!updateBot.isPending) onOpenChange(open);
+    }}>
+      <DialogContent className="md:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit bot name</DialogTitle>
+          <DialogDescription>
+            Choose a name to identify this bot in NyxID.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="bot-name">Bot name</Label>
+            <Input
+              id="bot-name"
+              maxLength={128}
+              disabled={updateBot.isPending}
+              aria-invalid={Boolean(errors.label)}
+              aria-describedby={errors.label ? "bot-name-error" : undefined}
+              {...register("label")}
+            />
+            {errors.label && (
+              <p id="bot-name-error" role="alert" className="text-xs text-destructive">
+                {errors.label.message}
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" disabled={updateBot.isPending} onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" disabled={!isDirty || !isValid || updateBot.isPending} isLoading={updateBot.isPending}>
+              Save name
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function EditVerificationSection({
   bot,
 }: {
@@ -903,6 +982,7 @@ export function ChannelBotDetailPage() {
   useBreadcrumbLabel(bot?.label);
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [showEditNameDialog, setShowEditNameDialog] = useState(false);
 
   const apiKeyNames: ReadonlyMap<string, string> = new Map(
     (apiKeys ?? []).map((k) => [k.id, k.name]),
@@ -999,7 +1079,16 @@ export function ChannelBotDetailPage() {
       {bot.status === "pending_webhook" && (bot.credential_source === "platform" ? <p role="status" className="text-xs text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? "Managed setup needs attention. Review the setup status below." : "Waiting for the first verified inbound message."}</p> : <WebhookSetupChecklist bot={bot} />)}
 
       {/* Bot Information */}
-      <DetailSection title="Bot Information">
+      <DetailSection
+        title="Bot Information"
+        action={
+          <Button variant="ghost" size="sm" onClick={() => setShowEditNameDialog(true)}>
+            <Pencil className="mr-1.5 h-3 w-3" aria-hidden="true" />
+            Edit name
+          </Button>
+        }
+      >
+        <DetailRow label="Bot name" value={bot.label} />
         <DetailRow label="Credential source" value={bot.credential_source === "connection" ? getPlatform(bot.platform).connectedLabel ?? "Connected account" : bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
         <DetailRow
           label="Platform"
@@ -1046,6 +1135,9 @@ export function ChannelBotDetailPage() {
         ownerOrgId={ownerOrgId}
       />
 
+      {showEditNameDialog && (
+        <EditBotNameDialog key={bot.id} bot={bot} onOpenChange={setShowEditNameDialog} />
+      )}
       {/* Delete Confirmation */}
       <DeleteBotDialog
         deletionNote={bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined}
