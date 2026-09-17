@@ -65,6 +65,10 @@ NyxID proxies requests, injects credentials automatically, punches through
 NAT (Network Address Translation) to reach your local services, and wraps
 any REST API as MCP (Model Context Protocol) tools.
 
+Administrators can configure shared credentials, access, endpoint rules, and
+billing from either services or linked providers. See [Service configuration and
+vendor retirement](docs/SERVICE_CONFIGURATION.md).
+
 ## What NyxID Does
 
 - **Connect email to agents** — [Aurinko Email](docs/AURINKO_INTEGRATION.md) provides an AI Service for mailbox API/MCP operations and an email channel bot for signed incoming notifications and replies. Connect with an account token; the channel additionally uses the application's signing secret.

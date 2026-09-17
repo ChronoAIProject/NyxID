@@ -116,9 +116,7 @@ pub mod org_service;
 pub mod org_slug;
 pub mod par_service;
 pub mod platform_credential_service;
-pub mod platform_operation_service;
 pub mod platform_settings_service;
-pub mod platform_vendor_template_service;
 pub mod provider_service;
 pub mod provider_token_exchange_service;
 pub mod proxy_authorization;
@@ -168,3 +166,5 @@ pub mod service_account_scope_service;
 pub mod channel_platform_catalog_service;
 
 pub mod channel_retry_ingress;
+pub mod provider_link_service;
+pub mod retired_service_service;

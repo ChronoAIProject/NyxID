@@ -14,6 +14,7 @@ export function serviceFormValues(
   service: DownstreamService,
 ): UpdateServiceFormData {
   return {
+    proxy_operation_policy: service.proxy_operation_policy ?? null,
     inference: service.inference ?? null,
     platform_key: service.platform_key
       ? {
@@ -146,6 +147,7 @@ export function serviceFormPayload(
           .map((s) => s.trim())
           .filter(Boolean),
         developer_app_ids: normalizedSet(data.developer_app_ids ?? []),
+        proxy_operation_policy: data.proxy_operation_policy,
         inference: data.inference,
         platform_key: data.platform_key
           ? {
@@ -155,9 +157,7 @@ export function serviceFormPayload(
               ),
             }
           : undefined,
-        ...(data.credential?.trim()
-          ? { credential: data.credential.trim() }
-          : {}),
+        ...(data.credential?.trim() ? { credential: data.credential } : {}),
         capabilities: {
           supports_proxy_read: data.supports_proxy_read ?? false,
           supports_proxy_write: data.supports_proxy_write ?? false,

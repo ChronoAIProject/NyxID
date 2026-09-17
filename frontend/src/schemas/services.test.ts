@@ -367,3 +367,12 @@ describe("redirectUriSchema", () => {
     expect(result.success).toBe(false);
   });
 });
+
+it("endpoint rules validate UTF-8 byte limits and reject ambiguous paths", async () => {
+  const { proxyOperationPolicySchema } = await import("./services");
+  const valid = (path_template: string) => proxyOperationPolicySchema.safeParse({ rules: [{ method: "GET", path_template }] }).success;
+  expect(valid("/models/{id}")).toBe(true);
+  expect(valid("/" + "é".repeat(1023))).toBe(true);
+  expect(valid("/" + "é".repeat(1024))).toBe(false);
+  for (const path of ["/foo\u0001", "/foo\u007f", "/a//b", "/a/..", "/a?b", "/a%2fb", "/a*", "/a/"]) expect(valid(path)).toBe(false);
+});

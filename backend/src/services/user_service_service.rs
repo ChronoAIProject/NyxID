@@ -409,13 +409,40 @@ async fn list_user_services_inner(
     if !include_disabled {
         filter.insert("is_active", true);
     }
-    let services: Vec<UserService> = db
+    let mut services: Vec<UserService> = db
         .collection::<UserService>(COLLECTION_NAME)
         .find(filter)
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
         .await?;
+    let catalog_ids: Vec<_> = services
+        .iter()
+        .filter_map(|s| s.catalog_service_id.as_deref())
+        .collect();
+    if !catalog_ids.is_empty() {
+        let retired: Vec<mongodb::bson::Document> = db
+            .collection::<mongodb::bson::Document>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find(doc! { "_id": { "$in": catalog_ids }, "$or": [
+                { "service_category": super::retired_service_service::RETIRED_CATEGORY },
+                { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+            ] })
+            .projection(doc! { "_id": 1 })
+            .await?
+            .try_collect()
+            .await?;
+        let retired_ids: std::collections::HashSet<_> = retired
+            .iter()
+            .filter_map(|row| row.get_str("_id").ok())
+            .collect();
+        services.retain(|s| {
+            s.catalog_service_id
+                .as_deref()
+                .is_none_or(|id| !retired_ids.contains(id))
+        });
+    }
     Ok(services)
 }
 
