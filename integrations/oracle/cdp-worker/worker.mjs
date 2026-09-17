@@ -1331,6 +1331,12 @@ export function composerVisibleHitPoint(rect, clips = [], viewport = {}) {
   return { x: (left + right) / 2, y: (top + bottom) / 2 };
 }
 
+// A composer holds a draft worth clearing when it contains any non-whitespace.
+// Used by clearComposerDraft to skip the clear on an already-empty composer.
+export function composerHasDraft(text) {
+  return typeof text === "string" && text.trim().length > 0;
+}
+
 export const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
@@ -1944,6 +1950,35 @@ async function selectModelInner(page, targets, budget, result) {
 // Clear overlays before typing and again immediately before Send. Never force
 // a click through an obstruction: failure stays pre-send and enters the
 // existing browser recovery / infrastructure retry path.
+// Clear a stale draft left in the composer by an earlier attempt on this tab.
+// Model selection runs before the prompt is typed, but a very long leftover
+// draft makes the page heavy enough that the selection interactions exceed
+// MODEL_SELECT_TIMEOUT_MS and the task fails as operation_timeout@selecting_model
+// on every subsequent pickup. The prompt is (re)typed after selection, so
+// clearing here is a no-op on a fresh composer and never drops real work.
+async function clearComposerDraft(page) {
+  const budget = interactionBudget(PRE_SEND_ACTION_MS);
+  const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
+  try {
+    const draft = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
+      if (Date.now() >= deadline) return "";
+      window.__nyx?.discoverControls();
+      const input = body.querySelector(composerSelector);
+      return input ? String(input.value ?? input.innerText ?? "").trim().slice(0, 8) : "";
+    }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+    if (!composerHasDraft(draft)) return;
+    const input = page.locator(COMPOSER_SELECTOR).first();
+    await input.click(interactionOptions(budget)).catch(() => {});
+    await input.fill("", interactionOptions(budget)).catch(() => {});
+  } catch (error) {
+    if (stableErrorCode(error) === "page_crashed") throw error;
+    // Best-effort: a failed clear must not consume a recovery attempt.
+  } finally {
+    budget.controller.abort();
+    clearTimeout(timer);
+  }
+}
+
 async function ensureComposerUnobstructed(page) {
   const budget = interactionBudget(PRE_SEND_ACTION_MS);
   const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
@@ -2322,6 +2357,9 @@ async function handlePrompt(runtime, page, task, recovering) {
     await failModelSelection(runtime, task, header.metadata, effortMetadata(pill.observed), 'model_unavailable');
   }
   if (readyError) throw new TaskFailure(readyError);
+  // A stale draft from a prior attempt makes model selection time out; clear
+  // it so each attempt selects the model against a light, empty composer.
+  await clearComposerDraft(page);
   if (task.model && task.model !== "unknown") {
     if (await ack(runtime, task, "selecting_model")) throw new TaskFailure("cancelled");
     const headerSelection = await selectModelSwitcher(page, task.model);

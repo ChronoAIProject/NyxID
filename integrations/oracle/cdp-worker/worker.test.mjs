@@ -17,6 +17,7 @@ test("preferredModelPillIndex never selects an unlabelled control", () => {
 
 import {
   PRE_SEND_ACTION_MS,
+  composerHasDraft,
   composerVisibleHitPoint,
   retryPresendModelRead,
   usageCooldownConfig,
@@ -1066,4 +1067,19 @@ test("composerVisibleHitPoint returns null when nothing is visible", () => {
   assert.equal(composerVisibleHitPoint({ left: 0, right: 800, top: 300, bottom: 500 }, [clip], { width: 1000, height: 764 }), null);
   // No composer at all.
   assert.equal(composerVisibleHitPoint(null, [], { width: 1000, height: 764 }), null);
+});
+
+
+test("composerHasDraft treats only non-whitespace content as a draft to clear", () => {
+  // A stale draft left in the composer by a prior attempt must be cleared
+  // before model selection, or a very long draft makes selection time out
+  // (operation_timeout@selecting_model) on every subsequent task pickup.
+  assert.equal(composerHasDraft("Review this PR"), true);
+  assert.equal(composerHasDraft("6\nPro"), true);
+  // An empty or whitespace-only composer is a no-op: nothing to clear.
+  assert.equal(composerHasDraft(""), false);
+  assert.equal(composerHasDraft("   \n\t "), false);
+  // Non-string reads (missing composer) are not drafts.
+  assert.equal(composerHasDraft(null), false);
+  assert.equal(composerHasDraft(undefined), false);
 });
