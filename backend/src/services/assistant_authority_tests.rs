@@ -696,7 +696,7 @@ async fn every_native_tool_requests_account_acknowledgement_and_preserves_owner_
             )
             .await;
         if name.starts_with("list_") && *name != "list_agent_key_bindings" {
-            assert!(!result.is_error, "{name}: {}", result.value);
+            assert!(!result.is_error, "{name}: unexpected error result");
         } else {
             assert!(result.is_error, "{name}");
             assert!(
@@ -704,8 +704,7 @@ async fn every_native_tool_requests_account_acknowledgement_and_preserves_owner_
                     .as_str()
                     .unwrap()
                     .ends_with("not_found"),
-                "{name}: {}",
-                result.value
+                "{name}: unexpected error code"
             );
         }
     }
@@ -765,7 +764,7 @@ async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
         args["acknowledgement_id"] = json!(id);
         result = f.tools().execute(&f.auth, &name, &args).await;
     }
-    assert!(!result.is_error, "{name}: {}", result.value);
+    assert!(!result.is_error, "{name}: unexpected error result");
     let serialized = result.value.to_string();
     for secret_field in [
         "key_hash",
