@@ -1,0 +1,14 @@
+{
+  "name": "@nyxid/compute-pool-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone worker-pull compute queue service managed through NyxID as a custom service.",
+  "scripts": {
+    "start": "node server.mjs",
+    "worker": "node worker.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
