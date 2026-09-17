@@ -1773,10 +1773,12 @@ pub enum ApiKeyCommands {
 
 // ---- Org ----
 //
-// All org commands hit /api/v1/orgs/* and are gated by org membership
-// (read) or admin role (write) on the server. The actor's auth comes from
-// the standard `AuthArgs`. There is no profile-aware switching here -- the
-// caller is always the actor; org credentials are resolved server-side.
+// Org reads (`org list`, `org show`, `org member list`,
+// `org role-scope list`, and `--org` resolution) work with an Agent Key
+// profile. Mutating commands and invite reads require an account login.
+// The server applies membership/admin ACLs, or Direct read access for an
+// org-owned key. Standard AuthArgs supplies the actor; there is no implicit
+// profile switching, and org credentials are resolved server-side.
 
 #[derive(Subcommand)]
 pub enum OrgCommands {

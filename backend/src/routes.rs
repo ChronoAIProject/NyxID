@@ -1352,33 +1352,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::billing::download_invoice),
         );
 
-    // Org management routes (creation, members, invites). All routes
-    // authenticate as a regular session/user; admin-vs-member checks happen
-    // inside the handlers based on org_memberships rather than a global flag.
-    let org_routes = Router::new()
-        .route(
-            "/",
-            get(handlers::orgs::list_orgs).post(handlers::orgs::create_org),
-        )
-        .route("/join/{nonce}", post(handlers::orgs::redeem_invite))
-        .route(
-            "/{org_id}",
-            get(handlers::orgs::get_org)
-                .patch(handlers::orgs::update_org)
-                .delete(handlers::orgs::delete_org),
-        )
+    // Org metadata accepts general API keys. Handlers apply membership or
+    // Direct-owner read access; service accounts remain rejected as before.
+    let org_read_routes = Router::new()
+        .route("/", get(handlers::orgs::list_orgs))
+        .route("/{org_id}", get(handlers::orgs::get_org))
         .route(
             "/{org_id}/authorization",
             get(handlers::orgs::get_org_authorization),
         )
-        .route(
-            "/{org_id}/members",
-            get(handlers::orgs::list_members).post(handlers::orgs::add_member),
-        )
-        .route(
-            "/{org_id}/members/{member_id}",
-            patch(handlers::orgs::update_member).delete(handlers::orgs::remove_member),
-        )
+        .route("/{org_id}/members", get(handlers::orgs::list_members))
         .route(
             "/{org_id}/members/{member_id}/authorization",
             get(handlers::orgs::get_member_authorization),
@@ -1386,6 +1369,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/{org_id}/role-scopes",
             get(handlers::org_role_scopes::list_role_scopes),
+        )
+        .layer(middleware::from_fn(reject_service_account_tokens));
+
+    // Writes and invite reads stay human-only. Invites expose redeemable
+    // bearer nonces, so their GET must not move to the metadata router.
+    let org_routes = Router::new()
+        .route("/", post(handlers::orgs::create_org))
+        .route("/join/{nonce}", post(handlers::orgs::redeem_invite))
+        .route(
+            "/{org_id}",
+            patch(handlers::orgs::update_org).delete(handlers::orgs::delete_org),
+        )
+        .route("/{org_id}/members", post(handlers::orgs::add_member))
+        .route(
+            "/{org_id}/members/{member_id}",
+            patch(handlers::orgs::update_member).delete(handlers::orgs::remove_member),
         )
         .route(
             "/{org_id}/role-scopes/{role}",
@@ -1743,6 +1742,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/oracle", oracle_consumer_routes)
         .nest("/connect-links", connect_link_routes)
         .nest("/triggers", trigger_routes)
+        .nest("/orgs", org_read_routes)
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
@@ -2113,6 +2113,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     (public_oauth, private)
 }
+
+#[cfg(test)]
+mod org_membership_tests;
 
 #[cfg(test)]
 mod retirement_tests {
