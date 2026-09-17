@@ -4,6 +4,32 @@ NyxID supports Aurinko in two places: an account-token connection in **AI Servic
 
 This document supersedes the proposed connector/polling architecture in the historical [feasibility assessment](./assistant/AURINKO_EMAIL_CHANNEL_FEASIBILITY.md). The implemented channel is a native adapter with bounded inline handling and producer-owned retries; NyxID does not poll mailboxes.
 
+## Configure application credentials
+
+Admins can store the Aurinko application credentials in **Admin → Platform Credentials → Aurinko Email**. The three password fields are **Application Client ID**, **Application Client Secret**, and **Application webhook signing secret**. The signing secret comes from separate webhook settings; it is not the Client Secret or an account token. Values are encrypted and never prefilled or returned. The existing Aurinko provider retains the app ID and client secret; the platform credential row stores only the signing secret. Combined changes are atomic and configuration reads use one database snapshot.
+
+The CLI uses the same descriptor and storage:
+
+```sh
+nyxid admin platform-credentials set aurinko \
+  --field-env client_id=AURINKO_CLIENT_ID \
+  --field-env client_secret=AURINKO_CLIENT_SECRET \
+  --field-env signing_secret=AURINKO_SIGNING_SECRET
+```
+
+Saving these fields prepares platform configuration. Managed authorization remains unavailable under the OAuth decision below. Manual AI Service and bot credentials remain independent; storing or clearing application configuration does not change them.
+
+On installations without this Aurinko form, the existing provider admin API can already store the application pair. Authenticate as a NyxID admin, call `GET /api/v1/providers`, and find the `id` of the entry whose `slug` is `aurinko`. Send `PUT /api/v1/providers/{id}` with only these fields:
+
+```json
+{
+  "client_id": "YOUR_AURINKO_APPLICATION_CLIENT_ID",
+  "client_secret": "YOUR_AURINKO_APPLICATION_CLIENT_SECRET"
+}
+```
+
+The response reports `has_client_id: true` and `has_client_secret: true`; it never returns their values. This uses the same encrypted provider storage and requires no secret seed or provider-type change. It stores configuration only and does not enable managed mailbox authorization.
+
 ## Connect an AI Service
 
 In **AI Services → Add service**, choose **Aurinko Email** and enter the Aurinko account access token in the existing API credential form. This creates the normal owner-scoped endpoint, encrypted credential, and service records. Use **Test Agent Key** to probe authenticated `GET /v1/account`; the probe separates NyxID agent-key authorization from the upstream credential result.
@@ -18,9 +44,13 @@ nyxid catalog endpoints api-aurinko
 
 Set `AURINKO_ACCOUNT_TOKEN` through your usual secret-management environment. The token must represent the mailbox account, not an Aurinko application client secret. The AI Service and bot currently store independent encrypted copies of the account token: connecting, disabling, rotating, or deleting one does not change the other. To use the same mailbox on both surfaces, supply that account's token to each, and rotate both copies when replacing it. Agent service bindings and Disable/Enable/Delete retain their normal AI Services behavior.
 
-The catalog uses `https://api.aurinko.io` with Bearer authorization and a curated OpenAPI overlay. Twelve concrete MCP operations cover account identity; email list/search; message, thread, and attachment reads; send and reply; and draft create/get/update/delete/send. Attachment reads return Aurinko's JSON representation. Writes carry write-risk/approval annotations and do not advertise provider idempotency. Scope the agent's NyxID API key to the intended service; normal owner, active-service, service-scope, and approval checks apply. A read-only agent should receive only read permissions and appropriate operation approvals. The general AI Service send operation supports user-authorized email composition; the channel reply endpoint has the narrower recipient policy below.
+The catalog uses `https://api.aurinko.io` with Bearer authorization and a curated OpenAPI overlay. Fifteen concrete MCP operations cover account identity; email list/search; message, thread, and attachment reads; send and reply; draft create/get/update/delete/send; and email sync start/updated/deleted. Attachment reads return Aurinko's JSON representation. Writes carry write-risk/approval annotations and do not advertise provider idempotency. Scope the agent's NyxID API key to the intended service; normal owner, active-service, service-scope, and approval checks apply. A read-only agent should receive only read permissions and appropriate operation approvals. The general AI Service send operation supports user-authorized email composition; the channel reply endpoint has the narrower recipient policy below.
 
 Aurinko permissions depend on the operations used: `Mail.Read` for reads, `Mail.Send` for sending, and `Mail.Drafts` for drafts (`Mail.All` is broader). The channel requires `Mail.Read` plus `Mail.Send`, or `Mail.ReadWrite` plus `Mail.Send`, or `Mail.All`. NyxID verifies the channel token's account, active token status, scopes, and mailbox identity using `/v1/account?pingProvider=true`.
+
+## Synchronize a mailbox through the API
+
+The connected service exposes `POST /v1/email/sync`, `GET /v1/email/sync/updated`, and `GET /v1/email/sync/deleted` through its normal NyxID proxy path and MCP discovery. Start accepts `daysWithin` and `bodyType`; wait for `ready`, then use `syncUpdatedToken` and `syncDeletedToken` for the corresponding delta feeds. Follow `nextPageToken` while paging, and retain `nextDeltaToken` for the next incremental request. A 410 means the sync cursor expired and the caller must start again. Sync needs `Mail.Read`; starting it carries the normal write/approval annotation. The caller stores cursors and any synchronized messages. NyxID injects the account token and does not return it or persist message bodies.
 
 ## Register an email channel bot
 

@@ -581,7 +581,7 @@ In QA mode, flag any code that doesn't match DESIGN.md.
 
 ### Aurinko email integration
 
-- `api-aurinko` is an owner-scoped account-token AI Service; its curated overlay supplies twelve MCP operations. No managed OAuth until Aurinko documents compatible PKCE. Do not use application credentials as a shared mailbox token.
+- `api-aurinko` is an owner-scoped account-token AI Service; its curated overlay supplies fifteen MCP operations. No managed OAuth until Aurinko documents compatible PKCE. Do not use application credentials as a shared mailbox token.
 - The `aurinko` channel adapter has independent encrypted account-token/signing-secret storage, signed raw-byte POST validation, bound subscriptions, and bounded inline producer retries. Never return 422 to Aurinko.
 - ADR-013 still applies: persist only email subscription bindings, batch digest/cursor, stable UUID-v4 receipts, and send-attempt barriers. Receipts/sends have no TTL while their bot exists; owner/bot deletion must fence in-flight effects before cleanup. Do not consume a retryable Aurinko reply token before preflight or resend an uncertain POST. Legacy adapter behavior remains unchanged.
 - See `docs/AURINKO_INTEGRATION.md` for lifecycle, callback routing, filtering, reply authority, scopes, and validation limits. Aurinko is included in the catalog overlay drift map.

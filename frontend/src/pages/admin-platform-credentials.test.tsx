@@ -309,3 +309,74 @@ it("offers only a read refresh after a successful clear with failed refresh", as
   await waitFor(() => expect(mock.refetch).toHaveBeenCalledTimes(1));
   expect(mock.clear).toHaveBeenCalledTimes(1);
 });
+
+it("renders Aurinko's three application fields and reviews a signing-only clear accurately", async () => {
+  mock.data = [
+    {
+      provider: "aurinko",
+      platform: "aurinko",
+      label: "Aurinko Email",
+      available: true,
+      backing: { type: "provider_oauth", provider_slug: "aurinko" },
+      fields: [
+        ["client_id", "Application Client ID"],
+        ["client_secret", "Application Client Secret"],
+        ["signing_secret", "Application webhook signing secret"],
+      ].map(([name, label]) => ({
+        name: name!,
+        label: label!,
+        secret: true,
+        required: true,
+        numeric: false,
+        configured: true,
+        help: "From the Aurinko application",
+      })),
+      setup_checklist: ["Each mailbox requires its owner's authorization."],
+      callback_url: null,
+      webhook_verify_token: null,
+      updated_at: "v1",
+    },
+  ];
+  const user = userEvent.setup();
+  render(<AdminPlatformCredentialsPage />);
+  expect(
+    screen.getByRole("heading", { name: "Aurinko Email" }),
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Clear provider" }));
+  const clear = await screen.findByRole("dialog", {
+    name: "Clear platform credentials",
+  });
+  expect(clear).toHaveTextContent("prevents managed mailbox authorization");
+  expect(clear).toHaveTextContent(
+    "Manual connections keep their own credentials",
+  );
+  expect(clear).not.toHaveTextContent(
+    "all of its OAuth connections and logins",
+  );
+  await user.click(within(clear).getByRole("button", { name: "Cancel" }));
+  for (const label of [
+    "Application Client ID",
+    "Application Client Secret",
+    "Application webhook signing secret",
+  ]) {
+    expect(screen.getByLabelText(label)).toHaveAttribute("type", "password");
+    expect(screen.getByLabelText(label)).toHaveValue("");
+  }
+  await user.click(
+    screen.getByRole("button", {
+      name: "Clear Application webhook signing secret",
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  const review = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(review).toHaveTextContent("AI Service mailbox tokens are retained");
+  expect(review).not.toHaveTextContent("OAuth connections and logins");
+  await user.click(
+    within(review).getByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mock.update).toHaveBeenCalledWith({
+      fields: { signing_secret: null },
+    }),
+  );
+});
