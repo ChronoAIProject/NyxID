@@ -252,6 +252,9 @@ pub async fn service_to_response_with_viewer(
     s: DownstreamService,
     viewer: Option<&ViewerRouting>,
 ) -> ServiceResponse {
+    let skills_manifest_digest = crate::services::catalog_skill_service::manifest_digest(
+        &crate::services::catalog_skill_service::state(&s),
+    );
     let legacy_public_master =
         s.platform_key.is_none() && crate::services::platform_key_service::legacy_public_master(&s);
     let effective_platform_metric =
@@ -312,6 +315,9 @@ pub async fn service_to_response_with_viewer(
         known_limitations: s.known_limitations,
         required_permissions: s.required_permissions,
         examples_url: s.examples_url,
+        skills_manifest_digest,
+        skills_revision: s.skills_revision,
+        recommended_skill_refs: s.recommended_skill_refs,
         recommended_skills: s.recommended_skills,
         custom_user_agent: s.custom_user_agent,
         default_request_headers: crate::models::default_request_header::redact_list_for_response(

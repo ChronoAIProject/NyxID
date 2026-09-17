@@ -1039,6 +1039,60 @@ pub async fn resolve_admin_proxy_target(
     })
 }
 
+/// Resolve only the granted catalog endpoint and this service account's credential.
+pub async fn resolve_curation_proxy_target(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    sa_id: &str,
+    service_id: &str,
+) -> AppResult<ProxyTarget> {
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {"_id": service_id, "is_active": true, "service_type": "http"})
+        .await?
+        .ok_or_else(|| AppError::NotFound("HTTP catalog service not found".into()))?;
+    super::retired_service_service::require_available(&service)?;
+    if service.proxy_operation_policy.is_none() {
+        return Err(AppError::Forbidden(
+            "Curation proxy target requires an explicit proxy operation policy".into(),
+        ));
+    }
+    if service.service_category == "provider" {
+        return Err(AppError::Forbidden(
+            "Provider services cannot be proxied".into(),
+        ));
+    }
+    let connection = db
+        .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+        .find_one(doc! {"user_id": sa_id, "service_id": service_id})
+        .await?;
+    if connection.as_ref().is_some_and(|c| !c.is_active) {
+        return Err(AppError::Forbidden(
+            "Service account connection is disabled".into(),
+        ));
+    }
+    let credential = match connection.and_then(|c| c.credential_encrypted) {
+        Some(encrypted) => decrypt_user_credential(encryption_keys, &encrypted).await?,
+        None if service.auth_method == "none" && !service.requires_user_credential => String::new(),
+        None => {
+            return Err(AppError::Forbidden(
+                "A dedicated service-account connection credential is required".into(),
+            ));
+        }
+    };
+    Ok(ProxyTarget {
+        base_url: service.base_url.clone(),
+        auth_method: service.auth_method.clone(),
+        auth_key_name: service.auth_key_name.clone(),
+        credential,
+        catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+        user_service_default_headers: Vec::new(),
+        ws_frame_injections: Vec::new(),
+        connection_id: None,
+        service,
+    })
+}
+
 /// Resolve the downstream service and credential for a proxy request.
 ///
 /// Enforces that the user has an active connection. For "connection" services,
@@ -3446,6 +3500,8 @@ fn build_minimal_downstream_service(
         && user_service.catalog_service_id.is_some();
 
     DownstreamService {
+        recommended_skill_refs: None,
+        skills_revision: 0,
         id: user_service
             .catalog_service_id
             .clone()
@@ -5513,6 +5569,8 @@ mod tests {
             auth_key_name: "Authorization".to_string(),
             credential: String::new(),
             service: DownstreamService {
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Upload Service".to_string(),
                 slug: "upload-service".to_string(),
@@ -6541,6 +6599,8 @@ mod tests {
             auth_key_name: String::new(),
             credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
             service: DownstreamService {
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Lark Bot".to_string(),
                 slug: "api-lark-bot".to_string(),
@@ -6878,6 +6938,8 @@ mod tests {
             auth_key_name: "app_secret".to_string(),
             credential: "super-secret".to_string(),
             service: DownstreamService {
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Body Auth Service".to_string(),
                 slug: "body-auth-service".to_string(),
@@ -7102,6 +7164,8 @@ mod tests {
             auth_key_name: String::new(),
             credential,
             service: DownstreamService {
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Cloud Billing Test".to_string(),
                 slug: "test-cloud-billing".to_string(),
@@ -7345,6 +7409,8 @@ mod tests {
 
     fn test_minimal_downstream() -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "ds-test".into(),
             name: "Test".into(),
             slug: "test".into(),

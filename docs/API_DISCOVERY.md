@@ -214,6 +214,12 @@ credential provisioning.
 4. Enrich the service with metadata: `homepage_url`, `repository_url`, `capabilities`, `auth_notes`, `known_limitations`, `required_permissions` so AI agents can discover the service fully.
 5. Share `GET /api/v1/proxy/services/{service_id}/docs` with internal consumers so they test through NyxID instead of bypassing it.
 
+
+## Catalog recommendation curation
+
+Catalog responses add optional `recommended_skill_refs`, `skills_revision`, and a separate versioned `skills_manifest_digest`. MCP keeps the existing name-based `catalog_digest` construction; exact-ref changes are discoverable through the new manifest digest. An instance's `recommended_skills` override suppresses inherited refs, even for an empty override.
+
+A dedicated protected Curation service account uses `/api/v1/catalog-curation/services` for grant-scoped discovery and `/services/{id}/skills`, `/skills/history`, and `/skills/restore` for conditional recommendation management. It cannot use unrestricted catalog or service-management routes. Human service editing shares the same revision/history transaction and must send the observed skill revision; omitted legacy revision means zero. See [Service accounts: catalog skill curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for grant administration, request examples, no-op/replay semantics, rollout ordering, and the Ornn package-content boundary.
 ## Inference and platform-key discovery (0.20)
 
 Catalog list, `?include_all=true`, single-entry lookup and MCP

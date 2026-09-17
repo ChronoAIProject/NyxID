@@ -1745,6 +1745,8 @@ mod tests {
         slug: &str,
     ) -> mcp_service::McpToolService {
         mcp_service::McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: catalog_service_id.to_string(),
             service_name: "Exact test service".to_string(),
             service_slug: slug.to_string(),
@@ -2369,6 +2371,8 @@ mod tests {
     #[test]
     fn exact_view_membership_rejects_only_delegated_generic_targets() {
         let generic_service = mcp_service::McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: "generic-service".to_string(),
             service_name: "Generic Service".to_string(),
             service_slug: "generic-service".to_string(),
@@ -2523,6 +2527,8 @@ mod tests {
     fn delegated_out_of_view_error_precedence_preserved() {
         let delegated = caller();
         let generic_service = mcp_service::McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: "generic-service".to_string(),
             service_name: "Generic Service".to_string(),
             service_slug: "generic-service".to_string(),

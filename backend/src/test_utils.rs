@@ -2606,6 +2606,8 @@ pub(crate) fn test_auto_connected_catalog_service()
         required_permissions: None,
         examples_url: None,
         recommended_skills: None,
+        recommended_skill_refs: None,
+        skills_revision: 0,
         custom_user_agent: None,
         default_request_headers: None,
         ws_frame_injections: Vec::new(),

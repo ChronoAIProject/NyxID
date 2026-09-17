@@ -35,7 +35,7 @@ use super::services_helpers::{
 
 // --- Request / Response types ---
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreateServiceRequest {
     pub provider_config_id: Option<String>,
     pub name: String,
@@ -66,6 +66,8 @@ pub struct CreateServiceRequest {
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    pub skills_request_id: Option<String>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
     /// Developer app (OAuth client) IDs that grant access to this service.
     /// Only relevant for private services -- users who consent to any of these
     /// apps will have the service auto-provisioned in their AI Services.
@@ -200,6 +202,9 @@ pub struct ServiceResponse {
     pub examples_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
+    pub skills_revision: i64,
+    pub skills_manifest_digest: String,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
     /// Admin-configured default HTTP headers injected on every proxied
@@ -271,6 +276,25 @@ pub struct BillingUpdate {
     #[serde(skip)]
     present_fields: std::collections::HashSet<String>,
 }
+// Preserve field presence in the request fingerprint while keeping BillingUpdate's
+// complete normalized serialization and flattened API schema for existing callers.
+fn serialize_billing_update<S: serde::Serializer>(
+    billing: &Option<BillingUpdate>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let Some(billing) = billing else {
+        return serializer.serialize_none();
+    };
+    let mut value = serde_json::to_value(&billing.value).map_err(serde::ser::Error::custom)?;
+    if let Some(fields) = value.as_object_mut() {
+        fields.retain(|key, _| billing.present_fields.contains(key));
+        for key in &billing.present_fields {
+            fields.entry(key.clone()).or_insert(serde_json::Value::Null);
+        }
+    }
+    value.serialize(serializer)
+}
+
 impl<'de> Deserialize<'de> for BillingUpdate {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = serde_json::Value::deserialize(deserializer)?;
@@ -334,7 +358,7 @@ impl std::ops::DerefMut for BillingUpdate {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct UpdateServiceRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -359,9 +383,11 @@ pub struct UpdateServiceRequest {
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
     pub capabilities: Option<ServiceCapabilities>,
+    #[serde(serialize_with = "serialize_billing_update")]
     pub billing: Option<BillingUpdate>,
     #[serde(
         default,
+        skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::models::nullable_field::deserialize"
     )]
     pub inference: Option<Option<crate::models::downstream_service::ServiceInference>>,
@@ -374,6 +400,11 @@ pub struct UpdateServiceRequest {
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    pub skills_revision: Option<i64>,
+    pub skills_request_id: Option<String>,
+    #[serde(default)]
+    pub clear_skill_refs: bool,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
     /// Developer app (OAuth client) IDs that grant access to this service.
     /// Pass `[]` to clear. Only meaningful for private services.
     pub developer_app_ids: Option<Vec<String>>,
@@ -386,6 +417,7 @@ pub struct UpdateServiceRequest {
     /// for why we can't just use `Option<Option<_>>` here.
     #[serde(
         default,
+        skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::models::nullable_field::deserialize"
     )]
     pub default_request_headers:
@@ -407,6 +439,7 @@ pub struct UpdateServiceRequest {
     /// Replace the data-plane operation allowlist. Empty rules deny all.
     #[serde(
         default,
+        skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::models::nullable_field::deserialize"
     )]
     pub proxy_operation_policy: Option<Option<ProxyOperationPolicy>>,
@@ -845,6 +878,9 @@ pub async fn list_services(
     Ok(Json(ServiceListResponse { services: items }))
 }
 
+#[cfg(test)]
+tokio::task_local! { pub(crate) static CREATE_BEFORE_SLUG: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Barrier>); }
+
 /// POST /api/v1/services
 ///
 /// Register a new downstream service. Requires admin privileges.
@@ -867,6 +903,36 @@ pub async fn create_service(
     Json(mut body): Json<CreateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
     require_admin(&state, &auth_user).await?;
+
+    let create_fingerprint = crate::services::catalog_skill_service::create_fingerprint(
+        &serde_json::to_value(&body).map_err(|e| AppError::Internal(e.to_string()))?,
+    )?;
+    let skill_request_id = body
+        .skills_request_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    if let Some(created) = crate::services::catalog_skill_service::replay_create(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        &skill_request_id,
+        &create_fingerprint,
+    )
+    .await?
+    {
+        state.billing.sync_service_price(&created).await?;
+        if catalog_spec_sync::should_auto_sync_service_endpoints(&created) {
+            catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), created.id.clone());
+        }
+        return Ok(Json(
+            service_to_response_with_viewer(Some(&state.encryption_keys), created, None).await,
+        ));
+    }
+    let initial_skills = crate::services::catalog_skill_service::SkillUpdate {
+        recommended_skills: body.recommended_skills.clone(),
+        recommended_skill_refs: body.recommended_skill_refs.clone(),
+        clear_refs: false,
+    };
+    crate::services::catalog_skill_service::resolve_update(&Default::default(), &initial_skills)?;
 
     if body.name.is_empty() {
         return Err(AppError::ValidationError("name is required".to_string()));
@@ -925,6 +991,12 @@ pub async fn create_service(
         ));
     }
 
+    #[cfg(test)]
+    if let Ok((read, resume)) = CREATE_BEFORE_SLUG.try_with(Clone::clone) {
+        read.wait().await;
+        resume.wait().await;
+    }
+
     // Check slug uniqueness among active services
     let existing = state
         .db
@@ -933,6 +1005,22 @@ pub async fn create_service(
         .await?;
 
     if existing.is_some() {
+        if let Some(created) = crate::services::catalog_skill_service::replay_create(
+            &state.db,
+            &auth_user.user_id.to_string(),
+            &skill_request_id,
+            &create_fingerprint,
+        )
+        .await?
+        {
+            state.billing.sync_service_price(&created).await?;
+            if catalog_spec_sync::should_auto_sync_service_endpoints(&created) {
+                catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), created.id.clone());
+            }
+            return Ok(Json(
+                service_to_response_with_viewer(Some(&state.encryption_keys), created, None).await,
+            ));
+        }
         return Err(AppError::Conflict(
             "A service with this slug already exists".to_string(),
         ));
@@ -1266,7 +1354,9 @@ pub async fn create_service(
     }
     validate_service_billing(body.billing.as_ref())?;
 
-    let mut new_service = DownstreamService {
+    let new_service = DownstreamService {
+        recommended_skill_refs: None,
+        skills_revision: 0,
         id: id.clone(),
         name: body.name.clone(),
         slug: slug.clone(),
@@ -1329,22 +1419,16 @@ pub async fn create_service(
     crate::services::retired_service_service::require_available(&new_service)?;
     anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&new_service)?;
 
-    if let Some(provider_id) = body.provider_config_id.as_deref() {
-        crate::services::provider_link_service::link(
-            &state.db,
-            provider_id,
-            &id,
-            Some(&new_service),
-        )
-        .await?;
-        new_service = fetch_service(&state, &id).await?;
-    } else {
-        state
-            .db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(&new_service)
-            .await?;
-    }
+    let new_service = crate::services::catalog_skill_service::create(
+        &state.db,
+        &new_service,
+        &auth_user.user_id.to_string(),
+        &initial_skills,
+        &skill_request_id,
+        &create_fingerprint,
+    )
+    .await?;
+    let id = new_service.id.clone();
 
     for (changed, event) in [
         (body.platform_key.is_some(), "service_platform_key_changed"),
@@ -1380,14 +1464,14 @@ pub async fn create_service(
         );
     }
 
-    tracing::info!(service_id = %id, name = %body.name, created_by = %auth_user.user_id, "Service created");
+    tracing::info!(service_id = %id, name = %new_service.name, created_by = %auth_user.user_id, "Service created");
 
     // CR-1: Audit log for service creation
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
         "service_created",
-        Some(serde_json::json!({ "service_id": &id, "name": &body.name })),
+        Some(serde_json::json!({ "service_id": &id, "name": &new_service.name })),
     );
 
     emit_event(
@@ -1581,8 +1665,41 @@ pub async fn update_service(
     Path(service_id): Path<String>,
     Json(mut body): Json<UpdateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
+    let skill_fingerprint_input = serde_json::to_value(&body)
+        .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    let skill_update = crate::services::catalog_skill_service::SkillUpdate {
+        recommended_skills: body.recommended_skills.clone(),
+        recommended_skill_refs: body.recommended_skill_refs.clone(),
+        clear_refs: body.clear_skill_refs,
+    };
+    if skill_update.is_present()
+        && let Some(request_id) = &body.skills_request_id
+        && crate::services::catalog_skill_service::has_human_operation(
+            &state.db,
+            &auth_user.user_id.to_string(),
+            request_id,
+        )
+        .await?
+    {
+        let result = crate::services::catalog_skill_service::commit(
+            &state.db,
+            &service_id,
+            &crate::services::catalog_skill_service::SkillActor::Human {
+                id: auth_user.user_id.to_string(),
+            },
+            &skill_update,
+            body.skills_revision.unwrap_or(0),
+            request_id,
+            &bson::Document::new(),
+            &bson::Document::new(),
+            None,
+            Some(&skill_fingerprint_input),
+        )
+        .await?;
+        return complete_replayed_skill_update(&state, &auth_user, &result.service, &body).await;
+    }
     if body.inference.is_some()
         || body.platform_key.is_some()
         || body.credential.is_some()
@@ -2049,7 +2166,7 @@ pub async fn update_service(
         set_doc.insert(
             "billing",
             match next_billing {
-                Some(billing) => bson::to_bson(&billing)
+                Some(billing) => bson::to_bson(&billing.value)
                     .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
                 None => bson::Bson::Null,
             },
@@ -2118,16 +2235,6 @@ pub async fn update_service(
         } else {
             set_doc.insert("examples_url", bson::Bson::Null);
         }
-    }
-    if let Some(ref skills) = body.recommended_skills {
-        if skills.len() > 50 {
-            return Err(AppError::ValidationError(
-                "recommended_skills must not exceed 50 entries".to_string(),
-            ));
-        }
-        let bson_skills = bson::to_bson(skills)
-            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-        set_doc.insert("recommended_skills", bson_skills);
     }
     if let Some(ref app_ids) = body.developer_app_ids {
         // Effective visibility: use the value being set in this request,
@@ -2246,7 +2353,7 @@ pub async fn update_service(
         next_resale_billable,
     )?;
 
-    if set_doc.is_empty() {
+    if set_doc.is_empty() && !skill_update.is_present() {
         if body
             .credential
             .as_ref()
@@ -2323,7 +2430,61 @@ pub async fn update_service(
             doc! { "$exists": false },
         );
     }
-    let committed_service = state
+    let committed_service = if skill_update.is_present() {
+        let request_id = body
+            .skills_request_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let result = crate::services::catalog_skill_service::commit(
+            &state.db,
+            &service_id,
+            &crate::services::catalog_skill_service::SkillActor::Human {
+                id: auth_user.user_id.to_string(),
+            },
+            &skill_update,
+            body.skills_revision.unwrap_or(0),
+            &request_id,
+            &set_doc,
+            &catalog_filter,
+            None,
+            Some(&skill_fingerprint_input),
+        )
+        .await?;
+        if result.replayed {
+            return complete_replayed_skill_update(&state, &auth_user, &result.service, &body)
+                .await;
+        }
+        if !result.mutated {
+            let mut routing = compute_viewer_routing(
+                &state.db,
+                &auth_user.user_id.to_string(),
+                &[result.service.id.as_str()],
+            )
+            .await?;
+            let viewer = routing.remove(&result.service.id);
+            let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
+            return Ok(Json(
+                service_to_response_with_viewer(
+                    can_inspect.then_some(state.encryption_keys.as_ref()),
+                    result.service,
+                    viewer.as_ref(),
+                )
+                .await,
+            ));
+        }
+        if result.changed {
+            audit_service::log_for_user(
+                state.db.clone(),
+                &auth_user,
+                "catalog_skills_updated",
+                Some(
+                    serde_json::json!({"service_id": service_id, "skills_revision": result.revision, "request_id": request_id}),
+                ),
+            );
+        }
+        result.service
+    } else {
+        state
         .db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one_and_update(
@@ -2344,7 +2505,8 @@ pub async fn update_service(
             } else {
                 AppError::NotFound("Service not found".to_string())
             }
-        })?;
+        })?
+    };
 
     if body.credential.is_some() {
         audit_service::log_for_user(
@@ -2509,6 +2671,52 @@ pub async fn update_service(
             can_inspect.then_some(state.encryption_keys.as_ref()),
             updated,
             routing.as_ref(),
+        )
+        .await,
+    ))
+}
+
+async fn complete_replayed_skill_update(
+    state: &AppState,
+    auth: &AuthUser,
+    current: &DownstreamService,
+    body: &UpdateServiceRequest,
+) -> AppResult<Json<ServiceResponse>> {
+    if body.billing.is_some() {
+        state.billing.sync_service_price(current).await?;
+    }
+    if current.service_type == "http"
+        && body.base_url.is_some()
+        && let Some(client_id) = &current.oauth_client_id
+    {
+        let callback = format!("{}/callback", current.base_url.trim_end_matches('/'));
+        oauth_client_service::update_redirect_uris(&state.db, client_id, &[callback]).await?;
+    }
+    if catalog_spec_sync::should_auto_sync_service_endpoints(current) {
+        catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), current.id.clone());
+    }
+    let row = state
+        .db
+        .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {"_id": &current.id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".into()))?;
+    if row.contains_key(crate::models::catalog_identity_reconciliation::FIELD_NAME) {
+        return Err(AppError::Conflict(
+            "The update committed but identity reconciliation is unresolved; run identity resync"
+                .into(),
+        ));
+    }
+    let latest = fetch_service(state, &current.id).await?;
+    let mut routing =
+        compute_viewer_routing(&state.db, &auth.user_id.to_string(), &[latest.id.as_str()]).await?;
+    let viewer = routing.remove(&latest.id);
+    let can_inspect = super::services_helpers::is_admin(state, auth).await?;
+    Ok(Json(
+        service_to_response_with_viewer(
+            can_inspect.then_some(state.encryption_keys.as_ref()),
+            latest,
+            viewer.as_ref(),
         )
         .await,
     ))
@@ -2980,6 +3188,8 @@ mod tests {
         base_url: String,
     ) -> CreateServiceRequest {
         CreateServiceRequest {
+            recommended_skill_refs: None,
+            skills_request_id: None,
             provider_config_id: None,
             name: name.to_string(),
             slug: Some(slug.to_string()),

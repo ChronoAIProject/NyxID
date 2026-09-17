@@ -314,6 +314,7 @@ async fn non_api_key_authentication_classes_preserve_inventory_behavior() {
         &Uuid::new_v4().to_string(),
         "account:read",
         60,
+        0,
     )
     .unwrap();
     let key = f.key(&f.person, None, false).await;

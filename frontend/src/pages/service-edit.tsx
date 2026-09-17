@@ -4,7 +4,8 @@ import {
   serviceFormPayload,
   serviceFormValues,
 } from "./service-edit.helpers";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { serviceSkillUpdate, skillRequestIdentity, type SkillRequestIdentity } from "@/lib/service-skill-update";
 import type { DownstreamService, UpdateServicePayload } from "@/types/api";
 import { describeChanges, sameValue } from "@/lib/form-changes";
 import {
@@ -89,6 +90,7 @@ export function ServiceEditPage() {
 function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
   const [service, setService] = useState(source);
   const serviceId = service.id;
+  const requestIdentity = useRef<SkillRequestIdentity | undefined>(undefined);
   const isMounted = useEditorMounted();
   const navigate = useNavigate();
   const updateMutation = useUpdateService();
@@ -106,6 +108,8 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
     (id) => !developerApps.some((app) => app.id === id),
   );
   const stale =
+    service.skills_revision !== source.skills_revision ||
+    !sameValue(service.recommended_skill_refs, source.recommended_skill_refs) ||
     !sameValue(serviceFormValues(service), serviceFormValues(source)) ||
     (!!form.watch("credential")?.trim() &&
       service.updated_at !== source.updated_at);
@@ -120,6 +124,15 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
     if (stale) return;
     const before = serviceFormPayload(serviceFormValues(service), service);
     const patch = serviceFormPatch(data, service);
+    if (service.service_type !== "ssh") {
+      try {
+        delete patch.recommended_skills;
+        Object.assign(patch, serviceSkillUpdate(service, data.recommended_skills, data.clear_skill_refs));
+      } catch (error) {
+        form.setError("recommended_skills", { message: error instanceof Error ? error.message : "Invalid skill update" });
+        return;
+      }
+    }
     if (!user?.is_admin) {
       delete patch.inference;
       delete patch.platform_key;
@@ -154,7 +167,14 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
 
   async function saveChanges({ serviceId: targetId, data }: ReviewedService) {
     try {
-      await updateMutation.mutateAsync({ serviceId: targetId, data });
+      let payload = data;
+      if ("skills_revision" in payload) {
+        requestIdentity.current = skillRequestIdentity(
+          { serviceId: targetId, payload }, requestIdentity.current,
+        );
+        payload = { ...payload, skills_request_id: requestIdentity.current.id };
+      }
+      await updateMutation.mutateAsync({ serviceId: targetId, data: payload });
       if (!isMounted()) return;
       toast.success("Service updated");
       void navigate({
@@ -741,6 +761,36 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           </FormItem>
                         )}
                       />
+
+                      {service.recommended_skill_refs != null && (
+                        <div className="space-y-2 text-[12px]">
+                          <p className="text-muted-foreground">
+                            Revision {service.skills_revision ?? 0}:{" "}
+                            {service.recommended_skill_refs
+                              .map((ref) => `${ref.name}@${ref.version}`)
+                              .join(", ")}
+                          </p>
+                          <FormField
+                            control={form.control}
+                            name="clear_skill_refs"
+                            render={({ field }) => (
+                              <FormItem className="flex items-center gap-2 space-y-0">
+                                <FormControl>
+                                  <Checkbox
+                                    checked={field.value ?? false}
+                                    onCheckedChange={(value) =>
+                                      field.onChange(value === true)
+                                    }
+                                  />
+                                </FormControl>
+                                <FormLabel>
+                                  Clear pinned references and use advisory names
+                                </FormLabel>
+                              </FormItem>
+                            )}
+                          />
+                        </div>
+                      )}
 
                       <Separator className="my-2" />
                       <div className="space-y-2">

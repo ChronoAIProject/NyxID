@@ -108,5 +108,6 @@ pub mod assistant_acknowledgement;
 pub mod assistant_agent_credential;
 pub mod assistant_conversation;
 pub mod assistant_message;
+pub mod catalog_skill_revision;
 pub mod channel_email;
 pub mod service_change_event;

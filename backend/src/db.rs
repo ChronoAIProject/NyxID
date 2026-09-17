@@ -115,6 +115,7 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     crate::services::service_history::relay::ensure_indexes(db).await?;
+    crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
     crate::services::coordination_service::ensure_indexes(db).await?;
 
@@ -4666,6 +4667,8 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "svc-1".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),

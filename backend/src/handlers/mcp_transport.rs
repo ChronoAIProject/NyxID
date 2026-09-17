@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::crypto::jwt;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
-use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
 use crate::services::{
@@ -499,8 +498,7 @@ async fn authenticate_mcp(
                 // Service account tokens have sa=true; verify against
                 // the service_accounts collection instead of users.
                 let (user_id, approval_owner_user_id) = if claims.sa == Some(true) {
-                    let (sa_id, owner_id) =
-                        verify_service_account_active(state, claims.sub).await?;
+                    let (sa_id, owner_id) = verify_service_account_active(state, &claims).await?;
                     (sa_id, Some(owner_id))
                 } else {
                     (verify_user_active(state, claims.sub).await?, None)
@@ -608,19 +606,15 @@ async fn verify_user_active(state: &AppState, user_id: String) -> Result<String,
 #[allow(clippy::result_large_err)]
 async fn verify_service_account_active(
     state: &AppState,
-    sa_id: String,
+    claims: &jwt::Claims,
 ) -> Result<(String, String), Response> {
-    let sa = state
-        .db
-        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
-        .find_one(doc! { "_id": &sa_id, "is_active": true })
+    let sa = crate::services::service_account_service::validate_access_token(&state.db, claims)
         .await
-        .map_err(|_| rpc_error(None, -32603, "Internal error"))?;
-
-    match sa {
-        Some(sa) => Ok((sa_id, sa.effective_owner_user_id().to_string())),
-        None => Err(mcp_401(&state.config.base_url)),
+        .map_err(|_| mcp_401(&state.config.base_url))?;
+    if sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation {
+        return Err(mcp_403_insufficient_scope());
     }
+    Ok((sa.id.clone(), sa.effective_owner_user_id().to_string()))
 }
 
 /// Extract the `Mcp-Session-Id` header value.
@@ -3616,6 +3610,8 @@ mod tests {
 
     fn user_managed(id: &str) -> McpToolService {
         McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: id.into(),
             service_name: id.into(),
             service_slug: id.into(),
@@ -3640,6 +3636,8 @@ mod tests {
 
     fn platform(id: &str) -> McpToolService {
         McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: id.into(),
             service_name: id.into(),
             service_slug: id.into(),
@@ -5003,6 +5001,64 @@ mod tests {
         let (text, _) = render_oracle_task_result(&task, 0, "pending");
         assert!(text.starts_with("Summary only."));
         assert!(text.contains("Artifacts (1)"));
+    }
+}
+
+#[cfg(test)]
+mod curation_auth_regressions {
+    use super::*;
+    use crate::handlers::curation_tests::{fixture, grant_input, token};
+    use crate::services::{curation_grant_service, service_account_service};
+
+    #[tokio::test]
+    async fn curation_conversion_denies_mcp_bearer_and_preexisting_session() {
+        let f = fixture("curation_mcp_conversion", false).await;
+        let bearer = token(&f, None).await;
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_ok());
+        let sid = f
+            .state
+            .mcp_sessions
+            .create_with_proxy_access(&f.sa.id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        curation_grant_service::issue(&f.state.db, &f.sa.id, &f.owner, grant_input(&f.service.id))
+            .await
+            .unwrap();
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
+        let fresh = token(&f, None).await;
+        headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
+        headers.remove("authorization");
+        headers.insert("mcp-session-id", sid.parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn general_sa_mcp_checks_missing_token_and_generation() {
+        let f = fixture("curation_mcp_generation", false).await;
+        let bearer = token(&f, None).await;
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_ok());
+        let claims = jwt::verify_token(&f.state.jwt_keys, &f.state.config, &bearer).unwrap();
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::service_account_token::COLLECTION_NAME,
+            )
+            .delete_one(doc! {"jti":claims.jti})
+            .await
+            .unwrap();
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
+        let fresh = token(&f, None).await;
+        headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());
+        service_account_service::rotate_secret(&f.state.db, &f.sa.id, true)
+            .await
+            .unwrap();
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
     }
 }
 

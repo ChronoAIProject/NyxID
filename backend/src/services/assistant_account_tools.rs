@@ -234,6 +234,8 @@ pub fn virtual_service() -> McpToolService {
         is_generic_proxy: false,
         invalid_openapi_contract: false,
         recommended_skills: Vec::new(),
+        recommended_skill_refs: None,
+        skills_revision: None,
         proxy_operation_policy: None,
         durable_endpoint_metadata: Default::default(),
         endpoints: TOOL_NAMES

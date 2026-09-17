@@ -776,6 +776,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let sa_admin_routes = Router::new()
         .route(
+            "/{sa_id}/curation-grant",
+            post(handlers::admin_service_accounts::issue_curation_grant)
+                .delete(handlers::admin_service_accounts::revoke_curation_grant),
+        )
+        .route(
             "/",
             get(handlers::admin_service_accounts::list_service_accounts)
                 .post(handlers::admin_service_accounts::create_service_account),
@@ -2039,6 +2044,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_relay_tokens));
 
     let api_v1 = api_v1_public
+        .nest("/catalog-curation", handlers::catalog_curation::router())
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
         .merge(api_v1_human_only);
