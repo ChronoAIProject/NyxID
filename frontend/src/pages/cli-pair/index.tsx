@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { WizardShell } from "@/components/cli-wizard/shell";
+import { ApiKeyRotationResult } from "@/components/cli-wizard/api-key-rotation-result";
 import { DisconnectBanner } from "@/components/cli-wizard/disconnect-banner";
 import {
   ENTER_CODE_STEP,
@@ -1112,13 +1113,11 @@ function SecretPanel({
         );
       case "api-key-rotate":
         return (
-          <DisplayOncePanel
-            title="API key rotated"
+          <ApiKeyRotationResult
+            result={result}
             description="The previous key has been revoked. Update any callers using it."
-            secret={result.full_key}
             ackButtonLabel="Close — I've saved the new key"
             onAcknowledge={onAcknowledged}
-            isAcknowledging={false}
           />
         );
       case "node-register-token":

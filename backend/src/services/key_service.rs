@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::crypto::token::{generate_api_key, hash_token};
 use crate::errors::{AppError, AppResult};
@@ -84,13 +85,19 @@ pub enum ApiKeyRotationOutcome {
 #[derive(Clone)]
 struct RotationMaterial {
     key_prefix: String,
-    full_key: String,
+    full_key: Zeroizing<String>,
     key_hash: String,
     created_at: chrono::DateTime<Utc>,
 }
 
+impl fmt::Debug for RotationMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RotationMaterial { [REDACTED] }")
+    }
+}
+
 enum RotationTransactionOutcome {
-    Created(ApiKey, Vec<ApiKeyCredential>),
+    Created(ApiKey, Vec<ApiKeyCredential>, bool),
     AlreadyCommitted(ApiKey),
 }
 
@@ -137,6 +144,7 @@ const VALID_API_KEY_SCOPES: &[&str] = &[
 
 /// Valid platform identifiers for API keys.
 const VALID_PLATFORMS: &[&str] = &[
+    "nyxid-assistant",
     "claude-code",
     "cursor",
     "codex",
@@ -502,7 +510,7 @@ pub async fn validate_login_api_key(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn create_api_key_with_security_class_and_id(
+pub(crate) async fn create_api_key_with_security_class_and_id(
     db: &mongodb::Database,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
@@ -757,11 +765,25 @@ pub async fn delete_api_key_with_expected_state_version(
     key_id: &str,
     expected_state_version: Option<i64>,
 ) -> AppResult<()> {
-    let key = db
-        .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+    delete_api_key_in_session(db, user_id, key_id, expected_state_version, None)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn delete_api_key_in_session(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    expected_state_version: Option<i64>,
+    mut session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Vec<crate::models::api_key_credential::ApiKeyCredential>> {
+    let collection = db.collection::<ApiKey>(API_KEYS);
+    let read = collection.find_one(doc! {"_id": key_id, "user_id": user_id});
+    let key = match session.as_deref_mut() {
+        Some(session) => read.session(session).await?,
+        None => read.await?,
+    }
+    .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
     if let Some(expected) = expected_state_version
         && key.state_version != expected
     {
@@ -773,29 +795,48 @@ pub async fn delete_api_key_with_expected_state_version(
         filter.insert("state_version", expected);
     }
 
-    let result =
-        key_mutations::update_one(db, filter, doc! { "$set": { "is_active": false } }, None)
-            .await?;
+    let result = key_mutations::update_one(
+        db,
+        filter,
+        doc! { "$set": { "is_active": false } },
+        session.as_deref_mut(),
+    )
+    .await?;
     if result.matched_count != 1 {
         return Err(unmatched_api_key_write(db, user_id, key_id, expected_state_version).await?);
     }
 
+    super::assistant_agent_credential_service::invalidate_for_key(
+        db,
+        user_id,
+        key_id,
+        session.as_deref_mut(),
+    )
+    .await?;
+    let bindings = db.collection::<AgentServiceBinding>(AGENT_BINDINGS);
+    let cleanup = bindings.delete_many(doc! {"api_key_id": key_id, "user_id": user_id});
+    match session.as_deref_mut() {
+        Some(session) => cleanup.session(session).await?,
+        None => cleanup.await?,
+    };
     let children = api_key_credential_service::revoke_children(
         db,
         key_id,
         CredentialRevokedReason::ParentRevoked,
-        None,
+        session.as_deref_mut(),
     )
     .await?;
-    api_key_credential_service::audit_revocations(
-        db,
-        &children,
-        CredentialRevokedReason::ParentRevoked,
-    );
+    if session.is_none() {
+        api_key_credential_service::audit_revocations(
+            db,
+            &children,
+            CredentialRevokedReason::ParentRevoked,
+        );
+    }
 
     tracing::info!(key_id = %key_id, user_id = %user_id, "API key deactivated");
 
-    Ok(())
+    Ok(children)
 }
 
 fn stale_api_key_conflict() -> AppError {
@@ -830,14 +871,16 @@ async fn unmatched_api_key_write(
 #[allow(dead_code)]
 pub async fn rotate_api_key(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     key_id: &str,
 ) -> AppResult<CreatedApiKey> {
-    rotate_api_key_with_scope_authorization(db, user_id, None, key_id).await
+    rotate_api_key_with_scope_authorization(db, encryption_keys, user_id, None, key_id).await
 }
 
 pub async fn rotate_api_key_with_scope_authorization(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
     key_id: &str,
@@ -845,6 +888,7 @@ pub async fn rotate_api_key_with_scope_authorization(
     let successor_id = Uuid::new_v4().to_string();
     match rotate_api_key_with_scope_authorization_and_id(
         db,
+        encryption_keys,
         user_id,
         scope_actor_user_id,
         key_id,
@@ -864,6 +908,7 @@ pub async fn rotate_api_key_with_scope_authorization(
 /// the one-time successor secret.
 pub async fn rotate_api_key_with_scope_authorization_and_id(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
     predecessor_id: &str,
@@ -871,6 +916,7 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
 ) -> AppResult<ApiKeyRotationOutcome> {
     rotate_api_key_with_scope_authorization_and_id_inner(
         db,
+        encryption_keys,
         user_id,
         scope_actor_user_id,
         predecessor_id,
@@ -884,6 +930,7 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
 #[cfg(test)]
 pub(crate) async fn rotate_api_key_with_scope_authorization_and_id_with_collision_hook(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
     predecessor_id: &str,
@@ -892,6 +939,7 @@ pub(crate) async fn rotate_api_key_with_scope_authorization_and_id_with_collisio
 ) -> AppResult<ApiKeyRotationOutcome> {
     rotate_api_key_with_scope_authorization_and_id_inner(
         db,
+        encryption_keys,
         user_id,
         scope_actor_user_id,
         predecessor_id,
@@ -903,6 +951,7 @@ pub(crate) async fn rotate_api_key_with_scope_authorization_and_id_with_collisio
 
 async fn rotate_api_key_with_scope_authorization_and_id_inner(
     db: &mongodb::Database,
+    encryption_keys: &Arc<crate::crypto::aes::EncryptionKeys>,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
     predecessor_id: &str,
@@ -919,6 +968,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
     }
 
     let audit_db = db.clone();
+    let encryption_keys = encryption_keys.clone();
     let db = db.clone();
     let user_id = user_id.to_string();
     let predecessor_id = predecessor_id.to_string();
@@ -1061,14 +1111,14 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                             };
                             RotationMaterial {
                                 key_prefix,
-                                full_key,
+                                full_key: Zeroizing::new(full_key),
                                 key_hash,
                                 created_at: Utc::now(),
                             }
                         })
                         .clone()
                 };
-                let successor = ApiKey {
+                let mut successor = ApiKey {
                     id: successor_for_transaction.clone(),
                     user_id: old_key.user_id.clone(),
                     name: old_key.name.clone(),
@@ -1113,6 +1163,68 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     ));
                 }
                 key_mutations::insert_one(&db, &successor, Some(&mut *session)).await?;
+                let assistant_managed =
+                    super::assistant_agent_credential_service::adopt_rotated_key(
+                        &db,
+                        &encryption_keys,
+                        &user_id,
+                        &old_key.id,
+                        &successor.id,
+                        &rotation_material.full_key,
+                        &mut *session,
+                    )
+                    .await?;
+                if assistant_managed {
+                    let credential = db
+                        .collection::<bson::Document>(
+                            crate::models::assistant_agent_credential::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"api_key_id": &successor.id, "user_id": &user_id})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| {
+                            AppError::Internal("Assistant credential unavailable".into())
+                        })?;
+                    let conversation_id = credential.get_str("conversation_id").map_err(|_| {
+                        AppError::Internal("Assistant credential unavailable".into())
+                    })?;
+                    let conversation = db
+                        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                            crate::models::assistant_conversation::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"_id": conversation_id, "user_id": &user_id})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+                    let full = conversation.access_mode
+                        == crate::models::assistant_conversation::AccessMode::Full;
+                    successor.scopes =
+                        super::assistant_agent_credential_service::ASSISTANT_SCOPES.into();
+                    if full {
+                        successor.scopes.push(' ');
+                        successor
+                            .scopes
+                            .push_str(crate::mw::auth::ASSISTANT_ACCOUNT_SCOPE);
+                    }
+                    successor.allowed_service_ids.clear();
+                    successor.allowed_node_ids.clear();
+                    successor.allow_all_services = full;
+                    successor.allow_all_nodes = true;
+                    successor.allow_auto_connected_services = true;
+                    key_mutations::update_one(
+                        &db,
+                        doc! {"_id": &successor.id, "user_id": &user_id},
+                        doc! {"$set": {
+                            "scopes": &successor.scopes,
+                            "allowed_service_ids": [], "allowed_node_ids": [],
+                            "allow_all_services": full, "allow_all_nodes": true,
+                            "allow_auto_connected_services": true,
+                        }},
+                        Some(&mut *session),
+                    )
+                    .await?;
+                    successor.state_version += 1;
+                }
                 let children = api_key_credential_service::revoke_children(
                     &db,
                     &old_key.id,
@@ -1141,7 +1253,11 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         .await?;
                 }
 
-                Ok(RotationTransactionOutcome::Created(successor, children))
+                Ok(RotationTransactionOutcome::Created(
+                    successor,
+                    children,
+                    assistant_managed,
+                ))
             }
             .await;
             key_mutations::transaction_result(operation)
@@ -1153,20 +1269,25 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
         RotationTransactionOutcome::AlreadyCommitted(key) => {
             Ok(ApiKeyRotationOutcome::AlreadyCommitted(key))
         }
-        RotationTransactionOutcome::Created(key, children) => {
+        RotationTransactionOutcome::Created(key, children, assistant_managed) => {
             api_key_credential_service::audit_revocations(
                 &audit_db,
                 &children,
                 CredentialRevokedReason::ParentRotated,
             );
-            let full_key = material
-                .lock()
-                .map_err(|_| AppError::Internal("rotation material lock poisoned".to_string()))?
-                .as_ref()
-                .map(|material| material.full_key.clone())
-                .ok_or_else(|| {
-                    AppError::Internal("rotation committed without key material".to_string())
-                })?;
+            // Assistant secrets stay private even when rotated through a user route.
+            let full_key = if assistant_managed {
+                String::new()
+            } else {
+                material
+                    .lock()
+                    .map_err(|_| AppError::Internal("rotation material lock poisoned".to_string()))?
+                    .as_ref()
+                    .map(|material| material.full_key.as_str().to_owned())
+                    .ok_or_else(|| {
+                        AppError::Internal("rotation committed without key material".to_string())
+                    })?
+            };
             tracing::info!(
                 old_key_id = %tracing_predecessor_id,
                 new_key_id = %key.id,
@@ -2161,9 +2282,14 @@ mod tests {
         )
         .await
         .expect("create key");
-        let rotated = rotate_api_key(&db, &user_id, &original.id)
-            .await
-            .expect("should rotate");
+        let rotated = rotate_api_key(
+            &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
+            &user_id,
+            &original.id,
+        )
+        .await
+        .expect("should rotate");
         assert_ne!(rotated.id, original.id);
         assert_ne!(rotated.full_key, original.full_key);
         assert_eq!(rotated.name, "rotate-me");
@@ -2209,6 +2335,7 @@ mod tests {
 
         let rotated = match rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &user_id,
             Some(&user_id),
             &original.id,
@@ -2247,6 +2374,7 @@ mod tests {
 
         let replay = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &user_id,
             Some(&user_id),
             &original.id,
@@ -2267,6 +2395,7 @@ mod tests {
 
         let owner_isolation = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &Uuid::new_v4().to_string(),
             None,
             &original.id,
@@ -2278,6 +2407,7 @@ mod tests {
 
         let conflict = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &user_id,
             Some(&user_id),
             &original.id,
@@ -2292,6 +2422,7 @@ mod tests {
             .expect("deactivate committed successor");
         let historical_replay = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &user_id,
             Some(&user_id),
             &original.id,
@@ -2336,6 +2467,7 @@ mod tests {
 
         let error = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &other_user_id,
             Some(&other_user_id),
             &original.id,
@@ -2397,6 +2529,7 @@ mod tests {
 
         let error = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &org_id,
             Some(&actor_id),
             &original.id,
@@ -2452,6 +2585,7 @@ mod tests {
         assert!(matches!(
             rotate_api_key_with_scope_authorization_and_id(
                 &db,
+                &Arc::new(crate::test_utils::test_encryption_keys()),
                 &org_id,
                 Some(&actor_id),
                 &original.id,
@@ -2471,6 +2605,7 @@ mod tests {
             .expect("revoke membership");
         let error = rotate_api_key_with_scope_authorization_and_id(
             &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
             &org_id,
             Some(&actor_id),
             &original.id,
@@ -2987,7 +3122,14 @@ mod auto_connected_scope_tests {
             effective_allowed_service_ids(&db, &updated).await.unwrap(),
             updated.allowed_service_ids
         );
-        let rotated = rotate_api_key(&db, &owner, &key.id).await.unwrap();
+        let rotated = rotate_api_key(
+            &db,
+            &Arc::new(crate::test_utils::test_encryption_keys()),
+            &owner,
+            &key.id,
+        )
+        .await
+        .unwrap();
         assert!(rotated.allow_auto_connected_services);
         let (_, stored, _) = validate_api_key(&db, &rotated.full_key).await.unwrap();
         assert!(stored.allow_auto_connected_services);

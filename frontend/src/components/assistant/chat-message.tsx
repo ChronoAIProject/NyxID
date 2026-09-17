@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -227,6 +228,13 @@ export function ChatMessageEntry({
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
 }) {
+  if (message.role === "system" && message.id.startsWith("nyxagent-context-reset:")) {
+    return (
+      <p role="note" aria-label="Conversation context reset" className="text-xs text-text-tertiary">
+        {message.content}
+      </p>
+    );
+  }
   const authorName = message.authorName?.trim() ?? "";
   if (message.role === "user" || message.role === "assistant") {
     return (
@@ -285,6 +293,7 @@ export function ChatMessageList({
   footer,
   notice,
   projectionVersion,
+  renderMessage,
 }: {
   readonly session: ChatSessionState | null;
   readonly bottomInset: number;
@@ -292,6 +301,7 @@ export function ChatMessageList({
   readonly footer?: ReactNode;
   readonly notice?: ReactNode;
   readonly projectionVersion?: string | number;
+  readonly renderMessage?: (message: ChatMessage) => ReactNode;
 }) {
   const [detectedMessageId, setDetectedMessageId] = useState<string>();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -378,7 +388,9 @@ export function ChatMessageList({
         ) : null}
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
-          <ChatMessageEntry key={message.id} message={message} />
+          <Fragment key={message.id}>
+            {renderMessage?.(message) ?? <ChatMessageEntry message={message} />}
+          </Fragment>
         ))}
         {footer}
         {emptyTurnDetected ? (

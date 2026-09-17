@@ -1,6 +1,6 @@
 import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
 import { useState } from "react";
-import { useParams } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import { useApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
 import { maskApiKey } from "@/lib/utils";
@@ -93,6 +93,18 @@ export function ApiKeyDetailPage() {
         }
       />
 
+      {apiKey.assistant_conversation_id ? (
+        <p className="text-[12px] text-muted-foreground">
+          Used by assistant chat · {" "}
+          <Link
+            to="/assistant"
+            search={{ c: apiKey.assistant_conversation_id }}
+            className="text-primary hover:underline"
+          >
+            Open chat
+          </Link>
+        </p>
+      ) : null}
       <div className="grid gap-4 md:grid-cols-2">
         <DetailsCard
           name={apiKey.name}

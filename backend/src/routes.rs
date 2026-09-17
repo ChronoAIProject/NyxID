@@ -124,6 +124,33 @@ macro_rules! assistant_direct_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/nyxagent/turns",
+                "/api/v1/assistant/nyxagent/turns",
+                "handlers::assistant_nyxagent::turns",
+                post(handlers::assistant_nyxagent::turns),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/nyxagent/models",
+                "/api/v1/assistant/nyxagent/models",
+                "handlers::assistant_nyxagent::models",
+                get(handlers::assistant_nyxagent::models),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/nyxagent/conversations/{id}",
+                "/api/v1/assistant/nyxagent/conversations/{id}",
+                "handlers::assistant_nyxagent::delete",
+                delete(handlers::assistant_nyxagent::delete),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
                 "/direct/completions",
                 "/api/v1/assistant/direct/completions",
                 "handlers::assistant_direct::completions",
@@ -1777,6 +1804,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route(
+            "/nyxagent/conversations",
+            get(handlers::assistant_nyxagent::list),
+        )
+        .route(
+            "/nyxagent/conversations/{id}",
+            get(handlers::assistant_nyxagent::history).patch(handlers::assistant_nyxagent::rename),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/stop",
+            post(handlers::assistant_nyxagent::stop),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/access-mode",
+            patch(handlers::assistant_nyxagent::change_access_mode),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",
+            post(handlers::assistant_nyxagent::decide_acknowledgement),
+        )
         .route("/wire-logs/{id}", get(handlers::assistant::get_wire_log))
         .route(
             "/readiness",

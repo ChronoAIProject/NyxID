@@ -346,12 +346,14 @@ export function ApiKeyCreateConfirm({
 interface ApiKeyRotateResponse {
   readonly id: string;
   readonly full_key: string;
+  readonly platform?: string | null;
 }
 
 export interface ApiKeyRotateSuccess {
   readonly kind: "api-key-rotate";
   readonly resource_id: string;
   readonly full_key: string;
+  readonly platform?: string | null;
 }
 
 interface ApiKeyRotateConfirmProps {
@@ -382,6 +384,7 @@ export function ApiKeyRotateConfirm({
         kind: "api-key-rotate",
         resource_id: res.id,
         full_key: res.full_key,
+        platform: res.platform,
       });
     } catch (e) {
       setError(errorMessage(e));

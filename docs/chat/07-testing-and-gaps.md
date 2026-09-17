@@ -117,6 +117,76 @@ NYXID_AEVATAR_ORIGIN_TURN_ID
 Absence of a valid access token and real actor/origin-turn IDs is an unmet
 environment prerequisite, not a producer pass.
 
+## NyxAgent seam
+
+`services/assistant_nyxagent_tests.rs` covers the closed request grammar, bounded
+recaps, fragmented SSE, cached terminal replay, error mapping, recovery decisions,
+owner scoping, transaction admission races, sequence pagination, and all failed
+turn binding resets. Review regression tests also prove the exact 2100-second
+fence expiry, transactional lost-turn reclaim, stale Rename/Delete/Stop behavior,
+DTO hiding, and late-settlement fencing. Credential service tests exercise concurrent provisioning,
+encryption, redacted Debug, scope authorization, revoke, rotation, expiry, changed
+hashes, and missing keys, including adoption of the rotation successor without
+minting or disclosing another key. Handler tests use a real local Axum upstream and MongoDB
+to prove detached completion, Stop, session-loss rebind, credential replacement,
+query/header isolation, and human/flag route gates. Injected persistence failures
+prove settlement is bounded and releases the permit; 1024 queued deltas prove
+lagged subscriptions still receive terminal events. Model tests distinguish
+uncached fallback from cached success; rejected requests preserve turn allowance. The shared proxy unit test
+proves Authorization ordering for cookie/JWT callers on direct and node assembly.
+
+Frontend tests cover server transport pagination, split SSE, notices, HTTP errors,
+identity clearing, engine precedence, history-only two-second polling with a
+single index refresh on settlement, profile refresh after provisioning, rename/delete,
+private assistant rotation UI, and hosted connect-link rendering. Reset-note tests
+cover live delivery, strict timestamp positioning, failed-reply ties, latest-reset
+replacement, and tail placement. Component tests prove inline system-note rendering. `e2e/nyxagent.spec.ts` uses the real page with
+`nyxagentEnabled` HTTP fixtures and covers profiles, reload, Stop, context-reset
+notes (including exact DOM position and uniqueness across reload), rename/delete,
+connect links, and retained actor history. Fixtures retain
+a simulated server transcript/deadline in sessionStorage only in dev/tests.
+
+The test MongoDB harness defaults a single loopback seed to direct connection
+unless the URI explicitly selects a mode. This supports Docker's published 27019
+port when the replica set advertises its internal 27017 port; transaction tests
+still verify a writable replica set and do not skip tests.
+
+## Chat authority and access-mode coverage
+
+`assistant_authority_tests.rs` exercises per-conversation admission rollback,
+service/account/action lifecycle, concurrent decisions, digest/tool/key/conversation
+binding, expiry, one-time use, denial retention until a new user message, rotation
+invalidation and bounded history. The complete 22-tool native inventory is exercised
+for authorization/refusal/audit and successful service-layer dispatch in both Ask
+and Full modes. Tests cover assistant-key self-widening and route-agent refusals,
+service lifecycle, scoped bindings, routes, nodes and approvals. Mode tests prove
+both key transitions, retained service allowlists, live-turn refusal, full draft
+provisioning and mode retention through rotation/replacement. Migration tests
+cover legacy Ask defaults and replacement of the unique owner credential index.
+Deletion tests prove child revocation, binding cleanup and after-commit audit;
+Full-mode tests also hide another owner's existing key and reject self-widening.
+
+`mcp_chat_authority_tests.rs` verifies visible ungranted services and search tools,
+auto-connected access, native tool metadata, JSON-RPC success envelopes containing
+`isError` refusals, Allow followed by real upstream execution, Deny, and Full mode
+execution/audit without cards, including request audits for execution/mutation and suppression for read-only discovery.
+Platform-source tests verify Ask-mode `full_access_required` without cards and real
+Full-mode execution through both call paths. Node-route tests prove service consent
+alone permits dispatch. Defensive service decisions reject catalog, missing, disabled
+and other-owner IDs; assistant-key deletion is refused in both modes.
+Handler tests verify human/flag/owner gates, 409,
+secret-free acknowledgement and key DTOs, pending counts and decision/mode audits.
+
+Frontend tests cover acknowledgement parsing/positioning, explicit mutations,
+750 ms throttling, pending-card polling, no automatic message, compact decided
+cards, errors, keys-page hiding/detail links, per-user draft modes and the Full
+access confirmation. `e2e/nyxagent-authority.spec.ts` covers service Allow/retry,
+Deny/refusal, separate account/action cards, focus, persistence, the hidden-key
+toggle/detail link, Full mode without action cards and remembered new-draft mode.
+Run it and affected existing assistant/route specs with `--repeat-each 4`.
+The existing actor hook also tests an immediate send after Stop with its sidebar
+refresh deliberately stalled; the released composer cannot silently lose that send.
+
 ## Direct seam
 
 The default-off Direct engine retains its existing memory-only transport and
@@ -139,9 +209,9 @@ do not replace those server-side security boundaries.
 
 - Live producer verification needs the credentialed environment above and is a
   manual contract check, not a credentialed CI job.
-- Chat history does not serialize `MEDIA_CONTENT`, so live artifacts are not
+- Aevatar chat history does not serialize `MEDIA_CONTENT`, so live artifacts are not
   restored after reload.
-- Terminal settlement does not automatically reconcile the local transcript
+- Aevatar terminal settlement does not automatically reconcile the local transcript
   against a fresh server history read.
 - `nyxid.authorization.required` connect cards are live-only and are not
   reconstructed from transcript history or typed actor state.

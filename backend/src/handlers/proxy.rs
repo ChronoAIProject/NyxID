@@ -2762,9 +2762,11 @@ async fn execute_proxy_inner(
 
         let mut base_headers = node_forward_headers;
         // Forward the caller's NyxID access token when the service is configured for it.
-        if target.service.forward_access_token
-            && let Some(ref token) = caller_token
-        {
+        if let Some(token) = proxy_service::forwarded_caller_token(
+            &target,
+            caller_token.as_deref(),
+            &extra_outbound_headers,
+        ) {
             base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
         let enriched_headers = proxy_service::build_effective_outbound_headers(

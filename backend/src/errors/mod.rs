@@ -84,6 +84,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("A turn is already active in this conversation")]
+    AssistantTurnActive,
+
     #[error("Grant cascade confirmation required")]
     GrantCascadeConfirmationRequired(Box<GrantCascadePayload>),
 
@@ -605,6 +608,7 @@ impl AppError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
+            Self::AssistantTurnActive => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
@@ -782,6 +786,7 @@ impl AppError {
             Self::Forbidden(_) => 1002,
             Self::NotFound(_) => 1003,
             Self::Conflict(_) => 1004,
+            Self::AssistantTurnActive => 12100,
             Self::RateLimited => 1005,
             Self::Internal(_) => 1006,
             Self::DatabaseError(_) => 1007,
@@ -1002,6 +1007,7 @@ impl AppError {
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
+            Self::AssistantTurnActive => "turn_active",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::RateLimited => "rate_limited",
             Self::Internal(_) => "internal_error",

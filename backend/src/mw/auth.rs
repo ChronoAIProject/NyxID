@@ -20,6 +20,10 @@ use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, Service
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
+/// Internal chat acknowledgement capability. Never accepted by the public key
+/// scope registry, and never grants management access on human-only REST routes.
+pub const ASSISTANT_ACCOUNT_SCOPE: &str = "assistant:account";
+
 /// Authenticated user extracted from session cookie or Bearer token.
 ///
 /// This acts as an Axum extractor: handlers that include `AuthUser` in their

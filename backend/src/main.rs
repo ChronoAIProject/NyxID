@@ -372,6 +372,7 @@ async fn main() {
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+    services::assistant_nyxagent::warn_at_startup(&db).await;
 
     // Load JWT signing keys early: DB-backed CLI subcommands may audit-log
     // before the server state is built, and the audit-chain key can fall back

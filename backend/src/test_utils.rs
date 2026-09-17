@@ -368,6 +368,19 @@ fn pin_test_db_uri(uri: &str) -> bool {
     pin_test_db_uri_in(&TEST_DB_PINNED_URI, uri)
 }
 
+// Docker publishes a loopback seed at a different port from the replica set's
+// advertised member. Preserve explicit topology options; otherwise stay on the
+// caller's single local seed. Transactions still require the real replica set.
+fn local_test_connection(options: &mut mongodb::options::ClientOptions) {
+    if options.direct_connection.is_none()
+        && options.hosts.len() == 1
+        && matches!(&options.hosts[0], mongodb::options::ServerAddress::Tcp { host, .. }
+            if matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1"))
+    {
+        options.direct_connection = Some(true);
+    }
+}
+
 async fn probe_test_mongo_uri(
     uri: &str,
     db_name: &str,
@@ -382,6 +395,7 @@ async fn probe_test_mongo_uri(
     // milliseconds. These more generous driver timeouts cover a real mongod and
     // remote explicit overrides. Under cargo llvm-cov, argon2 plus instrumentation
     // can starve the heartbeat monitor long enough to otherwise clear the pool.
+    local_test_connection(&mut options);
     options.server_selection_timeout = Some(Duration::from_secs(30));
     options.connect_timeout = Some(Duration::from_secs(20));
     // The cleanup guard is released only after the driver's SDAM monitor exits.
@@ -1168,6 +1182,7 @@ async fn test_db_cleanup_client(uri: &str) -> Option<mongodb::Client> {
     else {
         return None;
     };
+    local_test_connection(&mut options);
     options.server_selection_timeout = Some(Duration::from_secs(3));
     options.connect_timeout = Some(Duration::from_secs(3));
     options.max_pool_size = Some(2);
@@ -3486,5 +3501,21 @@ mod tests {
             remaining >= min_remaining.as_millis() - 50,
             "expected at least ~{min_remaining:?} left in the bin, got {remaining} ms"
         );
+    }
+    #[tokio::test]
+    async fn local_seed_defaults_direct_but_preserves_explicit_topologies() {
+        for (uri, expected) in [
+            ("mongodb://127.0.0.1:27019", Some(true)),
+            (
+                "mongodb://127.0.0.1:27019/?directConnection=false",
+                Some(false),
+            ),
+            ("mongodb://127.0.0.1:27019,127.0.0.1:27020", None),
+            ("mongodb://mongo.example:27019", None),
+        ] {
+            let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
+            local_test_connection(&mut options);
+            assert_eq!(options.direct_connection, expected);
+        }
     }
 }
