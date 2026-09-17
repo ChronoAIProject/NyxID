@@ -69,13 +69,18 @@ application handlers and services.
    **Billing lanes** and verify its synchronization status after saving. Storing
    a key does not itself configure a price; existing legacy billing may still
    apply when no lane prices are configured.
-6. Click **Save Changes**. An authorized user can open **AI Services**, add
+6. Click **Save Changes**, review the proposed changes, then click **Confirm changes**.
+   An authorized user can open **AI Services**, add
    **Telnyx**, choose **Use NyxID's key**, and click **Connect**. Use server
    routing for a platform key; node routing is unavailable for this binding.
    An existing connection can switch its credential binding on its detail page.
 7. Create or select a NyxID API key with access to that connection. Verify the
    setup with the read-only model listing below before sending messages or
    placing calls.
+
+For an unconfigured service, you can save only the credential with **Enable
+platform key** off; NyxID stores it encrypted with disabled, restricted access
+until you explicitly enable it and configure its audience or grants.
 
 For endpoint restrictions, use **Endpoint policy → Restrict allowed endpoints**
 in the shared service editor. Add exact HTTP methods and path templates, such as

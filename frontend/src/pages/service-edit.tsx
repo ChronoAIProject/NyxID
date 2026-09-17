@@ -1,17 +1,29 @@
 import { PlatformServiceFields } from "@/components/services/platform-service-fields";
-import { useEffect } from "react";
+import {
+  serviceFormPatch,
+  serviceFormPayload,
+  serviceFormValues,
+} from "./service-edit.helpers";
+import { useState } from "react";
+import type { DownstreamService, UpdateServicePayload } from "@/types/api";
+import { describeChanges, sameValue } from "@/lib/form-changes";
+import {
+  useChangeReview,
+  useEditorMounted,
+} from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useService, useUpdateService } from "@/hooks/use-services";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import {
   DELEGATION_TOKEN_SCOPES,
+  SSH_AUTH_MODES,
   updateServiceSchema,
   type UpdateServiceFormData,
   VISIBILITY_OPTIONS,
   type WsFrameInjection,
 } from "@/schemas/services";
-import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
 import { WsFrameInjectionsEditor } from "@/components/shared/ws-frame-injections-editor";
 import {
@@ -20,7 +32,11 @@ import {
   SERVICE_TYPE_LABELS,
   VISIBILITY_LABELS,
 } from "@/lib/constants";
-import { parseAllowedPrincipals } from "@/lib/ssh";
+import {
+  SSH_AUTH_MODE_LABELS,
+  getSshAuthModeChangeWarning,
+  inferSshAuthMode,
+} from "@/lib/ssh-auth-mode";
 import { flattenRowErrors, flattenRowFieldErrors } from "@/lib/form-errors";
 import { ApiError } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
@@ -56,251 +72,90 @@ import { toast } from "sonner";
 
 export function ServiceEditPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
-  const navigate = useNavigate();
   const { data: service, isLoading, error, refetch } = useService(serviceId);
+  if (isLoading && !service) return <Skeleton className="h-96 w-full" />;
+  if (!service)
+    return (
+      <ErrorBanner
+        message={
+          error instanceof ApiError ? error.message : "Unable to load service"
+        }
+        onRetry={refetch}
+      />
+    );
+  return <ServiceEditForm key={serviceId} source={service} />;
+}
+
+function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
+  const [service, setService] = useState(source);
+  const serviceId = service.id;
+  const isMounted = useEditorMounted();
+  const navigate = useNavigate();
   const updateMutation = useUpdateService();
   const user = useAuthStore((s) => s.user);
   const { data: appsData } = useDeveloperApps();
-  const developerApps = appsData?.clients?.filter((c) => c.is_active) ?? [];
-
   const form = useAppForm<UpdateServiceFormData>({
     resolver: zodResolver(updateServiceSchema),
-    defaultValues: {
-      service_type: "http",
-      name: "",
-      description: "",
-      base_url: "",
-      openapi_spec_url: "",
-      asyncapi_spec_url: "",
-      identity_propagation_mode: "none",
-      identity_include_user_id: false,
-      identity_include_email: false,
-      identity_include_name: false,
-      identity_jwt_audience: "",
-      forward_access_token: false,
-      inject_delegation_token: false,
-      platform_billable: false,
-      platform_charge_nyxid_credentials_only: false,
-      platform_metric: "auto" as const,
-      platform_price: "",
-      delegation_token_scope: "",
-      homepage_url: "",
-      repository_url: "",
-      issues_url: "",
-      auth_notes: "",
-      known_limitations: "",
-      required_permissions: "",
-      examples_url: "",
-      recommended_skills: "",
-      developer_app_ids: [],
-      supports_proxy_read: false,
-      supports_proxy_write: false,
-      supports_proxy_binary_upload: false,
-      supports_direct_downstream_auth: false,
-      supports_authoring_via_nyx: false,
-      supports_websocket: false,
-      supports_streaming: false,
-      host: "",
-      port: "22",
-      certificate_auth_enabled: false,
-      certificate_ttl_minutes: "30",
-      allowed_principals: "",
-      default_request_headers: [],
-      ws_frame_injections: [],
-    },
+    defaultValues: serviceFormValues(service),
   });
+  const selectedAppIds = form.watch("developer_app_ids") ?? [];
+  const developerApps = (appsData?.clients ?? []).filter(
+    (c) => c.is_active || selectedAppIds.includes(c.id),
+  );
+  const unavailableAppIds = selectedAppIds.filter(
+    (id) => !developerApps.some((app) => app.id === id),
+  );
+  const stale =
+    !sameValue(serviceFormValues(service), serviceFormValues(source)) ||
+    (!!form.watch("credential")?.trim() &&
+      service.updated_at !== source.updated_at);
+  type ReviewedService = { serviceId: string; data: UpdateServicePayload };
+  const review = useChangeReview<ReviewedService>(
+    saveChanges,
+    stale,
+    serviceId,
+  );
 
-  useEffect(() => {
-    if (service) {
-      form.reset({
-        proxy_operation_policy: service.proxy_operation_policy,
-        inference: service.inference,
-        platform_key: service.platform_key ?? undefined,
-        credential: "",
-        byok_pricing: service.billing?.byok_pricing,
-        platform_key_pricing: service.billing?.platform_key_pricing,
-        service_type: service.service_type === "ssh" ? "ssh" : "http",
-        visibility: service.visibility === "private" ? "private" : "public",
-        name: service.name,
-        description: service.description ?? "",
-        base_url: service.service_type === "http" ? service.base_url : "",
-        openapi_spec_url:
-          service.openapi_spec_url ?? service.api_spec_url ?? "",
-        asyncapi_spec_url: service.asyncapi_spec_url ?? "",
-        identity_propagation_mode:
-          (service.identity_propagation_mode as UpdateServiceFormData["identity_propagation_mode"]) ??
-          "none",
-        identity_include_user_id: service.identity_include_user_id ?? false,
-        identity_include_email: service.identity_include_email ?? false,
-        identity_include_name: service.identity_include_name ?? false,
-        identity_jwt_audience: service.identity_jwt_audience ?? "",
-        forward_access_token: service.forward_access_token ?? false,
-        inject_delegation_token: service.inject_delegation_token ?? false,
-        platform_billable: service.billing?.platform_billable ?? false,
-        platform_charge_nyxid_credentials_only:
-          service.billing?.platform_charge_nyxid_credentials_only ?? false,
-        platform_metric:
-          (service.billing?.platform_metric as UpdateServiceFormData["platform_metric"]) ??
-          "auto",
-        platform_price:
-          service.billing?.platform_pricing?.credits_per_unit ?? "",
-        delegation_token_scope: service.delegation_token_scope || "llm:proxy",
-        homepage_url: service.homepage_url ?? "",
-        repository_url: service.repository_url ?? "",
-        issues_url: service.issues_url ?? "",
-        auth_notes: service.auth_notes ?? "",
-        known_limitations: service.known_limitations ?? "",
-        required_permissions: service.required_permissions?.join(", ") ?? "",
-        examples_url: service.examples_url ?? "",
-        recommended_skills: service.recommended_skills?.join(", ") ?? "",
-        developer_app_ids: [...(service.developer_app_ids ?? [])],
-        supports_proxy_read: service.capabilities?.supports_proxy_read ?? false,
-        supports_proxy_write: service.capabilities?.supports_proxy_write ?? false,
-        supports_proxy_binary_upload: service.capabilities?.supports_proxy_binary_upload ?? false,
-        supports_direct_downstream_auth: service.capabilities?.supports_direct_downstream_auth ?? false,
-        supports_authoring_via_nyx: service.capabilities?.supports_authoring_via_nyx ?? false,
-        supports_websocket: service.capabilities?.supports_websocket ?? false,
-        supports_streaming: service.capabilities?.supports_streaming ?? false,
-        host: service.ssh_config?.host ?? "",
-        port: service.ssh_config ? String(service.ssh_config.port) : "22",
-        certificate_auth_enabled:
-          service.ssh_config?.certificate_auth_enabled ?? false,
-        certificate_ttl_minutes: service.ssh_config
-          ? String(service.ssh_config.certificate_ttl_minutes)
-          : "30",
-        allowed_principals:
-          service.ssh_config?.allowed_principals.join(", ") ?? "",
-        default_request_headers: service.default_request_headers
-          ? service.default_request_headers.map((h) => ({ ...h }))
-          : [],
-        ws_frame_injections: service.ws_frame_injections
-          ? service.ws_frame_injections.map((rule) => ({ ...rule }))
-          : [],
-      });
+  function onSubmit(data: UpdateServiceFormData) {
+    if (stale) return;
+    const before = serviceFormPayload(serviceFormValues(service), service);
+    const patch = serviceFormPatch(data, service);
+    if (!user?.is_admin) {
+      delete patch.inference;
+      delete patch.platform_key;
+      delete patch.credential;
+      delete patch.proxy_operation_policy;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [service]);
+    const warning = patch.ssh_config
+      ? getSshAuthModeChangeWarning(
+          inferSshAuthMode(
+            service.ssh_config?.ssh_auth_mode,
+            service.ssh_config?.certificate_auth_enabled,
+          ),
+          inferSshAuthMode(
+            patch.ssh_config.ssh_auth_mode,
+            patch.ssh_config.certificate_auth_enabled,
+          ),
+        )
+      : null;
+    review.review({ serviceId, data: patch }, [
+      ...(warning
+        ? [{ field: "SSH mode transition", before: "Node Key", after: warning }]
+        : []),
+      ...describeChanges(before, patch, {
+        secretFields: [
+          "credential",
+          "default_request_headers",
+          "ws_frame_injections",
+        ],
+      }),
+    ]);
+  }
 
-  async function onSubmit(data: UpdateServiceFormData) {
-    if (!service) return;
-    // NyxID#356 tri-state encoding: only send `default_request_headers`
-    // when the user actually changed the list. Omitting the field tells
-    // the backend to leave it unchanged. `null` explicitly clears.
-    const previousHeaders = service.default_request_headers ?? [];
-    const nextHeaders = data.default_request_headers ?? [];
-    const headersChanged =
-      previousHeaders.length !== nextHeaders.length ||
-      previousHeaders.some((prev, idx) => {
-        const curr = nextHeaders[idx];
-        if (!curr) return true;
-        return (
-          prev.name !== curr.name ||
-          prev.value !== curr.value ||
-          prev.overridable !== curr.overridable ||
-          prev.sensitive !== curr.sensitive
-        );
-      });
-    const defaultRequestHeadersPayload: null | DefaultRequestHeader[] | undefined =
-      headersChanged
-        ? nextHeaders.length === 0
-          ? null
-          : nextHeaders.map((h) => ({ ...h }))
-        : undefined;
-
+  async function saveChanges({ serviceId: targetId, data }: ReviewedService) {
     try {
-      await updateMutation.mutateAsync({
-        serviceId: service.id,
-        data:
-          service.service_type === "ssh"
-            ? {
-                name: data.name,
-                description: data.description || "",
-                visibility: data.visibility,
-                ssh_config: {
-                  host: (data.host ?? "").trim(),
-                  port: Number(data.port),
-                  certificate_auth_enabled:
-                    data.certificate_auth_enabled ?? false,
-                  certificate_ttl_minutes: Number(
-                    data.certificate_ttl_minutes || "30",
-                  ),
-                  allowed_principals: parseAllowedPrincipals(
-                    data.allowed_principals,
-                  ),
-                },
-              }
-            : {
-                name: data.name,
-                description: data.description || "",
-                visibility: data.visibility,
-                base_url: data.base_url || "",
-                openapi_spec_url: data.openapi_spec_url || "",
-                asyncapi_spec_url: data.asyncapi_spec_url || "",
-                identity_propagation_mode: data.identity_propagation_mode,
-                identity_include_user_id: data.identity_include_user_id,
-                identity_include_email: data.identity_include_email,
-                identity_include_name: data.identity_include_name,
-                identity_jwt_audience: data.identity_jwt_audience || "",
-                forward_access_token: data.forward_access_token,
-                inject_delegation_token: data.inject_delegation_token,
-                delegation_token_scope: data.delegation_token_scope || "",
-                homepage_url: data.homepage_url || "",
-                repository_url: data.repository_url || "",
-                issues_url: data.issues_url || "",
-                auth_notes: data.auth_notes || "",
-                known_limitations: data.known_limitations || "",
-                required_permissions: (data.required_permissions || "")
-                  .split(/[,\n]/)
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-                examples_url: data.examples_url || "",
-                recommended_skills: (data.recommended_skills || "")
-                  .split(/[,\n]/)
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-                developer_app_ids: data.developer_app_ids ?? [],
-                ...(user?.is_admin ? { proxy_operation_policy: data.proxy_operation_policy, inference: data.inference, platform_key: data.platform_key, ...(data.credential?.trim() ? { credential: data.credential } : {}) } : {}),
-                capabilities: {
-                  supports_proxy_read: data.supports_proxy_read ?? false,
-                  supports_proxy_write: data.supports_proxy_write ?? false,
-                  supports_proxy_binary_upload: data.supports_proxy_binary_upload ?? false,
-                  supports_direct_downstream_auth: data.supports_direct_downstream_auth ?? false,
-                  supports_authoring_via_nyx: data.supports_authoring_via_nyx ?? false,
-                  supports_websocket: data.supports_websocket ?? false,
-                  supports_streaming: data.supports_streaming ?? false,
-                },
-                // Preserve resale config; the toggle only controls the
-                // platform-layer opt-in.
-                billing: {
-                  ...(service?.billing ?? {}),
-                  ...(user?.is_admin ? { byok_pricing: data.byok_pricing, platform_key_pricing: data.platform_key_pricing } : {}),
-                  platform_billable: data.platform_billable ?? false,
-                  platform_charge_nyxid_credentials_only:
-                    data.platform_charge_nyxid_credentials_only ?? false,
-                  platform_metric:
-                    data.platform_metric && data.platform_metric !== "auto"
-                      ? data.platform_metric
-                      : undefined,
-                  platform_pricing: data.platform_price?.trim()
-                    ? {
-                        credits_per_unit: data.platform_price.trim(),
-                        lago_metric_code:
-                          service.billing?.platform_pricing?.lago_metric_code ??
-                          "",
-                        sync_status:
-                          service.billing?.platform_pricing?.sync_status ??
-                          "pending",
-                        sync_error:
-                          service.billing?.platform_pricing?.sync_error ?? null,
-                      }
-                    : undefined,
-                },
-                ws_frame_injections: data.ws_frame_injections ?? [],
-                ...(defaultRequestHeadersPayload !== undefined
-                  ? { default_request_headers: defaultRequestHeadersPayload }
-                  : {}),
-              },
-      });
+      await updateMutation.mutateAsync({ serviceId: targetId, data });
+      if (!isMounted()) return;
       toast.success("Service updated");
       void navigate({
         to: "/services/$serviceId",
@@ -313,28 +168,8 @@ export function ServiceEditPage() {
       } else {
         toast.error("Failed to update service");
       }
+      throw err;
     }
-  }
-
-  if (isLoading) {
-    return (
-      <div className="space-y-6">
-        <Skeleton className="h-10 w-64" />
-        <Skeleton className="h-96 w-full" />
-      </div>
-    );
-  }
-
-  if (error || !service) {
-    return (
-      <div className="space-y-8">
-        <PageHeader title="Service Not Found" />
-        <ErrorBanner
-          message={error instanceof ApiError ? error.message : "The service you are trying to edit does not exist or has been deleted."}
-          onRetry={refetch}
-        />
-      </div>
-    );
   }
 
   const isSshService = service.service_type === "ssh";
@@ -350,10 +185,18 @@ export function ServiceEditPage() {
 
   return (
     <div className="space-y-8">
-      <PageHeader
-        title={`Edit ${service.name}`}
-      />
+      <PageHeader title={`Edit ${service.name}`} />
 
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            setService(source);
+            form.reset(serviceFormValues(source));
+            review.cancel();
+          }}
+        />
+      )}
+      {review.dialog}
       <div className="max-w-2xl">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
@@ -437,20 +280,47 @@ export function ServiceEditPage() {
               )}
             />
 
-            {form.watch("visibility") === "private" &&
+            {(form.watch("visibility") === "private" ||
+              selectedAppIds.length > 0) &&
               user?.is_admin &&
-              developerApps.length > 0 && (
+              (developerApps.length > 0 || unavailableAppIds.length > 0) && (
                 <div className="space-y-2">
-                  <p className="text-[12px] font-medium">Developer App Scoping</p>
+                  <p className="text-[12px] font-medium">
+                    Developer App Scoping
+                  </p>
                   <p className="text-xs text-muted-foreground">
                     Select which developer apps grant access to this service.
                     Users who log in through a selected app will have this
-                    service auto-provisioned in their AI Services.
+                    service auto-provisioned in their AI Services. Remove
+                    inactive applications before saving changes to this
+                    selection.
                   </p>
                   <div className="space-y-2">
+                    {unavailableAppIds.map((id) => (
+                      <div key={id} className="flex items-center gap-2">
+                        <Checkbox
+                          id={`app-${id}`}
+                          checked={(
+                            form.watch("developer_app_ids") ?? []
+                          ).includes(id)}
+                          onCheckedChange={(checked) => {
+                            const ids =
+                              form.getValues("developer_app_ids") ?? [];
+                            form.setValue(
+                              "developer_app_ids",
+                              checked
+                                ? [...ids, id]
+                                : ids.filter((value) => value !== id),
+                            );
+                          }}
+                        />
+                        <Label htmlFor={`app-${id}`}>
+                          Selected app: {id} (details unavailable)
+                        </Label>
+                      </div>
+                    ))}
                     {developerApps.map((app) => {
-                      const selected =
-                        form.watch("developer_app_ids") ?? [];
+                      const selected = form.watch("developer_app_ids") ?? [];
                       const checked = selected.includes(app.id);
                       return (
                         <div
@@ -460,6 +330,7 @@ export function ServiceEditPage() {
                           <Checkbox
                             id={`app-${app.id}`}
                             checked={checked}
+                            disabled={!app.is_active && !checked}
                             onCheckedChange={(v) => {
                               const current =
                                 form.getValues("developer_app_ids") ?? [];
@@ -476,8 +347,12 @@ export function ServiceEditPage() {
                             className="text-[12px] font-normal"
                           >
                             {app.client_name}
+                            {!app.is_active ? " (inactive)" : ""}
                           </Label>
-                          <Badge variant="secondary" className="ml-auto text-xs">
+                          <Badge
+                            variant="secondary"
+                            className="ml-auto text-xs"
+                          >
                             {app.client_type}
                           </Badge>
                         </div>
@@ -522,24 +397,36 @@ export function ServiceEditPage() {
                   />
                 </div>
 
-                <div className="flex items-center justify-between rounded-lg border border-border p-3">
-                  <Label
-                    htmlFor="edit-ssh-cert-auth"
-                    className="text-[12px] font-normal"
-                  >
-                    Enable short-lived SSH certificates
-                  </Label>
-                  <Switch
-                    id="edit-ssh-cert-auth"
-                    checked={form.watch("certificate_auth_enabled") ?? false}
-                    onCheckedChange={(checked) =>
-                      form.setValue("certificate_auth_enabled", checked)
-                    }
-                  />
-                </div>
+                <FormField
+                  control={form.control}
+                  name="ssh_auth_mode"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>SSH Authentication Mode</FormLabel>
+                      <Select
+                        value={field.value}
+                        onValueChange={field.onChange}
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {SSH_AUTH_MODES.map((mode) => (
+                            <SelectItem key={mode} value={mode}>
+                              {SSH_AUTH_MODE_LABELS[mode]}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
 
-                {(form.watch("certificate_auth_enabled") ?? false) && (
-                  <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {form.watch("ssh_auth_mode") === "cert" && (
                     <FormField
                       control={form.control}
                       name="certificate_ttl_minutes"
@@ -553,26 +440,25 @@ export function ServiceEditPage() {
                         </FormItem>
                       )}
                     />
-
-                    <FormField
-                      control={form.control}
-                      name="allowed_principals"
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Allowed Principals</FormLabel>
-                          <FormControl>
-                            <Input placeholder="ubuntu, deploy" {...field} />
-                          </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Comma-separated SSH usernames NyxID is allowed to
-                            sign.
-                          </p>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
-                  </div>
-                )}
+                  )}
+                  <FormField
+                    control={form.control}
+                    name="allowed_principals"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Allowed Principals</FormLabel>
+                        <FormControl>
+                          <Input placeholder="ubuntu, deploy" {...field} />
+                        </FormControl>
+                        <p className="text-xs text-muted-foreground">
+                          Comma-separated SSH usernames allowed for this
+                          service.
+                        </p>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
               </>
             ) : (
               <>
@@ -866,10 +752,9 @@ export function ServiceEditPage() {
                             Headers NyxID injects on every proxied request for
                             this service. Non-overridable headers replace
                             caller-supplied values; overridable ones yield to
-                            them. Sensitive is a UI redaction flag only —
-                            values are stored plaintext in v1, so do not place
-                            real secrets here (use the service auth method
-                            instead).
+                            them. Sensitive is a UI redaction flag only — values
+                            are stored plaintext in v1, so do not place real
+                            secrets here (use the service auth method instead).
                           </p>
                         </div>
                         <FormField
@@ -910,8 +795,14 @@ export function ServiceEditPage() {
                               ["supports_proxy_read", "Proxy Read"],
                               ["supports_proxy_write", "Proxy Write"],
                               ["supports_proxy_binary_upload", "Binary Upload"],
-                              ["supports_direct_downstream_auth", "Direct Downstream Auth"],
-                              ["supports_authoring_via_nyx", "Authoring via NyxID"],
+                              [
+                                "supports_direct_downstream_auth",
+                                "Direct Downstream Auth",
+                              ],
+                              [
+                                "supports_authoring_via_nyx",
+                                "Authoring via NyxID",
+                              ],
                               ["supports_websocket", "WebSocket"],
                               ["supports_streaming", "Streaming"],
                             ] as const
@@ -929,9 +820,7 @@ export function ServiceEditPage() {
                               <Switch
                                 id={`cap-${key}`}
                                 checked={form.watch(key) ?? false}
-                                onCheckedChange={(v) =>
-                                  form.setValue(key, v)
-                                }
+                                onCheckedChange={(v) => form.setValue(key, v)}
                               />
                             </div>
                           ))}
@@ -960,9 +849,7 @@ export function ServiceEditPage() {
                         </Label>
                         <Switch
                           id="forward-access-token"
-                          checked={
-                            form.watch("forward_access_token") ?? false
-                          }
+                          checked={form.watch("forward_access_token") ?? false}
                           onCheckedChange={(v) =>
                             form.setValue("forward_access_token", v)
                           }
@@ -971,7 +858,16 @@ export function ServiceEditPage() {
                     </div>
 
                     <Separator className="my-2" />
-                    {user?.is_admin && <PlatformServiceFields service={service} credentialSupported={service.auth_method !== "oidc" && (service.auth_method !== "none" || Boolean(service.provider_config_id))} />}
+                    {user?.is_admin && (
+                      <PlatformServiceFields
+                        service={service}
+                        credentialSupported={
+                          service.auth_method !== "oidc" &&
+                          (service.auth_method !== "none" ||
+                            Boolean(service.provider_config_id))
+                        }
+                      />
+                    )}
                     <div className="space-y-4">
                       <div className="space-y-1">
                         <h3 className="text-[13px] font-semibold">Billing</h3>
@@ -979,8 +875,8 @@ export function ServiceEditPage() {
                           Services are free by default: usage is metered for
                           observability but never charged. Enable platform
                           billing to reserve and charge wallet credits for
-                          requests to this service at the plan&apos;s
-                          platform rates.
+                          requests to this service at the plan&apos;s platform
+                          rates.
                         </p>
                       </div>
 
@@ -1009,16 +905,23 @@ export function ServiceEditPage() {
                             Charge only NyxID-provided credentials
                           </Label>
                           <p className="text-xs text-muted-foreground">
-                            Charge NyxID master keys and shared OAuth apps. Users
-                            bringing their own credentials are metered for
+                            Charge NyxID master keys and shared OAuth apps.
+                            Users bringing their own credentials are metered for
                             observability without platform charges.
                           </p>
                         </div>
                         <Switch
                           id="platform-charge-nyxid-credentials-only"
-                          checked={form.watch("platform_charge_nyxid_credentials_only") ?? false}
+                          checked={
+                            form.watch(
+                              "platform_charge_nyxid_credentials_only",
+                            ) ?? false
+                          }
                           onCheckedChange={(v) =>
-                            form.setValue("platform_charge_nyxid_credentials_only", v)
+                            form.setValue(
+                              "platform_charge_nyxid_credentials_only",
+                              v,
+                            )
                           }
                         />
                       </div>
@@ -1095,9 +998,9 @@ export function ServiceEditPage() {
                         </p>
                       )}
                       <p className="text-xs text-muted-foreground">
-                        Auto meters tokens for llm- services, bytes for SSH
-                        and WebSocket connections, and requests otherwise. An
-                        empty price keeps the Lago-authored plan rate.
+                        Auto meters tokens for llm- services, bytes for SSH and
+                        WebSocket connections, and requests otherwise. An empty
+                        price keeps the Lago-authored plan rate.
                       </p>
                     </div>
 
@@ -1163,7 +1066,12 @@ export function ServiceEditPage() {
 
             <FormSubmitErrors className="pt-2 text-right" />
             <div className="flex items-center justify-end gap-3 pt-4">
-              <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
+              <Button
+                variant="primary"
+                type="submit"
+                isLoading={updateMutation.isPending}
+                disabled={stale || !form.formState.isDirty}
+              >
                 Save Changes
               </Button>
               <Button

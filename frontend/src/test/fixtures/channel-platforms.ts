@@ -21,4 +21,13 @@ export const platformFixtures: ChannelPlatformDescriptor[] = [
     managed_onboarding: { flow: "meta_embedded_signup", provider: "meta", bootstrap_fields: [], completion_fields: [] } },
   { ...platformFixture("x", []), managed_only: true, ingestion: { mode: "poll", min_interval_secs: 60 },
     managed_onboarding: { flow: "oauth_connection", provider: "twitter", bootstrap_fields: [], completion_fields: [] } },
+  { ...platformFixture("aurinko", [field("bot_token", true, true, true), field("app_secret", true, true, true)]),
+    display_name: "Aurinko Email",
+    capabilities: { initiated_send: false, reply_to: true, thread: false, edit: false, media: { inbound: [], outbound: [] } },
+    registration: {
+      ...platformFixture("aurinko").registration,
+      fields: [field("bot_token", true, true, true), field("app_secret", true, true, true)],
+      setup_instructions: ["AI Service and channel bot tokens are stored separately."],
+    },
+  },
 ];

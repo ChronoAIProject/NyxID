@@ -266,3 +266,7 @@ stored, defaulted tombstone and is not a client inference capability. Admin cata
 responses additionally expose `legacy_public_master`; editors render such absent
 platform configurations as enabled/public (implicit). Gateway-URL providers never
 advertise an available platform key.
+
+## Aurinko email operations
+
+The `api-aurinko` catalog entry uses the `aurinko` hosted overlay and seeds twelve concrete operations from documented Aurinko account/email/draft contracts. The base is `https://api.aurinko.io`; paths include `/v1`. Authentication is the owner's account Bearer token. Writes carry approval/risk annotations and do not claim upstream idempotency. Aurinko publishes a machine-readable OpenAPI specification and is included in the existing drift map. See [Aurinko integration](./AURINKO_INTEGRATION.md) for connection, permissions, and channel setup.

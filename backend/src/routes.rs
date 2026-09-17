@@ -829,7 +829,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/feature-flags/{flag_key}/metadata",
-            put(handlers::admin_feature_flags::update_feature_flag_metadata),
+            put(handlers::admin_feature_flags::update_feature_flag_metadata)
+                .patch(handlers::admin_feature_flags::patch_feature_flag_metadata),
         )
         .route(
             "/users",
@@ -1824,6 +1825,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route("/options/{option_set}", get(handlers::options::get_options))
         .route(
             "/channel-bots/telegram-new/claims/preview",
             post(handlers::telegram_new::preview_claim),
@@ -2136,6 +2138,10 @@ mod retirement_tests {
             ("PUT", "/api/v1/admin/platform-ops/x_search"),
             ("GET", "/api/v1/admin/platform-ops/vendor-templates"),
             ("POST", "/api/v1/admin/platform-ops/vendor-templates"),
+            (
+                "PATCH",
+                "/api/v1/admin/platform-ops/vendor-templates/legacy-template",
+            ),
         ] {
             let response = app
                 .clone()

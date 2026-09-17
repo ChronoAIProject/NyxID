@@ -2115,7 +2115,7 @@ mod tests {
                 .await
                 .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(json["platforms"].as_array().unwrap().len(), 9);
+            assert_eq!(json["platforms"].as_array().unwrap().len(), 10);
         }
         for token in [&delegated, &service] {
             let response = delegated_router_response(

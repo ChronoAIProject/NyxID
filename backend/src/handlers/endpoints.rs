@@ -36,15 +36,39 @@ pub struct CreateEndpointRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateEndpointRequest {
     pub name: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub description: Option<Option<String>>,
     pub method: Option<String>,
     pub path: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub parameters: Option<Option<serde_json::Value>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub request_body_schema: Option<Option<serde_json::Value>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub request_content_type: Option<Option<String>>,
     pub request_body_required: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub response_description: Option<Option<String>>,
     pub response: Option<OperationResponseContract>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub risk: Option<Option<EndpointRisk>>,
     pub supports_idempotency_key: Option<bool>,
     pub is_active: Option<bool>,
@@ -394,6 +418,25 @@ mod tests {
     };
     use crate::models::service_endpoint::ServiceEndpoint;
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+
+    #[test]
+    fn endpoint_update_distinguishes_omitted_and_cleared_fields() {
+        let unchanged: UpdateEndpointRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(unchanged.description.is_none());
+        assert!(unchanged.parameters.is_none());
+        let cleared: UpdateEndpointRequest = serde_json::from_value(serde_json::json!({
+            "description": null, "parameters": null, "request_body_schema": null,
+            "request_content_type": null, "response_description": null, "risk": null
+        }))
+        .unwrap();
+        assert_eq!(cleared.description, Some(None));
+        assert_eq!(cleared.parameters, Some(None));
+        assert_eq!(cleared.request_body_schema, Some(None));
+        assert_eq!(cleared.request_content_type, Some(None));
+        assert_eq!(cleared.response_description, Some(None));
+        assert!(matches!(cleared.risk, Some(None)));
+    }
 
     #[test]
     fn validate_request_content_type_accepts_valid_values() {

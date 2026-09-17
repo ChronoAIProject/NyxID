@@ -671,3 +671,77 @@ mod tests {
         assert!(matches!(err, AppError::ValidationError(_)));
     }
 }
+
+#[cfg(test)]
+mod custom_scope_regression_tests {
+    use super::*;
+    use crate::test_utils::{connect_test_database, test_app_state};
+
+    #[tokio::test]
+    async fn custom_scopes_remain_permissive_and_token_subsets_are_exact() {
+        let db = connect_test_database("sa_custom_scope_compat")
+            .await
+            .expect("MongoDB required");
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        let original = "custom:read 未知:scope proxy:* custom:read";
+        let (sa, secret) =
+            create_service_account(&db, "Custom bot", None, original, &[], None, &owner)
+                .await
+                .unwrap();
+        assert_eq!(sa.allowed_scopes, original);
+        let token = authenticate_client_credentials(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &sa.client_id,
+            &secret,
+            Some("custom:read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(token.scope, "custom:read");
+        let claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &token.access_token).unwrap();
+        assert!(
+            authenticate_client_credentials(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &sa.client_id,
+                &secret,
+                Some("proxy")
+            )
+            .await
+            .is_err()
+        );
+        let updated = "new:custom proxy:service:not-a-grant";
+        let sa = update_service_account(&db, &sa.id, None, None, Some(updated), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(sa.allowed_scopes, updated);
+        let record = db
+            .collection::<ServiceAccountToken>(SA_TOKENS)
+            .find_one(doc! { "jti": &claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !record.revoked,
+            "Editing suggestions must not change existing token semantics"
+        );
+        assert_eq!(record.scope, "custom:read");
+        let current = authenticate_client_credentials(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &sa.client_id,
+            &secret,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(current.scope, updated);
+        assert!(!crate::mw::auth::scope_allows_rest_proxy(&current.scope));
+    }
+}

@@ -917,8 +917,12 @@ export function ChannelBotDetailPage() {
 
   async function handleDelete() {
     try {
-      await deleteMutation.mutateAsync(botId);
-      toast.success("Bot deleted");
+      const result = await deleteMutation.mutateAsync(botId);
+      if (result?.webhook_cleanup === "failed") {
+        toast.warning("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard.");
+      } else {
+        toast.success("Bot deleted");
+      }
       void navigate({ to: "/channel-bots" });
     } catch (err) {
       toast.error(

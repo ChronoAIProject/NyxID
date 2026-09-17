@@ -1,3 +1,6 @@
+import { optionsResponse, optionsWrapper } from "@/test-utils/options";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -65,6 +68,8 @@ const listWithAccount: ServiceAccountListResponse = {
 describe("OrgServiceAccountsTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useAuthStore.setState({ user: { id: "actor" } as User });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => new Response(JSON.stringify(optionsResponse(String(url)))));
     mocks.useServiceAccounts.mockReturnValue({
       data: emptyList,
       isLoading: false,
@@ -75,7 +80,7 @@ describe("OrgServiceAccountsTab", () => {
       name: "Deploy Bot",
       client_id: "nyx_sa_deploy",
       client_secret: "secret-once",
-      allowed_scopes: "openid",
+      allowed_scopes: "roles",
       role_ids: [],
       is_active: true,
       created_at: "2026-04-20T00:00:00Z",
@@ -84,7 +89,7 @@ describe("OrgServiceAccountsTab", () => {
   });
 
   it("renders an org-owned empty state", () => {
-    render(<OrgServiceAccountsTab orgId="org-1" orgName="Acme Org" />);
+    render(<OrgServiceAccountsTab orgId="org-1" orgName="Acme Org" />, { wrapper: optionsWrapper() });
 
     expect(
       screen.getByText("No service accounts owned by Acme Org."),
@@ -100,7 +105,7 @@ describe("OrgServiceAccountsTab", () => {
       error: null,
     });
 
-    render(<OrgServiceAccountsTab orgId="org-1" orgName="Acme Org" />);
+    render(<OrgServiceAccountsTab orgId="org-1" orgName="Acme Org" />, { wrapper: optionsWrapper() });
     await user.click(screen.getByText("CI Bot"));
 
     expect(mocks.navigate).toHaveBeenCalledWith({
@@ -112,7 +117,7 @@ describe("OrgServiceAccountsTab", () => {
   it("injects target_org_id when creating a service account", async () => {
     const user = userEvent.setup();
 
-    render(<OrgServiceAccountsTab orgId="org-1" orgName="Acme Org" />);
+    render(<OrgServiceAccountsTab orgId="org-1" orgName="Acme Org" />, { wrapper: optionsWrapper() });
     await user.click(
       screen.getByRole("button", { name: /create service account/i }),
     );
@@ -121,14 +126,15 @@ describe("OrgServiceAccountsTab", () => {
     expect(screen.getByText("Acme Org")).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Name"), "Deploy Bot");
-    await user.type(screen.getByLabelText("Allowed Scopes"), "openid");
+    await user.click(screen.getByRole("combobox", { name: "Allowed scopes" }));
+    await user.click(await screen.findByRole("option", { name: /^roles$/ }));
     await user.click(screen.getByRole("button", { name: /^Create$/i }));
 
     await waitFor(() => {
       expect(mocks.createMutateAsync).toHaveBeenCalledWith({
         name: "Deploy Bot",
         description: undefined,
-        allowed_scopes: "openid",
+        allowed_scopes: "roles",
         role_ids: undefined,
         rate_limit_override: undefined,
         target_org_id: "org-1",

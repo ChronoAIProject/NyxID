@@ -710,6 +710,16 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             .delete_many(doc! { "conversation_id": { "$in": &conv_id_array } })
             .await?;
     }
+    for collection in [
+        crate::models::channel_email::SUBSCRIPTIONS,
+        crate::models::channel_email::SENDS,
+        crate::models::channel_email::BATCHES,
+        crate::models::channel_email::RECEIPTS,
+    ] {
+        db.collection::<bson::Document>(collection)
+            .delete_many(doc! { "user_id": org_user_id })
+            .await?;
+    }
     db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;

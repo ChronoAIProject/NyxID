@@ -2636,6 +2636,11 @@ Get a single provider configuration by ID.
 
 Returns a single provider object (same shape as list response items).
 
+Provider responses include the saved `authorization_url`, `token_url`, and
+`revocation_url`, plus `has_client_id` and `has_client_secret` booleans. These
+allow editors to display configured values without returning stored client
+credentials. Device-flow URLs remain available in their corresponding fields.
+
 **Errors:**
 - `1003 not_found` -- Provider does not exist
 
@@ -2693,6 +2698,11 @@ Update a provider configuration. Only the provided fields are updated (partial u
 Returns the updated provider object.
 
 Structured `revocation` uses the same fields and validation rules as provider creation. An omitted field preserves the current configuration; explicit `"revocation": null` clears both `revocation` and deprecated `revocation_url`. RFC 7009 configurations keep the alias synchronized, while vendor-specific styles clear the alias.
+
+An explicit empty `default_scopes` array clears the scope list. Trimmed-empty
+`description`, `api_key_instructions`, `api_key_url`, `icon_url`, and
+`documentation_url` strings remove the corresponding optional stored field.
+Blank replacement credentials should be omitted to preserve existing secrets.
 
 **Errors:**
 - `1002 forbidden` -- User is not an admin
@@ -5160,9 +5170,56 @@ curl -X POST http://localhost:3001/api/v1/auth/mfa/confirm \
 
 ---
 
+### Provider-linked service configuration
+
+Both provider/service endpoints require admin access:
+`GET /api/v1/providers/{provider_id}/services` lists canonical links and legacy
+provider requirements. `PUT /api/v1/providers/{provider_id}/services/{service_id}` links an existing catalog
+service; `POST /api/v1/services` also accepts `provider_config_id` for atomic
+creation/linking. A service already linked to another provider is not rebound.
+Direct-auth services retain their authentication method without adding provider
+requirements.
+
+Service updates accept a write-only `credential` (blank preserves), `platform_key`,
+credential-class billing lanes, and `proxy_operation_policy`. Omitted policy
+preserves; null clears; `{ "rules": [] }` denies every endpoint. Rules contain
+an HTTP `method` and absolute `path_template`, and apply to all service bindings.
+New shared keys default disabled/restricted. Admin response
+`credential_configured` is true/false after authorized inspection, or null when
+unreadable; non-admin responses return null without inspecting the credential.
+
+Platform Operations routes and its three named MCP operation tools are removed.
+See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md) for
+linking, access, billing, and migration behavior, and [Admin form save
+behavior](ADMIN_FORM_SAFETY.md) for sparse updates and confirmation.
+
 ### Admin
 
 All admin endpoints require the authenticated user to have `is_admin = true`. Admin endpoints include self-protection: admins cannot change their own role, disable themselves, or delete themselves.
+
+#### PATCH /api/v1/admin/feature-flags/{flag_key}/metadata
+
+Update only the supplied metadata fields for a registered feature flag.
+
+**Auth:** Admin
+
+| Field | Type | Required | Behavior |
+| --- | --- | --- | --- |
+| `description` | string/null | No | Omission preserves; null or trimmed blank clears the custom description and displays the code-declared fallback. |
+| `owner` | string/null | No | Omission preserves; null or trimmed blank clears the owner. |
+
+Unknown fields are rejected. An empty object leaves the metadata unchanged.
+An unknown flag key returns a bad-request error.
+
+**Response (200):** The saved metadata descriptor: `key`, effective `description`,
+`code_description`, nullable `custom_description`, nullable `owner`, and nullable
+`metadata_updated_at` / `metadata_updated_by`.
+
+For example, `{"owner":"Identity team"}` changes only the owner. The existing
+`PUT` route at this path keeps its replacement contract: omitted fields are
+cleared. Clients that need sparse updates should use `PATCH`.
+
+---
 
 #### GET /api/v1/admin/users
 
@@ -7845,6 +7902,16 @@ The connect body uses a decimal string for `telegram_bot_id` and an integer for 
 ---
 
 ## Webhooks
+
+### Aurinko email channel
+
+The existing channel APIs accept `platform: "aurinko"`. The platform descriptor is available through `GET /api/v1/channel-platforms`, including account-token and signing-secret fields, setup instructions, and capabilities. Registration uses `POST /api/v1/channel-bots` with `label`, `bot_token`, `app_secret`, and optional `target_org_id`. Credential rotation uses the existing PATCH endpoint; `POST /api/v1/channel-bots/{id}/verify` repairs the bound subscription without changing its mailbox.
+
+`POST /api/v1/webhooks/channel/aurinko/{id}` verifies Aurinko's signed raw request before returning a plaintext `validationToken` challenge or processing a notification. Successful/ignored notifications return 200; verification failures return 401, malformed requests 400, and recoverable failures 503 with `Retry-After: 10`. It never returns Aurinko's unsubscribe signal, 422.
+
+Agents reply through `POST /api/v1/channel-relay/reply` with `{"message_id":"INBOUND_UUID","reply":{"text":"Reply text"}}`, using the assigned agent key or message-bound reply token. The original email determines the single recipient; recipient overrides, channel attachments, initiated sends, and edits are unsupported. A durable send barrier prevents automatic resubmission after an uncertain provider POST.
+
+Aurinko bot deletion returns HTTP 200 with `{"webhook_cleanup":"removed"}` or `{"webhook_cleanup":"failed"}`; existing platforms retain HTTP 204. Both outcomes deactivate the bot locally. Failed cleanup requires removal of the remaining exact callback subscription in Aurinko or a later deletion retry. See [Aurinko integration](AURINKO_INTEGRATION.md) for the complete contract and independent AI Service setup.
 
 ### Inbound Triggers
 

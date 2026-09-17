@@ -4433,7 +4433,7 @@ pub enum ServiceAccountCommands {
         /// Human-readable name for this service account
         #[arg(long)]
         name: String,
-        /// Space-separated OAuth scopes the SA may request (e.g. "openid profile")
+        /// Space-separated service-account scopes (e.g. "llm:proxy roles" or "custom:read")
         #[arg(long)]
         scopes: String,
         /// Optional description
@@ -4779,7 +4779,7 @@ pub enum ChannelBotCommands {
         after_help = "Discover required fields and capabilities with: nyxid channel-bot platforms --output json"
     )]
     Register {
-        /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp
+        /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp, aurinko (email)
         #[arg(long)]
         platform: String,
         /// Complete managed onboarding in your browser
@@ -4851,16 +4851,16 @@ pub enum ChannelBotCommands {
         /// Lark/Feishu App ID
         #[arg(long)]
         app_id: Option<String>,
-        /// Lark/Feishu App Secret, Slack signing secret, or Meta App Secret
+        /// Lark/Feishu App Secret, Slack/Aurinko signing secret, or Meta App Secret
         #[arg(long, hide = true)]
         app_secret: Option<String>,
         /// Read replacement app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
-        /// Replacement bot access token (WhatsApp); prefer --token-env
+        /// Replacement account/bot access token (Aurinko, WhatsApp); prefer --token-env
         #[arg(long, hide = true)]
         bot_token: Option<String>,
-        /// Read replacement bot access token from this environment variable (WhatsApp)
+        /// Read replacement bot access token from this environment variable (Aurinko, WhatsApp)
         #[arg(long)]
         token_env: Option<String>,
         #[command(flatten)]

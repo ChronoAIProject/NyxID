@@ -1,3 +1,6 @@
+import { optionsResponse, optionsWrapper } from "@/test-utils/options";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,12 +9,14 @@ import {
   type AssistantServiceAccountAction,
 } from "./assistant-service-account-action-dialog";
 
-const { mockGet, mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockOptions } = vi.hoisted(() => ({
   mockGet: vi.fn(),
+  mockOptions: vi.fn(),
   mockPost: vi.fn(),
 }));
 vi.mock("@/lib/api-client", () => ({
   api: { get: mockGet, post: mockPost },
+  apiClient: mockOptions,
   ApiError: class ApiError extends Error {
     readonly status: number;
     constructor(status: number) {
@@ -50,6 +55,7 @@ function renderDialog(
       params={params}
       onComplete={vi.fn()}
     />,
+    { wrapper: optionsWrapper() },
   );
 }
 
@@ -64,6 +70,8 @@ async function submit(destructive = false) {
 }
 
 beforeEach(() => {
+  useAuthStore.setState({ user: { id: "actor" } as User });
+  mockOptions.mockImplementation(async (url: string) => optionsResponse(url));
   mockGet.mockReset();
   mockPost.mockReset();
 });

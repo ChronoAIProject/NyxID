@@ -1,5 +1,5 @@
 import { serviceCredentialStatus } from "@/lib/service-credential-status";
-import { useFormContext } from "react-hook-form";
+import { useController, useFormContext } from "react-hook-form";
 import type { SharedServiceFormData } from "@/schemas/services";
 import type { DownstreamService } from "@/types/api";
 import { UserPicker } from "@/components/admin-credits/credit-pickers";
@@ -35,7 +35,12 @@ export function PlatformServiceFields({
   readonly credentialSupported?: boolean;
 }) {
   const form = useFormContext<SharedServiceFormData>();
-  const policy = form.watch("proxy_operation_policy");
+  // Register the composite value so removing the last rule still marks it dirty.
+  const { field: policyField } = useController({
+    control: form.control,
+    name: "proxy_operation_policy",
+  });
+  const policy = policyField.value;
   const inference = form.watch("inference");
   const platform = form.watch("platform_key") ?? {
     enabled: service?.legacy_public_master ?? false,

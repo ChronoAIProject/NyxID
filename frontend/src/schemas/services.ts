@@ -391,6 +391,7 @@ export const updateServiceSchema = z
     supports_streaming: z.boolean().optional(),
     host: optionalString,
     port: optionalString,
+    ssh_auth_mode: sshAuthModeSchema.optional(),
     certificate_auth_enabled: z.boolean().optional(),
     certificate_ttl_minutes: optionalString,
     allowed_principals: optionalString,
@@ -422,7 +423,9 @@ export const updateServiceSchema = z
       {
         host: value.host,
         port: value.port,
-        certificate_auth_enabled: value.certificate_auth_enabled,
+        certificate_auth_enabled: value.ssh_auth_mode
+          ? value.ssh_auth_mode === "cert"
+          : value.certificate_auth_enabled,
         certificate_ttl_minutes: value.certificate_ttl_minutes,
         allowed_principals: value.allowed_principals,
       },

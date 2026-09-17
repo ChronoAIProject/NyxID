@@ -185,7 +185,7 @@ nyxid oauth bindings revoke <hash> [--yes]
 Machine-to-machine identities for the OAuth2 `client_credentials` grant. The `client_secret` is shown once at create / rotate.
 
 ```bash
-nyxid service-account create --name <name> --scopes "openid profile" [--org <id|slug|name>]
+nyxid service-account create --name <name> --scopes "llm:proxy roles" [--org <id|slug|name>]
 nyxid service-account list [--org <id|slug|name>] [--search <q>]
 nyxid service-account show <id>
 nyxid service-account update <id> [--name|--scopes|--is-active <bool>]

@@ -1,3 +1,4 @@
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
@@ -60,7 +61,14 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Copy, Check, Ban, Link2, MoreVertical, ArrowUpRight } from "lucide-react";
+import {
+  Copy,
+  Check,
+  Ban,
+  Link2,
+  MoreVertical,
+  ArrowUpRight,
+} from "lucide-react";
 import { MysteryBoxIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import type { InviteCode } from "@/types/admin";
@@ -83,7 +91,11 @@ export function AdminInviteCodesPage() {
 
   const search: { view?: string } = useSearch({ strict: false });
   const navigate = useNavigate();
-  const view = parseTab(search.view, INVITE_CODES_TABS, INVITE_CODES_TAB_DEFAULT);
+  const view = parseTab(
+    search.view,
+    INVITE_CODES_TABS,
+    INVITE_CODES_TAB_DEFAULT,
+  );
   function setView(value: string) {
     void navigate({
       to: "/admin/invite-codes",
@@ -207,36 +219,45 @@ export function AdminInviteCodesPage() {
     }
   }
 
-  async function handleSaveNote() {
+  const noteReview = useChangeReview<{ id: string; note: string }>(
+    async (variables) => {
+      try {
+        const updated = await updateMutation.mutateAsync({
+          id: variables.id,
+          body: { note: variables.note },
+        });
+        if (selectedCodeId === variables.id) {
+          // Sync the ref so noteHasChanges flips false now that the saved value
+          // is the new baseline. Without this the Save button would stay enabled
+          // because the ref still points at the value we loaded when the drawer
+          // first opened.
+          lastSyncedNoteRef.current = updated.note ?? "";
+        }
+        toast.success("Note updated");
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          toast.error("Save timed out after 10 seconds. Try again.");
+        } else if (err instanceof ApiError) {
+          toast.error(err.message);
+        } else {
+          toast.error("Failed to update note");
+        }
+        throw err;
+      }
+    },
+    false,
+    selectedCodeId ?? "",
+  );
+
+  function handleSaveNote() {
     if (!selectedCode || !noteHasChanges) return;
-    // Capture the id at call time. Even though the row-click / drawer-close
-    // guards below make `selectedCodeId` immutable while `isSaving === true`,
-    // keeping an explicit local + post-await equality check means a future
-    // refactor that relaxes those guards can't silently reintroduce the
-    // cross-row race (ref gets written for the wrong code after navigation).
-    const savingId = selectedCode.id;
-    try {
-      const updated = await updateMutation.mutateAsync({
-        id: savingId,
-        body: { note: noteDraft },
-      });
-      if (selectedCodeId === savingId) {
-        // Sync the ref so noteHasChanges flips false now that the saved value
-        // is the new baseline. Without this the Save button would stay enabled
-        // because the ref still points at the value we loaded when the drawer
-        // first opened.
-        lastSyncedNoteRef.current = updated.note ?? "";
-      }
-      toast.success("Note updated");
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        toast.error("Save timed out after 10 seconds. Try again.");
-      } else if (err instanceof ApiError) {
-        toast.error(err.message);
-      } else {
-        toast.error("Failed to update note");
-      }
-    }
+    noteReview.review({ id: selectedCode.id, note: noteDraft }, [
+      {
+        field: "Invite note",
+        before: lastSyncedNoteRef.current || "Not set",
+        after: noteDraft || "Not set",
+      },
+    ]);
   }
 
   function getStatusBadge(ic: InviteCode) {
@@ -248,6 +269,7 @@ export function AdminInviteCodesPage() {
 
   return (
     <div className="space-y-8">
+      {noteReview.dialog}
       <PageHeader
         title="Invite Codes"
         description="Create and manage invite codes that gate new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
@@ -262,7 +284,10 @@ export function AdminInviteCodesPage() {
           </TabsList>
           {canWrite && view === "codes" && (
             <div className="flex shrink-0 items-center gap-4 sm:pb-1">
-              <AddCtaButton label="Create Invite Code" onClick={openCreateDialog} />
+              <AddCtaButton
+                label="Create Invite Code"
+                onClick={openCreateDialog}
+              />
             </div>
           )}
         </div>
@@ -281,162 +306,56 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground">Failed to load invite codes</p>
-                <p className="text-xs text-muted-foreground">Please try again later.</p>
+                <p className="text-[12px] font-medium text-muted-foreground">
+                  Failed to load invite codes
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Please try again later.
+                </p>
               </div>
             </div>
           ) : inviteCodes.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground">No invite codes found</p>
-                <p className="text-xs text-muted-foreground">Create one to allow a new user to register.</p>
+                <p className="text-[12px] font-medium text-muted-foreground">
+                  No invite codes found
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Create one to allow a new user to register.
+                </p>
               </div>
             </div>
           ) : (
             <>
-            {/* Mobile cards */}
-            <div className="flex flex-col gap-3 md:hidden">
-              {inviteCodes.map((ic) => (
-                <div
-                  key={ic.id}
-                  className={cn(
-                    "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer",
-                    isSaving && "pointer-events-none opacity-60",
-                  )}
-                  onClick={() => {
-                    if (isSaving) return;
-                    setSelectedCodeId(ic.id);
-                  }}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium font-mono text-foreground truncate">
-                        {ic.code}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {getStatusBadge(ic)}
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <MoreVertical className="h-3 w-3" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleCopyCode(ic.code, ic.id);
-                            }}
-                          >
-                            <Copy className="h-3 w-3" />
-                            Copy code
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleCopyLink(ic.code, ic.id);
-                            }}
-                          >
-                            <Link2 className="h-3 w-3" />
-                            Copy invite link
-                          </DropdownMenuItem>
-                          {canWrite && ic.is_active && (
-                            <DropdownMenuItem
-                              className="text-destructive focus:text-destructive"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setDeactivateTarget(ic);
-                              }}
-                            >
-                              <Ban className="h-3 w-3" />
-                              Deactivate
-                            </DropdownMenuItem>
-                          )}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  </div>
-                  <div className="mt-2 text-xs text-muted-foreground">
-                    <span className="tabular-nums">
-                      {String(ic.used_count)}/{String(ic.max_uses)} uses
-                    </span>
-                    {ic.note && (
-                      <>
-                        <span className="text-border mx-1.5">|</span>
-                        <span className="truncate">{ic.note}</span>
-                      </>
+              {/* Mobile cards */}
+              <div className="flex flex-col gap-3 md:hidden">
+                {inviteCodes.map((ic) => (
+                  <div
+                    key={ic.id}
+                    className={cn(
+                      "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer",
+                      isSaving && "pointer-events-none opacity-60",
                     )}
-                  </div>
-                  <div className="mt-1.5 text-xs text-muted-foreground">
-                    <span>Created {formatDate(ic.created_at)}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Desktop table */}
-            <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Code</TableHead>
-                    <TableHead>Uses</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Note</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead className="w-[100px]">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {inviteCodes.map((ic) => (
-                    <TableRow
-                      key={ic.id}
-                      onClick={() => {
-                        if (isSaving) return;
-                        setSelectedCodeId(ic.id);
-                      }}
-                      className={cn(
-                        "cursor-pointer",
-                        isSaving && "pointer-events-none opacity-60",
-                      )}
-                    >
-                      <TableCell>
-                        <span className="font-mono text-sm font-medium text-foreground">
+                    onClick={() => {
+                      if (isSaving) return;
+                      setSelectedCodeId(ic.id);
+                    }}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium font-mono text-foreground truncate">
                           {ic.code}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        <span className="text-sm tabular-nums text-muted-foreground">
-                          {String(ic.used_count)}/{String(ic.max_uses)}
-                        </span>
-                      </TableCell>
-                      <TableCell>{getStatusBadge(ic)}</TableCell>
-                      <TableCell>
-                        {ic.note ? (
-                          <span className="text-[11px] text-text-tertiary">
-                            {ic.note}
-                          </span>
-                        ) : (
-                          <span className="text-muted-foreground">--</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {formatDate(ic.created_at)}
-                      </TableCell>
-                      <TableCell>
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {getStatusBadge(ic)}
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
                               variant="ghost"
                               size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                              className="h-7 w-7 text-muted-foreground hover:text-foreground"
                               onClick={(e) => e.stopPropagation()}
                             >
                               <MoreVertical className="h-3 w-3" />
@@ -475,12 +394,126 @@ export function AdminInviteCodesPage() {
                             )}
                           </DropdownMenuContent>
                         </DropdownMenu>
-                      </TableCell>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      <span className="tabular-nums">
+                        {String(ic.used_count)}/{String(ic.max_uses)} uses
+                      </span>
+                      {ic.note && (
+                        <>
+                          <span className="text-border mx-1.5">|</span>
+                          <span className="truncate">{ic.note}</span>
+                        </>
+                      )}
+                    </div>
+                    <div className="mt-1.5 text-xs text-muted-foreground">
+                      <span>Created {formatDate(ic.created_at)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop table */}
+              <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Code</TableHead>
+                      <TableHead>Uses</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Note</TableHead>
+                      <TableHead>Created</TableHead>
+                      <TableHead className="w-[100px]">Actions</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+                  </TableHeader>
+                  <TableBody>
+                    {inviteCodes.map((ic) => (
+                      <TableRow
+                        key={ic.id}
+                        onClick={() => {
+                          if (isSaving) return;
+                          setSelectedCodeId(ic.id);
+                        }}
+                        className={cn(
+                          "cursor-pointer",
+                          isSaving && "pointer-events-none opacity-60",
+                        )}
+                      >
+                        <TableCell>
+                          <span className="font-mono text-sm font-medium text-foreground">
+                            {ic.code}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-sm tabular-nums text-muted-foreground">
+                            {String(ic.used_count)}/{String(ic.max_uses)}
+                          </span>
+                        </TableCell>
+                        <TableCell>{getStatusBadge(ic)}</TableCell>
+                        <TableCell>
+                          {ic.note ? (
+                            <span className="text-[11px] text-text-tertiary">
+                              {ic.note}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">--</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {formatDate(ic.created_at)}
+                        </TableCell>
+                        <TableCell>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <MoreVertical className="h-3 w-3" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleCopyCode(ic.code, ic.id);
+                                }}
+                              >
+                                <Copy className="h-3 w-3" />
+                                Copy code
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleCopyLink(ic.code, ic.id);
+                                }}
+                              >
+                                <Link2 className="h-3 w-3" />
+                                Copy invite link
+                              </DropdownMenuItem>
+                              {canWrite && ic.is_active && (
+                                <DropdownMenuItem
+                                  className="text-destructive focus:text-destructive"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDeactivateTarget(ic);
+                                  }}
+                                >
+                                  <Ban className="h-3 w-3" />
+                                  Deactivate
+                                </DropdownMenuItem>
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
             </>
           )}
         </TabsContent>
@@ -499,8 +532,12 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground">Failed to load invite codes</p>
-                <p className="text-xs text-muted-foreground">Please try again later.</p>
+                <p className="text-[12px] font-medium text-muted-foreground">
+                  Failed to load invite codes
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Please try again later.
+                </p>
               </div>
             </div>
           ) : (
@@ -642,7 +679,11 @@ export function AdminInviteCodesPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" variant="primary" isLoading={createMutation.isPending}>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    isLoading={createMutation.isPending}
+                  >
                     Create Invite Code
                   </Button>
                 </DialogFooter>
@@ -669,10 +710,7 @@ export function AdminInviteCodesPage() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setDeactivateTarget(null)}
-            >
+            <Button variant="outline" onClick={() => setDeactivateTarget(null)}>
               Cancel
             </Button>
             <Button
@@ -956,15 +994,22 @@ function InviteCodesByUserView({
   onOpenCode,
   isSaving,
 }: InviteCodesByUserViewProps) {
-  const redemptions = useMemo(() => flattenRedemptions(inviteCodes), [inviteCodes]);
+  const redemptions = useMemo(
+    () => flattenRedemptions(inviteCodes),
+    [inviteCodes],
+  );
 
   if (redemptions.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium text-muted-foreground">No redemptions found</p>
-          <p className="text-xs text-muted-foreground">Invite codes will appear here once they are redeemed by users.</p>
+          <p className="text-[12px] font-medium text-muted-foreground">
+            No redemptions found
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Invite codes will appear here once they are redeemed by users.
+          </p>
         </div>
       </div>
     );
@@ -1036,9 +1081,7 @@ function InviteCodesByUserView({
             {redemptions.map((r) => (
               <TableRow
                 key={r.id}
-                className={cn(
-                  isSaving && "pointer-events-none opacity-60",
-                )}
+                className={cn(isSaving && "pointer-events-none opacity-60")}
               >
                 <TableCell>
                   <UserNameLink
