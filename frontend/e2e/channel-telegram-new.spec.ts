@@ -824,7 +824,7 @@ test("Telegram secrets stay out of live telemetry and storage", async ({
   await (await fallback).close();
   await selectPlatform(page, "Telegram", "Telegram bot token");
   await dialog
-    .getByLabel("Bot Token", { exact: true })
+    .getByLabel(/^Bot token$/i)
     .fill("private-bot-token-fixture");
   await dialog.getByLabel("Label", { exact: true }).click();
   await expect
