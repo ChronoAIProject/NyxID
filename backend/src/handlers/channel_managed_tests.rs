@@ -215,7 +215,7 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
         .map(|(_, descriptor)| descriptor.provider)
         .collect();
     providers.sort_unstable();
-    assert_eq!(providers, ["meta", "telegram-new", "x"]);
+    assert_eq!(providers, ["aurinko", "meta", "telegram-new", "x"]);
 }
 
 #[tokio::test]

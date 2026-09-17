@@ -44,18 +44,33 @@ pub async fn load(
             crate::models::provider_config::COLLECTION_NAME,
         );
         let (row, auxiliary) = if has_auxiliary_fields(descriptor) {
-            // A writer transaction alone cannot prevent readers mixing two rotations.
-            let mut session = db.client().start_session().snapshot(true).await?;
-            let row = providers
-                .find_one(doc! { "slug": provider_slug })
-                .session(&mut session)
-                .await?;
-            let auxiliary = db
-                .collection::<PlatformCredential>(COLLECTION_NAME)
-                .find_one(doc! { "provider": descriptor.provider })
-                .session(&mut session)
-                .await?;
-            (row, auxiliary)
+            // Keep the snapshot pinned between reads even with no retained history window.
+            let mut session = db.client().start_session().await?;
+            session
+                .start_transaction()
+                .read_concern(mongodb::options::ReadConcern::snapshot())
+                .and_run(
+                    (
+                        providers.clone(),
+                        db.collection::<PlatformCredential>(COLLECTION_NAME),
+                        provider_slug,
+                        descriptor.provider,
+                    ),
+                    |session, (providers, auxiliary, slug, provider)| {
+                        Box::pin(async move {
+                            let row = providers
+                                .find_one(doc! { "slug": *slug })
+                                .session(&mut *session)
+                                .await?;
+                            let auxiliary = auxiliary
+                                .find_one(doc! { "provider": *provider })
+                                .session(&mut *session)
+                                .await?;
+                            Ok((row, auxiliary))
+                        })
+                    },
+                )
+                .await?
         } else {
             (
                 providers.find_one(doc! { "slug": provider_slug }).await?,
