@@ -42,7 +42,7 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
         else {
             continue; // Service not seeded on this deployment
         };
-        if is_platform_vendor_service(&service) {
+        if crate::services::retired_service_service::is_retired(&service) {
             continue;
         }
 
@@ -200,21 +200,14 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
 }
 
 pub fn should_auto_sync_service_endpoints(service: &DownstreamService) -> bool {
-    service.is_active
+    !crate::services::retired_service_service::is_retired(service)
+        && service.is_active
         && service.service_type == "http"
         && service.service_category != "internal"
         && service
             .openapi_spec_url
             .as_deref()
             .is_some_and(|url| !url.is_empty())
-}
-
-/// Platform vendor rows are credential stores, not catalog surfaces. Their
-/// reserved slug namespace lets hosted catalog overlays continue to hydrate
-/// intentional internal services such as LLM catalogs without publishing
-/// tools for operator-managed vendor credentials.
-pub fn is_platform_vendor_service(service: &DownstreamService) -> bool {
-    service.service_category == "internal" && service.slug.starts_with("platform-")
 }
 
 /// Parse and validate the hosted overlay for a slug into endpoint inputs.
@@ -266,7 +259,9 @@ mod tests {
         service.openapi_spec_url = Some("https://api.elevenlabs.io/openapi.json".to_string());
 
         assert!(!should_auto_sync_service_endpoints(&service));
-        assert!(is_platform_vendor_service(&service));
+        assert!(crate::services::retired_service_service::is_retired(
+            &service
+        ));
     }
 
     #[test]

@@ -4,6 +4,12 @@ This document describes the system architecture, component design, data flows, a
 
 ---
 
+Catalog services own shared credentials, audience grants, endpoint policy, and
+billing; providers supply authentication configuration and may back multiple
+services. Provider linking and requirement mutations are serialized through the
+service record. A small retirement guard keeps historical vendor credential
+stores inaccessible. See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md).
+
 ## Table of Contents
 
 - [System Overview](#system-overview)

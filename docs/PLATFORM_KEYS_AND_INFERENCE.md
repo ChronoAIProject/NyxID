@@ -1,5 +1,7 @@
 # Platform keys, inference discovery, and billing lanes
 
+Admin service creation, provider linking, and legacy vendor retirement are documented in [SERVICE_CONFIGURATION.md](SERVICE_CONFIGURATION.md).
+
 NyxID 0.20.0 adds catalog inference metadata and an authenticated, owner-authorized
 platform credential binding. A platform key is the catalog row's existing encrypted
 master credential. It is never a new credential store and never appears in a client

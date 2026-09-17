@@ -19,7 +19,7 @@ pub async fn create_platform_key(
         .find_one(doc! { "slug": slug, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Service is no longer available".to_string()))?;
-    if catalog_spec_sync::is_platform_vendor_service(&catalog) {
+    if crate::services::retired_service_service::is_retired(&catalog) {
         return Err(AppError::NotFound(
             "Service is no longer available".to_string(),
         ));

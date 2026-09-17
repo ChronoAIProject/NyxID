@@ -1,3 +1,4 @@
+import { ProviderServices } from "@/components/providers/provider-services";
 import { useState } from "react";
 import type { ProviderConfig } from "@/types/api";
 import { changedFields, describeChanges, sameValue } from "@/lib/form-changes";
@@ -158,6 +159,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
     <div className="space-y-8">
       <PageHeader title={`Edit ${provider.name}`} />
 
+      <ProviderServices provider={source} />
       {stale && (
         <StaleFormNotice
           onReload={() => {

@@ -33,27 +33,23 @@ their existing contracts and are outside this edit-form change.
 | Users, roles, groups, service accounts | Changed fields compared with the dialog's opening values. Edited role/permission arrays are compared with the latest observed record before confirmation. |
 | Service endpoints | The review and mutation use the same parsed JSON delta. Null clears optional fields; whitespace-only JSON formatting is a no-op. |
 | Credit allowances and schedules | Changed editable fields; immutable schedule recurrence is excluded. Replacement recipient/service selections have observed-conflict checks. Status changes also require review. |
-| Platform operations | Changed top-level settings; changed typed config is a complete block. A broken vendor binding can be disabled without decrypting its credentials; enabling still validates the binding. |
 | Flag metadata | Sparse PATCH of description/owner. Omission preserves; null or trimmed blank clears. |
-| Vendor templates | Sparse PATCH of submitted editable fields. Omitted fields preserve; auth_key_name/operation accept null. Other fields reject null and retain existing validation. Disable also requires confirmation. |
 | Feature rollout | A copied batch shows each flag, target scope/ID, and before/after override. No mutation occurs before confirmation. |
 | Anonymous public rules | Staged enabled/method/path/quota changes, sparse normalized payloads, wildcard exposure warnings, and reviewed deletion. |
 | Invite notes | Copied note and code ID are reviewed before saving. |
 
-Two additive routes provide sparse updates without changing existing clients:
+`PATCH /api/v1/admin/feature-flags/{flag_key}/metadata` provides sparse updates
+without changing existing PUT replacement clients. PATCH rejects unknown keys
+and returns the authoritative saved descriptor. It keeps empty rows internally
+to avoid a read-then-delete race with disjoint edits; empty metadata is presented
+as the code default.
 
-- `PATCH /api/v1/admin/feature-flags/{flag_key}/metadata`
-- `PATCH /api/v1/admin/platform-ops/vendor-templates/{template_id}`
-
-Both routes reject unknown keys and return the authoritative saved descriptor.
-Their existing PUT routes retain full-replacement compatibility. PATCH metadata
-keeps empty rows internally to avoid a read-then-delete race with disjoint edits;
-empty metadata is still presented as the code default. Template PATCH validates
-the merged configuration, writes only submitted changed fields, and fences the
-operation/slug/URL/auth fields used by cross-field validation. A dependent-field
-race retries validation against current data or returns conflict; it cannot
-persist an invalid combination simply because two individually valid patches
-were concurrent. This narrow predicate is not a universal browser revision lock.
+Service endpoint policies use the same reviewed sparse update: omission
+preserves, null clears, and an empty rule list denies all endpoints. A policy
+belongs to the catalog service and applies to all bindings. Shared credential
+replacements are redacted in review and preserve their exact nonblank value.
+Provider-linked configuration opens the same service editor; see
+[Service configuration](SERVICE_CONFIGURATION.md).
 
 Provider optional text clears remove the stored field. Cleared user display
 names/avatars and role/group/service-account descriptions are stored as null.
@@ -81,7 +77,7 @@ custom scopes remain visible and editable when suggestions fail. A name-only
 update omits scopes, and a custom scope typed without pressing Enter is included
 in the reviewed scope update.
 
-Hooks that publish saved operation, credential, metadata, rollout, or anonymous
+Hooks that publish saved credential, metadata, rollout, or anonymous
 rule responses cancel outstanding reads before publication. A pre-save delayed
 GET cannot replace that saved cache afterward. Query invalidation still refreshes
 related views. Credential deletion records write success independently from its
@@ -143,11 +139,10 @@ finding in the audited scope.
 - Workspace Clippy passed with warnings denied (`cargo clippy --workspace
   --all-targets -- -D warnings`). Rust formatting and whitespace checks passed.
 
-Backend regressions cover sparse metadata/template persistence and PUT
+Backend regressions cover sparse metadata persistence and PUT
 compatibility, nullable request parsing, optional-field storage shape,
-spec-discovery gating, merged-template validation, and disabling a broken vendor
-binding. The CLI wizard's source manifest has no overlap with the changed source,
-and its committed closure hash matches; no wizard bundle rebuild is required.
+spec-discovery gating, and service billing updates. Rebuild the CLI wizard when
+integrating changes to its source closure, as required by CONTRIBUTING.
 
 Observed-conflict checks do not prevent an unseen concurrent write after the
 last browser read. Same-field writes and changed replacement arrays/blocks can

@@ -17,7 +17,7 @@ use crate::models::service_provider_requirement::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::services::{catalog_spec_sync, org_service, role_service};
+use crate::services::{org_service, role_service};
 
 /// A catalog entry combining DownstreamService + ProviderConfig info.
 pub struct CatalogEntry {
@@ -371,6 +371,7 @@ pub async fn list_catalog(
                 {
                     "$nor": [
                         { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+                        { "service_category": crate::services::retired_service_service::RETIRED_CATEGORY },
                     ],
                 },
                 visibility_filter(user_id),
@@ -394,6 +395,7 @@ pub async fn list_catalog_all(
             {
                 "$nor": [
                     { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+                        { "service_category": crate::services::retired_service_service::RETIRED_CATEGORY },
                 ],
             },
             visibility_filter(user_id),
@@ -452,7 +454,13 @@ async fn list_catalog_filtered(
             .as_ref()
             .and_then(|pid| providers.iter().find(|p| &p.id == pid));
 
-        let spr = sprs.iter().find(|r| r.service_id == svc.id);
+        let spr = sprs.iter().find(|r| {
+            r.service_id == svc.id
+                && svc
+                    .provider_config_id
+                    .as_deref()
+                    .is_none_or(|id| id == r.provider_config_id)
+        });
 
         let oauth_client_id = match provider {
             Some(provider) if provider.credential_mode != "user" => {
@@ -529,7 +537,7 @@ pub async fn get_downstream_service_by_slug(
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
-    if catalog_spec_sync::is_platform_vendor_service(&svc) {
+    if crate::services::retired_service_service::is_retired(&svc) {
         return Err(AppError::NotFound("Catalog entry not found".to_string()));
     }
 
@@ -637,7 +645,7 @@ pub async fn get_catalog_entry(
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
-    if catalog_spec_sync::is_platform_vendor_service(&svc) {
+    if crate::services::retired_service_service::is_retired(&svc) {
         return Err(AppError::NotFound("Catalog entry not found".to_string()));
     }
 
@@ -653,7 +661,7 @@ pub async fn get_catalog_entry(
 
     let spr = db
         .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
-        .find_one(doc! { "service_id": &svc.id })
+        .find_one(crate::services::provider_link_service::primary_requirement_filter(&svc))
         .await?;
 
     let oauth_client_id = match provider.as_ref() {

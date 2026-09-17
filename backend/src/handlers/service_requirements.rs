@@ -274,11 +274,7 @@ pub async fn add_requirement(
         updated_at: now,
     };
 
-    state
-        .db
-        .collection::<ServiceProviderRequirement>(COLLECTION_NAME)
-        .insert_one(&requirement)
-        .await?;
+    crate::services::provider_link_service::add_requirement(&state.db, &requirement).await?;
 
     tracing::info!(
         requirement_id = %id,
@@ -320,15 +316,12 @@ pub async fn remove_requirement(
 ) -> AppResult<Json<DeleteRequirementResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    let result = state
-        .db
-        .collection::<ServiceProviderRequirement>(COLLECTION_NAME)
-        .delete_one(doc! { "_id": &requirement_id, "service_id": &service_id })
-        .await?;
-
-    if result.deleted_count == 0 {
-        return Err(AppError::NotFound("Requirement not found".to_string()));
-    }
+    crate::services::provider_link_service::remove_requirement(
+        &state.db,
+        &service_id,
+        &requirement_id,
+    )
+    .await?;
 
     tracing::info!(
         requirement_id = %requirement_id,

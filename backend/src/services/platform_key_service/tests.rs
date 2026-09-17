@@ -126,6 +126,7 @@ async fn platform_acl_checks_people_org_roles_activity_and_revocation() {
     service.platform_key.as_mut().unwrap().enabled = false;
     assert!(!available(&db, &service, &org).await.unwrap());
     service.platform_key = None;
+    service.slug = "legacy-shared-service".into();
     service.service_category = "internal".into();
     service.requires_user_credential = false;
     service.visibility = "public".into();
@@ -891,6 +892,7 @@ async fn inherited_org_provisioning_preserves_legacy_personal_only_rows() {
     legacy.platform_key = None;
     legacy.auth_method = "none".into();
     legacy.requires_user_credential = false;
+    legacy.slug = "legacy-shared-service".into();
     legacy.service_category = "internal".into();
     legacy.visibility = "public".into();
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
@@ -920,6 +922,7 @@ async fn inherited_org_provisioning_preserves_legacy_personal_only_rows() {
 async fn server_chosen_accepts_implicit_and_explicit_public_only() {
     let db = connect_transaction_test_database("review_server_selected").await;
     let mut service = platform_service();
+    service.slug = "legacy-shared-service".into();
     service.requires_user_credential = false;
     service.service_category = "internal".into();
     service.visibility = "public".into();
