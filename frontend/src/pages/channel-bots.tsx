@@ -434,6 +434,8 @@ function CreateBotDialog({
                 <div className="space-y-2">
                   <Label htmlFor="scope">Scope</Label>
                   <OrgScopeSelect
+                    id="scope"
+                    aria-describedby="scope-description"
                     value={targetOrgId}
                     disabled={disabled}
                     onChange={(next) =>
@@ -441,7 +443,7 @@ function CreateBotDialog({
                     }
                     label="Scope"
                   />
-                  <p className="text-xs text-muted-foreground">
+                  <p id="scope-description" className="text-xs text-muted-foreground">
                     {scopeDescription ?? "Choose where this bot lives. Org bots are visible to every org admin and can be bound to org-owned agent keys."}
                   </p>
                 </div>
