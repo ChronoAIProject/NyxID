@@ -33,6 +33,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { ApiError } from "@/lib/api-client";
+import { ServiceIcon } from "@/components/service-icon";
 
 function CredentialForm({
   provider: source,
@@ -106,7 +107,12 @@ function CredentialForm({
             {
               field: "Shared OAuth credentials",
               before: sharedProvider,
-              after: `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.`,
+              after:
+                provider.provider === "aurinko"
+                  ? fields.client_id === null || fields.client_secret === null
+                    ? "Clearing application credentials prevents new mailbox authorizations and reconnects until restored. Clearing the webhook signing secret stops managed bot webhook verification. Manual connections keep their own credentials."
+                    : "Clearing the webhook signing secret stops managed bot webhook verification until restored. Application credentials and AI Service mailbox tokens are retained."
+                  : `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.`,
             },
           ]
         : []),
@@ -166,7 +172,11 @@ function CredentialForm({
   return (
     <section className="space-y-6 border-b border-border pb-8">
       <div className="flex items-center gap-3">
-        <KeyRound className="size-4 text-muted-foreground" />
+        {provider.provider === "aurinko" ? (
+          <ServiceIcon slug="api-aurinko" size="xs" />
+        ) : (
+          <KeyRound className="size-4 text-muted-foreground" />
+        )}
         <h2 className="text-[15px] font-semibold">{provider.label}</h2>
         <Badge variant={provider.available ? "success" : "secondary"}>
           {refreshRequired
@@ -325,9 +335,11 @@ function CredentialForm({
             </DialogTitle>
             <DialogDescription>
               {confirm === "clear"
-                ? sharedProvider
-                  ? `These credentials are shared with the ${sharedProvider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored. Unsaved credential edits will be discarded.`
-                  : "Managed onboarding and managed bot authentication will be unavailable until credentials are restored. Unsaved credential edits will be discarded."
+                ? provider.provider === "aurinko"
+                  ? "Clearing these credentials prevents managed mailbox authorization and managed bot webhook verification until restored. Manual connections keep their own credentials. Unsaved credential edits will be discarded."
+                  : sharedProvider
+                    ? `These credentials are shared with the ${sharedProvider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored. Unsaved credential edits will be discarded.`
+                    : "Managed onboarding and managed bot authentication will be unavailable until credentials are restored. Unsaved credential edits will be discarded."
                 : `Update ${provider.label}'s webhook verification settings with the replacement token.`}
             </DialogDescription>
           </DialogHeader>
