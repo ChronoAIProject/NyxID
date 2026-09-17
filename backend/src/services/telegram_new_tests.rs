@@ -380,7 +380,7 @@ async fn telegram_new_start_sends_readable_instructions_before_the_creation_keyb
 
     let sent = server.received_requests().await.unwrap();
     assert_eq!(sent.len(), 4);
-    for replies in sent.chunks_exact(2) {
+    for replies in sent.as_chunks::<2>().0 {
         let instructions = replies[0].body_json::<Value>().unwrap();
         assert_eq!(instructions["chat_id"], 700);
         assert!(instructions.get("reply_markup").is_none());
