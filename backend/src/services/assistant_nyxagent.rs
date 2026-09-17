@@ -132,7 +132,12 @@ pub struct RowContract {
     pub auth_none: bool,
     pub forward_access_token: bool,
     pub no_delegation: bool,
-    pub no_master_credential: bool,
+    /// Informational only, computed like the admin API's `credential_configured`
+    /// (decrypted content, not ciphertext length; legacy create paths stored an
+    /// encrypted empty string). With `auth_method = none` a stored credential is
+    /// never injected, so it cannot replace the assistant key. `None` means the
+    /// stored value could not be decrypted or was not evaluated.
+    pub master_credential_configured: Option<bool>,
 }
 impl RowContract {
     pub fn valid(&self) -> bool {
@@ -142,10 +147,12 @@ impl RowContract {
             && self.auth_none
             && self.forward_access_token
             && self.no_delegation
-            && self.no_master_credential
     }
 }
-pub fn row_contract(row: Option<&DownstreamService>) -> RowContract {
+pub fn row_contract(
+    row: Option<&DownstreamService>,
+    master_credential_configured: Option<bool>,
+) -> RowContract {
     RowContract {
         present: row.is_some(),
         active: row.is_some_and(|r| r.is_active),
@@ -153,20 +160,30 @@ pub fn row_contract(row: Option<&DownstreamService>) -> RowContract {
         auth_none: row.is_some_and(|r| r.auth_method == "none"),
         forward_access_token: row.is_some_and(|r| r.forward_access_token),
         no_delegation: row.is_some_and(|r| !r.inject_delegation_token),
-        no_master_credential: row.is_some_and(|r| r.credential_encrypted.is_empty()),
+        master_credential_configured,
     }
 }
-pub async fn catalog_contract(db: &Database) -> AppResult<RowContract> {
-    let row = db
+async fn catalog_row(db: &Database) -> AppResult<Option<DownstreamService>> {
+    Ok(db
         .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
         .find_one(doc! {"slug": SERVICE_SLUG})
-        .await?;
-    Ok(row_contract(row.as_ref()))
+        .await?)
+}
+pub async fn catalog_contract(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+) -> AppResult<RowContract> {
+    let row = catalog_row(db).await?;
+    let configured = match row.as_ref() {
+        Some(row) => crate::services::platform_key_service::credential_configured(keys, row).await,
+        None => None,
+    };
+    Ok(row_contract(row.as_ref(), configured))
 }
 pub async fn warn_at_startup(db: &Database) {
-    if !catalog_contract(db)
+    if !catalog_row(db)
         .await
-        .is_ok_and(|contract| contract.valid())
+        .is_ok_and(|row| row_contract(row.as_ref(), None).valid())
     {
         tracing::warn!(
             service_slug = SERVICE_SLUG,

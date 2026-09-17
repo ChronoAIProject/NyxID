@@ -473,7 +473,7 @@ async fn proxy(
 ) -> AppResult<Response> {
     let service =
         assistant_service::resolve_admin_service_by_slug(&state.db, engine::SERVICE_SLUG).await?;
-    if !engine::row_contract(Some(&service)).valid() {
+    if !engine::row_contract(Some(&service), None).valid() {
         return Err(AppError::Internal(
             "NyxAgent catalog configuration is invalid".into(),
         ));
