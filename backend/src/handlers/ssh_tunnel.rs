@@ -1413,6 +1413,8 @@ mod tests {
 
     fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: id.to_string(),
             name: "Bastion".to_string(),
             slug: format!("ssh-{id}"),

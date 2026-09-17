@@ -344,6 +344,11 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
 
+    #[serde(default)]
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    #[serde(default)]
+    pub skills_revision: i64,
+
     /// Custom User-Agent header to send to the downstream service.
     /// When set, overrides the client's User-Agent instead of forwarding it.
     /// When None, the client's User-Agent is forwarded as-is (passthrough).
@@ -460,6 +465,8 @@ pub mod test_helpers {
     /// valid struct but don't care about specific field values.
     pub fn dummy_service() -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "test-id".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),
@@ -561,6 +568,8 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Test Service".to_string(),
             slug: "test-service".to_string(),
@@ -645,6 +654,8 @@ mod tests {
         // Serialize a full struct, then remove default fields from the doc,
         // and verify they get their defaults on deserialization.
         let svc = DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "test-id".to_string(),
             name: "Svc".to_string(),
             slug: "svc".to_string(),

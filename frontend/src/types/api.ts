@@ -263,6 +263,9 @@ export interface DownstreamService {
   readonly required_permissions?: readonly string[] | null;
   readonly examples_url?: string | null;
   readonly recommended_skills?: readonly string[] | null;
+  readonly recommended_skill_refs?: readonly SkillReference[] | null;
+  readonly skills_revision?: number;
+  readonly skills_manifest_digest?: string;
   readonly developer_app_ids?: readonly string[] | null;
   /**
    * NyxID#356: admin-configured default HTTP headers injected on every
@@ -453,6 +456,10 @@ export type UpdateServicePayload =
       readonly required_permissions?: readonly string[];
       readonly examples_url?: string;
       readonly recommended_skills?: readonly string[];
+      readonly recommended_skill_refs?: readonly SkillReference[];
+      readonly skills_revision?: number;
+      readonly skills_request_id?: string;
+      readonly clear_skill_refs?: boolean;
       readonly developer_app_ids?: readonly string[];
       readonly anonymous_endpoints?: readonly AnonymousEndpointRule[];
       /**
@@ -793,4 +800,13 @@ export interface TelegramLoginData {
   readonly photo_url?: string;
   readonly auth_date: number;
   readonly hash: string;
+}
+
+export interface SkillReference {
+  readonly source: string;
+  readonly skill_id: string;
+  readonly name: string;
+  readonly version: string;
+  readonly sha256: string;
+  readonly dependencies: readonly Omit<SkillReference, "dependencies">[];
 }

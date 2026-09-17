@@ -12,6 +12,7 @@ use crate::services::mcp_service;
 pub struct McpConfigResponse {
     pub contract_version: &'static str,
     pub catalog_digest: String,
+    pub skills_manifest_digest: String,
     pub user_id: String,
     pub proxy_base_url: String,
     pub schema_contract: McpSchemaContract,
@@ -59,6 +60,8 @@ pub struct McpServiceConfig {
     /// service. Empty when none are recorded.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub recommended_skills: Vec<String>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: Option<i64>,
     pub endpoints: Vec<McpEndpointConfig>,
 }
 
@@ -127,6 +130,7 @@ pub async fn get_mcp_config(
     Ok(Json(McpConfigResponse {
         contract_version: "1.0",
         catalog_digest,
+        skills_manifest_digest: mcp_service::skills_manifest_digest(&catalog.services),
         user_id,
         proxy_base_url: build_proxy_base_url(&state.config.base_url),
         schema_contract: McpSchemaContract {
@@ -203,6 +207,8 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
                 is_user_service: svc.source.is_user_service(),
                 is_generic_proxy: svc.is_generic_proxy,
                 recommended_skills: svc.recommended_skills.clone(),
+                recommended_skill_refs: svc.recommended_skill_refs.clone(),
+                skills_revision: svc.skills_revision,
                 endpoints,
             }
         })
@@ -237,6 +243,8 @@ mod tests {
 
     fn service_with_schema(schema: serde_json::Value) -> McpServiceConfig {
         McpServiceConfig {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: "service-1".to_string(),
             service_name: "Example".to_string(),
             service_slug: "example".to_string(),
@@ -285,6 +293,8 @@ mod tests {
     #[test]
     fn rest_and_mcp_tool_generation_share_the_same_operation_set() {
         let services = vec![McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: "user-service-1".to_string(),
             service_name: "Example".to_string(),
             service_slug: "example".to_string(),
