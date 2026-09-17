@@ -33,6 +33,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { ApiError } from "@/lib/api-client";
+import { ServiceIcon } from "@/components/service-icon";
 
 function CredentialForm({
   provider: source,
@@ -171,7 +172,11 @@ function CredentialForm({
   return (
     <section className="space-y-6 border-b border-border pb-8">
       <div className="flex items-center gap-3">
-        <KeyRound className="size-4 text-muted-foreground" />
+        {provider.provider === "aurinko" ? (
+          <ServiceIcon slug="api-aurinko" size="xs" />
+        ) : (
+          <KeyRound className="size-4 text-muted-foreground" />
+        )}
         <h2 className="text-[15px] font-semibold">{provider.label}</h2>
         <Badge variant={provider.available ? "success" : "secondary"}>
           {refreshRequired
