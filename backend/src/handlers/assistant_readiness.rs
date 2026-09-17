@@ -66,9 +66,12 @@ pub async fn get_readiness(
             )
             .await
             .is_ok(),
-            row: crate::services::assistant_nyxagent::catalog_contract(&state.db)
-                .await
-                .unwrap_or_else(|_| crate::services::assistant_nyxagent::row_contract(None)),
+            row: crate::services::assistant_nyxagent::catalog_contract(
+                &state.db,
+                &state.encryption_keys,
+            )
+            .await
+            .unwrap_or_else(|_| crate::services::assistant_nyxagent::row_contract(None, None)),
             credential_exists: crate::services::assistant_agent_credential_service::exists(
                 &state.db,
                 &auth_user.user_id.to_string(),

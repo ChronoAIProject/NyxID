@@ -577,16 +577,54 @@ fn row_contract_ignores_a_stored_credential_when_auth_is_none() {
     row.forward_access_token = true;
     row.inject_delegation_token = false;
     row.credential_encrypted = vec![1, 2, 3];
-    let contract = row_contract(Some(&row));
-    assert!(!contract.no_master_credential);
-    assert!(
-        contract.valid(),
-        "a never-injected blob must not take the assistant down"
-    );
+    for configured in [Some(true), Some(false), None] {
+        let contract = row_contract(Some(&row), configured);
+        assert_eq!(contract.master_credential_configured, configured);
+        assert!(
+            contract.valid(),
+            "a never-injected credential must not take the assistant down"
+        );
+    }
     row.auth_method = "bearer".into();
-    assert!(!row_contract(Some(&row)).valid());
+    assert!(!row_contract(Some(&row), Some(false)).valid());
     row.auth_method = "none".into();
     row.forward_access_token = false;
-    assert!(!row_contract(Some(&row)).valid());
-    assert!(!row_contract(None).valid());
+    assert!(!row_contract(Some(&row), Some(false)).valid());
+    assert!(!row_contract(None, None).valid());
+}
+
+#[tokio::test]
+async fn catalog_contract_reports_decrypted_credential_presence() {
+    let db = connect_transaction_test_database("nyxa_row_contract").await;
+    let state = test_app_state(db.clone());
+    let mut row = crate::models::downstream_service::test_helpers::dummy_service();
+    row.id = Uuid::new_v4().to_string();
+    row.slug = SERVICE_SLUG.into();
+    row.is_active = true;
+    row.auth_method = "none".into();
+    row.requires_user_credential = false;
+    row.forward_access_token = true;
+    row.inject_delegation_token = false;
+    // Legacy create paths encrypted an absent credential; that is "not configured".
+    row.credential_encrypted = state.encryption_keys.encrypt(b"").await.unwrap();
+    let services = db.collection::<crate::models::downstream_service::DownstreamService>(
+        crate::models::downstream_service::COLLECTION_NAME,
+    );
+    services.insert_one(&row).await.unwrap();
+    let contract = catalog_contract(&db, &state.encryption_keys).await.unwrap();
+    assert_eq!(contract.master_credential_configured, Some(false));
+    assert!(contract.valid());
+    services
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"credential_encrypted": bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: state.encryption_keys.encrypt(b"real-secret").await.unwrap(),
+            }}},
+        )
+        .await
+        .unwrap();
+    let contract = catalog_contract(&db, &state.encryption_keys).await.unwrap();
+    assert_eq!(contract.master_credential_configured, Some(true));
+    assert!(contract.valid(), "auth none never injects it");
 }
