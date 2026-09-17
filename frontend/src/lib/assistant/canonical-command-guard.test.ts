@@ -27,7 +27,15 @@ describe("assistant canonical command guard", () => {
   it("keeps runtime assistant sources free of scoped command URL templates", () => {
     const offenders = assistantRuntimeFiles(ASSISTANT_DIR).flatMap((file) => {
       const source = readFileSync(file, "utf8");
-      return FORBIDDEN_MARKERS.filter((marker) => source.includes(marker)).map(
+      return FORBIDDEN_MARKERS.filter((marker) => {
+        // NyxAgent owns a distinct, durable Stop resource; Aevatar commands
+        // still use the canonical typed /chat endpoint.
+        if (path.basename(file) === "nyxagent-transport.ts" && marker === "}/stop") {
+          expect(source).toContain('const ROOT = "/assistant/nyxagent"');
+          return false;
+        }
+        return source.includes(marker);
+      }).map(
         (marker) => `${path.relative(ASSISTANT_DIR, file)}:${marker}`,
       );
     });

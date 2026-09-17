@@ -91,3 +91,17 @@ describe("useAssistantDraftStore", () => {
     expect(localStorage.getItem("nyxid.assistant_drafts")).toBeNull();
   });
 });
+
+it("remembers the draft mode per owner and clears it across identity changes", () => {
+  const store = useAssistantDraftStore.getState();
+  store.clear();
+  store.setNyxAgentAccessMode("one", "full");
+  store.saveDraft("one", "screen:nyxagent:assistant", "Work");
+  expect(useAssistantDraftStore.getState().nyxAgentAccessMode).toBe("full");
+  expect(localStorage.getItem("nyxid.assistant_drafts")).toContain('"nyxAgentAccessMode":"full"');
+  store.saveDraft("two", "screen:nyxagent:assistant", "New work");
+  expect(useAssistantDraftStore.getState().nyxAgentAccessMode).toBe("ask");
+  store.setNyxAgentAccessMode("two", "full");
+  store.clear();
+  expect(useAssistantDraftStore.getState().nyxAgentAccessMode).toBe("ask");
+});

@@ -32,6 +32,12 @@ export function RotateKeyDialog({
   async function handleRotate() {
     try {
       const result = await rotateMutation.mutateAsync(keyId);
+      if (!result.full_key) {
+        toast.success("Assistant key rotated");
+        onOpenChange(false);
+        void navigate({ to: "/keys/api-key/$keyId", params: { keyId: result.id } });
+        return;
+      }
       setNewKeyValue(result.full_key);
       setNewKeyId(result.id);
     } catch {

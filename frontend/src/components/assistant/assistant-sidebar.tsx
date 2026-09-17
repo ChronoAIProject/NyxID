@@ -1,4 +1,9 @@
 import { useState, type ReactNode } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useAppForm } from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { nyxAgentTitleSchema } from "@/schemas/assistant-nyxagent";
+import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
 import {
   Activity,
   ChevronRight,
@@ -107,12 +112,14 @@ function ConversationRow({
   ownerUserId,
   onSelect,
   onRequestDelete,
+  onRequestRename,
 }: {
   readonly conversation: Conversation;
   readonly active: boolean;
   readonly ownerUserId: string | null;
   readonly onSelect: () => void;
   readonly onRequestDelete: () => void;
+  readonly onRequestRename?: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const draft = useAssistantDraftStore((state) =>
@@ -178,7 +185,17 @@ function ConversationRow({
         </DropdownMenuTrigger>
         {/* Above the z-[80] mobile sidebar drawer this can be opened from. */}
         <DropdownMenuContent align="end" className="z-[90] min-w-[160px]">
+          {onRequestRename ? (
+            <DropdownMenuItem
+              disabled={Boolean(conversation.active_turn)}
+              onSelect={onRequestRename}
+            >
+              <PencilLine aria-hidden="true" />
+              Rename
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuItem
+            disabled={Boolean(conversation.active_turn)}
             onSelect={onRequestDelete}
             className="text-destructive focus:text-destructive"
           >
@@ -200,6 +217,7 @@ export function AssistantSidebar({
   onNewChat,
   onSelect,
   onDelete,
+  onRename,
 }: {
   readonly conversations: readonly Conversation[];
   readonly activeConversationId: string | undefined;
@@ -209,12 +227,14 @@ export function AssistantSidebar({
   readonly onNewChat: () => void;
   readonly onSelect: (conversationId: string) => void;
   readonly onDelete: (conversationId: string) => void | Promise<void>;
+  readonly onRename?: (conversationId: string, title: string) => Promise<void>;
 }) {
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
   const pluginsActive = activeView === "plugins";
   const approvalsActive = activeView === "approvals";
   const [deleteTarget, setDeleteTarget] = useState<Conversation | undefined>();
+  const [renameTarget, setRenameTarget] = useState<Conversation | undefined>();
   const [deletePendingIds, setDeletePendingIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -332,6 +352,9 @@ export function AssistantSidebar({
               ownerUserId={user?.id ?? null}
               onSelect={() => onSelect(conversation.id)}
               onRequestDelete={() => setDeleteTarget(conversation)}
+              onRequestRename={onRename && isNyxAgentConversationId(conversation.id)
+                ? () => setRenameTarget(conversation)
+                : undefined}
             />
           ))}
         </div>
@@ -361,6 +384,14 @@ export function AssistantSidebar({
         </div>
       </div>
 
+      {renameTarget && onRename ? (
+        <RenameChatDialog
+          key={renameTarget.id}
+          conversation={renameTarget}
+          onClose={() => setRenameTarget(undefined)}
+          onRename={onRename}
+        />
+      ) : null}
       <Dialog
         open={deleteTarget !== undefined}
         onOpenChange={(open) => {
@@ -403,5 +434,56 @@ export function AssistantSidebar({
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function RenameChatDialog({
+  conversation,
+  onClose,
+  onRename,
+}: {
+  readonly conversation: Conversation;
+  readonly onClose: () => void;
+  readonly onRename: (id: string, title: string) => Promise<void>;
+}) {
+  const form = useAppForm({
+    resolver: zodResolver(nyxAgentTitleSchema),
+    defaultValues: { title: conversation.title },
+  });
+  const [error, setError] = useState<string>();
+  return (
+    <Dialog open onOpenChange={(open) => {
+      if (!open) onClose();
+    }}>
+      <DialogContent className="z-[90] md:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Rename chat</DialogTitle>
+          <DialogDescription>Choose a title for this conversation.</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={form.handleSubmit(async ({ title }) => {
+          try {
+            await onRename(conversation.id, title);
+            onClose();
+          } catch {
+            setError("Could not rename this chat. Try again.");
+          }
+        })}>
+          <label htmlFor="chat-title" className="text-[12px]">Title</label>
+          <Input id="chat-title" maxLength={200} {...form.register("title")} />
+          {error ? <p role="alert" className="mt-2 text-[12px] text-destructive">{error}</p> : null}
+          <DialogFooter className="mt-4">
+            <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button
+              type="submit"
+              variant="primary"
+              isLoading={form.formState.isSubmitting}
+              disabled={!form.formState.isDirty || !form.watch("title").trim()}
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

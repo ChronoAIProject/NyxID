@@ -605,7 +605,7 @@ function CreateDeviceChannelDialog({
   // Device events arrive through an agent callback URL, so only keys with
   // one configured are selectable.
   const activeApiKeys = useMemo(
-    () => (apiKeys ?? []).filter((k) => k.is_active),
+    () => (apiKeys ?? []).filter((k) => k.is_active && k.platform !== "nyxid-assistant"),
     [apiKeys],
   );
 

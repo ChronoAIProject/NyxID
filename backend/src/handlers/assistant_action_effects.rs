@@ -98,6 +98,7 @@ pub async fn rotate_key(
     auth_user.ensure_write_scope()?;
     let result = assistant_action_execution_service::rotate_key(
         &state.db,
+        &state.encryption_keys,
         &auth_user.user_id.to_string(),
         KeyRotateActionRequest {
             action_request_id: body.action_request_id,

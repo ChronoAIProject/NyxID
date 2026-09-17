@@ -246,6 +246,8 @@ fn rpc_scope_forbidden(id: Option<serde_json::Value>, message: &str) -> Response
 /// limits, and audit attribution.
 #[derive(Debug, Clone)]
 struct McpAuthContext {
+    chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
+    account_acknowledged: bool,
     user_id: String,
     auth_method: AuthMethod,
     acting_client_id: Option<String>,
@@ -271,6 +273,8 @@ struct McpAuthContext {
 impl McpAuthContext {
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
+            chat: None,
+            account_acknowledged: false,
             user_id,
             auth_method,
             acting_client_id: None,
@@ -406,7 +410,19 @@ async fn authenticate_mcp(
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
                 let user_id = verify_user_active(state, user_id).await?;
+                let chat = crate::services::assistant_acknowledgement_service::for_key(
+                    &state.db,
+                    &user_id,
+                    Some(&api_key.id),
+                )
+                .await
+                .map_err(|_| mcp_401(&state.config.base_url))?;
                 return Ok(McpAuthContext {
+                    chat,
+                    account_acknowledged: api_key
+                        .scopes
+                        .split_whitespace()
+                        .any(|scope| scope == auth::ASSISTANT_ACCOUNT_SCOPE),
                     user_id,
                     auth_method: AuthMethod::ApiKey,
                     acting_client_id: None,
@@ -662,7 +678,7 @@ fn is_scoped_api_key(auth: &McpAuthContext) -> bool {
 }
 
 fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
-    if auth.allow_all_services {
+    if auth.chat.is_some() || auth.allow_all_services {
         mcp_service::ServiceScope::Unrestricted
     } else {
         mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
@@ -689,7 +705,9 @@ fn filter_services_by_scope(
             mcp_service::McpToolSource::UserManaged { .. } => {
                 auth.allowed_service_ids.contains(&svc.service_id)
             }
-            mcp_service::McpToolSource::Platform { .. } => false,
+            mcp_service::McpToolSource::Platform { .. } | mcp_service::McpToolSource::Internal => {
+                false
+            }
         })
         .collect()
 }
@@ -716,11 +734,13 @@ fn ensure_service_in_scope(
             "API key does not have access to this service",
             true,
         )),
-        mcp_service::McpToolSource::Platform { .. } => Err(tool_result(
-            request_id,
-            "Scoped API keys cannot call platform services through MCP",
-            true,
-        )),
+        mcp_service::McpToolSource::Internal | mcp_service::McpToolSource::Platform { .. } => {
+            Err(tool_result(
+                request_id,
+                "Scoped API keys cannot call platform services through MCP",
+                true,
+            ))
+        }
     }
 }
 
@@ -1225,7 +1245,10 @@ async fn handle_tools_list(
         }
     };
 
-    let services = catalog.services;
+    let mut services = catalog.services;
+    if auth.chat.is_some() {
+        services.push(crate::services::assistant_account_tools::virtual_service());
+    }
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
     let mut tool_defs = match session_id {
@@ -1265,6 +1288,14 @@ async fn handle_tools_list(
     )
 }
 
+fn audit_chat_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "nyx__call_tool" | "nyx__connect_service" | "nyx__wait_for_connection" | "nyx__ssh_exec"
+    ) || name.starts_with("nyx__oracle_")
+        || name.starts_with("nyxid__")
+}
+
 async fn handle_tools_call(
     state: &AppState,
     auth: &McpAuthContext,
@@ -1288,6 +1319,56 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
+    if let Some(chat) = auth.chat.as_ref().filter(|_| audit_chat_tool(tool_name)) {
+        // Record execution requests and refusals. Never copy arbitrary tool names or
+        // arguments into the audit chain; execution events identify resolved tools.
+        let known_meta_tool = matches!(
+            tool_name,
+            "nyx__search_tools"
+                | "nyx__discover_services"
+                | "nyx__list_connected_services"
+                | "nyx__connect_service"
+                | "nyx__wait_for_connection"
+                | "nyx__call_tool"
+                | "nyx__ssh_exec"
+                | "nyx__ssh_list_services"
+                | "nyx__oracle_pools"
+                | "nyx__oracle_ask"
+                | "nyx__oracle_result"
+                | "nyx__oracle_attach"
+                | "nyx__oracle_extract"
+                | "nyx__oracle_session"
+        );
+        let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
+            crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
+        });
+        let _ = audit_service::log_actor_event(
+            state.db.clone(),
+            &audit_service::AuditActor {
+                user_id: auth.user_id.clone(),
+                ip_address: auth.ip_address.clone(),
+                user_agent: auth.user_agent.clone(),
+                api_key_id: auth.api_key_id.clone(),
+                api_key_name: auth.api_key_name.clone(),
+            },
+            "assistant_mcp_tool_call",
+            Some(serde_json::json!({
+                "conversation_id": chat.conversation_id,
+                "access_mode": chat.access_mode,
+                "tool_name": if known_meta_tool || known_account_tool {
+                    tool_name
+                } else {
+                    "service_tool"
+                },
+                "outcome": "requested",
+            })),
+        )
+        .await;
+    }
+
+    if tool_name.starts_with("nyxid__") {
+        return handle_account_tool(state, auth, tool_name, &arguments, request.id.clone()).await;
+    }
     // -- Meta-tools --
     match tool_name {
         "nyx__search_tools" => {
@@ -1429,6 +1510,9 @@ async fn handle_tools_call(
         }
     };
 
+    if let Some(response) = chat_service_gate(state, auth, service, request.id.clone()).await {
+        return response;
+    }
     // Enforce API-key service scope before activation/execute -- scoped keys
     // must not reach execute_tool for services outside their allow-list.
     if let Err(resp) = ensure_service_in_scope(auth, service, request.id.clone()) {
@@ -1516,6 +1600,7 @@ async fn handle_tools_call(
             "tool": tool_name,
             "service_id": service.service_id,
             "response_status": status,
+            "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
         })),
         auth.ip_address.clone(),
         auth.user_agent.clone(),
@@ -1702,6 +1787,106 @@ async fn authorize_mcp_operation(
 // Meta-tool dispatch helpers
 // ---------------------------------------------------------------------------
 
+fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> &'static str {
+    let granted = if auth.chat.as_ref().is_some_and(|chat| {
+        chat.access_mode == crate::models::assistant_conversation::AccessMode::Full
+    }) {
+        true
+    } else if matches!(service.source, mcp_service::McpToolSource::Platform { .. }) {
+        return "full_access_required";
+    } else if matches!(service.source, mcp_service::McpToolSource::Internal) {
+        auth.account_acknowledged
+    } else {
+        auth.allowed_service_ids.contains(&service.service_id)
+    };
+    if granted {
+        "granted"
+    } else {
+        "acknowledgement_required"
+    }
+}
+
+async fn chat_service_gate(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    let chat = auth.chat.as_ref()?;
+    if chat_access(auth, service) == "full_access_required" {
+        let refusal = serde_json::json!({
+            "error": "full_access_required",
+            "service_slug": service.service_slug,
+            "service_name": service.service_name,
+            "instructions": "This platform service is available to this chat only in Full access \
+                mode. Ask the user to switch the chat's Mode to Full access, or use a connected \
+                service instead.",
+        });
+        return Some(tool_result(request_id, &refusal.to_string(), true));
+    }
+    let result = crate::services::assistant_acknowledgement_service::service_gate(
+        &state.db,
+        chat,
+        &service.service_id,
+        &service.service_slug,
+        &service.service_name,
+    )
+    .await;
+    match result {
+        Ok(None) => None,
+        Ok(Some(value)) => Some(tool_result(request_id, &value.to_string(), true)),
+        Err(error) => {
+            let result = crate::services::assistant_account_tools::error_result(error);
+            Some(tool_result(request_id, &result.value.to_string(), true))
+        }
+    }
+}
+
+async fn handle_account_tool(
+    state: &AppState,
+    auth: &McpAuthContext,
+    name: &str,
+    args: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let Ok(user_id) = uuid::Uuid::parse_str(&auth.user_id) else {
+        return tool_result(request_id, "{\"error\":\"unauthorized\"}", true);
+    };
+    let user = auth::AuthUser {
+        user_id,
+        session_id: None,
+        scope: String::new(),
+        acting_client_id: auth.acting_client_id.clone(),
+        oauth_client_id: None,
+        token_jti: None,
+        approval_owner_user_id: auth.approval_owner_user_id.clone(),
+        auth_method: auth.auth_method.clone(),
+        allow_all_services: auth.allow_all_services,
+        allow_all_nodes: auth.allow_all_nodes,
+        allowed_service_ids: auth.allowed_service_ids.clone(),
+        resource_uris: None,
+        allowed_node_ids: auth.allowed_node_ids.clone(),
+        api_key_id: auth.api_key_id.clone(),
+        api_key_name: auth.api_key_name.clone(),
+        api_key_credential_id: None,
+        api_key_purpose: Default::default(),
+        rate_limit_per_second: auth.rate_limit_per_second,
+        rate_limit_burst: auth.rate_limit_burst,
+        ip_address: auth.ip_address.clone(),
+        user_agent: auth.user_agent.clone(),
+    };
+    let tools = crate::services::assistant_account_tools::AccountTools {
+        db: &state.db,
+        keys: &state.encryption_keys,
+        http: &state.http_client,
+        config: &state.config,
+        token_exchange_cache: &state.token_exchange_cache,
+        node_manager: &state.node_ws_manager,
+    };
+    let result = tools.execute(&user, name, args).await;
+    tool_result(request_id, &result.value.to_string(), result.is_error)
+}
+
 /// `nyx__call_tool` -- universal proxy that lets clients invoke any connected
 /// tool by name, bypassing the need for a `tools/list` refresh.  The AI
 /// discovers tools via `nyx__search_tools` and then calls them through this
@@ -1734,7 +1919,7 @@ async fn handle_meta_call_tool(
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(parsed) => parsed,
                 Err(e) => {
-                    tracing::warn!("Failed to parse arguments_json as JSON: {e}, raw: {json_str}");
+                    tracing::warn!("Invalid MCP tool arguments JSON");
                     return tool_result(
                         request_id,
                         &format!("arguments_json must be a valid JSON string. Parse error: {e}"),
@@ -1757,6 +1942,10 @@ async fn handle_meta_call_tool(
             }
             serde_json::Value::Object(flat)
         };
+
+    if tool_name.starts_with("nyxid__") {
+        return handle_account_tool(state, auth, tool_name, &inner_args, request_id).await;
+    }
 
     // Load user tools with API-key node scope applied so
     // `nyx__call_tool` can't auto-invoke a tool whose only dispatchable
@@ -1792,6 +1981,10 @@ async fn handle_meta_call_tool(
             );
         }
     };
+
+    if let Some(response) = chat_service_gate(state, auth, service, request_id.clone()).await {
+        return response;
+    }
 
     let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &inner_args) {
         Ok(prepared) => prepared,
@@ -1873,6 +2066,7 @@ async fn handle_meta_call_tool(
             "tool": tool_name,
             "service_id": service.service_id,
             "response_status": status,
+            "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
             "via": "nyx__call_tool",
         })),
         auth.ip_address.clone(),
@@ -1941,11 +2135,17 @@ async fn handle_meta_search(
         .matches
         .iter()
         .map(|t| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
                 "inputSchema": t.input_schema,
-            })
+            });
+            if auth.chat.is_some()
+                && let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services)
+            {
+                value["chat_access"] = serde_json::json!(chat_access(auth, service));
+            }
+            value
         })
         .collect();
 
@@ -1970,10 +2170,22 @@ async fn load_all_services_for_meta_tools(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
-        mcp_node_scope(auth),
+        if auth.chat.is_some() {
+            mcp_service::NodeScope::Unrestricted
+        } else {
+            mcp_node_scope(auth)
+        },
     )
     .await?;
-    Ok(filter_services_by_scope(services, auth))
+    if auth.chat.is_some() {
+        let mut services = services;
+        // Reserve the native namespace against a connected service shadowing it.
+        services.retain(|service| service.service_slug != "nyxid");
+        services.push(crate::services::assistant_account_tools::virtual_service());
+        Ok(services)
+    } else {
+        Ok(filter_services_by_scope(services, auth))
+    }
 }
 
 async fn handle_meta_list_connected(
@@ -1995,7 +2207,19 @@ async fn handle_meta_list_connected(
         }
     };
 
-    let result = mcp_service::list_connected_services(&services, query);
+    let mut result = mcp_service::list_connected_services(&services, query);
+    if auth.chat.is_some()
+        && let Some(rows) = result["services"].as_array_mut()
+    {
+        for row in rows {
+            if let Some(service) = services
+                .iter()
+                .find(|service| row["service_id"] == service.service_id)
+            {
+                row["chat_access"] = serde_json::json!(chat_access(auth, service));
+            }
+        }
+    }
     let text = serde_json::to_string_pretty(&result).unwrap_or_default();
     tool_result(request_id, &text, false)
 }
@@ -2029,6 +2253,17 @@ async fn handle_meta_connect(
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
 ) -> Response {
+    if auth.chat.is_some() && arguments.get("credential").is_some() {
+        return tool_result(
+            request_id,
+            &serde_json::json!({
+                "error": "credential_entry_excluded",
+                "instructions": "Enter credentials in the NyxID UI, never in chat.",
+            })
+            .to_string(),
+            true,
+        );
+    }
     let service_id = match arguments.get("service_id").and_then(|s| s.as_str()) {
         Some(id) if uuid::Uuid::try_parse(id).is_ok() => id,
         Some(_) => return tool_result(request_id, "Invalid service_id format", true),
@@ -3287,6 +3522,8 @@ mod tests {
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
+            chat: None,
+            account_acknowledged: false,
             user_id: "user-1".into(),
             auth_method: AuthMethod::ApiKey,
             acting_client_id: None,
@@ -4762,3 +4999,7 @@ mod tests {
         assert!(text.contains("Artifacts (1)"));
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_chat_authority_tests.rs"]
+mod chat_authority_tests;

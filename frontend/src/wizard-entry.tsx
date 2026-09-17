@@ -33,6 +33,7 @@ import {
 import "./app.css"
 
 import { WizardShell } from "@/components/cli-wizard/shell"
+import { ApiKeyRotationResult } from "@/components/cli-wizard/api-key-rotation-result"
 import {
   resolveStep,
   type PostClaimPhase,
@@ -558,13 +559,11 @@ function SecretDispatcher({
   }
   if (result.kind === "api-key-rotate") {
     return (
-      <DisplayOncePanel
-        title="API key rotated"
+      <ApiKeyRotationResult
+        result={result}
         description="The previous key is revoked. Save this new value now — it won't be shown again."
-        secret={result.full_key}
         ackButtonLabel="I have saved this — close"
         onAcknowledge={onAck}
-        isAcknowledging={false}
       />
     )
   }

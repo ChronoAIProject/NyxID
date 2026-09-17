@@ -362,13 +362,13 @@ for (const width of [1440, 390]) {
     await expect(cancel).toBeInViewport({ ratio: 1 });
     expect(await page.evaluate(() => window.scrollY)).toBe(backgroundScroll);
     await page.screenshot({
-      path: `/tmp/telegram-review-${width}x${height}-bottom.png`,
+      path: test.info().outputPath(`telegram-review-${width}x${height}-bottom.png`),
     });
     await dialog.evaluate((element) => {
       element.scrollTop = 0;
     });
     await page.screenshot({
-      path: `/tmp/telegram-review-${width}x${height}-top.png`,
+      path: test.info().outputPath(`telegram-review-${width}x${height}-top.png`),
     });
     await page.setViewportSize({ width, height: 700 });
     await expect
@@ -401,12 +401,12 @@ for (const width of [1440, 390]) {
         .toBeGreaterThan(0);
     }
     await page.screenshot({
-      path: `/tmp/nyxbot-creation-setup-bottom-${width}.png`,
+      path: test.info().outputPath(`nyxbot-creation-setup-bottom-${width}.png`),
     });
     await dialog.evaluate((element) => {
       element.scrollTop = 0;
     });
-    await page.screenshot({ path: `/tmp/nyxbot-creation-setup-${width}.png` });
+    await page.screenshot({ path: test.info().outputPath(`nyxbot-creation-setup-${width}.png`) });
 
     await dialog.getByRole("button", { name: "Close", exact: true }).click();
     await expect(dialog).toHaveCount(0);
@@ -531,7 +531,7 @@ test("pending Telegram bot detail resumes in the modal and platform changes keep
   await expect(dialog).toBeVisible();
   await expect(page).not.toHaveURL(/connect=telegram-new/);
   await expect(dialog.getByLabel("Label", { exact: true })).toBeEnabled();
-  await dialog.getByLabel("Bot Token", { exact: true }).fill("existing-secret");
+  await dialog.getByLabel("Bot token", { exact: true }).fill("existing-secret");
   await dialog
     .getByRole("combobox")
     .filter({ hasText: "Telegram bot token" })
@@ -558,7 +558,7 @@ for (const inFlight of [false, true]) {
     ).toBeVisible();
     await selectPlatform(page, "Telegram", "Slack");
     await dialog
-      .getByLabel("Bot Token", { exact: true })
+      .getByLabel("Bot token", { exact: true })
       .fill("slack-private-token");
     await dialog.getByLabel("Signing Secret").fill("slack-signing-secret");
     await selectPlatform(page, "Slack", "Telegram");
@@ -570,19 +570,19 @@ for (const inFlight of [false, true]) {
     await expect(
       dialog.getByRole("button", { name: "Connect with Meta" }),
     ).toBeVisible();
-    await dialog.getByText("Advanced: use your own Meta app").click();
+    await dialog.getByText("Advanced: use your own credentials").click();
     await expect(
-      dialog.getByLabel("Access Token", { exact: true }),
+      dialog.getByLabel("Access token", { exact: true }),
     ).toHaveValue("");
     await expect(
       dialog.getByLabel("Meta App Secret", { exact: true }),
     ).toHaveValue("");
     await selectPlatform(page, "WhatsApp", "X (Twitter)");
     await expect(
-      dialog.getByRole("button", { name: "Connect X account" }),
+      dialog.getByRole("button", { name: "Connect X (Twitter) account" }),
     ).toBeVisible();
     await selectPlatform(page, "X \\(Twitter\\)", "Slack");
-    await expect(dialog.getByLabel("Bot Token", { exact: true })).toHaveValue(
+    await expect(dialog.getByLabel("Bot token", { exact: true })).toHaveValue(
       "",
     );
     await expect(dialog.getByLabel("Signing Secret")).toHaveValue("");
@@ -610,16 +610,21 @@ test("switching away stops request polling without cancelling or auto-navigating
   await expect(
     page.getByRole("button", { name: "Reopen Telegram" }),
   ).toBeVisible();
-  const initial = state.reads.length;
+  // The page's separate summary query may refresh on window focus. Only the
+  // selected request's query polls, and switching platforms must stop that query.
+  const selectedReads = () => state.reads.filter((query) =>
+    new URLSearchParams(query).get("request_id") === requestId,
+  ).length;
+  const initial = selectedReads();
   await expect
-    .poll(() => state.reads.length, { timeout: 5000 })
+    .poll(selectedReads, { timeout: 5000 })
     .toBeGreaterThan(initial);
   await selectPlatform(page, "Telegram", "Slack");
   await page.waitForTimeout(500);
-  const stopped = state.reads.length;
+  const stopped = selectedReads();
   // Observe more than two real polling intervals while the request remains active.
   await page.waitForTimeout(4500);
-  expect(state.reads.length).toBe(stopped);
+  expect(selectedReads()).toBe(stopped);
   await expect(
     page.getByRole("dialog").getByLabel("Signing Secret"),
   ).toBeVisible();

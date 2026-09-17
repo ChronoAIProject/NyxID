@@ -18,6 +18,19 @@ const BASE: ChatMessage = {
 describe("canonical chat presentation", () => {
   afterEach(() => vi.useRealTimers());
 
+  it("renders an inline context reset as a system note without assistant controls", () => {
+    const content = "Conversation context was reset; the assistant was given a recap of this chat.";
+    render(<ChatMessageEntry message={{
+      ...BASE,
+      id: "nyxagent-context-reset:conversation",
+      role: "system",
+      content,
+    }} />);
+    expect(screen.getByRole("note", { name: "Conversation context reset" }))
+      .toHaveTextContent(content);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
   it("composes reasoning, actions, sanitized Markdown, and an error", () => {
     const { container } = render(
       <ChatMessageBubble

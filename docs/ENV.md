@@ -88,6 +88,13 @@ host route. If route detection fails, NyxID falls back to `HOSTNAME` and then
 
 ## Assistant Diagnostics
 
+The default NyxAgent assistant introduces **no environment variable**. Its catalog
+slug `llm-nyx` and default-on feature flag `assistant:nyxagent-engine` are code-level
+configuration. The catalog row provides the upstream base URL. Readiness reports
+its required authentication settings; see [NyxAgent engine](chat/08-nyxagent-engine.md).
+Existing encryption-provider settings protect its per-conversation assistant credentials. Chat acknowledgements and access modes
+introduce no environment variables; permissions are stored per conversation.
+
 The Aevatar assistant chat wire-log diagnostic has no environment variable. It
 is gated by the `experimental:aevatar-chat-wire-log` runtime feature flag
 (default off), toggled platform-wide, per org cohort, or per user through the

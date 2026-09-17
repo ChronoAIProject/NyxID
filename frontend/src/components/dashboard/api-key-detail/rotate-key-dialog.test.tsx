@@ -18,7 +18,7 @@ vi.mock("@/hooks/use-api-keys", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: { error: vi.fn() },
+  toast: { error: vi.fn(), success: vi.fn() },
 }));
 
 import { RotateKeyDialog } from "./rotate-key-dialog";
@@ -62,6 +62,22 @@ describe("RotateKeyDialog", () => {
       to: "/keys/api-key/$keyId",
       params: { keyId: NEW_KEY_ID },
     });
+  });
+
+  it("closes and selects an adopted assistant successor without a copy-secret screen", async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    mockMutateAsync.mockResolvedValue({ id: NEW_KEY_ID, full_key: "" });
+    render(<RotateKeyDialog open onOpenChange={onOpenChange} keyId={OLD_KEY_ID} />);
+
+    await user.click(screen.getByRole("button", { name: "Rotate Key" }));
+
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(mockNavigate).toHaveBeenCalledWith({
+      to: "/keys/api-key/$keyId",
+      params: { keyId: NEW_KEY_ID },
+    });
+    expect(screen.queryByText("New API Key")).not.toBeInTheDocument();
   });
 
   it("does not navigate when dialog is cancelled before rotation", async () => {
