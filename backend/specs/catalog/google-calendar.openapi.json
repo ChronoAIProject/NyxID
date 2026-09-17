@@ -1,0 +1,896 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Google Calendar",
+    "version": "v3-nyxid-overlay",
+    "description": "NyxID-hosted Google Calendar operations. NyxID injects the connected account's Google OAuth token."
+  },
+  "servers": [
+    {
+      "url": "https://www.googleapis.com"
+    }
+  ],
+  "paths": {
+    "/calendar/v3/users/me/calendarList": {
+      "get": {
+        "operationId": "calendar_list_calendars",
+        "summary": "List the user's calendars, including their IDs and access roles.",
+        "x-aevatar-tool": {
+          "name": "calendar_list_calendars",
+          "description": "List the user's calendars, including their IDs and access roles.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "maxResults",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "showHidden",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "minAccessRole",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "calendar_add_to_list",
+        "summary": "Add an existing calendar to the user's calendar list.",
+        "x-aevatar-tool": {
+          "name": "calendar_add_to_list",
+          "description": "Add an existing calendar to the user's calendar list.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calendar/v3/users/me/calendarList/{calendarId}": {
+      "delete": {
+        "operationId": "calendar_remove_from_list",
+        "summary": "Remove a calendar from the user's calendar list.",
+        "x-aevatar-tool": {
+          "name": "calendar_remove_from_list",
+          "description": "Remove a calendar from the user's calendar list.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/calendar/v3/calendars": {
+      "post": {
+        "operationId": "calendar_create_calendar",
+        "summary": "Create a new secondary calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_create_calendar",
+          "description": "Create a new secondary calendar.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "summary"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calendar/v3/calendars/{calendarId}": {
+      "get": {
+        "operationId": "calendar_get_calendar",
+        "summary": "Get calendar metadata. Use primary or a calendar ID from calendar_list_calendars.",
+        "x-aevatar-tool": {
+          "name": "calendar_get_calendar",
+          "description": "Get calendar metadata. Use primary or a calendar ID from calendar_list_calendars.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "calendar_update_calendar",
+        "summary": "Update a calendar's name, description, location, or time zone.",
+        "x-aevatar-tool": {
+          "name": "calendar_update_calendar",
+          "description": "Update a calendar's name, description, location, or time zone.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "calendar_delete_calendar",
+        "summary": "Delete a secondary calendar. Google does not permit deleting the primary calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_delete_calendar",
+          "description": "Delete a secondary calendar. Google does not permit deleting the primary calendar.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/calendar/v3/calendars/{calendarId}/events": {
+      "get": {
+        "operationId": "calendar_list_events",
+        "summary": "List or search events on the selected calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_list_events",
+          "description": "List or search events on the selected calendar.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timeMin",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timeMax",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maxResults",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "syncToken",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "singleEvents",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "orderBy",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "showDeleted",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "timeZone",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "calendar_create_event",
+        "summary": "Create an event on the selected calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_create_event",
+          "description": "Create an event on the selected calendar.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sendUpdates",
+            "in": "query",
+            "required": false,
+            "description": "Which guests receive notifications.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "externalOnly",
+                "none"
+              ]
+            }
+          },
+          {
+            "name": "conferenceDataVersion",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "start": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "date": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD for an all-day event."
+                      },
+                      "dateTime": {
+                        "type": "string",
+                        "description": "RFC3339 timestamp."
+                      },
+                      "timeZone": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "end": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "date": {
+                        "type": "string",
+                        "description": "Exclusive end date for an all-day event."
+                      },
+                      "dateTime": {
+                        "type": "string",
+                        "description": "RFC3339 timestamp."
+                      },
+                      "timeZone": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "attendees": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "email": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "email"
+                      ]
+                    }
+                  },
+                  "recurrence": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "conferenceData": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {}
+                  }
+                },
+                "required": [
+                  "start",
+                  "end"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calendar/v3/calendars/{calendarId}/events/{eventId}": {
+      "get": {
+        "operationId": "calendar_get_event",
+        "summary": "Get an event on the selected calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_get_event",
+          "description": "Get an event on the selected calendar.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timeZone",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "calendar_update_event",
+        "summary": "Update an event on the selected calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_update_event",
+          "description": "Update an event on the selected calendar.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sendUpdates",
+            "in": "query",
+            "required": false,
+            "description": "Which guests receive notifications.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "externalOnly",
+                "none"
+              ]
+            }
+          },
+          {
+            "name": "conferenceDataVersion",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "location": {
+                    "type": "string"
+                  },
+                  "start": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "date": {
+                        "type": "string",
+                        "description": "YYYY-MM-DD for an all-day event."
+                      },
+                      "dateTime": {
+                        "type": "string",
+                        "description": "RFC3339 timestamp."
+                      },
+                      "timeZone": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "end": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "date": {
+                        "type": "string",
+                        "description": "Exclusive end date for an all-day event."
+                      },
+                      "dateTime": {
+                        "type": "string",
+                        "description": "RFC3339 timestamp."
+                      },
+                      "timeZone": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "attendees": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "email": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "email"
+                      ]
+                    }
+                  },
+                  "recurrence": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "conferenceData": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "calendar_delete_event",
+        "summary": "Delete an event on the selected calendar.",
+        "x-aevatar-tool": {
+          "name": "calendar_delete_event",
+          "description": "Delete an event on the selected calendar.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "calendarId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sendUpdates",
+            "in": "query",
+            "required": false,
+            "description": "Which guests receive notifications.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "externalOnly",
+                "none"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/calendar/v3/freeBusy": {
+      "post": {
+        "operationId": "calendar_free_busy",
+        "summary": "Check availability across accessible calendars.",
+        "x-aevatar-tool": {
+          "name": "calendar_free_busy",
+          "description": "Check availability across accessible calendars.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "timeMin": {
+                    "type": "string",
+                    "description": "RFC3339 timestamp."
+                  },
+                  "timeMax": {
+                    "type": "string",
+                    "description": "RFC3339 timestamp."
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "description": "Calendar or group ID."
+                        }
+                      },
+                      "required": [
+                        "id"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "timeMin",
+                  "timeMax",
+                  "items"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -55,6 +55,8 @@ pub(super) async fn fixture(label: &str, curated: bool) -> Fixture {
     service.id = Uuid::new_v4().to_string();
     service.slug = format!("ornn-{}", service.id);
     service.created_by = owner.clone();
+    service.proxy_operation_policy =
+        Some(crate::models::downstream_service::ProxyOperationPolicy { rules: vec![] });
     db.collection::<DownstreamService>(SERVICES)
         .insert_one(&service)
         .await
@@ -555,6 +557,33 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         matchers::{header, method, path},
     };
     let mut f = fixture("curation_proxy_binding", true).await;
+    let permission_names = vec![
+        "ornn:skill:read".to_string(),
+        "ornn:skill:publish".to_string(),
+    ];
+    let role = crate::services::role_service::create_role(
+        &f.state.db,
+        "Ornn publisher",
+        "ornn-publisher",
+        None,
+        &permission_names,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    f.state
+        .db
+        .collection::<Document>(ACCOUNTS)
+        .update_one(
+            doc! {"_id": &f.sa.id},
+            doc! {"$set": {"role_ids": [&role.id]}},
+        )
+        .await
+        .unwrap();
+    f.service.identity_propagation_mode = "both".into();
+    f.service.identity_include_user_id = true;
+    f.service.identity_jwt_audience = Some("ornn-curation-test".into());
     let catalog = MockServer::start().await;
     let owner_endpoint = MockServer::start().await;
     Mock::given(method("GET"))
@@ -571,6 +600,14 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         .expect(0)
         .mount(&owner_endpoint)
         .await;
+    f.service.proxy_operation_policy = Some(
+        serde_json::from_value(json!({"rules":[
+            {"method":"GET","path_template":"/packages"},
+            {"method":"POST","path_template":"/api/v1/skills"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}"}
+        ]}))
+        .unwrap(),
+    );
     f.service.base_url = catalog.uri();
     f.service.auth_method = "bearer".into();
     f.service.requires_user_credential = true;
@@ -645,9 +682,143 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
     }
     let bearer = token(&f, None).await;
     let route = format!("/api/v1/proxy/{}/packages", f.service.id);
-    let (status, body) = request(&f.state, "GET", &route, &bearer, None).await;
+    let spoofed_request = Request::builder()
+        .method("GET")
+        .uri(&route)
+        .header("authorization", format!("Bearer {bearer}"))
+        .header("x-nyxid-user-id", &f.owner)
+        .header("x-nyxid-user-roles", "admin")
+        .header(
+            "x-nyxid-user-permissions",
+            "ornn:admin:skill,ornn:skill:delete",
+        )
+        .header("x-nyxid-identity-token", "forged-owner-assertion")
+        .body(Body::empty())
+        .unwrap();
+    let response = router(&f.state).oneshot(spoofed_request).await.unwrap();
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["credential"], "dedicated-sa");
+    let requests = catalog.received_requests().await.unwrap();
+    let headers = &requests[0].headers;
+    let assertion = headers
+        .get("x-nyxid-identity-token")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    validation.set_audience(&["ornn-curation-test"]);
+    validation.set_issuer(&[&f.state.config.jwt_issuer]);
+    let claims = jsonwebtoken::decode::<Value>(assertion, &f.state.jwt_keys.decoding, &validation)
+        .unwrap()
+        .claims;
+    assert_eq!(claims["sub"], f.sa.id);
+    assert_eq!(claims["nyx_service_id"], f.service.id);
+    let mut actual_permissions: Vec<String> =
+        serde_json::from_value(claims["permissions"].clone()).unwrap();
+    actual_permissions.sort();
+    let mut expected_permissions = permission_names;
+    expected_permissions.sort();
+    assert_eq!(actual_permissions, expected_permissions);
+    assert_eq!(claims["roles"], json!(["ornn-publisher"]));
+    assert_eq!(
+        headers.get("x-nyxid-user-id").unwrap().to_str().unwrap(),
+        f.sa.id
+    );
+    assert_eq!(
+        headers.get("x-nyxid-user-roles").unwrap().to_str().unwrap(),
+        "ornn-publisher"
+    );
+    let mut header_permissions: Vec<_> = headers
+        .get("x-nyxid-user-permissions")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(',')
+        .collect();
+    header_permissions.sort();
+    assert_eq!(header_permissions, expected_permissions);
+    for (method, path) in [
+        ("POST", "/api/v1/skills"),
+        ("PUT", "/api/v1/skills/owned-skill"),
+    ] {
+        Mock::given(wiremock::matchers::method(method))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+            .expect(1)
+            .mount(&catalog)
+            .await;
+        assert_eq!(
+            request(
+                &f.state,
+                method,
+                &format!("/api/v1/proxy/{}{path}", f.service.id),
+                &bearer,
+                Some(json!({}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    for (method, path) in [
+        ("POST", "/api/v1/assistant/chat"),
+        ("POST", "/api/v1/skills/owned-skill/audit"),
+        ("DELETE", "/api/v1/skills/owned-skill/dist-tags/stable"),
+        ("DELETE", "/api/v1/skills/owned-skill"),
+        ("PATCH", "/api/v1/skills/owned-skill"),
+    ] {
+        assert_eq!(
+            request(
+                &f.state,
+                method,
+                &format!("/api/v1/proxy/{}{path}", f.service.id),
+                &bearer,
+                Some(json!({}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN,
+            "{method} {path}"
+        );
+    }
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            &format!(
+                "/api/v1/proxy/{}/api/v1/skills/owned%2Fpermissions",
+                f.service.id
+            ),
+            &bearer,
+            Some(json!({}))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    f.state
+        .db
+        .collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &f.service.id},
+            doc! {"$unset": {"proxy_operation_policy":""}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f.state, "GET", &route, &bearer, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert!(
+        grants::issue(&f.state.db, &f.sa.id, &f.owner, grant_input(&f.service.id))
+            .await
+            .is_err()
+    );
+    f.state.db.collection::<Document>(SERVICES).update_one(doc! {"_id": &f.service.id}, doc! {"$set": {"proxy_operation_policy": bson::to_bson(&f.service.proxy_operation_policy).unwrap()}}).await.unwrap();
     // A missing SA credential must not fall back to either owner or master.
     f.state
         .db
@@ -756,7 +927,7 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         request(&f.state, "GET", &route, &bearer, None).await.0,
         StatusCode::FORBIDDEN
     );
-    assert_eq!(catalog.received_requests().await.unwrap().len(), 2);
+    assert_eq!(catalog.received_requests().await.unwrap().len(), 4);
     assert_eq!(owner_endpoint.received_requests().await.unwrap().len(), 0);
 }
 
@@ -832,7 +1003,7 @@ async fn curation_human_mixed_retry_nullable_noop_and_postcommit_oidc_repair() {
     let f = fixture("curation_human_mixed", true).await;
     let route = format!("/api/v1/services/{}", f.service.id);
     let request_id = Uuid::new_v4().to_string();
-    let body = json!({"name":"Mixed edit","recommended_skills":["one"],"skills_revision":0,"skills_request_id":request_id});
+    let body = json!({"name":"Mixed edit","billing":{"platform_billable":false},"recommended_skills":["one"],"skills_revision":0,"skills_request_id":request_id});
     let (status, response) =
         request(&f.state, "PUT", &route, &f.human_token, Some(body.clone())).await;
     assert_eq!(status, StatusCode::OK, "{response}");
@@ -846,6 +1017,30 @@ async fn curation_human_mixed_retry_nullable_noop_and_postcommit_oidc_repair() {
         StatusCode::CONFLICT,
         "omitted headers and explicit null have distinct effects"
     );
+    for field in [
+        "inference",
+        "byok_pricing",
+        "platform_key_pricing",
+        "platform_charge_nyxid_credentials_only",
+    ] {
+        let mut different = body.clone();
+        if field == "inference" {
+            different[field] = Value::Null;
+        } else {
+            different["billing"][field] = if field == "platform_charge_nyxid_credentials_only" {
+                json!(false)
+            } else {
+                Value::Null
+            };
+        }
+        assert_eq!(
+            request(&f.state, "PUT", &route, &f.human_token, Some(different))
+                .await
+                .0,
+            StatusCode::CONFLICT,
+            "omitted {field} has different mutation semantics"
+        );
+    }
     let instance = test_utils::test_user_service(
         &Uuid::new_v4().to_string(),
         &f.owner,

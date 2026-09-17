@@ -32,6 +32,7 @@ vi.mock("@/components/dashboard/identity-propagation-config", () => ({
   IdentityPropagationConfig: () => null,
 }));
 vi.mock("@/stores/auth-store", () => ({ useAuthStore: (selector: (state: { user: { is_admin: boolean } }) => unknown) => selector({ user: { is_admin: true } }) }));
+vi.mock("@/hooks/use-admin", () => ({ useAdminUsers: () => ({ data: { users: [] }, isFetching: false }) }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 function makeService(
@@ -87,6 +88,7 @@ describe("service editor curation concurrency", () => {
     await user.clear(screen.getByLabelText("Service Name"));
     await user.type(screen.getByLabelText("Service Name"), "Renamed");
     await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm changes" }));
     await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
     const payload = mutate.mock.calls[0]![0].data;
     expect(payload.name).toBe("Renamed");
@@ -95,31 +97,38 @@ describe("service editor curation concurrency", () => {
     expect(payload).not.toHaveProperty("skills_request_id");
   });
 
-  it("preserves observed revision through background refetch and retries identical payload with same ID", async () => {
+  it("retries the reviewed skill payload with the same observed revision and request ID", async () => {
     const user = userEvent.setup();
-    mutate.mockRejectedValue(
-      new ApiError(409, {
-        error: "conflict",
-        error_code: 1004,
-        message: "Skills revision changed",
-      }),
-    );
+    mutate.mockRejectedValue(new ApiError(409, { error: "conflict", error_code: 1004, message: "Skills revision changed" }));
+    render(<ServiceEditPage />);
+    await user.clear(screen.getByLabelText("Recommended Skills"));
+    await user.type(screen.getByLabelText("Recommended Skills"), "new");
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm changes" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
+    expect(mutate.mock.calls[0]![0].data.skills_revision).toBe(7);
+    expect(await screen.findAllByText("Skills revision changed")).not.toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Confirm changes" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(2));
+    expect(mutate.mock.calls[1]![0]).toEqual(mutate.mock.calls[0]![0]);
+  });
+
+  it("preserves a draft and blocks a pending review after a ref-only background change", async () => {
+    const user = userEvent.setup();
     const view = render(<ServiceEditPage />);
     await user.clear(screen.getByLabelText("Recommended Skills"));
     await user.type(screen.getByLabelText("Recommended Skills"), "new");
-    source.data = makeService({
-      recommended_skills: ["someone-else"],
-      skills_revision: 8,
-    });
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await screen.findByRole("dialog");
+    source.data = { ...source.data!, skills_revision: 8, recommended_skill_refs: [] };
     view.rerender(<ServiceEditPage />);
     expect(screen.getByLabelText("Recommended Skills")).toHaveValue("new");
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
-    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
-    expect(mutate.mock.calls[0]![0].data.skills_revision).toBe(7);
-    expect(await screen.findByText("Skills revision changed")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
-    await waitFor(() => expect(mutate).toHaveBeenCalledTimes(2));
-    expect(mutate.mock.calls[1]![0]).toEqual(mutate.mock.calls[0]![0]);
+    expect(screen.getByRole("button", { name: "Confirm changes" })).toBeDisabled();
+    expect(mutate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Load latest values (discard edits)" }));
+    expect(screen.getByLabelText("Recommended Skills")).toHaveValue("old");
+    expect(screen.getByRole("checkbox", { name: "Clear pinned references and use advisory names" })).not.toBeChecked();
   });
 
   it("offers explicit ref clearing even for an empty pinned list", async () => {
@@ -139,6 +148,7 @@ describe("service editor curation concurrency", () => {
       }),
     );
     await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.click(await screen.findByRole("button", { name: "Confirm changes" }));
     await waitFor(() => expect(mutate).toHaveBeenCalledTimes(1));
     expect(mutate.mock.calls[0]![0].data).toMatchObject({
       recommended_skills: ["new"],

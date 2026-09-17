@@ -13,6 +13,8 @@ pub struct Cli {
     pub command: Commands,
 }
 
+// Parsed once per invocation; clap flattened arguments cannot be boxed.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
     /// Log in to NyxID (opens browser by default)
@@ -55,6 +57,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: CatalogCommands,
     },
+    /// List configured service keys and their credential binding
+    Keys(AuthArgs),
     /// Manage AI services (external APIs)
     Service {
         #[command(subcommand)]
@@ -215,6 +219,11 @@ pub struct ConnectArgs {
     /// Human-readable label shown on the hosted connection page
     #[arg(long)]
     pub label: Option<String>,
+    /// Additional OAuth scopes to request on top of the provider's defaults
+    /// (repeatable, comma- or space-separated). The upstream provider decides
+    /// whether to grant them. Example: --scope "public_repo,read:org"
+    #[arg(long = "scope", value_name = "SCOPES")]
+    pub scopes: Vec<String>,
     /// Return immediately after creating the link
     #[arg(long)]
     pub no_wait: bool,
@@ -227,6 +236,8 @@ pub struct ConnectArgs {
 
 #[derive(Subcommand)]
 pub enum ProviderCommands {
+    /// Optionally import a local Codex API key after confirming the account and instance
+    ConnectCodex(CodexConnectArgs),
     /// Disconnect a personal or org-owned provider token
     Disconnect {
         /// Provider ID
@@ -247,6 +258,36 @@ pub enum ProviderCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+}
+
+#[derive(Args)]
+pub struct CodexConnectArgs {
+    /// Finish without reading Codex configuration or credentials
+    #[arg(long, conflicts_with_all = ["status", "verify", "approve_instance", "approve_account", "replace_connection"])]
+    pub skip: bool,
+    /// Inspect the saved NyxID connection without reading local Codex credentials
+    #[arg(long, conflicts_with_all = ["verify", "approve_instance", "approve_account", "replace_connection"])]
+    pub status: bool,
+    /// Verify the already saved connection with a small OpenAI Responses request
+    #[arg(long, conflicts_with_all = ["approve_instance", "approve_account", "replace_connection"])]
+    pub verify: bool,
+    /// Explicit credential-transfer consent for this exact NyxID instance
+    #[arg(long, requires = "approve_account")]
+    pub approve_instance: Option<String>,
+    /// Explicit credential-transfer consent for this live NyxID account UUID
+    #[arg(long, requires = "approve_instance")]
+    pub approve_account: Option<String>,
+    /// Explicitly approve replacing this existing connection UUID
+    #[arg(long, requires_all = ["approve_account", "replace_version"])]
+    pub replace_connection: Option<String>,
+    /// Reviewed version of the connection being replaced
+    #[arg(long, requires = "replace_connection", conflicts_with_all = ["skip", "status", "verify"])]
+    pub replace_version: Option<i64>,
+    /// Model for the small verification request; billed by OpenAI at API rates
+    #[arg(long, default_value = "gpt-4.1-mini")]
+    pub verification_model: String,
+    #[command(flatten)]
+    pub auth: AuthArgs,
 }
 
 #[derive(Subcommand)]
@@ -289,7 +330,7 @@ pub enum AdminCommands {
 
 #[derive(Subcommand)]
 pub enum AdminPlatformCredentialsCommands {
-    /// Show field configuration and platform webhook setup
+    /// Show provider field configuration and callback setup
     Show {
         provider: String,
         #[command(flatten)]
@@ -308,7 +349,7 @@ pub enum AdminPlatformCredentialsCommands {
         app_id: Option<String>,
         #[arg(long)]
         embedded_signup_config_id: Option<String>,
-        /// Read the Meta app secret from this environment variable
+        /// Compatibility alias for --field-env app_secret=ENV_VAR
         #[arg(long)]
         app_secret_env: Option<String>,
         #[arg(long)]
@@ -321,6 +362,9 @@ pub enum AdminPlatformCredentialsCommands {
         provider: String,
         #[arg(long = "field")]
         fields: Vec<String>,
+        /// Confirm that all OAuth connections and logins for the shared provider stop working
+        #[arg(long)]
+        confirm_shared_provider: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -459,6 +503,8 @@ pub struct DoctorArgs {
 
 #[derive(Args, Clone)]
 pub struct UpdateArgs {
+    #[command(subcommand)]
+    pub command: Option<UpdateCommands>,
     /// Only update installed skills, skip CLI binary update
     #[arg(long)]
     pub skills_only: bool,
@@ -485,8 +531,40 @@ pub struct UpdateArgs {
     pub base_url: Option<String>,
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Subcommand, Clone)]
+pub enum UpdateCommands {
+    /// Configure opt-in verified prebuilt upgrades (macOS/Linux user scheduler)
+    Auto {
+        #[command(subcommand)]
+        command: AutoUpdateCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AutoUpdateCommands {
+    /// Install a user scheduler; running nodes adopt updates on manual restart
+    Enable {
+        #[arg(long, default_value_t = 24, value_parser = clap::value_parser!(u32).range(1..=720))]
+        interval_hours: u32,
+    },
+    /// Prevent automatic installation and remove the user scheduler
+    Disable,
+    /// Show policy, scheduler availability, recent result, and next check window
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause automatic installation at the currently active version
+    Hold,
+    /// Clear a hold, including a hold created by deliberate rollback
+    Resume,
+    /// Run one due check; normally invoked by the user scheduler
+    Run,
+}
+
+#[derive(Clone, Copy, Default, clap::ValueEnum)]
 pub enum OutputFormat {
+    #[default]
     Table,
     Json,
 }
@@ -518,21 +596,23 @@ pub enum PublicCommands {
 
 // ---- Login ----
 
-#[derive(Args)]
+#[derive(Args, Default)]
 pub struct LoginArgs {
     /// NyxID base URL, e.g. https://auth.nyxid.dev
-    #[arg(
-        long,
-        env = "NYXID_URL",
-        default_value = "https://nyx-api.chrono-ai.fun"
-    )]
-    pub base_url: String,
+    #[arg(long, env = "NYXID_URL", global = true)]
+    pub base_url: Option<String>,
     /// Use email/password login instead of opening the browser
     #[arg(long)]
     pub password: bool,
     /// Use RFC 8628 device-code login instead of opening the browser
     #[arg(long, conflicts_with = "password")]
     pub device: bool,
+    /// Use the local browser-callback login: opens the web console and completes with a full account session, no code entry; incompatible with --output json or login resume
+    #[arg(long, conflicts_with_all = ["password", "device", "agent_key", "code", "no_wait"])]
+    pub callback: bool,
+    /// Copy the user code before browser opening (best-effort); incompatible with --password or --code; --output json and --no-wait only print it, without copying or opening a browser
+    #[arg(short = 'c', long, conflicts_with_all = ["password", "code"])]
+    pub clipboard: bool,
     /// Authorize this CLI with an Agent Key chosen or created in the web UI (no account session is stored)
     #[arg(long, conflicts_with_all = ["password", "device"])]
     pub agent_key: bool,
@@ -540,8 +620,30 @@ pub struct LoginArgs {
     #[arg(long)]
     pub email: Option<String>,
     /// Agent profile name (isolates tokens)
-    #[arg(long, env = "NYXID_PROFILE")]
+    #[arg(long, env = "NYXID_PROFILE", global = true)]
     pub profile: Option<String>,
+    /// Print the authorization challenge and exit without polling or opening a browser
+    #[arg(long, conflicts_with_all = ["password", "code"])]
+    pub no_wait: bool,
+    /// Structured login events on stdout; credentials are never printed
+    #[arg(long, value_enum, default_value = "table", global = true)]
+    pub output: OutputFormat,
+    /// Redeem a one-time code created in the web console or mobile app; omit its value for a hidden prompt
+    #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["password", "device", "agent_key"])]
+    pub code: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<LoginCommands>,
+}
+
+#[derive(Subcommand)]
+pub enum LoginCommands {
+    /// Complete an existing locally saved login request
+    Resume {
+        request_id: String,
+        /// Check once; a pending request exits with login_pending instead of waiting
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 // ---- Register (C1) ----
@@ -746,6 +848,42 @@ pub enum CatalogCommands {
 
 // ---- Service (C11-C13, I21-I23) ----
 
+#[derive(Args, Default)]
+pub struct CatalogServiceArgs {
+    /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
+    #[arg(long)]
+    pub catalog_admin: bool,
+    /// Inference wire protocol (none clears the block)
+    #[arg(long, value_parser = ["anthropic_messages", "openai_responses", "openai_completions", "none"])]
+    pub inference_protocol: Option<String>,
+    #[arg(long)]
+    pub inference_model_list: Option<bool>,
+    #[arg(long)]
+    pub inference_realtime: Option<bool>,
+    #[arg(long)]
+    pub platform_key_enabled: Option<bool>,
+    #[arg(long, value_parser = ["public", "restricted"])]
+    pub platform_key_audience: Option<String>,
+    /// Grant an owner UUID or organization slug/display name (repeatable)
+    #[arg(long, num_args = 1..)]
+    pub platform_key_allow: Vec<String>,
+    /// Remove an owner UUID or organization slug/display name (repeatable)
+    #[arg(long, num_args = 1..)]
+    pub platform_key_deny: Vec<String>,
+    #[arg(long, value_parser = ["tokens", "requests", "bytes"])]
+    pub byok_metric: Option<String>,
+    #[arg(long, conflicts_with = "byok_free")]
+    pub byok_price: Option<String>,
+    #[arg(long)]
+    pub byok_free: bool,
+    #[arg(long, value_parser = ["tokens", "requests", "bytes"])]
+    pub platform_key_metric: Option<String>,
+    #[arg(long, conflicts_with = "platform_key_free")]
+    pub platform_key_price: Option<String>,
+    #[arg(long)]
+    pub platform_key_free: bool,
+}
+
 #[derive(Subcommand)]
 // The `Add` variant has accreted a lot of flags as catalog adds have
 // gained capabilities (org targeting, OpenAPI spec URL, WS frame
@@ -760,6 +898,11 @@ pub enum CatalogCommands {
 pub enum ServiceCommands {
     /// Add a service from catalog or custom endpoint
     Add {
+        #[command(flatten)]
+        catalog: CatalogServiceArgs,
+        /// Use the authorized NyxID platform key without entering a credential
+        #[arg(long, conflicts_with_all = ["custom", "credential", "credential_env", "credential_file", "oauth", "device_code", "via_node", "endpoint_url", "auth_method", "auth_key_name", "oauth_client_id", "oauth_client_secret", "oauth_client_secret_env", "copy_oauth_client_from", "scopes", "openapi_spec_url", "ws_frame_preset", "ws_frame_clear", "no_wait"]) ]
+        platform_key: bool,
         /// Catalog slug (e.g., llm-openai). Omit with --custom for a custom endpoint.
         slug: Option<String>,
         /// Add a fully custom endpoint (interactive prompts)
@@ -937,6 +1080,9 @@ pub enum ServiceCommands {
     },
     /// Show service details
     Show {
+        /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
+        #[arg(long)]
+        catalog_admin: bool,
         /// Service ID
         id: String,
         #[command(flatten)]
@@ -981,6 +1127,15 @@ pub enum ServiceCommands {
     },
     /// Update service configuration
     Update {
+        #[command(flatten)]
+        catalog: CatalogServiceArgs,
+        #[arg(long, conflicts_with = "use_own_key")]
+        use_platform_key: bool,
+        #[arg(long)]
+        use_own_key: bool,
+        /// Read the replacement credential from an environment variable
+        #[arg(long, conflicts_with = "use_platform_key")]
+        credential_env: Option<String>,
         /// Service ID
         id: String,
         /// New display label
@@ -1433,7 +1588,7 @@ pub enum ApiKeyCommands {
         /// Expiry in days (0 = no expiry)
         #[arg(long)]
         expires_in_days: Option<u32>,
-        /// Allowed service IDs (comma-separated)
+        /// Allowed service UUIDs or slugs (comma-separated; includes platform services)
         #[arg(long)]
         allowed_services: Option<String>,
         /// Allowed node IDs (comma-separated)
@@ -1442,6 +1597,9 @@ pub enum ApiKeyCommands {
         /// Allow access to all services
         #[arg(long)]
         allow_all_services: bool,
+        /// Allow all auto-connected platform services, including future additions
+        #[arg(long)]
+        allow_auto_connected_services: bool,
         /// Allow access to all nodes
         #[arg(long)]
         allow_all_nodes: bool,
@@ -1524,12 +1682,16 @@ pub enum ApiKeyCommands {
         name: Option<String>,
         #[arg(long)]
         scopes: Option<String>,
+        /// Service UUIDs or slugs (comma-separated)
         #[arg(long)]
         allowed_services: Option<String>,
         #[arg(long)]
         allowed_nodes: Option<String>,
         #[arg(long)]
         allow_all_services: Option<bool>,
+        /// Allow all auto-connected platform services (true or false)
+        #[arg(long)]
+        allow_auto_connected_services: Option<bool>,
         #[arg(long)]
         allow_all_nodes: Option<bool>,
         /// Callback URL for channel bot relay (set empty string to clear)
@@ -2198,6 +2360,9 @@ pub enum DeviceCommands {
         /// Service(s) to grant the device proxy access to at approve time. Repeatable. Accepts slugs or service IDs. Without this, the device gets an api_key with no service access; you'll need to grant scopes separately later.
         #[arg(long = "service", value_name = "SLUG_OR_UUID")]
         service: Vec<String>,
+        /// Grant all auto-connected platform services, including future additions
+        #[arg(long)]
+        allow_auto_connected_services: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -2226,6 +2391,9 @@ pub enum DeviceCommands {
         /// Service(s) to grant the device proxy access to at onboard time. Repeatable. Accepts slugs or service IDs.
         #[arg(long = "service", value_name = "SLUG_OR_UUID")]
         service: Vec<String>,
+        /// Grant all auto-connected platform services, including future additions
+        #[arg(long)]
+        allow_auto_connected_services: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -2488,6 +2656,90 @@ mod tests {
             Cli::try_parse_from(["nyxid", "oracle", "login", "chatgpt-pro", "--wait", "0",])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn oracle_saved_login_options_are_explicit_and_separate_from_cli_profile() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "oracle",
+            "login",
+            "pool",
+            "--save-as",
+            "account-a",
+            "--profile",
+            "operator",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Oracle {
+                command: OracleCommands::Login { save_as, auth, .. },
+            } => {
+                assert_eq!(save_as.as_deref(), Some("account-a"));
+                assert_eq!(auth.profile.as_deref(), Some("operator"));
+            }
+            _ => panic!("unexpected command"),
+        }
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "oracle",
+            "worker",
+            "install",
+            "--pool",
+            "pool",
+            "--login-profile",
+            "account-a",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Commands::Oracle { command: OracleCommands::Worker {
+            command: OracleWorkerCommands::Install { login_profile: Some(name), .. }
+        } } if name == "account-a")
+        );
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "oracle",
+            "worker",
+            "bind-login",
+            "pool",
+            "remote",
+            "--login-profile",
+            "account-b",
+            "--replace-existing",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Oracle {
+                command: OracleCommands::Worker {
+                    command: OracleWorkerCommands::BindLogin {
+                        replace_existing: true,
+                        ..
+                    }
+                }
+            }
+        ));
+        for args in [
+            vec!["nyxid", "oracle", "login-profile", "list", "pool"],
+            vec![
+                "nyxid",
+                "oracle",
+                "login-profile",
+                "delete",
+                "pool",
+                "account-a",
+            ],
+            vec![
+                "nyxid",
+                "oracle",
+                "worker",
+                "unbind-login",
+                "pool",
+                "remote",
+            ],
+        ] {
+            Cli::try_parse_from(args).unwrap();
+        }
     }
 
     #[test]
@@ -4186,7 +4438,7 @@ pub enum ServiceAccountCommands {
         /// Human-readable name for this service account
         #[arg(long)]
         name: String,
-        /// Space-separated OAuth scopes the SA may request (e.g. "openid profile")
+        /// Space-separated service-account scopes (e.g. "llm:proxy roles" or "custom:read")
         #[arg(long)]
         scopes: String,
         /// Optional description
@@ -4558,9 +4810,17 @@ pub enum AiSetupCommands {
 
 #[derive(Subcommand)]
 pub enum ChannelBotCommands {
+    /// Discover supported platforms, registration fields, and media capabilities
+    Platforms {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Register a new messaging platform bot
+    #[command(
+        after_help = "Discover required fields and capabilities with: nyxid channel-bot platforms --output json"
+    )]
     Register {
-        /// Platform: telegram, discord, lark, feishu, slack, whatsapp (Meta Cloud API)
+        /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp, aurinko (email)
         #[arg(long)]
         platform: String,
         /// Complete managed onboarding in your browser
@@ -4632,16 +4892,16 @@ pub enum ChannelBotCommands {
         /// Lark/Feishu App ID
         #[arg(long)]
         app_id: Option<String>,
-        /// Lark/Feishu App Secret, Slack signing secret, or Meta App Secret
+        /// Lark/Feishu App Secret, Slack/Aurinko signing secret, or Meta App Secret
         #[arg(long, hide = true)]
         app_secret: Option<String>,
         /// Read replacement app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
-        /// Replacement bot access token (WhatsApp); prefer --token-env
+        /// Replacement account/bot access token (Aurinko, WhatsApp); prefer --token-env
         #[arg(long, hide = true)]
         bot_token: Option<String>,
-        /// Read replacement bot access token from this environment variable (WhatsApp)
+        /// Read replacement bot access token from this environment variable (Aurinko, WhatsApp)
         #[arg(long)]
         token_env: Option<String>,
         #[command(flatten)]
@@ -4691,6 +4951,20 @@ pub enum ChannelBotCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Send a message to an opted-in conversation without an inbound reply anchor
+    Send {
+        /// NyxID conversation UUID
+        #[arg(long)]
+        conversation: String,
+        /// Message text
+        #[arg(long)]
+        text: String,
+        /// Reuse this key when retrying the same delivery (1-128 characters)
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Manage conversation routes
     Route {
         #[command(subcommand)]
@@ -4720,6 +4994,9 @@ pub enum ChannelRouteCommands {
         /// Mark as the default agent for unmatched conversations
         #[arg(long)]
         default_agent: bool,
+        /// Let the assigned agent message this chat unprompted (human opt-in)
+        #[arg(long)]
+        allow_agent_initiated: bool,
         /// Create this route under the given org (you must be an admin
         /// of that org). The bot and agent key must also belong to the
         /// same org. Omit for a personal route.
@@ -4758,6 +5035,9 @@ pub enum ChannelRouteCommands {
         /// Set as default agent
         #[arg(long)]
         default_agent: Option<bool>,
+        /// Allow unprompted agent messages; pass false to disable
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        allow_agent_initiated: Option<bool>,
         /// Set route active/inactive
         #[arg(long)]
         active: Option<bool>,
@@ -4904,6 +5184,9 @@ pub enum OracleCommands {
         /// Model hint forwarded to the worker (defaults to the pool's)
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// ChatGPT Project URL for this prompt (overrides the pool default)
         #[arg(long)]
         project_url: Option<String>,
@@ -5017,6 +5300,9 @@ pub enum OracleCommands {
     Login {
         /// Pool slug or id
         pool: String,
+        /// Retain a named login for explicitly bound workers; skips pool-wide fanout
+        #[arg(long)]
+        save_as: Option<String>,
         /// Read the raw pool worker token from this file
         #[arg(long, value_name = "PATH")]
         worker_token_file: Option<String>,
@@ -5029,6 +5315,11 @@ pub enum OracleCommands {
         wait: u64,
         #[command(flatten)]
         auth: AuthArgs,
+    },
+    /// Manage saved ChatGPT logins
+    LoginProfile {
+        #[command(subcommand)]
+        command: OracleLoginProfileCommands,
     },
     /// List your multi-turn conversations
     Sessions {
@@ -5059,9 +5350,31 @@ pub enum OracleCommands {
 
 #[derive(Subcommand)]
 pub enum OracleWorkerCommands {
-    /// List worker presence for a pool
+    /// Bind this installation to a saved login profile
+    BindLogin {
+        pool: String,
+        label: String,
+        #[arg(long)]
+        login_profile: String,
+        /// Explicitly replace any account already logged in on this worker
+        #[arg(long)]
+        replace_existing: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Stop saved-login import and refresh for this worker; keep its local browser
+    UnbindLogin {
+        pool: String,
+        label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List active (online) workers in a pool
     List {
         pool: String,
+        /// Include offline workers that have not sent a heartbeat recently
+        #[arg(long)]
+        all: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -5072,18 +5385,21 @@ pub enum OracleWorkerCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Install and start a worker on this machine
+    /// Join a pool and start a worker using your NyxID login (no shared token needed)
     Install {
         #[arg(long)]
         pool: String,
-        /// Read the raw pool worker token from this file
+        /// Use an existing shared pool token instead of automatic enrollment
         #[arg(long, value_name = "PATH")]
         worker_token_file: Option<String>,
         /// Choose the worker label (letters, digits, '-', '_'; default: server-generated).
-        /// An existing legacy worker's label is adopted; a label bound to another
-        /// managed installation is refused.
+        /// Labels already in use are refused. With a shared pool token, an
+        /// existing legacy worker's label can be adopted.
         #[arg(long)]
         label: Option<String>,
+        /// Import this saved login on first startup (existing accounts are preserved)
+        #[arg(long)]
+        login_profile: Option<String>,
         /// Replace an existing installation for this pool/profile
         #[arg(long)]
         force: bool,
@@ -5200,6 +5516,23 @@ pub enum OracleWorkerCommands {
 }
 
 #[derive(Subcommand)]
+pub enum OracleLoginProfileCommands {
+    /// List saved login status, bindings and retention deadlines
+    List {
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete the retained login and its bindings; local worker sessions remain
+    Delete {
+        pool: String,
+        name: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum OraclePoolCommands {
     /// Create a pool and print its one-time worker token
     Create {
@@ -5220,6 +5553,9 @@ pub enum OraclePoolCommands {
         /// Default model hint recorded on tasks
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// Allow this pool to drive worker browsers to extract arbitrary URLs
         #[arg(long)]
         allow_extract: bool,
@@ -5271,6 +5607,9 @@ pub enum OraclePoolCommands {
         project_url: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// Enable or disable browser URL extraction for this pool
         #[arg(long, action = clap::ArgAction::Set)]
         allow_extract: Option<bool>,

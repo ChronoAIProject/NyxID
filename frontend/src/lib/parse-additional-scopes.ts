@@ -1,3 +1,17 @@
+import type { ScopeCatalogEntry } from "@/types/keys";
+
+export function includeRequiredScopes(
+  scopes: readonly string[],
+  catalog: readonly ScopeCatalogEntry[] = [],
+): readonly string[] {
+  return [
+    ...new Set([
+      ...scopes,
+      ...catalog.filter((entry) => entry.required).map((entry) => entry.scope),
+    ]),
+  ];
+}
+
 /**
  * Parse a free-form "additional scopes" textbox into a trimmed, deduped list.
  * Accepts comma-, space-, or newline-separated values. Mirrors the CLI's

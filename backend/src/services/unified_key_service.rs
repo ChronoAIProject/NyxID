@@ -1,3 +1,8 @@
+mod platform;
+pub use platform::set_platform_connection_active;
+pub use platform::{
+    create_platform_key, switch_credential_binding, update_platform_connection_cosmetics,
+};
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
@@ -24,12 +29,146 @@ use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::{
     audit_service::{self, AuditActor},
-    catalog_spec_sync, node_service, oauth_revocation, ssh_service, user_api_key_service,
-    user_credentials_service, user_endpoint_service, user_service_service, user_token_service,
-    ws_frame_injector,
+    catalog_spec_sync, node_service, oauth_revocation,
+    platform_key_service::{self, OwnerGrants},
+    ssh_service, user_api_key_service, user_credentials_service, user_endpoint_service,
+    user_service_service, user_token_service, ws_frame_injector,
 };
 
 const MAX_SERVICE_SLUG_LEN: usize = 80;
+
+/// Provision the personal API-key import's endpoint, key and service in its
+/// credential transaction. Retrying uses the reserved service ID; an existing
+/// disabled/deleted service is never silently re-enabled by verification.
+pub(crate) async fn provision_imported_api_key_in_transaction(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    token: &UserProviderToken,
+    catalog: &DownstreamService,
+    service_id: &str,
+) -> AppResult<()> {
+    use crate::models::service_provider_requirement::{
+        COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
+    };
+    use crate::models::user_endpoint::COLLECTION_NAME as ENDPOINTS;
+    use crate::models::user_service::COLLECTION_NAME as SERVICES;
+
+    let services = db.collection::<UserService>(SERVICES);
+    if services
+        .find_one(doc! {"_id":service_id,"user_id":&token.user_id})
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    if catalog.provider_config_id.as_deref() != Some(&token.provider_config_id)
+        || !catalog.is_active
+        || catalog.service_type != "http"
+        || catalog_spec_sync::is_platform_vendor_service(catalog)
+    {
+        return Err(AppError::BadRequest(
+            "A compatible personal API service is unavailable".into(),
+        ));
+    }
+    user_endpoint_service::validate_endpoint_url(&catalog.base_url)?;
+    if let Some(url) = &catalog.openapi_spec_url {
+        user_endpoint_service::validate_openapi_spec_url(url)?;
+    }
+    let requirement = db
+        .collection::<ServiceProviderRequirement>(REQUIREMENTS)
+        .find_one(doc! {"service_id":&catalog.id})
+        .session(&mut *session)
+        .await?;
+    let (auth_method, auth_key_name) = derive_effective_auth(catalog, requirement.as_ref());
+    if auth_method != "bearer" || !auth_key_name.eq_ignore_ascii_case("authorization") {
+        return Err(AppError::BadRequest(
+            "OpenAI connection requires bearer authentication".into(),
+        ));
+    }
+    let keys = db.collection::<UserApiKey>(USER_API_KEYS);
+    let key = match keys.find_one(doc! {"user_id":&token.user_id,"source":"user_created","source_id":&token.id,"status":"active"})
+        .session(&mut *session).await? {
+        Some(key) => key,
+        None => {
+            let mut key = user_api_key_service::api_key_from_provider_token(&token.user_id,
+                "Codex API key", &token.provider_config_id, token)?;
+            // A confirmed reconnect gets a fresh key when the prior one was
+            // deleted/revoked. Keep terminal keys and their audit identity.
+            if token.state_version > 1 {
+                key.source = Some("codex_import".into());
+                key.source_id = Some(format!("{}:{}",token.id,token.state_version));
+            }
+            keys.insert_one(&key).session(&mut *session).await?;
+            key
+        }
+    };
+    let now = Utc::now();
+    let endpoint = UserEndpoint {
+        id: Uuid::new_v4().to_string(),
+        user_id: token.user_id.clone(),
+        label: "Codex API key".into(),
+        url: catalog.base_url.clone(),
+        catalog_service_id: Some(catalog.id.clone()),
+        openapi_spec_url: catalog.openapi_spec_url.clone(),
+        recommended_skills: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let slug = format!("codex-openai-{}", service_id.replace('-', ""));
+    if db
+        .collection::<bson::Document>(crate::models::service_pool::COLLECTION_NAME)
+        .find_one(doc! {"user_id":&token.user_id,"slug":&slug})
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::ServicePoolSlugTaken(slug));
+    }
+    let identity = identity_config_from_downstream_service(catalog);
+    let service = UserService {
+        id: service_id.into(),
+        user_id: token.user_id.clone(),
+        slug,
+        endpoint_id: endpoint.id.clone(),
+        api_key_id: Some(key.id),
+        credential_binding: None,
+        auth_method,
+        auth_key_name,
+        catalog_service_id: Some(catalog.id.clone()),
+        node_id: None,
+        node_priority: 0,
+        service_type: "http".into(),
+        ssh_auth_mode: SshAuthMode::ProxyOnly,
+        admin_only: false,
+        ssh_node_keys_stale: false,
+        identity_propagation_mode: identity.identity_propagation_mode,
+        identity_include_user_id: identity.identity_include_user_id,
+        identity_include_email: identity.identity_include_email,
+        identity_include_name: identity.identity_include_name,
+        identity_jwt_audience: identity.identity_jwt_audience,
+        forward_access_token: identity.forward_access_token,
+        inject_delegation_token: identity.inject_delegation_token,
+        delegation_token_scope: identity.delegation_token_scope,
+        custom_user_agent: None,
+        default_request_headers: None,
+        ws_frame_injections: Vec::new(),
+        is_active: true,
+        source: Some("codex_import".into()),
+        source_id: Some(service_id.into()),
+        source_app_id: None,
+        created_at: now,
+        updated_at: now,
+        state_version: 1,
+        rotation_predecessor_id: None,
+    };
+    db.collection::<UserEndpoint>(ENDPOINTS)
+        .insert_one(&endpoint)
+        .session(&mut *session)
+        .await?;
+    services.insert_one(&service).session(&mut *session).await?;
+    Ok(())
+}
 const HUMAN_SLUG_SUFFIX_MAX: u8 = 9;
 const RANDOM_SLUG_SUFFIX_ATTEMPTS: usize = 5;
 const RANDOM_SLUG_SUFFIX_LEN: usize = 4;
@@ -205,15 +344,7 @@ fn identity_config_from_downstream_service(
 }
 
 fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
-    service.visibility == "public"
-        && service.service_category == "internal"
-        && service.auth_method != "none"
-        && service.auth_method != "token_exchange"
-        && !service.requires_user_credential
-        && service.service_type == "http"
-        && service.is_active
-        && !service.credential_encrypted.is_empty()
-        && service.provider_config_id.is_none()
+    super::platform_key_service::has_platform_key(service)
 }
 
 fn is_auto_provisionable_catalog_service(
@@ -227,7 +358,9 @@ fn is_auto_provisionable_catalog_service(
         && service.service_type == "http"
         && !has_provider_requirement;
 
-    is_truly_no_auth
+    (service.platform_key.is_none() && is_truly_no_auth)
+        || (service.platform_key.is_some()
+            && super::platform_key_service::has_platform_key(service))
         || (!has_provider_requirement && is_public_internal_master_credential_service(service))
 }
 
@@ -417,6 +550,10 @@ pub struct KeyView {
     /// True when the service stores an `api_key_id` whose `UserApiKey` row is
     /// missing. This is a recoverable degraded state, not a no-auth service.
     pub credential_missing: bool,
+    pub credential_binding: String,
+    pub platform_key_available: bool,
+    pub platform_key_pricing: Option<super::inference_service::LanePricingView>,
+    pub byok_pricing: Option<super::inference_service::LanePricingView>,
     pub credential_type: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -1270,6 +1407,7 @@ async fn create_key_inner(
             auth_type: Some("ssh".to_string()),
             auth_key_name: String::new(),
             credential_encrypted: empty_credential.clone(),
+            platform_key: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -1292,6 +1430,8 @@ async fn create_key_inner(
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -1626,6 +1766,41 @@ pub async fn auto_provision_no_auth_services(
     db: &mongodb::Database,
     user_id: &str,
 ) -> AppResult<()> {
+    let grants = OwnerGrants::load_for_listing(db, user_id).await?;
+    let providers = platform_key_service::load_providers(db).await?;
+    auto_provision_with_grants(db, user_id, &grants, &providers).await
+}
+
+async fn auto_provision_with_grants(
+    db: &mongodb::Database,
+    user_id: &str,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
+) -> AppResult<()> {
+    Box::pin(auto_provision_owner_services(
+        db, user_id, false, grants, providers,
+    ))
+    .await?;
+    for membership in grants.memberships().iter().filter(|m| m.role.can_proxy()) {
+        Box::pin(auto_provision_owner_services(
+            db,
+            &membership.org_user_id,
+            true,
+            grants,
+            providers,
+        ))
+        .await?;
+    }
+    Ok(())
+}
+
+async fn auto_provision_owner_services(
+    db: &mongodb::Database,
+    user_id: &str,
+    explicit_platform_only: bool,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
+) -> AppResult<()> {
     use crate::models::service_provider_requirement::{
         COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
     };
@@ -1634,30 +1809,41 @@ pub async fn auto_provision_no_auth_services(
     // catalog entry is no longer eligible (deleted, deactivated, changed auth
     // method, gained an SPR, went private without consent, etc). This is
     // fully independent of the provisioning pipeline below.
-    reconcile_stale_auto_provisions(db, user_id).await;
+    reconcile_stale_auto_provisions(db, user_id, grants, providers).await;
 
     // Find all active catalog services that could be user-callable without a
     // user-owned credential. The finer auth/provider-requirement predicate is
     // applied in memory below.
-    let candidates: Vec<DownstreamService> = db
+    let all_candidates: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(doc! {
-            "is_active": true,
-            "requires_user_credential": false,
-            "service_category": { "$in": ["connection", "internal"] },
-            "service_type": "http",
-            "$or": [
-                { "auth_method": "none" },
-                {
-                    "visibility": "public",
-                    "service_category": "internal",
-                    "auth_method": { "$ne": "none" },
-                },
-            ],
-        })
+        .find(doc! { "is_active": true, "service_type": "http" })
         .await?
         .try_collect()
         .await?;
+    let mut candidates = Vec::new();
+    for candidate in all_candidates {
+        // Inherited org traversal is new; preserve legacy personal-only provisioning.
+        if explicit_platform_only && candidate.platform_key.is_none() {
+            continue;
+        }
+        if let Some(config) = &candidate.platform_key {
+            // An org grant auto-connects the org; personal use through membership
+            // remains an explicit choice so joining an org does not retarget BYOK.
+            if config.audience == crate::models::downstream_service::PlatformKeyAudience::Restricted
+                && !config.allowed_owner_ids.iter().any(|id| id == user_id)
+            {
+                continue;
+            }
+            let provider = candidate
+                .provider_config_id
+                .as_ref()
+                .and_then(|id| providers.get(id));
+            if !platform_key_service::available_with_grants(&candidate, provider, user_id, grants) {
+                continue;
+            }
+        }
+        candidates.push(candidate);
+    }
 
     if candidates.is_empty() {
         return Ok(());
@@ -1706,7 +1892,7 @@ pub async fn auto_provision_no_auth_services(
     let eligible: Vec<(&DownstreamService, Option<&str>)> = provisionable_services
         .iter()
         .filter_map(|svc| {
-            if svc.visibility != "private" {
+            if svc.platform_key.is_some() || svc.visibility != "private" {
                 // Public (or legacy without visibility) -- always eligible
                 Some((*svc, None))
             } else if let Some(ref app_ids) = svc.developer_app_ids {
@@ -1792,7 +1978,15 @@ pub async fn auto_provision_no_auth_services(
 
         let source_id = auto_provision_source_id(user_id, &svc.id);
         let catalog_identity = identity_config_from_downstream_service(svc);
-        let (auth_method, auth_key_name) = auto_provision_auth_snapshot(svc);
+        let platform_auth = if svc.platform_key.is_some() {
+            Some(super::platform_key_service::effective_auth(db, svc).await?)
+        } else {
+            None
+        };
+        let (auth_method, auth_key_name) = platform_auth
+            .as_ref()
+            .map(|(method, key)| (method.as_str(), key.as_str()))
+            .unwrap_or_else(|| auto_provision_auth_snapshot(svc));
         // Auto-provision is always personal (node_id = None), so the actor
         // and the effective owner are the same.
         match user_service_service::create_user_service(
@@ -1818,7 +2012,16 @@ pub async fn auto_provision_no_auth_services(
         )
         .await
         {
-            Ok(_) => {}
+            Ok(service) => {
+                if svc.platform_key.is_some() {
+                    db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
+                        .update_one(
+                            doc! { "_id": &service.id },
+                            doc! { "$set": { "credential_binding": "platform" } },
+                        )
+                        .await?;
+                }
+            }
             Err(AppError::Conflict(_)) => {
                 cleanup_auto_provision_endpoint(db, user_id, &endpoint.id).await;
             }
@@ -1900,7 +2103,12 @@ pub async fn load_valid_app_consents(
 ///   requires user credential, etc.)
 /// - Is now private without `developer_app_ids`
 /// - Is now private with `developer_app_ids` but the user has no valid consent
-async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) {
+async fn reconcile_stale_auto_provisions(
+    db: &mongodb::Database,
+    user_id: &str,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
+) {
     use crate::models::service_provider_requirement::{
         COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
     };
@@ -2004,6 +2212,22 @@ async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) 
         }
     };
 
+    let platform_valid: HashSet<&str> = catalog_map
+        .values()
+        .filter(|catalog| {
+            platform_key_service::available_with_grants(
+                catalog,
+                catalog
+                    .provider_config_id
+                    .as_ref()
+                    .and_then(|id| providers.get(id)),
+                user_id,
+                grants,
+            )
+        })
+        .map(|catalog| catalog.id.as_str())
+        .collect();
+
     // Determine which auto-provisioned services are now stale.
     // A service is valid only if its catalog entry still satisfies the full
     // auto-provision predicate AND the visibility/consent rules.
@@ -2018,6 +2242,9 @@ async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) 
             match catalog {
                 None => true, // catalog entry deleted
                 Some(ds) => {
+                    if ds.platform_key.is_some() {
+                        return !platform_valid.contains(ds.id.as_str());
+                    }
                     if !is_auto_provisionable_catalog_service(ds, spr_set.contains(&ds.id)) {
                         return true; // catalog changed -- stale
                     }
@@ -2145,15 +2372,33 @@ pub async fn list_keys(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     user_id: &str,
+    providers: &HashMap<String, ProviderConfig>,
+) -> AppResult<Vec<KeyView>> {
+    // Reconciliation and rendering share the request's ACL/provider snapshot.
+    // The handler also reuses providers to render revocation capabilities.
+    let grants = OwnerGrants::load_for_listing(db, user_id).await?;
+    auto_provision_with_grants(db, user_id, &grants, providers).await?;
+    list_keys_with_grants(db, encryption_keys, user_id, &grants, providers).await
+}
+
+async fn list_keys_with_grants(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<Vec<KeyView>> {
     // Disabled services are included here and nowhere else: `/keys` is the
     // management surface that owns the Enable control, so a paused row has to
     // stay visible for the pause to be reversible. Each `KeyView` carries
     // `is_active` for the UI to badge them. Enforcement consumers keep using
     // the active-only `list_user_services_with_sources`.
-    let tagged =
-        user_service_service::list_user_services_with_sources_including_disabled(db, user_id)
-            .await?;
+    let tagged = user_service_service::list_user_services_with_sources_including_disabled(
+        db,
+        user_id,
+        grants.memberships(),
+    )
+    .await?;
     if tagged.is_empty() {
         return Ok(vec![]);
     }
@@ -2250,6 +2495,25 @@ pub async fn list_keys(
     // present. Sequential await is fine — N is bounded by the user's
     // key count and decrypt is fast.
     for view in views.iter_mut() {
+        if let Some(catalog) = view
+            .catalog_service_id
+            .as_deref()
+            .and_then(|id| cat_map.get(id))
+        {
+            let owner = ep_map
+                .get(view.endpoint_id.as_str())
+                .map(|ep| ep.user_id.as_str())
+                .unwrap_or(user_id);
+            view.platform_key_available = platform_key_service::available_with_grants(
+                catalog,
+                catalog
+                    .provider_config_id
+                    .as_ref()
+                    .and_then(|id| providers.get(id)),
+                owner,
+                grants,
+            );
+        }
         let enc = view
             .api_key_id
             .as_deref()
@@ -2321,6 +2585,10 @@ pub async fn get_key(
         user_service_service::CredentialSource::Personal,
     );
 
+    if let Some(catalog) = catalog_ds.as_ref() {
+        view.platform_key_available =
+            super::platform_key_service::available(db, catalog, user_id).await?;
+    }
     enrich_view_with_oauth_client_id(
         encryption_keys,
         &mut view,
@@ -2741,7 +3009,11 @@ pub async fn ensure_user_api_key_for_update(
         && msg.starts_with("Credential is required")
         && deferred_auth_supported
         && let Some(ref cat) = catalog_service
-        && new_auth_method.is_some_and(|am| am == cat.auth_method)
+        && new_auth_method.is_some_and(|am| {
+            am == cat.auth_method
+                || (crate::services::platform_key_service::binding(&service) == "platform"
+                    && am == service.auth_method)
+        })
     {
         action = UpdateCredentialAction::Provision {
             credential_type: "oauth2",
@@ -3952,6 +4224,13 @@ fn build_key_view(
         .as_deref()
         .and_then(|id| cat_map.get(id).copied());
 
+    let credential_binding = super::platform_key_service::binding(svc).to_string();
+    let ak = if credential_binding == "platform" {
+        None
+    } else {
+        ak
+    };
+
     // SSH fields from catalog service
     let (
         ssh_host,
@@ -3986,13 +4265,25 @@ fn build_key_view(
         .and_then(|id| app_name_map.get(id).cloned());
 
     KeyView {
+        platform_key_available: false,
+        platform_key_pricing: catalog_ds
+            .and_then(|c| c.billing.as_ref())
+            .and_then(|b| b.platform_key_pricing.as_ref())
+            .map(Into::into),
+        byok_pricing: catalog_ds
+            .and_then(|c| c.billing.as_ref())
+            .and_then(|b| b.byok_pricing.as_ref())
+            .map(Into::into),
         id: svc.id.clone(),
         label: ak.map_or_else(|| ep.label.clone(), |k| k.label.clone()),
         slug: svc.slug.clone(),
         endpoint_url: ep.url.clone(),
         endpoint_id: ep.id.clone(),
         api_key_id: ak.map(|k| k.id.clone()),
-        credential_missing: svc.api_key_id.is_some() && ak.is_none(),
+        credential_binding: credential_binding.clone(),
+        credential_missing: credential_binding != "platform"
+            && svc.api_key_id.is_some()
+            && ak.is_none(),
         credential_type: ak
             .map(|k| k.credential_type.clone())
             .unwrap_or_else(|| "none".to_string()),
@@ -4294,6 +4585,7 @@ mod tests {
             slug: "test".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: Some("key-1".to_string()),
+            credential_binding: None,
             auth_method: auth_method.to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,
@@ -4428,6 +4720,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -4451,6 +4744,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -6290,6 +6585,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -6339,6 +6637,7 @@ mod tests {
         provider.slug = "github".to_string();
         provider.name = "GitHub".to_string();
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
             auth: "basic".to_string(),
@@ -6552,6 +6851,7 @@ mod tests {
 
         let mut provider = multi_conn_provider("oauth2");
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "self_bearer".to_string(),
             url: format!("http://{address}/revoke"),
             auth: "none".to_string(),
@@ -6654,6 +6954,7 @@ mod tests {
         provider.slug = "facebook".to_string();
         provider.name = "Facebook".to_string();
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "facebook_deauth".to_string(),
             url: "https://graph.facebook.com/me/permissions".to_string(),
             auth: "post".to_string(),
@@ -7624,6 +7925,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -8578,7 +8882,16 @@ mod tests {
         .await
         .unwrap();
 
-        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        let keys = list_keys(
+            &db,
+            &enc,
+            &user_id,
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(keys.len(), 2);
         let slugs: Vec<&str> = keys.iter().map(|k| k.slug.as_str()).collect();
         assert!(slugs.contains(&"svc-a"));
@@ -8602,7 +8915,16 @@ mod tests {
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
 
-        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        let keys = list_keys(
+            &db,
+            &enc,
+            &user_id,
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert!(keys.is_empty());
     }
 
@@ -8819,7 +9141,16 @@ mod tests {
             .await
             .unwrap();
 
-        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        let keys = list_keys(
+            &db,
+            &enc,
+            &user_id,
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         // Revoked services have is_active=false. list_keys calls
         // list_user_services_with_sources which filters by is_active.
         let active_slugs: Vec<&str> = keys
@@ -10257,7 +10588,16 @@ mod tests {
         .await
         .unwrap();
 
-        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        let keys = list_keys(
+            &db,
+            &enc,
+            &user_id,
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(
             keys[0].catalog_service_name.as_deref(),

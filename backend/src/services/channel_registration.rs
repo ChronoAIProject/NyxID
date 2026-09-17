@@ -12,6 +12,7 @@ use crate::models::channel_bot::ChannelBot;
 pub struct RegistrationField {
     pub name: &'static str,
     pub label: &'static str,
+    pub hint: Option<&'static str>,
     pub storage: &'static str,
     pub secret: bool,
     pub required: bool,
@@ -30,6 +31,7 @@ pub const BOT_TOKEN_FIELD: RegistrationField = RegistrationField {
     patchable: false,
     clearable: false,
     webhook_secret: false,
+    hint: None,
     platform_fallback: None,
 };
 
@@ -45,6 +47,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -56,6 +59,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -67,6 +71,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -78,6 +83,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -89,12 +95,14 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: true,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
 ];
 
 #[derive(Clone, Copy, Debug)]
 pub struct RegistrationDescriptor {
+    pub documentation_url: Option<&'static str>,
     pub fields: &'static [RegistrationField],
     pub token_fields: &'static [&'static str],
     pub extra_fields: &'static [RegistrationField],
@@ -105,6 +113,9 @@ pub struct RegistrationDescriptor {
     pub empty_ack_is_text: bool,
     pub enabled: bool,
     pub automatic_webhook: bool,
+    pub webhook_ingestion: bool,
+    pub managed_only: bool,
+    pub managed_only_message: &'static str,
     pub webhook_secret_label: Option<&'static str>,
     pub setup_instructions: &'static [&'static str],
 }
@@ -112,6 +123,7 @@ pub struct RegistrationDescriptor {
 impl Default for RegistrationDescriptor {
     fn default() -> Self {
         Self {
+            documentation_url: None,
             fields: &[BOT_TOKEN_FIELD],
             token_fields: &["bot_token"],
             extra_fields: LEGACY_OPTIONAL_FIELDS,
@@ -124,6 +136,9 @@ impl Default for RegistrationDescriptor {
             empty_ack_is_text: true,
             enabled: true,
             automatic_webhook: false,
+            webhook_ingestion: true,
+            managed_only: false,
+            managed_only_message: "This platform requires managed onboarding",
             webhook_secret_label: None,
             setup_instructions: &[],
         }

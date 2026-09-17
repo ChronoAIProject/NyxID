@@ -80,6 +80,7 @@ export function AgentKeyCreateForm({
                     value={field.value ?? "personal"}
                     onValueChange={(value) => {
                       field.onChange(value === "personal" ? undefined : value);
+                      form.setValue("allow_auto_connected_services", false);
                       form.setValue("allowed_service_ids", []);
                       form.setValue("allowed_node_ids", []);
                       form.setValue("allow_all_services", false);
@@ -106,9 +107,13 @@ export function AgentKeyCreateForm({
           <ApiKeyScopesField form={form} />
           <ApiKeyResourceFields
             form={form}
-            services={options.services.filter(
-              (item) => !owner || item.owner_id === owner,
-            )}
+            services={options.services
+              .filter((item) => !owner || item.owner_id === owner)
+              .map((item) => ({
+                ...item,
+                platform_grant_eligible:
+                  item.owner_id === (owner || options.personal_owner_id),
+              }))}
             nodes={options.nodes.filter(
               (item) => !owner || item.owner_id === owner,
             )}

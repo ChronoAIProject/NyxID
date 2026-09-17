@@ -119,6 +119,18 @@ pub async fn issue(
             "Every grant target must be an existing catalog service".into(),
         ));
     }
+    if let Some(target) = &input.ornn_proxy_service_id
+        && db
+            .collection::<DownstreamService>(SERVICES)
+            .find_one(doc! {
+                "_id": target, "is_active": true, "service_type": "http",
+                "proxy_operation_policy": {"$ne": bson::Bson::Null}
+            })
+            .await?
+            .is_none()
+    {
+        return Err(AppError::ValidationError("Curation proxy target requires an active HTTP catalog service with an explicit proxy operation policy".into()));
+    }
     let sa = super::service_account_service::get_service_account(db, sa_id).await?;
     let owner = db
         .collection::<User>(USERS)

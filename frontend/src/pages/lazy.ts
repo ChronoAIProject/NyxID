@@ -1,5 +1,11 @@
 import { lazy } from "react";
 
+export const NyxbotOnboardingPage = lazy(() =>
+  import("@/pages/nyxbot-onboarding").then((m) => ({
+    default: m.NyxbotOnboardingPage,
+  })),
+);
+
 export const LandingPage = lazy(() =>
   import("@/pages/landing").then((m) => ({ default: m.LandingPage })),
 );

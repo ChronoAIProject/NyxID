@@ -135,17 +135,7 @@ fn normalize_optional_field(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-/// Truncated SHA-256 of a platform conversation ID, for use in telemetry
-/// properties where raw conversation IDs must not be emitted. Returns the
-/// first 16 hex chars (8 bytes) of the digest — enough entropy for
-/// per-conversation cardinality analysis, short enough to stay ergonomic.
-pub(crate) fn hash_conversation_id(id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(id.as_bytes());
-    let digest = hasher.finalize();
-    hex::encode(&digest[..8])
-}
+pub(crate) use crate::services::channel_inbound_service::hash_conversation_id;
 
 fn ensure_verify_material_present(
     bot: &crate::models::channel_bot::ChannelBot,
@@ -184,6 +174,8 @@ pub struct ChannelBotListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotDetailResponse {
+    #[serde(flatten)]
+    pub connection: ChannelConnectionState,
     pub credential_source: String,
     pub managed_setup: Option<ManagedSetupResponse>,
     #[serde(flatten)]
@@ -220,6 +212,8 @@ pub struct ChannelBotDetailResponse {
 
 #[derive(Serialize)]
 pub struct CreateChannelBotResponse {
+    pub webhook_ingestion: bool,
+    pub connection_id: Option<String>,
     pub credential_source: String,
     pub managed_setup: Option<ManagedSetupResponse>,
     #[serde(flatten)]
@@ -247,6 +241,11 @@ pub struct VerifyBotResponse {
     pub id: String,
     pub status: String,
     pub webhook_registered: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteChannelBotResponse {
+    pub webhook_cleanup: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -291,10 +290,16 @@ impl CreateChannelBotResponse {
     ) -> AppResult<Self> {
         let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
         Ok(Self {
+            webhook_ingestion: descriptor.webhook_ingestion,
+            connection_id: bot.connection_id.clone(),
             credential_source: bot.credential_source.clone(),
             managed_setup: bot.managed_setup.as_ref().map(Into::into),
             platform_config: descriptor.configuration(&bot)?,
-            webhook_url,
+            webhook_url: if descriptor.webhook_ingestion {
+                webhook_url
+            } else {
+                String::new()
+            },
             webhook_secret: descriptor
                 .webhook_secret_label
                 .filter(|_| bot.credential_source != "platform")
@@ -312,6 +317,60 @@ impl CreateChannelBotResponse {
             permission_setup_url,
             permission_setup_scopes,
         })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelConnectionState {
+    pub webhook_ingestion: bool,
+    pub connection_id: Option<String>,
+    pub poll_cursor: Option<String>,
+    pub last_polled_at: Option<String>,
+    pub next_poll_at: Option<String>,
+    pub poll_backoff_until: Option<String>,
+    pub poll_error_count: u32,
+    pub last_poll_notice: Option<String>,
+    pub error: Option<String>,
+}
+
+impl ChannelConnectionState {
+    fn new(
+        bot: &crate::models::channel_bot::ChannelBot,
+        adapter: &dyn PlatformAdapter,
+        config: &crate::config::AppConfig,
+    ) -> Self {
+        let next = match adapter.ingestion() {
+            crate::services::channel_platform::Ingestion::Poll { min_interval_secs }
+                if config.channel_poll_interval_secs > 0
+                    && bot.is_active
+                    && bot.status == "active" =>
+            {
+                let interval = min_interval_secs
+                    .max(config.channel_poll_interval_secs)
+                    .min(i64::MAX as u64) as i64;
+                let next = bot.last_polled_at.unwrap_or_else(chrono::Utc::now)
+                    + chrono::Duration::seconds(interval);
+                Some(
+                    bot.poll_backoff_until
+                        .unwrap_or(next)
+                        .max(bot.poll_lease_until.unwrap_or(next))
+                        .max(next)
+                        .to_rfc3339(),
+                )
+            }
+            _ => None,
+        };
+        Self {
+            webhook_ingestion: adapter.registration().webhook_ingestion,
+            connection_id: bot.connection_id.clone(),
+            poll_cursor: bot.poll_cursor.clone(),
+            last_polled_at: bot.last_polled_at.map(|d| d.to_rfc3339()),
+            next_poll_at: next,
+            poll_backoff_until: bot.poll_backoff_until.map(|d| d.to_rfc3339()),
+            poll_error_count: bot.poll_error_count,
+            last_poll_notice: bot.last_poll_notice.clone(),
+            error: bot.error.clone(),
+        }
     }
 }
 
@@ -452,6 +511,11 @@ pub async fn create_bot(
 
     let adapter = resolve_adapter(&body.platform, &state.token_exchange_cache)?;
     let descriptor = adapter.registration();
+    if descriptor.managed_only {
+        return Err(AppError::ValidationError(
+            descriptor.managed_only_message.to_string(),
+        ));
+    }
     let label = body.label.trim();
     if label.is_empty() || label.len() > 128 {
         return Err(AppError::ValidationError(
@@ -516,7 +580,9 @@ pub async fn create_bot(
 
     if let Err(e) = reg_result {
         // Webhook registration failed: mark the bot as failed and return error
-        let _ = channel_bot_service::mark_bot_failed(&state.db, &bot_id).await;
+        if !adapter.serializes_lifecycle() {
+            let _ = channel_bot_service::mark_bot_failed(&state.db, &bot_id).await;
+        }
         return Err(AppError::BadRequest(format!(
             "Webhook registration failed: {e}"
         )));
@@ -664,6 +730,7 @@ pub async fn update_bot(
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&updated);
 
     Ok(Json(ChannelBotDetailResponse {
+        connection: ChannelConnectionState::new(&updated, adapter.as_ref(), &state.config),
         credential_source: updated.credential_source.clone(),
         managed_setup: updated.managed_setup.as_ref().map(Into::into),
         platform_config: adapter.registration().configuration(&updated)?,
@@ -734,6 +801,7 @@ pub async fn get_bot(
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
 
     Ok(Json(ChannelBotDetailResponse {
+        connection: ChannelConnectionState::new(&bot, adapter.as_ref(), &state.config),
         credential_source: bot.credential_source.clone(),
         managed_setup: bot.managed_setup.as_ref().map(Into::into),
         platform_config: adapter.registration().configuration(&bot)?,
@@ -782,6 +850,7 @@ pub async fn delete_bot(
 
     let managed_webhook_cleanup = channel_bot_service::delete_bot(
         &state.db,
+        &state.config,
         &state.http_client,
         &state.encryption_keys,
         adapter.as_ref(),
@@ -812,7 +881,13 @@ pub async fn delete_bot(
         })),
     );
 
-    Ok(StatusCode::NO_CONTENT)
+    if adapter.serializes_lifecycle() {
+        return Ok(Json(DeleteChannelBotResponse {
+            webhook_cleanup: managed_webhook_cleanup,
+        })
+        .into_response());
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// POST /api/v1/channel-bots/{id}/verify
@@ -823,10 +898,51 @@ pub async fn verify_bot(
 ) -> AppResult<Json<VerifyBotResponse>> {
     let actor = auth_user.user_id.to_string();
     let (_owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
+    if bot.platform == "telegram-new" {
+        if !bot.is_active || bot.status == "suspended" {
+            return Err(AppError::Conflict(
+                "This Telegram bot requires fresh approval; verification cannot reactivate it."
+                    .into(),
+            ));
+        }
+        if bot.status != "active" {
+            return Err(AppError::Conflict(
+                "Continue the Telegram bot creation request to finish setting up this bot.".into(),
+            ));
+        }
+    }
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
+    if adapter.serializes_lifecycle() {
+        let url = format!(
+            "{}/api/v1/webhooks/channel/{}/{}",
+            state.config.base_url, bot.platform, bot.id
+        );
+        let verified = channel_bot_service::verify_serialized_bot(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &bot.id,
+            &bot.user_id,
+            &url,
+        )
+        .await?;
+        return Ok(Json(VerifyBotResponse {
+            id: verified.id,
+            status: verified.status,
+            webhook_registered: verified.webhook_registered,
+        }));
+    }
+
     // Decrypt the token and verify it is still valid with the platform
-    let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
+    let bot_token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
     let platform_secrets = if bot.credential_source == "platform" {
         Some(
             crate::services::channel_managed::build_verify_secrets(
@@ -855,7 +971,7 @@ pub async fn verify_bot(
     ensure_verify_material_present(&bot, adapter.as_ref())?;
 
     // Some subscription protocols bind the dashboard to the original secret.
-    if adapter.registration().preserve_subscription_on_verify {
+    if adapter.registration().preserve_subscription_on_verify || bot.platform == "telegram-new" {
         return Ok(Json(VerifyBotResponse {
             id: bot.id,
             status: bot.status,
@@ -963,6 +1079,14 @@ mod tests {
             platform: "lark".to_string(),
             label: "Test Lark Bot".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -1028,6 +1152,14 @@ mod tests {
             platform: "telegram".to_string(),
             label: "TG Bot".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -1059,7 +1191,8 @@ mod tests {
             scopes.unwrap(),
             vec![
                 "im:message".to_string(),
-                "im:message:send_as_bot".to_string()
+                "im:message:send_as_bot".to_string(),
+                "im:resource".to_string()
             ]
         );
     }

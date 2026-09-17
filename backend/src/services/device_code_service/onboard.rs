@@ -77,8 +77,13 @@ pub async fn onboard_with_id(
         ));
     }
 
-    let default_service_ids =
-        resolve_default_service_ids(db, &owner_user_id, input.default_services.as_deref()).await?;
+    let default_service_ids = resolve_default_service_ids(
+        db,
+        actor_user_id,
+        &owner_user_id,
+        input.default_services.as_deref(),
+    )
+    .await?;
     let bootstrap_token = Zeroizing::new(generate_bootstrap_token());
     let now = Utc::now();
     let expires_at = now + Duration::seconds(DEVICE_ONBOARD_EXPIRES_IN_SECS);
@@ -88,6 +93,7 @@ pub async fn onboard_with_id(
         bootstrap_token_hash: hash_token(bootstrap_token.as_str()),
         label: input.label.clone(),
         default_service_ids,
+        allow_auto_connected_services: input.allow_auto_connected_services,
         used: false,
         redeemed_api_key_id: None,
         redeemed_node_id: None,
@@ -185,6 +191,7 @@ pub async fn redeem_onboard(
         Some(&credential.default_service_ids),
         Some(&empty_node_ids),
         Some(false),
+        Some(credential.allow_auto_connected_services),
         Some(false),
         None,
         None,
@@ -394,6 +401,7 @@ mod tests {
             org_id: None,
             label: " Kitchen ".to_string(),
             default_services: None,
+            allow_auto_connected_services: false,
             base_url: " https://api.example.com/ ".to_string(),
         })
         .expect("valid input");
@@ -447,6 +455,7 @@ mod tests {
                 org_id: None,
                 label: "Kitchen Camera".to_string(),
                 default_services: None,
+                allow_auto_connected_services: false,
                 base_url: "https://api.example.com".to_string(),
             },
         )
@@ -509,6 +518,7 @@ mod tests {
                 org_id: None,
                 label: "Lab Camera".to_string(),
                 default_services: Some(vec![service.slug.clone()]),
+                allow_auto_connected_services: true,
                 base_url: "https://api.example.com".to_string(),
             },
         )
@@ -543,6 +553,7 @@ mod tests {
         );
         assert_eq!(stored_key.scopes, DEVICE_CODE_API_KEY_SCOPES);
         assert!(!stored_key.allow_all_services);
+        assert!(stored_key.allow_auto_connected_services);
         assert_eq!(stored_key.allowed_service_ids, vec![service.id]);
         assert!(!stored_key.allow_all_nodes);
         assert_eq!(stored_key.allowed_node_ids, vec![response.node_id.clone()]);
@@ -603,6 +614,7 @@ mod tests {
                 org_id: None,
                 label: "Lab Camera".to_string(),
                 default_services: None,
+                allow_auto_connected_services: false,
                 base_url: "https://api.example.com".to_string(),
             },
         )
@@ -650,6 +662,7 @@ mod tests {
                 org_id: None,
                 label: "Lab Camera".to_string(),
                 default_services: None,
+                allow_auto_connected_services: false,
                 base_url: "https://api.example.com".to_string(),
             },
         )
@@ -683,6 +696,7 @@ mod tests {
                 org_id: None,
                 label: "Lab Camera".to_string(),
                 default_services: Some(vec!["missing-svc".to_string()]),
+                allow_auto_connected_services: false,
                 base_url: "https://api.example.com".to_string(),
             },
         )
@@ -707,6 +721,7 @@ mod tests {
                 bootstrap_token_hash: hash_token(&token),
                 label: "Expired Camera".to_string(),
                 default_service_ids: Vec::new(),
+                allow_auto_connected_services: false,
                 used: false,
                 redeemed_api_key_id: None,
                 redeemed_node_id: None,
@@ -736,6 +751,7 @@ mod tests {
             org_id: None,
             label: label.to_string(),
             default_services: None,
+            allow_auto_connected_services: false,
             base_url: "https://api.example.com".to_string(),
         }
     }
@@ -785,6 +801,7 @@ mod tests {
             slug: slug.to_string(),
             endpoint_id: Uuid::new_v4().to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,

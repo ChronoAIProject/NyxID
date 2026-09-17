@@ -3422,6 +3422,7 @@ mod tests {
             slug: slug.to_string(),
             endpoint_id: Uuid::new_v4().to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: None,

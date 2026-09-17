@@ -120,6 +120,7 @@ pub async fn create_conversation(
     platform_sender_id: Option<&str>,
     agent_api_key_id: &str,
     default_agent: bool,
+    allow_agent_initiated: bool,
 ) -> AppResult<ChannelConversation> {
     // Verify the API key exists and belongs to the user
     let api_key = db
@@ -171,6 +172,7 @@ pub async fn create_conversation(
         platform_sender_id: platform_sender_id.map(String::from),
         agent_api_key_id: agent_api_key_id.to_string(),
         default_agent,
+        allow_agent_initiated,
         is_active: true,
         last_message_at: None,
         created_at: now,
@@ -214,6 +216,7 @@ pub async fn update_conversation(
     agent_api_key_id: Option<&str>,
     default_agent: Option<bool>,
     is_active: Option<bool>,
+    allow_agent_initiated: Option<bool>,
 ) -> AppResult<ChannelConversation> {
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
@@ -237,6 +240,10 @@ pub async fn update_conversation(
 
     if let Some(active) = is_active {
         set_doc.insert("is_active", active);
+    }
+
+    if let Some(allowed) = allow_agent_initiated {
+        set_doc.insert("allow_agent_initiated", allowed);
     }
 
     // Handle default_agent toggle: clear other defaults first
@@ -358,6 +365,7 @@ mod tests {
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -396,6 +404,7 @@ mod tests {
             None,
             &key_id,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -432,6 +441,7 @@ mod tests {
             None,
             &key_id,
             false,
+            false,
         )
         .await
         .unwrap_err();
@@ -465,6 +475,7 @@ mod tests {
             "group",
             None,
             &key_id,
+            false,
             false,
         )
         .await
@@ -506,6 +517,7 @@ mod tests {
             None,
             &key_id,
             true,
+            false,
         )
         .await
         .unwrap();
@@ -554,6 +566,7 @@ mod tests {
             None,
             &key_id,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -595,6 +608,7 @@ mod tests {
             "private",
             None,
             &key_id,
+            false,
             false,
         )
         .await

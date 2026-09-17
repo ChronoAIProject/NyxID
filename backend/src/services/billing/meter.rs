@@ -629,6 +629,117 @@ mod tests {
     use crate::test_utils::connect_test_database;
 
     #[tokio::test]
+    async fn credential_restriction_meters_every_class_and_charges_only_eligible_ones() {
+        let db = connect_test_database("meter_credential_sources")
+            .await
+            .expect("MongoDB required");
+        create_usage_transaction_index(&db).await;
+        insert_rate(&db, "platform_requests", 5).await;
+        for restricted in [false, true] {
+            for (class, nyxid_supplied) in [
+                (CredentialClass::NyxidManagedMaster, true),
+                (CredentialClass::NyxidPlatformOauthApp, true),
+                (CredentialClass::UserOwned, false),
+                (CredentialClass::AgentOverrideUserOwned, false),
+                (CredentialClass::NodeManaged, false),
+                (CredentialClass::NoAuth, false),
+            ] {
+                let id = format!("{class:?}-{restricted}");
+                insert_wallet(&db, &id, 10, 0).await;
+                let billing = ServiceBilling {
+                    platform_billable: true,
+                    platform_charge_nyxid_credentials_only: restricted,
+                    ..Default::default()
+                };
+                let ctx = BillingRouteContext::new(
+                    BillingIngress::Proxy,
+                    id.clone(),
+                    id.clone(),
+                    "actor".into(),
+                    None,
+                    Some("service".into()),
+                    Some("catalog".into()),
+                    Some("api-twitter".into()),
+                    NodeIntent::Direct,
+                    "bearer".into(),
+                    class,
+                    BillingMetric::Requests,
+                    Some(&billing),
+                    true,
+                );
+                let should_charge = !restricted || nyxid_supplied;
+                assert_eq!(ctx.service_platform_billable, should_charge);
+                let platform_billable = ctx.service_platform_billable;
+                let ctx = ctx.with_platform_metering(platform_billable);
+                let reservation = if should_charge {
+                    crate::services::billing::reservation::try_reserve_prepaid(&db, &id, 5)
+                        .await
+                        .unwrap()
+                        .expect("reserved");
+                    Some(BillingReservation {
+                        owner_id: id.clone(),
+                        wallet_id: format!("wallet-{id}"),
+                        total_reserved_credits: 5,
+                        layers: vec![crate::services::billing::reservation::LayerReservation {
+                            layer: BillingLayer::Platform,
+                            estimated_quantity: 1,
+                            credits_per_unit_micros: 5_000_000,
+                            reserved_credits: 5,
+                            allowance_reservations: Vec::new(),
+                            grant_reservations: Vec::new(),
+                        }],
+                    })
+                } else {
+                    // Even an unavailable billing provider cannot gate free BYO traffic.
+                    crate::services::billing::reservation::gate_and_reserve(
+                        &db, None, &ctx, true, 900,
+                    )
+                    .await
+                    .expect("free requests bypass the spend gate")
+                };
+                let metered = open(&db, &ctx, reservation.as_ref()).await.unwrap();
+                mark_forwarded(&db, &metered).await.unwrap();
+                settle(&db, &metered, PlatformUsage::single_request(42), None, None)
+                    .await
+                    .unwrap();
+                settle(&db, &metered, PlatformUsage::single_request(42), None, None)
+                    .await
+                    .unwrap();
+                let rows: Vec<UsageMeterRow> = db
+                    .collection(crate::models::usage_meter::COLLECTION_NAME)
+                    .find(doc! { "billing_request_id": &id })
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "OAuth app credentials never create resale rows"
+                );
+                let row = &rows[0];
+                assert_eq!(row.layer, BillingLayer::Platform);
+                assert_eq!(row.credential_class, class);
+                assert_eq!(row.quantity, Some(1));
+                assert_eq!(row.status, UsageStatus::Finalized);
+                assert_eq!(row.wallet_id.is_some(), should_charge);
+                let wallet = db
+                    .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+                    .find_one(doc! { "owner_id": &id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(wallet.reserved_credits, 0);
+                assert_eq!(
+                    wallet.pending_lago_debits,
+                    if should_charge { 5 } else { 0 }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn ledger_open_mark_and_settle_are_durable_and_idempotent() {
         let Some(db) = connect_test_database("usage_meter_ledger").await else {
             return;
@@ -645,9 +756,14 @@ mod tests {
 
         let billing = ServiceBilling {
             platform_billable: true,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -916,9 +1032,14 @@ mod tests {
         create_usage_transaction_index(&db).await;
         let billing = ServiceBilling {
             platform_billable: true,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

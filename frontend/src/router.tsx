@@ -1,4 +1,6 @@
+import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
+import { managedConnectPlatform } from "@/lib/channel-platforms";
 import {
   createRouter,
   createRoute,
@@ -19,9 +21,12 @@ import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { parseAuthDeviceSearch } from "@/schemas/auth-device";
+import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
 
 import {
   LandingPage,
+  NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
   RegisterPage,
@@ -150,6 +155,14 @@ const loginRoute = createRoute({
   component: LoginPage,
 });
 
+const nyxbotOnboardingRoute = createRoute({
+  path: "/nyxbot/onboarding",
+  getParentRoute: () => rootRoute,
+  validateSearch: (search: Record<string, unknown>) =>
+    nyxbotSearchSchema.parse(search),
+  component: NyxbotOnboardingPage,
+});
+
 const registerRoute = createRoute({
   path: "/register",
   getParentRoute: () => authLayout,
@@ -260,15 +273,23 @@ const cliPairRoute = createRoute({
 export const loginAgentKeyRoute = createRoute({
   path: "/login/agent-key",
   getParentRoute: () => rootRoute,
-  validateSearch: (): Record<string, never> => ({}),
+  validateSearch: parseAuthDeviceSearch,
   component: LoginAgentKeyPage,
 });
 
-const loginDeviceRoute = createRoute({
+export const loginDeviceRoute = createRoute({
   path: "/login/device",
   getParentRoute: () => rootRoute,
-  validateSearch: (): Record<string, never> => ({}),
+  validateSearch: parseAuthDeviceSearch,
   component: LoginDevicePage,
+});
+
+export const loginCodeRoute = createRoute({
+  path: "/login/code",
+  getParentRoute: () => rootRoute,
+  // This page mints a new login code; it has no code input to prefill.
+  validateSearch: (): Record<string, never> => ({}),
+  component: () => <LoginAgentKeyPage mint />,
 });
 
 const connectLinkRoute = createRoute({
@@ -357,7 +378,7 @@ const assistantApprovalsRoute = createRoute({
 const dashboardLayout = createRoute({
   id: "dashboard",
   getParentRoute: () => rootRoute,
-  beforeLoad: async () => {
+  beforeLoad: async ({ location }) => {
     if (import.meta.env.DEV) {
       const { isMockMode, getMockUser } = await import("./lib/mock-data");
       if (isMockMode()) {
@@ -375,7 +396,8 @@ const dashboardLayout = createRoute({
       // social-login `return_to` cookie both accept an absolute URL on
       // this origin. For plain `/dashboard` there's nothing useful to
       // preserve, so fall through to the bare redirect.
-      const returnPath = `${window.location.pathname}${window.location.search}`;
+      preserveTelegramClaimForLogin();
+      const returnPath = `${location.pathname}${location.searchStr}`;
       if (returnPath !== "/" && returnPath !== "/dashboard") {
         const returnTo = `${window.location.origin}${returnPath}`;
         window.location.assign(
@@ -718,7 +740,13 @@ const apiKeyDetailRoute = createRoute({
 
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
-  validateSearch: (search: Record<string, unknown>): { connect?: "whatsapp"; label?: string; target_org_id?: string } => ({ connect: search.connect === "whatsapp" ? "whatsapp" : undefined, label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined, target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined }),
+  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string; request_id?: string; claim_entry?: boolean } => ({
+    connect: managedConnectPlatform(search.connect),
+    claim_entry: search.claim_entry === true || search.claim_entry === "true" ? true : undefined,
+    label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined,
+    target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined,
+    request_id: typeof search.request_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.request_id) ? search.request_id : undefined,
+  }),
   getParentRoute: () => dashboardLayout,
   component: ChannelBotsPage,
 });
@@ -907,6 +935,7 @@ const adminFeatureFlagsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   landingRoute,
+  nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
   oauthLaunchingRoute,
@@ -922,6 +951,7 @@ const routeTree = rootRoute.addChildren([
   cliAuthRoute,
   cliPairRoute,
   loginDeviceRoute,
+  loginCodeRoute,
   loginAgentKeyRoute,
   connectLinkRoute,
   connectLinkReturnRoute,

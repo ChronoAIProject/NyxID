@@ -458,6 +458,14 @@ fn delegated_read_denied_path(path: &str) -> bool {
         return true;
     }
 
+    // Media downloads deliver private content, unlike the platform catalog.
+    if matches!(
+        segments.as_slice(),
+        ["channel-relay", "messages", _, "attachments", _]
+    ) {
+        return true;
+    }
+
     // Node WebSocket transport and both pending-credential URL shapes are
     // protocols that deliver or advance one-time credential material.
     if matches!(segments.as_slice(), ["nodes", "ws"])
@@ -483,6 +491,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
     matches!(
         segments.as_slice(),
         ["providers", "callback"]
+            | ["providers", "codex-connection"]
             | ["providers", _, "callback"]
             | ["providers", _, "connect", "oauth"]
     )
@@ -667,7 +676,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                         auth_method: AuthMethod::ApiKey,
                                         allow_all_services: api_key.allow_all_services,
                                         allow_all_nodes: api_key.allow_all_nodes,
-                                        allowed_service_ids: api_key.allowed_service_ids.clone(),
+                                        allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(&state.db, &api_key).await?,
                                         resource_uris: None,
                                         allowed_node_ids: api_key.allowed_node_ids.clone(),
                                         api_key_id: Some(api_key.id.clone()),
@@ -895,9 +904,31 @@ impl FromRequestParts<AppState> for AuthUser {
                         (true, true, vec![], vec![], None, None)
                     };
 
+                    let session_id = if auth_method == AuthMethod::AccessToken
+                        && claims.client_id.is_none()
+                    {
+                        if let Some(id) = claims.sid.as_deref() {
+                            let id = Uuid::parse_str(id)
+                                .map_err(|_| AppError::Unauthorized("Invalid session".into()))?;
+                            let live = state.db.collection::<Session>(SESSIONS).find_one(doc! {
+                                "_id": id.to_string(), "user_id": &user_id_str, "revoked": false,
+                                "expires_at": {"$gt": bson::DateTime::from_chrono(chrono::Utc::now())}
+                            }).await?;
+                            if live.is_none() {
+                                return Err(AppError::Unauthorized(
+                                    "Session expired or revoked".into(),
+                                ));
+                            }
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     return Ok(AuthUser {
                         user_id,
-                        session_id: None,
+                        session_id,
                         scope: claims.scope.clone(),
                         acting_client_id: claims.act.map(|a| a.sub),
                         oauth_client_id: claims.client_id.clone(),
@@ -1058,7 +1089,9 @@ impl FromRequestParts<AppState> for AuthUser {
                     auth_method: AuthMethod::ApiKey,
                     allow_all_services: key.allow_all_services,
                     allow_all_nodes: key.allow_all_nodes,
-                    allowed_service_ids: key.allowed_service_ids.clone(),
+                    allowed_service_ids:
+                        crate::services::key_service::effective_allowed_service_ids(&state.db, &key)
+                            .await?,
                     resource_uris: None,
                     allowed_node_ids: key.allowed_node_ids.clone(),
                     api_key_id: Some(key.id.clone()),
@@ -2034,6 +2067,107 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn channel_platform_catalog_accepts_all_management_auth_and_denies_media_delegation() {
+        use crate::{crypto::jwt, models::user::UserType};
+        let Some(db) = crate::test_utils::connect_test_database("channel_catalog_auth").await
+        else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let actor = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor.to_string(),
+                UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let raw_key = "nyxid_ag_catalog_test_token";
+        let key = delegated_fixture_api_key(
+            &Uuid::new_v4().to_string(),
+            &actor.to_string(),
+            &hash_token(raw_key),
+        );
+        db.collection::<crate::models::api_key::ApiKey>(API_KEYS)
+            .insert_one(key)
+            .await
+            .unwrap();
+        let (sa, secret) = crate::services::service_account_service::create_service_account(
+            &db,
+            "Catalog reader",
+            None,
+            "account:read",
+            &[],
+            None,
+            &actor.to_string(),
+        )
+        .await
+        .unwrap();
+        let session = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "account:read",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let delegated = jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "account:read",
+            "catalog-client",
+            3600,
+            None,
+        )
+        .unwrap();
+        let service = crate::services::service_account_service::authenticate_client_credentials(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &sa.client_id,
+            &secret,
+            None,
+        )
+        .await
+        .unwrap()
+        .access_token;
+        let (_, private) = crate::routes::build_router();
+        let app = private.with_state(state);
+        for token in [&session, &delegated, &service, raw_key] {
+            let response =
+                delegated_router_response(&app, Method::GET, "/api/v1/channel-platforms", token)
+                    .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["platforms"].as_array().unwrap().len(), 10);
+        }
+        for token in [&delegated, &service] {
+            let response = delegated_router_response(
+                &app,
+                Method::GET,
+                "/api/v1/channel-relay/messages/nonexistent/attachments/0",
+                token,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        assert!(!delegated_read_denied_path("/api/v1/channel-platforms"));
+        assert!(delegated_read_denied_path(
+            "/api/v1/channel-relay/messages/id/attachments/0"
+        ));
+        db.drop().await.unwrap();
+    }
+
     fn delegated_fixture_api_key(
         id: &str,
         user_id: &str,
@@ -2057,6 +2191,7 @@ mod tests {
             allowed_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -2426,6 +2561,9 @@ mod tests {
                 is_active: true,
                 credential_mode: "both".to_string(),
                 token_endpoint_auth_method: "client_secret_post".to_string(),
+                token_request_encoding: None,
+                oauth_request_headers: Default::default(),
+                supports_oauth_scopes: true,
                 extra_auth_params: None,
                 device_code_format: "rfc8628".to_string(),
                 client_id_param_name: None,

@@ -73,9 +73,8 @@ pub const PLATFORM_OPERATION_VENDOR_CONTRACTS: [PlatformOperationVendorContract;
     },
 ];
 
-/// Seed data for the admin-managed template collection. Duffel deliberately
-/// has no operation binding yet; a future operation adds a code contract and
-/// sets this row's `operation` to that operation name before it can be bound.
+/// Seed data for the admin-managed template collection. Templates without an
+/// operation provision credentials until a code-owned operation is added.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SeededPlatformVendorTemplate {
     pub vendor: &'static str,
@@ -91,7 +90,7 @@ pub struct SeededPlatformVendorTemplate {
     pub restriction_summary: &'static str,
 }
 
-pub const DEFAULT_PLATFORM_VENDOR_TEMPLATES: [SeededPlatformVendorTemplate; 4] = [
+pub const DEFAULT_PLATFORM_VENDOR_TEMPLATES: [SeededPlatformVendorTemplate; 5] = [
     SeededPlatformVendorTemplate {
         vendor: "twilio",
         display_name: "Twilio",
@@ -130,6 +129,19 @@ pub const DEFAULT_PLATFORM_VENDOR_TEMPLATES: [SeededPlatformVendorTemplate; 4] =
         operation: Some("x_search"),
         capability_summary: "Searches recent posts through the bounded x_search operation.",
         restriction_summary: "Does not publish, modify accounts, or expose X's general API.",
+    },
+    SeededPlatformVendorTemplate {
+        vendor: "telnyx",
+        display_name: "Telnyx",
+        slug: "platform-telnyx",
+        base_url: "https://api.telnyx.com/v2",
+        auth_method: "bearer",
+        auth_key_name: None,
+        credential_label: "API key",
+        credential_note: "Create an API key at https://portal.telnyx.com/#/app/api-keys and paste the raw key. NyxID adds the Bearer prefix.",
+        operation: None,
+        capability_summary: "Stores a platform-owned Telnyx key for a future platform operation. Personal keys can be used with the Telnyx catalog connection.",
+        restriction_summary: "No Telnyx platform operation is shipped yet. Adding a key does not enable platform-funded AI, calls, or messaging.",
     },
     SeededPlatformVendorTemplate {
         vendor: "duffel",
@@ -632,6 +644,7 @@ pub async fn list_enabled_operations(db: &mongodb::Database) -> AppResult<Vec<Pl
         .collect())
 }
 
+#[cfg(test)]
 pub async fn upsert_operation(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -641,8 +654,51 @@ pub async fn upsert_operation(
     config: PlatformOperationConfig,
     updated_by: &str,
 ) -> AppResult<PlatformOperation> {
+    patch_operation(
+        db,
+        encryption_keys,
+        op,
+        Some(enabled),
+        Some(vendor_service_slug),
+        Some(config),
+        updated_by,
+    )
+    .await
+}
+
+pub async fn patch_operation(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    op: PlatformOperationName,
+    enabled: Option<bool>,
+    vendor_service_slug: Option<String>,
+    config: Option<PlatformOperationConfig>,
+    updated_by: &str,
+) -> AppResult<PlatformOperation> {
+    let existing = db
+        .collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        .find_one(doc! { "op": operation_name(op) })
+        .await?;
+    let changed_enabled = enabled.is_some();
+    let changed_vendor = vendor_service_slug.is_some();
+    let changed_config = config.is_some();
+    let enabled = enabled.unwrap_or_else(|| existing.as_ref().is_some_and(|row| row.enabled));
+    let vendor_service_slug = vendor_service_slug.unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|row| row.vendor_service_slug.clone())
+            .unwrap_or_else(|| default_vendor_service_slug(op).to_string())
+    });
+    let config = config.unwrap_or_else(|| {
+        existing
+            .as_ref()
+            .map(|row| row.config.clone())
+            .unwrap_or_else(|| default_operation_config(op))
+    });
     validate_operation_config(op, &vendor_service_slug, &config)?;
-    validate_vendor_binding(db, encryption_keys, op, &vendor_service_slug).await?;
+    if enabled {
+        validate_vendor_binding(db, encryption_keys, op, &vendor_service_slug).await?;
+    }
 
     let config = bson::to_bson(&config).map_err(|error| {
         AppError::Internal(format!(
@@ -650,22 +706,30 @@ pub async fn upsert_operation(
         ))
     })?;
     let updated_at = Utc::now();
+    let mut set = doc! {
+        "updated_at": bson::DateTime::from_chrono(updated_at),
+        "updated_by": updated_by,
+    };
+    let mut insert = doc! { "_id": uuid::Uuid::new_v4().to_string(), "op": operation_name(op) };
+    if changed_enabled {
+        set.insert("enabled", enabled);
+    } else {
+        insert.insert("enabled", enabled);
+    }
+    if changed_vendor {
+        set.insert("vendor_service_slug", vendor_service_slug);
+    } else {
+        insert.insert("vendor_service_slug", vendor_service_slug);
+    }
+    if changed_config {
+        set.insert("config", config);
+    } else {
+        insert.insert("config", config);
+    }
     db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
         .find_one_and_update(
             doc! { "op": operation_name(op) },
-            doc! {
-                "$set": {
-                    "enabled": enabled,
-                    "vendor_service_slug": vendor_service_slug,
-                    "config": config,
-                    "updated_at": bson::DateTime::from_chrono(updated_at),
-                    "updated_by": updated_by,
-                },
-                "$setOnInsert": {
-                    "_id": uuid::Uuid::new_v4().to_string(),
-                    "op": operation_name(op),
-                },
-            },
+            doc! { "$set": set, "$setOnInsert": insert },
         )
         .upsert(true)
         .return_document(ReturnDocument::After)
@@ -1200,8 +1264,7 @@ mod tests {
 
         for template in DEFAULT_PLATFORM_VENDOR_TEMPLATES {
             let Some(operation) = template.operation else {
-                // Duffel is intentionally a credential template until a code
-                // operation is shipped; there is no contract to cross-check.
+                // Unbound templates provision credentials for future operations.
                 continue;
             };
             let operation = parse_operation_name(operation).expect("seeded operation name");
@@ -1502,6 +1565,43 @@ mod tests {
                 "voice_id": "voice-a",
                 "model_id": "caller-model",
             }))
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod admin_form_disable_tests {
+    use super::*;
+    #[tokio::test]
+    async fn admin_form_can_disable_an_operation_without_vendor_credentials() {
+        let db = crate::test_utils::connect_test_database("admin_form_disable_operation")
+            .await
+            .expect("Mongo required");
+        let keys = crate::test_utils::test_encryption_keys();
+        let saved = patch_operation(
+            &db,
+            &keys,
+            PlatformOperationName::XSearch,
+            Some(false),
+            None,
+            None,
+            "admin",
+        )
+        .await
+        .unwrap();
+        assert!(!saved.enabled);
+        assert!(
+            patch_operation(
+                &db,
+                &keys,
+                PlatformOperationName::XSearch,
+                Some(true),
+                None,
+                None,
+                "admin"
+            )
+            .await
             .is_err()
         );
     }

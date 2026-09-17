@@ -64,6 +64,81 @@ fn assert_safe_label(name: &str) -> Result<()> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Retention must preserve binaries referenced by existing service definitions.
+/// A definition we cannot interpret stops pruning rather than breaking restart.
+pub(crate) fn pinned_binary_paths() -> std::result::Result<Vec<PathBuf>, anyhow::Error> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot locate node service definitions"))?;
+    let mut directories = if cfg!(target_os = "macos") {
+        vec![home.join("Library/LaunchAgents")]
+    } else {
+        vec![home.join(".config/systemd/user")]
+    };
+    if cfg!(target_os = "linux")
+        && let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+    {
+        directories.push(PathBuf::from(xdg).join("systemd/user"));
+    }
+    pinned_binary_paths_in(&directories)
+}
+
+fn pinned_binary_paths_in(
+    directories: &[PathBuf],
+) -> std::result::Result<Vec<PathBuf>, anyhow::Error> {
+    let mut pins = Vec::new();
+    for directory in directories {
+        if !directory.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("dev.nyxid.node") && name.ends_with(".plist") {
+                let value = plist::Value::from_file(entry.path())?;
+                let program = value.as_dictionary().and_then(|v| v.get("ProgramArguments"))
+                .and_then(plist::Value::as_array).and_then(|v| v.first()).and_then(plist::Value::as_string)
+                .ok_or_else(|| anyhow::anyhow!("Cannot determine pinned node executable; reinstall the daemon before pruning"))?;
+                pins.push(PathBuf::from(program));
+            } else if name.starts_with("nyxid-node") && name.ends_with(".service") {
+                let contents = fs::read_to_string(entry.path())?;
+                pins.push(systemd_pinned_binary(&contents)?);
+            }
+        }
+    }
+    Ok(pins)
+}
+
+fn systemd_pinned_binary(contents: &str) -> std::result::Result<PathBuf, anyhow::Error> {
+    let starts = contents
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("ExecStart="))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        starts.len() == 1,
+        "Cannot determine pinned node executable; reinstall the daemon before pruning"
+    );
+    let mut chars = starts[0].chars();
+    while let Some(character) = chars.next() {
+        if character == '\\' {
+            anyhow::ensure!(
+                matches!(chars.next(), Some('\\' | '"' | '\'')),
+                "Node unit has unsupported systemd escapes; migrate the daemon before pruning retained versions"
+            );
+        }
+    }
+    let args = shlex::split(starts[0]).ok_or_else(|| anyhow::anyhow!("Invalid node ExecStart"))?;
+    let path = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Missing node ExecStart"))?;
+    // NyxID's generated units use literal quoted paths. Custom specifiers or
+    // variable expansion require operator migration before automatic pruning.
+    anyhow::ensure!(
+        !path.contains(['%', '$']) && Path::new(path).is_absolute(),
+        "Node service uses an expanded executable path; reinstall with a literal path before pruning retained versions"
+    );
+    Ok(PathBuf::from(path))
+}
+
 /// Install the node agent as a background service (LaunchAgent / systemd unit).
 ///
 /// If `--force` is passed, existing service files are overwritten.
@@ -82,7 +157,7 @@ pub fn install(
         )));
     }
 
-    let config_dir = config::resolve_config_dir_with_profile(config_path, profile)?;
+    let config_dir = resolve_daemon_config_dir(config_path, profile)?;
     ensure_config_exists(&config_dir)?;
     let config_dir = canonicalize_existing_dir(&config_dir)?;
 
@@ -864,6 +939,12 @@ fn xml_escape(s: &str) -> String {
 
 /// Resolve the absolute path of the `nyxid` binary (current executable).
 fn resolve_binary() -> Result<PathBuf> {
+    if let Ok(active) = crate::commands::update::active_binary_path()
+        && let Ok(versions) = crate::commands::update::installed_versions()
+        && versions.iter().any(|version| version.active)
+    {
+        return Ok(active);
+    }
     std::env::current_exe().map_err(|e| {
         Error::Config(format!(
             "Could not determine nyxid binary path: {e}. \
@@ -928,6 +1009,32 @@ fn read_pid_if_running(pid_file: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_pins_scan_historical_and_xdg_locations_and_reject_c_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("home/.config/systemd/user");
+        let xdg = tmp.path().join("custom/systemd/user");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(
+            legacy.join("nyxid-node.service"),
+            "[Service]\nExecStart=\"/tmp/old version/nyxid\" node start\n",
+        )
+        .unwrap();
+        fs::write(
+            xdg.join("nyxid-node-alt.service"),
+            "[Service]\nExecStart=/tmp/other/nyxid node start\n",
+        )
+        .unwrap();
+        let paths = pinned_binary_paths_in(&[legacy, xdg]).unwrap();
+        assert!(paths.contains(&PathBuf::from("/tmp/old version/nyxid")));
+        assert!(paths.contains(&PathBuf::from("/tmp/other/nyxid")));
+        assert!(
+            systemd_pinned_binary(r"ExecStart=/tmp/path\x20with\x20spaces/nyxid node start")
+                .is_err()
+        );
+    }
     use std::ffi::OsString;
     use std::io::Write;
     use std::path::{Path, PathBuf};

@@ -1,3 +1,25 @@
+# Claim links carry a short-lived bearer. Redact them before access logging and
+# suppress the initial document's referrer before the browser loads any assets.
+map $request_uri $nyxid_has_claim {
+    default 0;
+    ~[?&]claim(?:=|&|$) 1;
+}
+map $nyxid_has_claim $nyxid_referrer_policy {
+    0 "strict-origin-when-cross-origin";
+    default "no-referrer";
+}
+map $nyxid_has_claim $nyxid_access_request {
+    0 $request;
+    default "$request_method $uri?claim=REDACTED $server_protocol";
+}
+map $http_referer $nyxid_access_referrer {
+    default $http_referer;
+    ~[?&]claim= "REDACTED";
+}
+log_format nyxid_frontend '$remote_addr - $remote_user [$time_local] '
+    '"$nyxid_access_request" $status $body_bytes_sent '
+    '"$nyxid_access_referrer" "$http_user_agent"';
+
 server {
     listen 8080;
     server_name _;
@@ -11,7 +33,8 @@ server {
     # Security headers
     add_header X-Frame-Options "DENY" always;
     add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Referrer-Policy $nyxid_referrer_policy always;
+    access_log /var/log/nginx/access.log nyxid_frontend;
 
     # Gzip compression
     gzip on;
@@ -84,7 +107,7 @@ server {
         add_header Cache-Control "public, immutable";
         add_header X-Frame-Options "DENY" always;
         add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Referrer-Policy $nyxid_referrer_policy always;
         try_files $uri =404;
     }
 
@@ -99,7 +122,7 @@ server {
         add_header Cache-Control "no-cache" always;
         add_header X-Frame-Options "DENY" always;
         add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Referrer-Policy $nyxid_referrer_policy always;
         try_files $uri /index.html;
     }
 }

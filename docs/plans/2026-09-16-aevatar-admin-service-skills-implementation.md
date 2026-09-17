@@ -11,7 +11,7 @@ The account can make incorrect editorial decisions. V1 limits writable resources
 The implementation has two independently testable parts:
 
 1. NyxID: live account authority, bounded recommendation API, version history/restore, existing-writer participation, management/client support, and tests. This checkout owns these changes.
-2. Ornn/Aevatar: resource/action scoped content CRU and consumption of published changes. Their repository locations have been requested. The complete content-editing integration is not considered delivered until those boundaries are implemented or verified against executable evidence. Do not substitute broad Ornn admin permissions or claim a recommendation-only feature edits packages.
+2. Ornn/Aevatar: resource/action scoped content CRU and consumption of published changes. Ornn source is `ChronoAIProject/Ornn`, with companion content-only publication tracked in [#1247](https://github.com/ChronoAIProject/Ornn/issues/1247). Aevatar deployment consumption still requires verification. The complete deployed content-editing integration is not considered verified until those boundaries have executable evidence. Do not substitute broad Ornn admin permissions or claim a recommendation-only feature edits packages.
 
 ## Simplifications for the first release
 
@@ -38,6 +38,14 @@ Keep the existing proxy projection for this purpose so the catalog legacy branch
 Add `credential_generation: i64` (legacy default zero) to the account and token record and optional `sgen` to SA JWT claims. Issuance records the generation read with the validated secret. Rotation increments generation atomically with the secret-hash change, then revokes old rows through the existing helper. Authentication requires an existing token record with matching account/jti/scope, unexpired and unrevoked, and matching current credential generation in both record and claim. For legacy SA tokens, missing generation means zero and is accepted only while the account remains generation zero. Other token types do not carry this field. This closes issuance-after-rotation races regardless of row insertion order. Never return/log secret material from grant/history APIs.
 
 Admin account responses expose purpose, protection, grant summary, and credential generation without secret material.
+
+The approved integration with current main reuses its `proxy_operation_policy`: a Curation
+Ornn target must have an explicit policy at grant issuance and runtime (empty means
+deny all). Use a separate catalog endpoint with the exact skills read/upload/version
+routes in `docs/SERVICE_ACCOUNTS.md`, not the shared endpoint for other clients.
+The SA's downstream role has only Ornn read+publish; exact existing object write
+grants bind package edits to its UUID. Ornn's auth-only assistant/audit routes make
+the endpoint policy necessary in addition to the role. No new policy framework is added.
 
 ## 2. Recommendation state and history
 

@@ -33,6 +33,19 @@ pub struct ServicePlatformPricing {
     pub sync_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct LanePricing {
+    #[serde(default)]
+    pub metric: BillingMetric,
+    pub credits_per_unit: String,
+    #[serde(default)]
+    pub lago_metric_code: String,
+    #[serde(default)]
+    pub sync_status: PricingSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_error: Option<String>,
+}
+
 impl BillingMetric {
     /// Stable serde-matching name; used in ledger canonical encoding, so
     /// variant renames must not change these strings.
@@ -52,6 +65,10 @@ pub struct ServiceBilling {
     /// platform-operated services that should bill wallet credits.
     #[serde(default)]
     pub platform_billable: bool,
+    /// Restrict platform charges to NyxID master credentials and shared OAuth
+    /// apps. User-owned, agent-override, node-managed and no-auth traffic stays free.
+    #[serde(default)]
+    pub platform_charge_nyxid_credentials_only: bool,
     /// Admin-selected platform metering unit. Unset falls back to the
     /// heuristic (WS/SSH meter bytes, `llm-` slugs meter tokens,
     /// everything else meters requests).
@@ -67,6 +84,14 @@ pub struct ServiceBilling {
     /// removes this metric's charge from Lago before clearing the marker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_pricing_cleanup_metric_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byok_pricing: Option<LanePricing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key_pricing: Option<LanePricing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byok_pricing_cleanup_metric_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key_pricing_cleanup_metric_code: Option<String>,
     #[serde(default)]
     pub resale_billable: bool,
     #[serde(default)]
@@ -79,9 +104,14 @@ impl Default for ServiceBilling {
     fn default() -> Self {
         Self {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: false,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: None,
@@ -192,6 +222,35 @@ mod tests {
     use super::{BillingMetric, ServiceBilling};
 
     #[test]
+    fn credential_charge_restriction_defaults_off_and_round_trips() {
+        let legacy: ServiceBilling = bson::from_document(bson::doc! {
+            "platform_billable": true,
+        })
+        .unwrap();
+        assert!(!legacy.platform_charge_nyxid_credentials_only);
+        assert!(!ServiceBilling::default().platform_charge_nyxid_credentials_only);
+        let restricted = ServiceBilling {
+            platform_charge_nyxid_credentials_only: true,
+            ..legacy
+        };
+        let document = bson::to_document(&restricted).unwrap();
+        assert!(
+            document
+                .get_bool("platform_charge_nyxid_credentials_only")
+                .unwrap()
+        );
+        assert_eq!(
+            bson::from_document::<ServiceBilling>(document).unwrap(),
+            restricted
+        );
+        let json = serde_json::to_string(&restricted).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ServiceBilling>(&json).unwrap(),
+            restricted
+        );
+    }
+
+    #[test]
     fn service_billing_defaults_to_not_resale_billable() {
         let billing = ServiceBilling::default();
 
@@ -205,9 +264,14 @@ mod tests {
     fn active_resale_spec_requires_metric_code() {
         let mut billing = ServiceBilling {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: None,

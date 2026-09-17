@@ -20,14 +20,14 @@ pub struct AgentKeyLoginRequest {
     #[serde(flatten)]
     pub context: LoginClientContext,
     pub client_ip_hmac: Option<String>,
-    #[serde(default)]
-    pub requested_profile: Option<String>,
     pub approved_user_id: Option<String>,
     pub approver_ip_hmac: Option<String>,
     pub api_key_id: Option<String>,
     pub credential_id: Option<String>,
     #[serde(default)]
     pub key_was_created: bool,
+    #[serde(default)]
+    pub key_created_by_approval: bool,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub delivery_credential_encrypted: Option<Vec<u8>>,
     #[serde(default, with = "bson_datetime::optional")]
@@ -70,13 +70,20 @@ mod tests {
         .unwrap();
         assert_eq!(row.slow_down_increments, 0);
         assert!(!row.key_was_created);
-        assert!(row.context.client_label.is_none() && row.requested_profile.is_none());
+        assert!(row.context.client_label.is_none() && row.context.requested_profile.is_none());
         assert!(row.approved_at.is_none() && row.last_polled_at.is_none());
         row.approved_at = Some(now.to_chrono());
         row.delivered_at = Some(now.to_chrono());
         row.denied_at = Some(now.to_chrono());
         row.last_polled_at = Some(now.to_chrono());
         row.delivery_credential_encrypted = Some(b"encrypted-login-material".to_vec());
+        row.context.requested_profile = Some("fixture-profile".into());
+        let raw = bson::to_vec(&row).unwrap();
+        let raw_restored: AgentKeyLoginRequest = bson::from_slice(&raw).unwrap();
+        assert_eq!(
+            raw_restored.context.requested_profile.as_deref(),
+            Some("fixture-profile")
+        );
         let document = bson::to_document(&row).unwrap();
         for field in [
             "created_at",

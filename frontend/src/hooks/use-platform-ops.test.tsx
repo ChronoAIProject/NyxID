@@ -12,17 +12,27 @@ import {
   usePlatformVendorRequirements,
   useProvisionPlatformVendor,
   useUpdatePlatformOperation,
+  useUpdatePlatformVendorTemplate,
 } from "./use-platform-ops";
 
-const { mockDelete, mockGet, mockPost, mockPut } = vi.hoisted(() => ({
-  mockDelete: vi.fn(),
-  mockGet: vi.fn(),
-  mockPost: vi.fn(),
-  mockPut: vi.fn(),
-}));
+const { mockDelete, mockGet, mockPost, mockPut, mockPatch } = vi.hoisted(
+  () => ({
+    mockDelete: vi.fn(),
+    mockGet: vi.fn(),
+    mockPost: vi.fn(),
+    mockPut: vi.fn(),
+    mockPatch: vi.fn(),
+  }),
+);
 
 vi.mock("@/lib/api-client", () => ({
-  api: { delete: mockDelete, get: mockGet, post: mockPost, put: mockPut },
+  api: {
+    delete: mockDelete,
+    get: mockGet,
+    post: mockPost,
+    put: mockPut,
+    patch: mockPatch,
+  },
 }));
 
 const elevenLabsRequirement: PlatformVendorRequirement = {
@@ -188,4 +198,76 @@ describe("platform operation hooks", () => {
       )?.operations[0],
     ).toEqual(updated);
   });
+});
+
+it("keeps the confirmed operation cache when a pre-save GET resolves late", async () => {
+  const before = {
+    op: "x_search",
+    enabled: false,
+    vendor_service_slug: "platform-x",
+    config: { type: "x_search", max_results_cap: 10 },
+    updated_at: null,
+    updated_by: null,
+  };
+  const saved = {
+    ...before,
+    enabled: true,
+    updated_at: "2026-09-17T00:00:00Z",
+    updated_by: "admin",
+  };
+  let finishRead!: (value: unknown) => void;
+  mockGet.mockReturnValue(
+    new Promise((resolve) => {
+      finishRead = resolve;
+    }),
+  );
+  mockPut.mockResolvedValue(saved);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  client.setQueryData(PLATFORM_OPERATION_QUERY_KEY, { operations: [before] });
+  const wrapper = ({ children }: PropsWithChildren) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  const { result } = renderHook(
+    () => ({
+      query: usePlatformOperations(),
+      update: useUpdatePlatformOperation(),
+    }),
+    { wrapper },
+  );
+  await waitFor(() => expect(mockGet).toHaveBeenCalled());
+  await act(async () => {
+    await result.current.update.mutateAsync({
+      op: "x_search",
+      data: { enabled: true },
+    });
+  });
+  await act(async () => {
+    finishRead({ operations: [before] });
+  });
+  await waitFor(() => expect(result.current.query.isFetching).toBe(false));
+  expect(client.getQueryData(PLATFORM_OPERATION_QUERY_KEY)).toEqual({
+    operations: [saved],
+  });
+});
+
+it("PATCHes only the reviewed vendor template field", async () => {
+  mockPatch.mockResolvedValue(elevenLabsRequirement);
+  const client = new QueryClient();
+  const { result } = renderHook(() => useUpdatePlatformVendorTemplate(), {
+    wrapper: ({ children }: PropsWithChildren) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+  await act(() =>
+    result.current.mutateAsync({
+      id: "template-elevenlabs",
+      data: { credential_note: "New note" },
+    }),
+  );
+  expect(mockPatch).toHaveBeenCalledWith(
+    "/admin/platform-ops/vendor-templates/template-elevenlabs",
+    { credential_note: "New note" },
+  );
 });

@@ -94,14 +94,14 @@ async function fixture(page: Page, signedIn: boolean) {
   return { requests, state };
 }
 
-test("phone QR is public, ignores URL codes and leaves no browser storage or account cookie", async ({
+test("phone QR prefills once, strips the URL and leaves no browser storage or account cookie", async ({
   page,
   context,
 }, info) => {
   const { requests, state } = await fixture(page, false);
   await page.goto("/login/agent-key?user_code=ABCD-EFGH");
-  await expect(page.getByLabel("User code")).toHaveValue("");
-  await page.getByLabel("User code").fill("ABCD-EFGH");
+  await expect(page.getByLabel("User code")).toHaveValue("ABCD-EFGH");
+  await expect(page).toHaveURL(/\/login\/agent-key$/);
   expect(requests).toHaveLength(0);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await expect(
@@ -128,7 +128,7 @@ test("phone QR is public, ignores URL codes and leaves no browser storage or acc
   ).toBe(true);
   state.status = "approved";
   await expect(
-    page.getByText("Approved - return to your terminal"),
+    page.getByText("Approved - return to the requesting device"),
   ).toBeVisible({ timeout: 10000 });
   await expect(page.getByAltText("Agent Key login QR code")).toHaveCount(0);
   const count = requests.length;
@@ -153,8 +153,10 @@ for (const selection of ["existing", "new"] as const)
   }, info) => {
     const { requests } = await fixture(page, true);
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/login/agent-key");
-    await page.getByLabel("User code").fill("ABCD-EFGH");
+    await page.goto("/login/agent-key?user_code=abcd%20efgh");
+    await expect(page.getByLabel("User code")).toHaveValue("ABCD-EFGH");
+    await expect(page).toHaveURL(/\/login\/agent-key$/);
+    expect(requests).toEqual([]);
     await page.getByRole("button", { name: "Continue", exact: true }).click();
     await expect(
       page.getByText("Requested profile: home-agent", { exact: true }),
@@ -174,6 +176,8 @@ for (const selection of ["existing", "new"] as const)
       .getByRole("button", { name: "Review permissions", exact: true })
       .click();
     await expect(page.getByText("Confirm effective permissions")).toBeVisible();
+    await expect(page.getByText("ABCD-EFGH", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Reject if it does not match/)).toBeVisible();
     expect(requests.some((request) => request.path.endsWith("/approve"))).toBe(
       false,
     );
@@ -189,7 +193,7 @@ for (const selection of ["existing", "new"] as const)
     await page.waitForTimeout(800);
     await page.getByRole("button", { name: "Approve", exact: true }).click();
     await expect(
-      page.getByText("Approved - return to your terminal"),
+      page.getByText("Approved - return to the requesting device"),
     ).toBeVisible();
     const approvals = requests.filter((request) =>
       request.path.endsWith("/approve"),
@@ -209,3 +213,16 @@ for (const selection of ["existing", "new"] as const)
       },
     });
   });
+
+
+test("malformed QR code is removed and leaves a usable empty form", async ({ page }) => {
+  const { requests } = await fixture(page, false);
+  await page.goto("/login/agent-key?user_code=ABCD-EFGH%21");
+  await expect(page).toHaveURL(/\/login\/agent-key$/);
+  await expect(page.getByLabel("User code")).toHaveValue("");
+  await expect(page.getByText(/Enter the code manually/)).toBeVisible();
+  expect(requests).toEqual([]);
+  await page.getByLabel("User code").fill("ABCD-EFGH");
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByText("ABCD-EFGH", { exact: true })).toBeVisible();
+});

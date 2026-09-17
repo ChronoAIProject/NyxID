@@ -191,11 +191,16 @@ A valid instance-mounted `openapi_spec_url` (set via `nyxid service update --ope
 
 Admin-created catalog services get the same treatment: any active HTTP service with an `openapi_spec_url` and **zero** endpoint rows has discovery run automatically -- once at startup (background sweep) and whenever an admin creates or updates the service with a spec URL. The fetch uses the hardened SSRF-checked path, so spec URLs on private/internal hosts still require the manual `POST /services/{id}/discover-endpoints` route. Services with any existing endpoint rows are never touched automatically; re-run manual discovery to refresh them.
 
-A weekly `catalog-spec-drift` workflow (`scripts/check-catalog-spec-drift.py`) verifies every overlay operation still exists in the official upstream spec for providers that publish one (OpenAI, X, Discord, ElevenLabs, Twilio). A red run means a provider moved or removed an operation; update the overlay by hand -- overlays are never auto-updated.
+A weekly `catalog-spec-drift` workflow (`scripts/check-catalog-spec-drift.py`) verifies every overlay operation still exists in the official upstream spec for providers that publish one (OpenAI, X, Discord, ElevenLabs, Telnyx, Twilio). A red run means a provider moved or removed an operation; update the overlay by hand -- overlays are never auto-updated.
 
 ElevenLabs and Twilio both publish JSON specifications that currently fit under the 5MB fetch limit (roughly 2.0MB and 1.9MB respectively), but NyxID deliberately uses hosted overlays for them. The upstream documents expose much broader, frequently changing surfaces than the default MCP catalog needs. The overlays keep discovery focused on ElevenLabs speech/voice/ConvAI operations and Twilio Calls/Messages/Recordings operations, while preserving Aevatar risk annotations. ElevenLabs realtime WebSocket paths are transport capabilities rather than OpenAPI operations; clients use the normal proxy WebSocket route with the vendor frame protocol.
 
 To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register it in `HOSTED_SPEC_SOURCES` and `SLUG_TO_SPEC_KEY`, and the seed, backfill, sync, and serving paths all pick it up.
+
+The Telnyx overlay covers core AI inference, assistants, conversations, speech,
+messaging, and calling. Its full upstream spec exceeds the fetch limit. See
+[Telnyx integration](TELNYX_INTEGRATION.md) for connection setup and platform
+credential provisioning.
 
 ---
 
@@ -213,3 +218,59 @@ To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register 
 Catalog responses add optional `recommended_skill_refs`, `skills_revision`, and a separate versioned `skills_manifest_digest`. MCP keeps the existing name-based `catalog_digest` construction; exact-ref changes are discoverable through the new manifest digest. An instance's `recommended_skills` override suppresses inherited refs, even for an empty override.
 
 A dedicated protected Curation service account uses `/api/v1/catalog-curation/services` for grant-scoped discovery and `/services/{id}/skills`, `/skills/history`, and `/skills/restore` for conditional recommendation management. It cannot use unrestricted catalog or service-management routes. Human service editing shares the same revision/history transaction and must send the observed skill revision; omitted legacy revision means zero. See [Service accounts: catalog skill curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for grant administration, request examples, no-op/replay semantics, rollout ordering, and the Ornn package-content boundary.
+## Inference and platform-key discovery (0.20)
+
+Catalog list, `?include_all=true`, single-entry lookup and MCP
+`nyx__discover_services` expose an optional `inference` block. No block means no
+advertised model-call protocol. `wire_protocol` is `anthropic_messages`,
+`openai_responses` or `openai_completions`; `model_list=true` advertises
+`GET /api/v1/proxy/s/{slug}/models` with a `data` model array. Anthropic keeps its
+own pagination fields. Optional `realtime=true` advertises WebSocket
+`/api/v1/proxy/s/{slug}/realtime`. xAI and OpenAI preserve the bearer-injected
+`wss://api.x.ai/v1/realtime` and `wss://api.openai.com/v1/realtime` transports.
+
+`binding` is computed for the caller. `platform` means an authorized server-held
+key is available and omits `status_slug`; it does not change the binding of an
+existing personal connection. `user` means the client needs a personal connection:
+
+1. For provider-linked services, `status_slug` is `ProviderConfig.slug`. Find that
+   `provider_slug` in `GET /api/v1/llm/status`; `ready` is usable, `expired` needs
+   reauthorization, `not_connected` needs connection.
+2. Otherwise `status_slug` is the catalog slug. In `GET /api/v1/keys`, find rows
+   whose `catalog_service_slug` matches, check `is_active=true`, then inspect
+   credential health (`status` / `connection_status`). Do not match the user
+   connection's potentially customized `slug`, and do not treat a healthy
+   credential on a disabled service as a usable connection.
+3. Execute through the selected connection's returned proxy URL/slug. A user may
+   have several connections and may choose BYOK even when catalog binding is
+   platform. Restricted availability is revalidated at execution time.
+
+Every catalog entry also returns `platform_key: { available, pricing }` and
+`byok_pricing`. A price view contains `metric`, exact decimal `credits_per_unit`
+and `sync_status`; null means no configured lane price. In lane mode the missing
+lane is free. Services without lanes retain legacy `billing` behavior; resale can
+also apply. No credentials, secret lengths or allowed-owner lists are exposed.
+
+Startup fills only null/absent inference values for OpenAI, Anthropic, DeepSeek,
+Mistral, OpenRouter, xAI, `chrono-llm` and `chrono-llm-public`. Chrono uses chat
+completions and models as recorded in [its upstream contract](chat/direct-chronollm-spec.md).
+Chrono public preserves platform binding; Chrono BYOK uses `status_slug=chrono-llm`.
+Codex, Google AI and Cohere do not advertise a generic protocol block.
+
+Connect through `POST /keys` or `nyx__connect_service` with
+`use_platform_key: true`, or omit it for existing BYOK behavior. Hosted connect-link
+creation/completion accepts the same choice. Assistant clients can request the
+additive boolean schema with `GET /api/v1/assistant/actions?revision=nyxid-assistant-actions.v9`;
+the default and revisions v4-v8 keep their deployed pinned schemas. The v9
+`catalogService.use_platform_key` field is optional and the human can review the
+choice in the connection dialog.
+
+Admin-cleared inference stays absent after restart: `inference_admin_modified` is a
+stored, defaulted tombstone and is not a client inference capability. Admin catalog
+responses additionally expose `legacy_public_master`; editors render such absent
+platform configurations as enabled/public (implicit). Gateway-URL providers never
+advertise an available platform key.
+
+## Aurinko email operations
+
+The `api-aurinko` catalog entry uses the `aurinko` hosted overlay and seeds twelve concrete operations from documented Aurinko account/email/draft contracts. The base is `https://api.aurinko.io`; paths include `/v1`. Authentication is the owner's account Bearer token. Writes carry approval/risk annotations and do not claim upstream idempotency. Aurinko publishes a machine-readable OpenAPI specification and is included in the existing drift map. See [Aurinko integration](./AURINKO_INTEGRATION.md) for connection, permissions, and channel setup.

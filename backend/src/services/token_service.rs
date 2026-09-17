@@ -159,6 +159,16 @@ pub async fn create_session(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) -> AppResult<IssuedSession> {
+    create_session_with_transaction(db, user_id, ip_address, user_agent, None).await
+}
+
+async fn create_session_with_transaction(
+    db: &mongodb::Database,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    transaction: Option<&mut mongodb::ClientSession>,
+) -> AppResult<IssuedSession> {
     Uuid::parse_str(user_id).map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let session_token = generate_random_token();
@@ -180,9 +190,13 @@ pub async fn create_session(
         last_active_at: now,
     };
 
-    db.collection::<Session>(SESSIONS)
-        .insert_one(&new_session)
-        .await?;
+    let collection = db.collection::<Session>(SESSIONS);
+    let insert = collection.insert_one(&new_session);
+    if let Some(transaction) = transaction {
+        insert.session(transaction).await?;
+    } else {
+        insert.await?;
+    }
 
     Ok(IssuedSession {
         session_token,
@@ -199,16 +213,85 @@ pub async fn create_session_and_issue_tokens(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) -> AppResult<IssuedTokens> {
+    issue_session_tokens(db, config, jwt_keys, user_id, ip_address, user_agent, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn issue_session_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    transaction: Option<&mut mongodb::ClientSession>,
+) -> AppResult<IssuedTokens> {
+    let prepared =
+        prepare_session_tokens(db, config, jwt_keys, user_id, ip_address, user_agent).await?;
+    if let Some(transaction) = transaction {
+        insert_prepared_session(db, &prepared, transaction).await?;
+    } else {
+        db.collection::<Session>(SESSIONS)
+            .insert_one(&prepared.session)
+            .await?;
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .insert_one(&prepared.refresh)
+            .await?;
+    }
+    Ok(prepared.tokens)
+}
+
+pub struct PreparedSessionTokens {
+    pub tokens: IssuedTokens,
+    session: Session,
+    refresh: RefreshToken,
+}
+
+pub async fn insert_prepared_session(
+    db: &mongodb::Database,
+    prepared: &PreparedSessionTokens,
+    transaction: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    db.collection::<Session>(SESSIONS)
+        .insert_one(&prepared.session)
+        .session(&mut *transaction)
+        .await?;
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .insert_one(&prepared.refresh)
+        .session(&mut *transaction)
+        .await?;
+    Ok(())
+}
+
+pub async fn prepare_session_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+) -> AppResult<PreparedSessionTokens> {
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
-    let session = create_session(db, user_id, ip_address, user_agent).await?;
     let now = Utc::now();
+    let session = Session {
+        id: Uuid::new_v4().to_string(),
+        user_id: user_id.to_owned(),
+        token_hash: hash_token(&generate_random_token()),
+        ip_address: ip_address.map(str::to_owned),
+        user_agent: user_agent.map(str::to_owned),
+        expires_at: now + Duration::seconds(SESSION_TTL_SECS),
+        revoked: false,
+        created_at: now,
+        last_active_at: now,
+    };
 
     // Resolve RBAC data and inject into the access token based on scope
     let scope = FIRST_PARTY_ACCESS_SCOPES;
-    let rbac_data =
+    let mut rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, user_id, scope).await?;
+    rbac_data.sid = Some(session.id.clone());
     let access_token = jwt::generate_access_token(
         jwt_keys,
         config,
@@ -234,7 +317,7 @@ pub async fn create_session_and_issue_tokens(
         jti: refresh_jti,
         client_id: Uuid::nil().to_string(), // first-party client
         user_id: user_id.to_string(),
-        session_id: Some(session.session_id.clone()),
+        session_id: Some(session.id.clone()),
         scope: None,
         expires_at: refresh_expires,
         revoked: false,
@@ -246,16 +329,17 @@ pub async fn create_session_and_issue_tokens(
         created_at: now,
     };
 
-    db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .insert_one(&new_refresh)
-        .await?;
-
-    Ok(IssuedTokens {
+    let tokens = IssuedTokens {
         access_token,
         refresh_token: refresh_token_jwt,
-        session_id: session.session_id,
+        session_id: session.id.clone(),
         access_expires_in: config.jwt_access_ttl_secs,
         resource_uris: Vec::new(),
+    };
+    Ok(PreparedSessionTokens {
+        tokens,
+        session,
+        refresh: new_refresh,
     })
 }
 
@@ -322,6 +406,21 @@ pub async fn refresh_tokens(
         .find_one(doc! { "jti": &claims.jti })
         .await?
         .ok_or_else(|| AppError::Unauthorized("Refresh token not found".to_string()))?;
+
+    if stored.client_id == Uuid::nil().to_string()
+        && let Some(id) = stored.session_id.as_deref()
+    {
+        let live = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! {
+                "_id": id, "user_id": &stored.user_id, "revoked": false,
+                "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}
+            })
+            .await?;
+        if live.is_none() {
+            return Err(AppError::Unauthorized("Session expired or revoked".into()));
+        }
+    }
 
     // Re-validate the issuing OAuth client. First-party login flows
     // (`auth_service::login_with_password`, `refresh_session_with_token`)
@@ -474,8 +573,11 @@ pub async fn refresh_tokens(
             active_token.allow_all_services,
         )
         .await?;
-    let rbac_data =
+    let mut rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
+    if active_token.client_id == Uuid::nil().to_string() {
+        rbac_data.sid = session_id.clone();
+    }
     let restrictions =
         (!token_resource_scope.allow_all_services).then_some(jwt::AccessTokenRestrictions {
             resources: &token_resource_scope.resource_uris,

@@ -7,7 +7,7 @@ import {
 } from "../../lib/env";
 
 const NORMALIZED_USER_CODE_LENGTH = 8;
-const NORMALIZED_USER_CODE_PATTERN = /^[0-9A-HJKMNP-TV-Z]{8}$/;
+const NORMALIZED_USER_CODE_PATTERN = /^(?:2)?[0-9A-HJKMNP-TV-Z]{8}$/;
 const ABSOLUTE_URL_PATTERN =
   /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)(\/[^?#]*)?(?:\?([^#]*))?(?:#.*)?$/i;
 
@@ -104,7 +104,6 @@ export function normalizeAuthDeviceUserCode(raw: string): string | null {
     .replace(/U/g, "V");
 
   if (
-    normalized.length !== NORMALIZED_USER_CODE_LENGTH ||
     !NORMALIZED_USER_CODE_PATTERN.test(normalized)
   ) {
     return null;
@@ -113,11 +112,19 @@ export function normalizeAuthDeviceUserCode(raw: string): string | null {
   return normalized;
 }
 
+export function supportsRestrictedDeviceLogin(raw: string): boolean {
+  return normalizeAuthDeviceUserCode(raw)?.length === 9;
+}
+
 export function formatAuthDeviceUserCode(raw: string): string {
   const compact = raw
     .replace(/[- \t]/g, "")
     .toUpperCase()
-    .slice(0, NORMALIZED_USER_CODE_LENGTH);
+    .slice(0, raw.replace(/[- \t]/g, "").startsWith("2") ? 9 : NORMALIZED_USER_CODE_LENGTH);
+
+  if (compact.length === 9 && compact.startsWith("2")) {
+    return `2-${compact.slice(1, 5)}-${compact.slice(5)}`;
+  }
 
   return compact.length > 4
     ? `${compact.slice(0, 4)}-${compact.slice(4)}`

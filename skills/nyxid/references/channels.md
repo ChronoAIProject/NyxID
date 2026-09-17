@@ -180,15 +180,29 @@ nyxid channel-bot register --platform whatsapp --label "WhatsApp Support" --toke
 
 For WhatsApp, copy the returned Callback URL and one-time **Verify Token** into Meta App Dashboard > WhatsApp > Configuration, verify and save, then subscribe to `messages`. Manually subscribe the app to the WABA with `POST /{version}/{WABA_ID}/subscribed_apps`. The token must be a System User access token authorized for that account. `phone_number_id` is the Meta phone identifier, not its display number or App ID. NyxID filters other phone numbers' app-wide events. The WhatsApp Business App has no API; Twilio-hosted WhatsApp is a separate, unsupported API.
 
-Rotate WhatsApp credentials with `nyxid channel-bot update <BOT_ID> --token-env WHATSAPP_ACCESS_TOKEN --app-secret-env META_APP_SECRET`. The Verify Token is preserved. Private conversation IDs are sender `wa_id` digits without `+`; outbound recipients also accept one leading `+` and spaces/dashes. Replies use text (split at 4096 characters), `metadata.template`, or `metadata.interactive`; outside the 24-hour service window only approved templates are allowed. Inbound media references require a two-step authenticated Graph download through a separately authorized connection. WhatsApp retries with an already-stored inbound message ID for the same bot/platform are skipped before routing; concurrent first deliveries can still race. Other platforms keep their existing behavior. Full setup: `docs/CHANNEL_BOT_RELAY.md`.
+Rotate WhatsApp credentials with `nyxid channel-bot update <BOT_ID> --token-env WHATSAPP_ACCESS_TOKEN --app-secret-env META_APP_SECRET`. The Verify Token is preserved. Private conversation IDs are sender `wa_id` digits without `+`; outbound recipients also accept one leading `+` and spaces/dashes. Replies use text (split at 4096 characters), `metadata.template`, or `metadata.interactive`; outside the 24-hour service window only approved templates are allowed. Read inbound media through its NyxID `download_url`; NyxID performs the authenticated Graph download. WhatsApp retries with an already-stored inbound message ID for the same bot/platform are skipped before routing; concurrent first deliveries can still race. Other platforms keep their existing behavior. Full setup: `docs/CHANNEL_BOT_RELAY.md`.
 
 For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. Telegram/Discord/Slack bots auto-activate on first successful webhook delivery. Lark/Feishu bots promote from `pending_webhook` to `active` only after inbound webhook verification passes, which requires the bot's Verification Token to be set correctly. Encrypt Key is optional, but if it is enabled in the Lark/Feishu console it must also be set on the bot. The CLI falls back to `NYXID_LARK_VERIFICATION_TOKEN` and `NYXID_LARK_ENCRYPT_KEY` when `--verification-token` or `--encrypt-key` are omitted. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
 
-**Lark/Feishu permission setup link (NyxID#167).** For Lark/Feishu bots, every response that includes the bot's `app_id` also carries a `permission_setup_url` and `permission_setup_scopes` field. The URL deep-links into the developer console's Permissions & Scopes page with the scopes NyxID's adapter needs (`im:message`, `im:message:send_as_bot`) already pre-checked, ready for "Bulk Enable". The CLI prints it as a `Configure Permissions:` block after `nyxid channel-bot register`, `nyxid channel-bot show`, and `nyxid channel-bot update` (table mode); the web UI renders it as a "Configure Permissions" section on the bot detail page. When helping a user set up a Lark/Feishu bot, point them at this link instead of asking them to manually search for scope keys in the developer console.
+**Lark/Feishu permission setup link (NyxID#167).** For Lark/Feishu bots, every response that includes the bot's `app_id` also carries a `permission_setup_url` and `permission_setup_scopes` field. The URL deep-links into the developer console's Permissions & Scopes page with the scopes NyxID's adapter needs (`im:message`, `im:message:send_as_bot`, `im:resource`) already pre-checked, ready for "Bulk Enable". The CLI prints it as a `Configure Permissions:` block after `nyxid channel-bot register`, `nyxid channel-bot show`, and `nyxid channel-bot update` (table mode); the web UI renders it as a "Configure Permissions" section on the bot detail page. When helping a user set up a Lark/Feishu bot, point them at this link instead of asking them to manually search for scope keys in the developer console.
 
 ### Manage bots
 
 Managed WhatsApp is available after an admin configures Meta under Platform Credentials:
+
+Managed platforms are discovered through the server bootstrap; `--managed` is not restricted to a platform name. X is available after an admin configures its shared OAuth app in Platform Credentials:
+
+```bash
+nyxid channel-bot register --platform x --managed --label "DM Support"
+nyxid channel-bot register --platform x --managed --org my-team
+nyxid channel-bot show BOT_ID
+```
+
+X opens `/channel-bots?connect=x` for OAuth consent to `tweet.read users.read dm.read dm.write media.write offline.access`; no user developer credentials are required. The bot references the owner's `UserApiKey`, refreshes it live, and starts active without a webhook. Old connections without DM scopes require re-consent. Personal credentials cannot back org bots. Replies go only to conversations with an inbound message and never initiate unsolicited DMs.
+
+X polls no faster than 60 seconds through the generic leased sweep (`CHANNEL_POLL_INTERVAL_SECS=30`; `0` disables). Onboarding starts at the newest event, with no history replay. Normal latency is about 60-90 seconds plus callback time; rate limits/backlogs can delay it. Show includes connection ID, cursor, last/next poll and failure cause. Revoked/deleted credentials or permanent refresh failure stop the bot; five consecutive polling errors also stop it. Reconnect on the detail page signs in again to the same X account and preserves the cursor to process the failure-period backlog. Only a missing cursor gets a fresh baseline. Backlogs exceeding ten pages emit the fetched messages, advance the cursor, and leave a persistent notice that older DMs were skipped, without failing the bot. Delete leaves the OAuth connection in place. Use attachment `download_url` to fetch through NyxID without receiving the user bearer token. Current paid usage credits and app caps are shared by all NyxID customers. See `docs/CHANNEL_BOT_RELAY.md#x-dm-accounts` for pricing, consent, bounds and recovery.
+
+Managed WhatsApp commands:
 
 ```bash
 nyxid channel-bot register --platform whatsapp --managed
@@ -204,6 +218,8 @@ nyxid channel-bot update <ID> --label "New Label" --verification-token "vtoken_x
 nyxid channel-bot verify <ID>                   # re-verify token and webhook
 nyxid channel-bot delete <ID> --yes             # deregister bot
 ```
+
+Existing Lark/Feishu bots must grant `im:resource` in the developer console before attachment downloads work; until then downloads return `channel_media_fetch_failed`.
 
 ### Fix a stuck Lark / Feishu bot
 
@@ -265,13 +281,21 @@ The callback payload includes normalized fields (`content.text`, `sender`, etc.)
 ### Agent-facing endpoints
 
 ```bash
-# Async reply — this is the only way for an agent to respond.
+# Discover active assigned routes, including opt-in, addressability and capabilities.
+# Agent API key only.
+GET /api/v1/channel-relay/conversations?page=1&per_page=50
+
+# Proactive send — assigned agent API key or human owner, human opt-in required.
+POST /api/v1/channel-relay/send
+{ "conversation_id": "<route-id>", "message": { "text": "Job finished" }, "idempotency_key": "job-123" }
+
+# Async reply anchored to an inbound message.
 # Authorization: Bearer <agent API key> OR <reply_token from the callback payload>.
 POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
 
-# Edit a previously-sent reply (Lark/Feishu only in v1).
-# Addresses the upstream platform message returned by a prior /reply call
+# Edit a previously-sent reply (Telegram/Discord/Slack/Lark/Feishu).
+# Addresses the upstream platform message returned by a prior /reply or /send call
 # (e.g. Lark `om_xxx`). Same dual auth as /reply.
 POST /api/v1/channel-relay/reply/update
 { "message_id": "<upstream_platform_message_id>", "reply": { "text": "..." } }
@@ -283,18 +307,24 @@ GET /api/v1/channel-relay/messages/<conversation_id>?page=1&per_page=50
 GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 ```
 
+Proactive sends require `addressable`, `allow_agent_initiated`, and `capabilities.initiated_send`. Only a human can enable the opt-in. Reuse an idempotency key only with identical text/metadata: completed sends replay the receipt; different content or pending/uncertain sends return 409. Claims retain only a delivery fingerprint and routing metadata for 24h. Native errors release claims for explicit retry, which can duplicate an uncertain/partial platform delivery. Known target refusals are non-retryable 400s. A platform message ID means acceptance, not recipient delivery/read confirmation. Never use Discord interaction credentials on `/send`.
+
 #### Editing a sent reply (progressive / streaming renders)
 
-`POST /channel-relay/reply/update` lets an agent PATCH the text of a reply it already sent, which is how you implement progressive / streaming reply rendering on Lark/Feishu without flooding the chat with one message per token chunk.
+`POST /channel-relay/reply/update` lets an agent PATCH the text of a reply it already sent, which is how you implement progressive / streaming reply rendering on Telegram, Discord, Slack, Lark, and Feishu without flooding the chat with one message per token chunk.
 
-- **Body:** `{ "message_id": "<upstream_platform_message_id>", "reply": { "text": "...", "metadata": {...} } }`. `message_id` is the platform message id (e.g. Lark `om_xxx`) returned by the prior `/reply` call — **not** the inbound message id.
-- **Auth:** Same as `/reply`: agent API key OR the original per-callback reply token. The reply token is reusable for edits — see the reply-token section below for the JTI semantics.
-- **Platform support in v1:**
+- **Body:** `{ "message_id": "<upstream_platform_message_id>", "reply": { "text": "...", "metadata": {...} } }`. `message_id` is the platform message id (e.g. Lark `om_xxx`) returned by the prior `/reply` or `/send` call — **not** the inbound message id.
+- **Auth:** Same as `/reply`: agent API key OR the original per-callback reply token. The reply token is reusable for anchored edits — see the reply-token section below for the JTI semantics. Only an assigned agent API key can edit initiated rows from `/send`; reply tokens cannot.
+- **Platform support:**
   - Lark / Feishu: text edits via `PUT /im/v1/messages/{id}`, card edits via `PATCH /im/v1/messages/{id}` (pass the new card in `reply.metadata.card`).
-  - Telegram / Discord / Slack / OpenClaw: `501` with `code="edit_unsupported"`. Degrade to a final `/reply` at turn end.
+  - Telegram / telegram-new: `editMessageText` with Markdown, matching sends. Ordinary bot messages have a 48-hour edit window; identical edits succeed.
+  - Discord: NyxID always edits through `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token and never through the interaction-webhook edit endpoint, so edits that Discord only permits via the interaction token (for example ephemeral interaction responses) are not supported and surface as a classified refusal.
+  - Slack: `chat.update`; `reply.metadata.blocks` is passed through when present.
+  - WhatsApp / X / OpenClaw: `501` with `code="edit_unsupported"`. Degrade to a final `/reply` at turn end.
   - Device channels: `400 device_channel_reply_not_allowed` (device conversations have no reply surface).
 - **Throttling is the caller's job.** NyxID only protects against abuse — per-upstream-message rate limit (default `10/s` burst `20`, configurable via `CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND` / `..._BURST`). `429 rate_limited` on exceed.
-- **Error classification:** Lark frequency-limit errors surface as `429`; "message not editable / wrong state" errors as `409`; malformed content as `400`. Anything else falls through to `502`.
+- **Address resolution:** NyxID uses the outbound row’s chat address, then the parent inbound address for legacy rows, then a concrete conversation address. Missing addresses on wildcard routes fail before dispatch with `channel_conversation_not_addressable`.
+- **Error classification:** Known Telegram/Discord/Slack target or edit refusals return `400 channel_conversation_not_reachable`; other upstream errors retain existing platform-error handling, including Slack rate-limit diagnostics. Lark frequency-limit errors surface as `429`; "message not editable / wrong state" errors as `409`; malformed content as `400`. Anything else falls through to `502`.
 
 > **ADR-013 note:** `GET /channel-relay/messages/...` returns only routing metadata (direction, platform, sender ids, delivery status, timestamps). Agents that need conversation bodies must retain their own history.
 
@@ -313,7 +343,7 @@ Every callback delivery carries an RS256 JWT in `X-NyxID-Callback-Token` that do
 
 The callback payload includes a short-lived `reply_token` (RS256 JWT) the agent can present as `Authorization: Bearer <reply_token>` instead of the agent API key. Intended for runtimes that don't want to persist agent credentials (e.g. Aevatar).
 
-- **Shape:** RS256 JWT. `aud = "channel-relay/reply"` (rejected everywhere else). `token_type = "relay_reply"`.
+- **Shape:** RS256 JWT. `aud = "channel-relay/reply"` (reply, reply/update and exact-message attachment downloads only). `token_type = "relay_reply"`.
 - **Claim bindings:** `api_key_id`, `conversation_id`, `inbound_message_id`, `platform` — all four must match the reply request. For `/reply`, the body's `message_id` must equal `inbound_message_id`. For `/reply/update`, NyxID looks up the outbound row by the body's `message_id` (platform id) and verifies its stored `reply_to_message_id` equals the token's `inbound_message_id`.
 - **TTL:** `JWT_RELAY_REPLY_TTL_SECS` (default `1800` = 30 min). 60s clock-skew tolerance on both `iat` and `exp`.
 - **JTI semantics:** `jti` is consumed on the first successful `/reply`. Reuse on `/reply` returns `401 "Reply token already used"`. `/reply/update` uses the same token without consuming a new JTI — it requires the JTI to already exist in `reply_token_uses` (i.e. proof the token was used to send), so bare-minted tokens cannot edit-flood. The same token can therefore drive one send + many edits within the TTL.
@@ -424,3 +454,20 @@ curl -X POST https://<your-nyxid>/api/v1/channel-events/<CONVERSATION_ROW_ID> \
 | 401 | Missing/invalid bearer, **or** conversation not found, **or** API key is not bound to the conversation (collapsed into one opaque error to prevent existence-probing) |
 | 429 | Per-channel rate limit exceeded |
 | 502 | Downstream agent unreachable or returned non-2xx |
+
+
+### Channel media and platform discovery
+
+Discover registration requirements before creating a bot with `nyxid channel-bot platforms --output json` or authenticated `GET /api/v1/channel-platforms`. Use `enabled`, `managed_only`, `registration.fields` (required/secret), `managed_onboarding`, and `capabilities.media`. The catalog accepts sessions, agent keys, service accounts and delegated `account:read`; credential values are never returned.
+
+Treat inbound `image`, `file`, `audio`, and `video` messages as attachment-bearing content, even without text. For each callback `content.attachments[]`, GET its absolute `download_url` with the assigned agent API key or the callback's `reply_token`. Provider `url`/handles remain for compatibility and often cannot be fetched directly. Downloads validate the exact message/conversation and live bot/agent, but do not consume the reply token. Keep that token for the one subsequent send. Device conversations cannot download or reply. Delegated, relay and service-account tokens cannot download private media.
+
+Send media using `reply.attachments` on `/channel-relay/reply` or `message.attachments` on `/channel-relay/send`:
+
+```json
+{"kind":"file","source":{"type":"base64","data":"aGVsbG8="},"filename":"report.txt","mime_type":"text/plain","caption":"Your report"}
+```
+
+A source can instead be `{"type":"url","url":"https://public.example/report.pdf"}`. Check declared outbound kinds, use at most ten attachments, and stay within `CHANNEL_MEDIA_MAX_BYTES` (default 20 MiB per attachment; the aggregate JSON body also has a base64-sized limit). Attachment-only messages are supported. `/reply/update` rejects attachments. X supports images/video with OAuth `media.write`; older connections require re-consent. OpenClaw declares no media.
+
+History contains only routing metadata plus inbound attachment descriptors/download URLs. ADR-013 still forbids persisted bytes, message bodies, outbound captions/filenames, or raw webhook content. Download URLs expire with retained rows/provider resources and are not archival storage. `/send` fingerprints media descriptors/content hashes; changing media under the same idempotency key returns 409. See [Channel Bot Relay](../../../docs/CHANNEL_BOT_RELAY.md#media) for transport details and SSRF protections.

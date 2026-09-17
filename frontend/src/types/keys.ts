@@ -1,3 +1,4 @@
+import type { InferenceView, LanePricingView } from "@/schemas/platform-keys";
 import type { CredentialSource } from "@/schemas/orgs";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 import type { WsFrameInjection } from "@/schemas/services";
@@ -5,6 +6,10 @@ import type { WsFrameInjection } from "@/schemas/services";
 export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 export interface KeyInfo {
+  readonly credential_binding?: "platform" | "user";
+  readonly platform_key_available?: boolean;
+  readonly platform_key_pricing?: LanePricingView | null;
+  readonly byok_pricing?: LanePricingView | null;
   readonly id: string;
   readonly name?: string;
   readonly label: string;
@@ -147,9 +152,14 @@ export interface ScopeCatalogEntry {
   readonly label: string;
   readonly description: string;
   readonly sensitive?: boolean;
+  readonly required?: boolean;
 }
 
 export interface CatalogEntry {
+  readonly billing?: import("./api").ServiceBilling | null;
+  readonly inference?: InferenceView | null;
+  readonly platform_key?: { readonly available: boolean; readonly pricing?: LanePricingView | null };
+  readonly byok_pricing?: LanePricingView | null;
   readonly slug: string;
   readonly resource_uri: string;
   readonly name: string;
@@ -177,6 +187,9 @@ export interface CatalogEntry {
   readonly token_url: string | null;
   readonly device_code_url: string | null;
   readonly default_scopes: readonly string[] | null;
+  readonly supports_oauth_scopes?: boolean;
+  readonly token_request_encoding?: "form" | "json";
+  readonly oauth_request_headers?: Readonly<Record<string, string>>;
   /**
    * Curated menu of notable available scopes for this provider (NyxID#917).
    * The connect UIs render these as selectable pills (defaults pre-selected)
@@ -270,6 +283,7 @@ export interface AllowedServiceInfo {
   readonly slug: string;
   readonly label: string;
   readonly catalog_service_name: string | null;
+  readonly auto_connected?: boolean;
 }
 
 export interface AllowedNodeInfo {
@@ -291,6 +305,7 @@ export interface NyxIdApiKeyInfo {
   readonly allowed_service_ids: readonly string[];
   readonly allowed_node_ids: readonly string[];
   readonly allow_all_services: boolean;
+  readonly allow_auto_connected_services?: boolean;
   readonly allow_all_nodes: boolean;
   readonly allowed_services: readonly AllowedServiceInfo[];
   readonly allowed_nodes: readonly AllowedNodeInfo[];

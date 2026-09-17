@@ -1,24 +1,11 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{IsTerminal, Write};
-use zeroize::Zeroizing;
 
-use super::{LoginSleeper, TokioLoginSleeper};
-use crate::api::{ApiClient, ErrorEnvelope, build_cli_http_client, device_login_user_agent};
+use crate::api::ApiClient;
 
 pub const TOKEN_FILE: &str = "token";
 const AUTH_KIND_FILE: &str = "auth_kind";
 const METADATA_FILE: &str = "agent_key.json";
-const ERR_NOT_FOUND: i64 = 11900;
-const ERR_EXPIRED: i64 = 11901;
-const ERR_PENDING: i64 = 11902;
-const ERR_SLOW_DOWN: i64 = 11903;
-const ERR_DENIED: i64 = 11904;
-const ERR_ALREADY_DELIVERED: i64 = 11905;
-const ERR_RATE_LIMITED: i64 = 11906;
-const ERR_USER_CODE_INVALID: i64 = 11907;
-const ERR_KEY_INELIGIBLE: i64 = 11908;
-const ERR_CREDENTIAL_NOT_FOUND: i64 = 11909;
 pub const REJECTED_MESSAGE: &str = "Your Agent Key credential was rejected (revoked, expired, or the key was deleted). Run `nyxid login --agent-key` to authorize again.";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -31,6 +18,8 @@ pub struct KeyMetadata {
     pub owner_name: String,
     pub scopes: String,
     pub allow_all_services: bool,
+    #[serde(default)]
+    pub allow_auto_connected_services: bool,
     pub allow_all_nodes: bool,
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
@@ -54,30 +43,15 @@ pub struct Identity {
 }
 
 #[derive(Deserialize)]
-struct Delivery {
-    credential: String,
+pub(super) struct Delivery {
+    pub(super) credential: String,
     #[serde(flatten)]
-    identity: Identity,
-}
-
-#[derive(Deserialize)]
-struct Challenge {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    expires_in: u64,
-    interval: u64,
+    pub(super) identity: Identity,
 }
 
 impl std::fmt::Debug for Delivery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentKeyDelivery").finish_non_exhaustive()
-    }
-}
-
-impl std::fmt::Debug for Challenge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentKeyChallenge").finish_non_exhaustive()
     }
 }
 
@@ -112,161 +86,43 @@ pub(super) fn clear_agent_files(profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn save(
+pub(super) fn save(
     profile: Option<&str>,
     base_url: &str,
     credential: &str,
     identity: &Identity,
 ) -> Result<()> {
-    let _lock = super::acquire_refresh_lock(profile)?;
-    let dir = super::token_dir_for_profile(profile)?;
-    // Persist the mode first. Even an interrupted write must never expose a
-    // stale account token as the fallback identity for this profile.
-    super::write_token_file(&dir.join(AUTH_KIND_FILE), "agent_key")?;
-    for name in [
-        super::TOKEN_FILE_NAME,
-        super::REFRESH_TOKEN_FILE_NAME,
-        super::USER_ID_FILE_NAME,
-    ] {
-        remove_if_present(&dir.join(name))?;
-    }
-    super::write_token_file(
-        &dir.join(METADATA_FILE),
-        &serde_json::to_string_pretty(identity)?,
-    )?;
-    super::save_base_url_for(profile, base_url)?;
-    super::write_token_file(&dir.join(TOKEN_FILE), credential)
-}
-
-pub async fn run_login(base_url: &str, profile: Option<&str>) -> Result<()> {
-    run_login_with_sleeper(base_url, profile, &TokioLoginSleeper).await
-}
-
-async fn run_login_with_sleeper(
-    base_url: &str,
-    profile: Option<&str>,
-    sleeper: &impl LoginSleeper,
-) -> Result<()> {
-    if let Some(profile) = profile {
-        super::validate_profile_name(profile)?;
-    }
-    let base_url = base_url.trim_end_matches('/');
-    let client = build_cli_http_client(profile)?;
-    let response = client.post(format!("{base_url}/api/v1/auth/agent-key/request"))
-        .json(&serde_json::json!({"client_label": super::client_label(), "client_user_agent": device_login_user_agent(), "requested_profile": profile.unwrap_or("default")}))
-        .send().await.context("Agent Key login request failed")?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        bail!("This NyxID backend doesn't support Agent Key login");
-    }
-    if !response.status().is_success() {
-        bail!(
-            "Agent Key login request failed (HTTP {})",
-            response.status()
-        );
-    }
-    let challenge: Challenge = response
-        .json()
-        .await
-        .context("Invalid Agent Key login response")?;
-    let device_code = Zeroizing::new(challenge.device_code);
-    let mut verification_uri = url::Url::parse(&challenge.verification_uri)
-        .context("Invalid Agent Key verification URL")?;
-    if !matches!(verification_uri.scheme(), "http" | "https")
-        || !verification_uri.username().is_empty()
-        || verification_uri.password().is_some()
-    {
-        bail!("Invalid Agent Key verification URL");
-    }
-    verification_uri.set_query(None);
-    verification_uri.set_fragment(None);
-    eprintln!("! First copy your one-time code: {}", challenge.user_code);
-    eprintln!("\nThen open {verification_uri} and enter the code above.");
-    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-        eprint!("\nOpen in your browser? [Y/n] ");
-        std::io::stderr().flush().ok();
-        let mut answer = String::new();
-        if std::io::stdin().read_line(&mut answer).is_ok() {
-            let answer = answer.trim().to_ascii_lowercase();
-            if (answer.is_empty() || answer == "y" || answer == "yes")
-                && let Err(error) = crate::browser::open_browser(verification_uri.as_str())
-            {
-                eprintln!("Could not open browser: {error}. Paste the URL above manually.");
-            }
+    super::replace_login_files(profile, || {
+        let dir = super::token_dir_for_profile(profile)?;
+        // Persist the mode first. Even an interrupted write must never expose a
+        // stale account token as the fallback identity for this profile.
+        super::write_token_file(&dir.join(AUTH_KIND_FILE), "agent_key")?;
+        for name in [
+            super::TOKEN_FILE_NAME,
+            super::REFRESH_TOKEN_FILE_NAME,
+            super::USER_ID_FILE_NAME,
+        ] {
+            remove_if_present(&dir.join(name))?;
         }
-    }
-    let mut interval = challenge.interval.max(5);
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_secs(challenge.expires_in.saturating_add(60));
-    loop {
-        sleeper.sleep(interval).await;
-        if std::time::Instant::now() >= deadline {
-            bail!("Agent Key login timed out. Run `nyxid login --agent-key` again.");
-        }
-        let response = client
-            .post(format!("{base_url}/api/v1/auth/agent-key/poll"))
-            .json(&serde_json::json!({"device_code": device_code.as_str()}))
-            .send()
-            .await
-            .context("Agent Key login poll failed")?;
-        if response.status().is_success() {
-            let delivery: Delivery = response
-                .json()
-                .await
-                .context("Invalid Agent Key delivery response")?;
-            let credential = Zeroizing::new(delivery.credential);
-            if credential.len() != 73
-                || !credential.starts_with("nyxid_ag_")
-                || !credential[9..].bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                bail!("Invalid Agent Key credential returned by the backend");
-            }
-            if let Err(error) = save(profile, base_url, &credential, &delivery.identity) {
-                let _ = client
-                    .delete(format!("{base_url}/api/v1/auth/agent-key/self"))
-                    .bearer_auth(credential.as_str())
-                    .send()
-                    .await;
-                return Err(error);
-            }
-            eprintln!("{}", format_identity(&delivery.identity));
-            return Ok(());
-        }
-        let status = response.status();
-        let error: ErrorEnvelope = response
-            .json()
-            .await
-            .with_context(|| format!("Agent Key login poll failed (HTTP {status})"))?;
-        interval = handle_poll_error(error.error_code, interval)?;
-    }
-}
-
-fn handle_poll_error(code: i64, interval: u64) -> Result<u64> {
-    match code {
-        ERR_PENDING => Ok(interval),
-        ERR_SLOW_DOWN => Ok(interval.saturating_add(5)),
-        ERR_NOT_FOUND | ERR_EXPIRED => {
-            bail!("Agent Key login timed out. Run `nyxid login --agent-key` again.")
-        }
-        ERR_DENIED => bail!("Agent Key login was denied."),
-        ERR_ALREADY_DELIVERED => {
-            bail!("This code was already used. Run `nyxid login --agent-key` again.")
-        }
-        ERR_RATE_LIMITED => bail!("Too many attempts. Try again in a few minutes."),
-        ERR_USER_CODE_INVALID => {
-            bail!("Invalid Agent Key login code. Run `nyxid login --agent-key` again.")
-        }
-        ERR_KEY_INELIGIBLE => {
-            bail!("The selected key is no longer eligible. Run `nyxid login --agent-key` again.")
-        }
-        ERR_CREDENTIAL_NOT_FOUND => bail!(
-            "The Agent Key login credential is no longer available. Run `nyxid login --agent-key` again."
-        ),
-        _ => bail!("Agent Key login failed (error {code})."),
-    }
+        super::write_token_file(
+            &dir.join(METADATA_FILE),
+            &serde_json::to_string_pretty(identity)?,
+        )?;
+        super::save_base_url_for(profile, base_url)?;
+        super::write_token_file(&dir.join(TOKEN_FILE), credential)
+    })
 }
 
 pub fn format_identity(identity: &Identity) -> String {
     let key = &identity.key;
+    let services = if key.allow_auto_connected_services && !key.allow_all_services {
+        format!(
+            "{} explicit + all auto-connected platform services",
+            key.allowed_service_ids.len()
+        )
+    } else {
+        key.allowed_service_ids.len().to_string()
+    };
     format!(
         "Authentication: Agent Key\nKey: {} ({})\nOwner: {} ({})\nScopes: {}\nServices: {} (allow all: {})\nNodes: {} (allow all: {})\nKey expiry: {}\nCredential expiry: {}\nCredential label: {}\nRate limit: {} requests/s; burst: {}",
         key.name,
@@ -274,7 +130,7 @@ pub fn format_identity(identity: &Identity) -> String {
         key.owner_name,
         key.owner_type,
         key.scopes,
-        key.allowed_service_ids.len(),
+        services,
         key.allow_all_services,
         key.allowed_node_ids.len(),
         key.allow_all_nodes,
@@ -302,42 +158,62 @@ pub async fn show_identity(api: &mut ApiClient, output: crate::cli::OutputFormat
     Ok(())
 }
 
-pub(super) async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
-    let revoked = match (
-        super::read_saved_token_for(profile),
-        build_cli_http_client(profile),
-    ) {
-        (Some(token), Ok(client)) => client
-            .delete(format!(
-                "{}/api/v1/auth/agent-key/self",
-                base_url.trim_end_matches('/')
-            ))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success()),
-        _ => false,
-    };
-    let _lock = super::acquire_refresh_lock(profile)?;
-    // Remove any old human files before removing the mode marker.
-    let dir = super::token_dir_for_profile(profile)?;
-    for name in [
-        super::TOKEN_FILE_NAME,
-        super::REFRESH_TOKEN_FILE_NAME,
-        super::USER_ID_FILE_NAME,
-    ] {
-        remove_if_present(&dir.join(name))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn legacy_identity() -> Value {
+        json!({
+            "api_key": {
+                "id": "key-id", "name": "Agent", "key_prefix": "nyxid_ag_test",
+                "owner_type": "personal", "owner_id": "owner-id", "owner_name": "Person",
+                "scopes": "proxy", "allow_all_services": false, "allow_all_nodes": false,
+                "allowed_service_ids": ["service-a", "service-b"], "allowed_node_ids": []
+            },
+            "credential_id": "credential-id", "credential_expires_at": null, "label": "Workstation"
+        })
     }
-    clear_agent_files(profile)?;
-    if let Some(client) = crate::telemetry::TelemetryClient::init(profile) {
-        client.reset();
+
+    #[test]
+    fn legacy_metadata_defaults_platform_grant_to_false() {
+        let identity: Identity = serde_json::from_value(legacy_identity()).unwrap();
+        assert!(!identity.key.allow_auto_connected_services);
+        assert!(format_identity(&identity).contains("Services: 2 (allow all: false)"));
     }
-    if revoked {
-        eprintln!("Logged out. Agent Key credential revoked on the server and cleared locally.");
-    } else {
-        eprintln!(
-            "Logged out. Local Agent Key credential cleared; server-side revocation could not be confirmed."
-        );
+
+    #[test]
+    fn platform_grant_survives_metadata_round_trip() {
+        let mut response = legacy_identity();
+        response["api_key"]["allow_auto_connected_services"] = json!(true);
+        let identity: Identity = serde_json::from_value(response).unwrap();
+        let stored = serde_json::to_string_pretty(&identity).unwrap();
+        let restored: Identity = serde_json::from_str(&stored).unwrap();
+        assert!(restored.key.allow_auto_connected_services);
+        assert!(format_identity(&restored).contains(
+            "Services: 2 explicit + all auto-connected platform services (allow all: false)"
+        ));
     }
-    Ok(())
+
+    #[test]
+    fn identity_displays_only_the_effective_platform_grant() {
+        let mut identity: Identity = serde_json::from_value(legacy_identity()).unwrap();
+        for allow_all in [false, true] {
+            identity.key.allow_all_services = allow_all;
+            identity.key.allow_auto_connected_services = false;
+            let original = format_identity(&identity);
+            assert!(original.contains(&format!("Services: 2 (allow all: {allow_all})")));
+            assert!(!original.contains("auto-connected"));
+            identity.key.allow_auto_connected_services = true;
+            let with_platform = format_identity(&identity);
+            if allow_all {
+                assert_eq!(with_platform, original);
+            } else {
+                assert_eq!(with_platform, original.replace(
+                    "Services: 2 (allow all: false)",
+                    "Services: 2 explicit + all auto-connected platform services (allow all: false)"
+                ));
+            }
+        }
+    }
 }

@@ -1,14 +1,58 @@
 # Channel Bot Relay Design
 
-> **ADR-013 update (2026-04-09):** Channel Bot Relay is now a **pure passthrough gateway** per ADR-013. NyxID no longer stores message bodies, attachments, or raw webhook payloads in `channel_messages` — only routing metadata. Synchronous agent replies (HTTP 200 + body) are no longer supported; agents must return 202 and post replies via `POST /api/v1/channel-relay/reply`. See NyxID#221, ADR-013, and [`docs/CHANNEL_EVENT_GATEWAY.md`](./CHANNEL_EVENT_GATEWAY.md) for the full rationale. The earlier deprecation-in-favor-of-service-connections direction (NyxID#191) has been recalled: channel relay and the new HTTP Event Gateway are the first-class inbound paths.
+> **ADR-013 update (2026-04-09):** Channel Bot Relay is now a **pure passthrough gateway** per ADR-013. NyxID never stores message bodies, media bytes, outbound captions/filenames, or raw webhook payloads; inbound attachment routing metadata is retained in `channel_messages` for authorized downloads. Synchronous agent replies (HTTP 200 + body) are no longer supported; agents must return 202 and post replies via `POST /api/v1/channel-relay/reply`. See NyxID#221, ADR-013, and [`docs/CHANNEL_EVENT_GATEWAY.md`](./CHANNEL_EVENT_GATEWAY.md) for the full rationale. The earlier deprecation-in-favor-of-service-connections direction (NyxID#191) has been recalled: channel relay and the new HTTP Event Gateway are the first-class inbound paths.
 
 ## Overview
 
-NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**. Users register their own bots (Telegram, Discord, Lark, Feishu), NyxID receives messages via platform webhooks, normalizes them into a common format, routes each message to the correct AI agent's callback URL, and relays the agent's response back to the chat.
+NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**. Users register bots or connect accounts (Telegram, Discord, Lark, Feishu, Slack, WhatsApp, X). Adapter-owned webhooks or polling normalize inbound messages into a common format, route each message to the correct AI agent's callback URL, and relay the agent's asynchronous response back to the chat.
 
 Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can wire different messaging platforms (or even different conversations on the same platform) to different AI agents -- each with independent credentials, rate limits, and audit trails.
 
 ---
+
+For Telegram's optional native bot creation, see [Telegram bot creation](TELEGRAM_NEW.md). The **Telegram** option uses the separate `telegram-new` adapter; **Telegram bot token** uses the existing `telegram` adapter and token setup. These are display labels; platform identifiers and existing connections remain unchanged.
+
+## X DM Accounts
+
+X is managed-only: users connect their own X account with OAuth and provide no developer credentials. NyxID uses the account's user-context token to poll incoming one-to-one and group DMs and deliver the routed agent's asynchronous reply. App-only bearer tokens cannot access private DMs. Although X also supports legacy OAuth 1.0a user-context credentials, a BYO path would require users to supply and maintain developer credentials, so this channel deliberately does not expose one.
+
+### Platform setup and pricing
+
+Admin > Platform Credentials lists every registered adapter's provider descriptor. Meta uses encrypted `platform_credentials`; X's `ProviderOAuth { provider_slug: "twitter" }` backing reads and writes the **same encrypted Client ID and Client Secret** used by the existing `twitter` OAuth provider. There is no second copy of X's app credentials. Clearing either X credential clears a shared provider field, retaining the provider record, and stops all of the `twitter` provider's OAuth connections and logins until restored. Both provider-wide and per-field clear buttons require this impact confirmation; CLI clears require `--confirm-shared-provider`. Update and delete audits record `shared_provider_slug`. Rotating credentials affects all connections using the shared app. Secret values never appear in admin responses. The descriptor supplies fields, setup checklist, backing information and callback URL for the generic API, page and CLI.
+
+Configure a confidential Web App with OAuth 2.0 user authentication and PKCE in the X Developer Console. Set the callback to `{BASE_URL}/api/v1/providers/callback`, exactly as displayed in Platform Credentials. Enable `tweet.read users.read dm.read dm.write media.write offline.access`. Seed migration additively includes these scopes in `twitter.default_scopes`; it does not grant new permissions to old connections. Completion rejects connections without every required scope and requires fresh consent.
+
+**Pricing checked 2026-09-08:** [X's current pricing documentation](https://docs.x.com/x-api/getting-started/pricing) specifies pay-per-usage credits with no subscriptions, replacing the older Basic/Pro tier assumption. Published DM Event reads cost $0.010 per resource and DM Interaction creates cost $0.015 per request. Fund and monitor **NyxID's shared app** in the [Developer Console/pricing page](https://developer.x.com/#pricing): all customers' DM traffic consumes that app's credits and caps. Prices and access entitlements can change; the console is authoritative. Repeated polling can retrieve already-seen resources, so budget from provider usage reports rather than treating every lookup as free.
+
+[Current rate limits](https://docs.x.com/x-api/fundamentals/rate-limits): `/2/dm_events` permits 15 reads per 15 minutes per user. Existing-conversation message creation permits 15 per 15 minutes and 1,440 per day per user, plus 1,440 per day per app. X therefore declares a 60-second minimum poll interval. The generic sweep defaults to 30 seconds (`CHANNEL_POLL_INTERVAL_SECS`; `0` disables). A quiet, healthy account normally receives new DMs within roughly 60-90 seconds, plus callback processing; pagination, provider backoff and sweep load can increase latency.
+
+### Connect, route and recover
+
+Use Add Channel Bot > X (Twitter), or `nyxid channel-bot register --platform x --managed`. The CLI checks the server's managed bootstrap and prints `/channel-bots?connect=x`; optional label and org scope are preserved. An unconfigured app shows an explicit unavailable state.
+
+`GET /api/v1/channel-bots/managed-onboarding/x` returns `available`, `flow: "oauth_connection"`, `provider_slug`, `required_scopes` and `authorize_start_url`. `POST` to its `/start` endpoint accepts `{label, target_org_id?}` and creates an owner-bound OAuth connection through existing OAuth/PKCE machinery. Channel-started connection rows are tagged `source: "channel_onboarding"` with a unique `source_id`. The existing OAuth refresh sweep deletes pending rows older than one hour, retaining completed connections. Cleanup is disabled when `OAUTH_REFRESH_SWEEP_INTERVAL_SECS=0`. The existing popup completion protocol carries only a nonce and completion status. `POST` to `/complete` accepts `{connection_id, label, target_org_id?}`; this ID is the `user_api_keys` row UUID, not the OAuth protocol's internal connection UUID. Completion validates ownership, platform credential provenance and scopes, verifies `/2/users/me`, initializes the cursor and applies the ordinary duplicate-account and bot-limit checks.
+
+All managed bootstrap/start/complete and reconnect routes require an authenticated human. API keys, delegated tokens, service accounts and relay tokens are rejected by the existing human-only middleware. Writes share the existing per-user managed-onboarding rate limit. Org creation and reconnect require the same owning-org admin access as other channel bots; an actor's personal connection cannot back an org bot.
+
+The bot starts `active` with `credential_source: "connection"` and `webhook_registered: false`. A polling descriptor suppresses webhook setup UI; no callback or webhook verification secret is needed. Configure conversation/default-agent routing exactly as for other channels. Detail and `channel-bot show` include the connected handle, connection UUID, cursor, last/next poll, error count and locally authored failure cause.
+
+Polling, Verify Bot and async replies resolve the live owner-bound connection and reuse `refresh_user_api_key_in_place`. A deleted/revoked connection, insufficient scopes or permanent refresh failure marks the bot `failed` with a metadata-only audit event; there is no stale-token fallback. Transient polling errors back off exponentially, and five consecutive failures stop polling with an audit. Rate limits defer polling without counting as an error. Reconnect runs OAuth again and posts `{connection_id}` to `POST /api/v1/channel-bots/{id}/reconnect`; it requires the same X account, swaps the connection and preserves the committed cursor. The next sweep processes DMs received during the failure through the normal bounded page walk and deduplication. Only a missing cursor is initialized to the newest event. Delete removes the bot and routes but **retains the OAuth connection**; revoke that connection separately when appropriate.
+
+### Polling and message semantics
+
+The adapter's `Ingestion::Poll` and `CredentialResolution::OAuthConnection` hooks drive generic sweeps. Up to eight due bots per adapter are processed concurrently, and a per-bot failure does not stop the other bots in that tick. Each due bot is atomically claimed by `find_one_and_update`, with a 90-second lease renewed every 20 seconds and a 15-minute work deadline. Claims, renewals and cursor commits are fenced; reconnect invalidates the previous claim. All outcomes attempt to release the lease. An abrupt process exit recovers at lease expiry. Backoff, cursors, timestamps and error counts are persisted with BSON datetime compatibility for legacy rows.
+
+[The DM events endpoint](https://docs.x.com/x-api/direct-messages/get-dm-events) does **not** support `since_id`. The adapter requests 100 `MessageCreate` events per page, follows `pagination_token` newest-first until the saved event ID (or an older ID) is reached, and emits the batch chronologically. Own-account messages are skipped. At onboarding it saves the newest existing ID without emitting history; empty accounts use an explicit empty baseline. At most ten pages (about 1,000 events) are walked. When that limit is reached before the cursor, the fetched batch is emitted chronologically and the cursor advances to its newest event after processing. Older DMs are skipped, with a persistent, locally authored `last_poll_notice` on the detail page and CLI; this does not count as an error or fail the bot. A processing error or a 429 before the bounded window completes retains the old cursor. X exposes only the last 30 days of events.
+
+The shared pipeline retains the existing webhook behavior, metadata-only message storage, routing, callback telemetry and touch semantics. X opts into the existing bot/platform/message-ID dedup hook. Overlapping completed batches are suppressed. Callback delivery retains the existing relay semantics: a stored message is not automatically redelivered after callback failure. This is not an exactly-once end-to-end delivery guarantee, and an interrupted provider reply may already have sent an earlier chunk.
+
+One-to-one IDs have `{smaller_user_id}-{larger_user_id}` form; group DMs have their own conversation ID. Sender display names and media are normalized from expansions; raw event data is forwarded to the agent and never logged or persisted as a message body. Media URLs are private and may need the connected user's bearer token; the callback never exposes that token. `referenced_tweets` contains shared posts, **not DM reply targets**. Current docs expose no DM reply-reference field; optional `referenced_events` reply references are preserved when supplied, without inventing references from shared posts.
+
+Replies call `POST /2/dm_conversations/{dm_conversation_id}/messages`, supporting existing private/group conversations. Text is split into chunks of at most 10,000 Unicode characters. `attachments` uploads image/video bytes through OAuth2 `POST /2/media/upload` before creating the DM. GIF/video processing is polled for up to 30 seconds before dispatch. Existing `metadata.attachments` still accepts one `{media_id}` uploaded by that user and attaches it to the first text chunk. Existing connections lacking `media.write` must re-consent; the shared OAuth provider defaults include this scope. Editing is unsupported. 401, 403 and 429 errors use local messages and rate-limit retry delay, never upstream error prose. The current v2 schema does not publish a text maximum; the established 10,000-character DM limit could not be independently reconfirmed from the Help Center during implementation (HTTP 403).
+
+### Automation policy and verified limits
+
+Automated replies to inbound DMs are allowed under [X's automation rules](https://help.x.com/en/rules-and-policies/x-automation) subject to user intent, consent and opt-out requirements. Unsolicited automated outbound DMs are not permitted. NyxID's reply authorization binds an inbound message; its initiated-send interface requires human opt-in and addresses an existing X DM conversation. Native capability does not establish recipient consent. Operators remain responsible for consent, opt-out handling and compliant agent responses. The current pricing page lists DM webhook charges; Enterprise-only webhook entitlement was not independently confirmed. This implementation deliberately uses the requested polling model and needs no webhook subscription.
 
 ## Problem Statement
 
@@ -147,6 +191,118 @@ sequenceDiagram
     H->>DB: Insert channel_message (direction: outbound)
     H-->>AG: 200 OK { platform_message_id: "..." }
 ```
+
+### Editing a sent reply
+
+`POST /api/v1/channel-relay/reply/update` replaces a previously sent message using the `platform_message_id` returned by `/reply` or `/send`:
+
+```json
+{ "message_id": "<platform_message_id>", "reply": { "text": "Updated response", "metadata": null } }
+```
+
+An assigned agent API key can edit both anchored replies and agent-initiated messages. A per-callback reply token can edit only replies anchored to its bound inbound message, and only after its JTI has been consumed by `/reply`; it cannot edit initiated rows. The existing authorization and per-message rate limit apply to every edit, with rate limiting before authentication. Discovery exposes native support as `capabilities.edit`.
+
+- **Telegram / telegram-new:** text messages use `editMessageText`; media captions use `editMessageCaption` after Telegram returns exactly `Bad Request: there is no text in the message to edit`. Both use the chat ID, numeric message ID, and `parse_mode: "Markdown"`, matching sends. Ordinary bot messages are subject to Telegram's 48-hour edit window. An identical edit (`message is not modified`) succeeds idempotently.
+- **Discord:** `PATCH` edits `content` on any bot message, including media messages. NyxID always edits through `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token and never through the interaction-webhook edit endpoint, so edits that Discord only permits via the interaction token (for example ephemeral interaction responses) are not supported and surface as a classified refusal.
+- **Slack:** `chat.update` with `channel`, `ts`, and `text`; `reply.metadata.blocks` passes through just as it does on sends. File/image messages cannot be edited by `chat.update` and surface as classified refusals. Existing Slack rate-limit error handling is preserved.
+- **Lark / Feishu:** text edits via `PUT /im/v1/messages/{id}` and card edits via `PATCH /im/v1/messages/{id}` using `reply.metadata.card`. These edits do not apply to file/image messages and surface as classified refusals.
+- **WhatsApp / X / OpenClaw:** `501 edit_unsupported`; WhatsApp and X have no message edit API. Device channels return `400 device_channel_reply_not_allowed`.
+
+The edit address comes first from the outbound row. For pre-0.21.0 rows without that address, NyxID reads the parent inbound row, then falls back to the conversation's concrete address. Wildcard (`"*"`) and empty addresses cannot reach a platform; no resolvable address returns `channel_conversation_not_addressable` before dispatch.
+
+Known permanent Telegram, Discord, and Slack refusals (including missing messages, messages the bot cannot edit, and closed edit windows) return `channel_conversation_not_reachable`; other upstream diagnostics use the existing bounded platform-error response. Lark/Feishu retain their existing error classification. Edits update only the outbound timestamp and routing-only audit metadata; message bodies and metadata are never persisted (ADR-013). Initiated edit audits retain a null `inbound_message_id`.
+
+### Agent-initiated messages
+
+`POST /api/v1/channel-relay/send` sends to a configured conversation without an inbound message. Use it for an opted-in digest, alert, or job-completion notification. Existing and newly created conversations default to `allow_agent_initiated: false`. Only a human session can set this field through conversation create/update; the agent cannot grant itself permission. Organization sends require owner write access for human callers, or the exact assigned active agent key for agent callers.
+
+```mermaid
+sequenceDiagram
+    participant C as Agent or human owner
+    participant H as NyxID send handler
+    participant L as Shared conversation limiter
+    participant DB as MongoDB
+    participant A as Platform adapter
+    C->>H: POST /channel-relay/send (conversation_id, message, idempotency_key?)
+    H->>L: Check channel_initiate bucket before authentication
+    H->>H: Authenticate API key or human session
+    H->>DB: Load active conversation, authorize owner/assigned live key
+    H->>H: Require opt-in, reject device/wildcard/empty address
+    H->>DB: Load active bot, verify owner and platform scope
+    H->>H: Check adapter initiated_send capability, validate content
+    opt Idempotency key supplied
+        H->>DB: Insert pending claim with delivery fingerprint
+        DB-->>H: Claimed, matching sent receipt, or 409 conflict
+    end
+    H->>A: send_reply(chat_id, reply_to=None, text, metadata)
+    A-->>H: Platform acceptance receipt or classified refusal
+    H->>DB: Store outbound routing metadata; mark claim sent
+    H-->>C: 200 (message_id, platform_message_id?)
+```
+
+Request and response:
+
+```http
+POST /api/v1/channel-relay/send
+Authorization: Bearer <assigned-agent-key-or-first-party-human-access-token>
+Content-Type: application/json
+
+{
+  "conversation_id": "660e8400-e29b-41d4-a716-446655440000",
+  "message": { "text": "Your report is ready.", "metadata": null },
+  "idempotency_key": "report-2026-09-15"
+}
+```
+
+```json
+{ "message_id": "550e8400-e29b-41d4-a716-446655440000", "platform_message_id": "12345" }
+```
+
+Browser session cookies and the CLI's first-party human access JWTs are accepted. OAuth-app access tokens, relay access tokens, delegated tokens, service accounts, and per-callback reply tokens are not accepted. The new endpoint does not relax any existing router middleware. Request parsing and UUID syntax validation precede the per-conversation check; authentication and resource lookups follow it. The limiter itself uses MongoDB shared coordination, at `1` message/second with burst `5` by default. Every syntactically valid attempt, including a duplicate, consumes rate capacity.
+
+Gate order is rate limit → authentication → active conversation → assigned-key liveness or human owner write access → opt-in → device guard → concrete address → active bot and matching owner/platform → adapter capability → content → idempotency claim → platform send → metadata persistence. Missing/inactive conversations are not-found-shaped. `"*"` and empty addresses are catch-all routes and cannot be used to initiate; create a specific chat route first. Device channels have no outbound transport. Platform-specific rich content is still adapter-validated (`metadata.card` is Lark/Feishu-only).
+
+Threading accepts durable platform metadata such as Telegram `message_thread_id` or Slack `thread_ts`. There is no internal `message_id` reply anchor. `metadata.interaction_thread_id` is rejected here because Discord interaction follow-up credentials expire and can redirect dispatch away from the conversation. Other supported metadata passes directly to the adapter; it is never persisted.
+
+**Discovery:** `GET /api/v1/channel-relay/conversations?page=1&per_page=50` requires an active API key and returns only its active assigned rows. The response is `{ conversations, total, page, per_page }`, capped at 100 items per page. Each item contains only `{ id, platform, platform_conversation_type, addressable, allow_agent_initiated, capabilities, last_message_at }`. Wildcard and device rows are not addressable; device capabilities are all false. Wildcards retain the adapter's capability values. Owner conversation responses expose the same capabilities plus the human-set opt-in.
+
+**Idempotency:** optional keys contain 1–128 characters and are scoped to a conversation. A unique composite MongoDB `_id` (`conversation_id:idempotency_key`) is claimed *before* contacting the platform. `channel_send_claims` stores a SHA-256 fingerprint over recursively key-sorted JSON `{text, metadata}`, an attempt fence, `pending`/`sent` state, IDs, and a 24-hour BSON `expires_at`. It stores no message content. Reusing the key with different content returns 409. A matching `sent` claim returns the original IDs with 200; a matching `pending` claim returns 409 (send in progress or delivery outcome uncertain). Native dispatch/credential preparation failures delete the pending claim, allowing an explicit retry with the same key. There is no automatic retry or queue.
+
+A crash after claiming, a platform timeout after acceptance, partial delivery of a multi-chunk message, or a database failure after acceptance cannot provide an exactly-once guarantee. After successful platform acceptance, metadata/receipt persistence failures retain the pending claim so retries cannot silently duplicate the message. A crash can leave that claim pending until TTL cleanup. MongoDB's TTL monitor runs asynchronously: claims can live slightly longer than 24 hours; once removed, the same key may send again. Transport failures release the claim as specified, so an explicit retry can duplicate an already accepted or partially sent message. A platform message ID proves only that the platform accepted a send, not that any recipient received or read it.
+
+**Refusals:** disabled opt-in returns `channel_agent_initiate_not_allowed` (403), non-addressable routes return `channel_conversation_not_addressable` (400), unsupported transports return `channel_platform_send_unsupported` (501), and known permanent target refusals return `channel_conversation_not_reachable` (400). Examples include blocked/kicked Telegram bots, missing Discord access, archived Slack chats, missing Lark membership, WhatsApp undeliverable recipients/outside-window text, and X recipient DM refusals. WhatsApp outside its 24-hour window requires an approved template message. Classification belongs to adapters and also improves ordinary replies: being kicked from a chat is equally non-retryable for both paths. Unmatched Telegram, Discord, Slack, and Lark/Feishu refusals remain 502 with the platform description limited to 200 characters so callers can correct malformed payloads; matched refusals expose only the adapter-owned marker. WhatsApp retains locally authored reasons and X retains its existing 403 handling; existing Slack rate-limit handling is unchanged.
+
+Audit event `channel_message_initiated` contains only `conversation_id`, `platform`, `channel_bot_id`, and `agent_api_key_id`. `channel.reply_sent` telemetry uses `reply_mode: "initiated"` with the existing 10% conversation-hash sampling. Neither audit, claims, logs, nor message rows retain text, cards, or metadata bodies (ADR-013).
+
+Human setup and test-send:
+
+```bash
+nyxid channel-bot route create --bot-id <BOT_ID> --agent-key-id <KEY_ID> \
+  --conversation-id <PLATFORM_CHAT_ID> --allow-agent-initiated
+nyxid channel-bot route update <ROUTE_ID> --allow-agent-initiated true
+nyxid channel-bot send --conversation <ROUTE_ID> --text 'Test notification' --idempotency-key test-1
+nyxid channel-bot route update <ROUTE_ID> --allow-agent-initiated false
+```
+
+The conversation detail page provides the same opt-in, explains unprompted messaging, disables unsupported/non-addressable routes, and offers an explicit test-send form.
+
+#### Outbound capability model
+
+This declaration-and-contract-test model follows OpenClaw's `ChannelOutboundAdapter`: outbound is target-addressed, and a reply is an optional anchor on the same native send operation.
+
+| Adapter | initiated_send | reply_to | thread | edit | Media in | Media out | Thread metadata |
+|---|---|---|---|---|---|---|---|
+| telegram | true | true | true | true | image, file, audio, video | image, file, audio, video | `message_thread_id` |
+| telegram-new | true | true | true | true | image, file, audio, video | image, file, audio, video | Delegates to Telegram |
+| discord | true | false | false | true | image, file, audio, video | image, file, audio, video | — (interaction follow-up is a reply-only mechanism) |
+| lark | true | false | false | true | image, file, audio, video | image, file, audio, video | — |
+| feishu | true | false | false | true | image, file, audio, video | image, file, audio, video | — |
+| slack | true | true | true | true | image, file, audio, video | image, file, audio, video | `thread_ts` |
+| whatsapp | true | true | false | false | image, file, audio, video | image, file, audio, video | — |
+| x | true | false | false | false | image, video | image, video | — |
+| openclaw | false | false | false | false | none | none | — |
+
+Every adapter must implement `outbound_capabilities` and `media_capabilities`; there is no trait default. Flags describe what the native transport preserves, not generic platform possibilities or permission to send to every recipient. Tests exercise the actual request builders/native edit implementation. `send_reply` remains the single send method. OpenClaw explicitly returns `ChannelPlatformSendUnsupported` and performs no HTTP request; it cannot report a successful empty receipt for a no-op. X sends address existing DM conversation IDs; WhatsApp messaging-window and recipient restrictions still apply. API keys can edit initiated messages on adapters with native edit capability; the edit audit records a null inbound message ID. Reply tokens remain bound to an inbound message and cannot edit initiated rows.
 
 ### Bot Registration
 
@@ -296,6 +452,7 @@ erDiagram
         string platform_sender_id "optional: per-sender routing in groups"
         string agent_api_key_id FK "which agent handles this"
         bool default_agent "fallback route for unmatched conversations"
+        bool allow_agent_initiated "human opt-in, default false"
         bool is_active
         datetime last_message_at
         datetime created_at
@@ -313,9 +470,7 @@ erDiagram
         string sender_platform_id
         string sender_display_name
         string content_type "text | image | file | audio | video"
-        string text
-        array attachments "MessageAttachment[]"
-        object raw_platform_data "original JSON for debugging"
+        array attachments "StoredAttachment[]: inbound routing metadata only"
         string agent_api_key_id FK
         string callback_status "pending | delivered | failed | timeout"
         string reply_to_message_id FK "for outbound: which inbound this replies to"
@@ -333,6 +488,8 @@ erDiagram
 | `channel_conversations` | `{ channel_bot_id: 1, platform_conversation_id: 1 }` | Unique | One mapping per conversation |
 | `channel_conversations` | `{ user_id: 1, platform: 1 }` | Standard | List user's routes |
 | `channel_conversations` | `{ agent_api_key_id: 1 }` | Standard | Find routes for an agent |
+| `channel_send_claims` | `{ _id: 1 }` | Unique | Conversation/key delivery identity |
+| `channel_send_claims` | `{ expires_at: 1 }` | TTL (expireAfterSeconds 0) | Remove claims after 24h |
 | `channel_messages` | `{ conversation_id: 1, created_at: -1 }` | Standard | Conversation history |
 | `channel_messages` | `{ created_at: 1 }` | TTL (30d) | Auto-cleanup |
 
@@ -345,6 +502,13 @@ classDiagram
     class PlatformAdapter {
         <<trait>>
         +platform_id() str
+        +display_name() str
+        +ingestion() Ingestion
+        +managed_onboarding() OptionalDescriptor
+        +platform_credentials() OptionalDescriptor
+        +outbound_capabilities() OutboundCapabilities
+        +media_capabilities() MediaCapabilities
+        +fetch_attachment(http, credentials, attachment, max_bytes) FetchedMedia
         +registration() RegistrationDescriptor
         +registration_token(fields) Secret
         +updated_token(current, fields) OptionalSecret
@@ -357,6 +521,7 @@ classDiagram
         +reply_context(thread_id, created_at, metadata)
         +supports_reply_metadata(metadata) bool
         +send_reply(http, credentials, conversation_id, reply) Result~String~
+        +edit_reply(http, credentials, conversation_id, platform_message_id, edit) Result
         +register_webhook(http, bot, url, secret) Result
         +verify_bot_token(http, credentials) Result~BotIdentity~
     }
@@ -384,6 +549,28 @@ classDiagram
         -App access token caching
     }
 
+    class OutboundReply {
+        +text: OptionalString
+        +attachments: MaterializedAttachment[]
+        +metadata: OptionalJSON
+    }
+    class MaterializedAttachment {
+        +kind: MediaKind
+        +bytes: Bytes_ephemeral
+        +filename: OptionalString
+        +mime_type: OptionalString
+        +caption: OptionalString
+    }
+    class FetchedMedia {
+        +bytes: Bytes_ephemeral
+        +mime_type: OptionalString
+        +filename: OptionalString
+    }
+    OutboundReply *-- MaterializedAttachment
+    PlatformAdapter ..> FetchedMedia
+    PlatformAdapter <|.. TelegramNewAdapter
+    PlatformAdapter <|.. XAdapter
+    PlatformAdapter <|.. OpenClawAdapter
     PlatformAdapter <|.. TelegramAdapter
     PlatformAdapter <|.. DiscordAdapter
     PlatformAdapter <|.. LarkFamilyAdapter
@@ -412,6 +599,8 @@ classDiagram
 | **Feishu** | Same as Lark | Same as Lark | Same as Lark | Same as Lark, different base URL (`open.feishu.cn`) |
 | **Slack** | Bot user OAuth token (`xoxb-`) + Signing Secret | HMAC-SHA256 over `v0:timestamp:body`, five-minute replay window | `url_verification` | `POST /api/chat.postMessage` |
 | **WhatsApp** | Permanent System User access token + Phone Number ID + Meta App Secret; optional WABA ID | `X-Hub-Signature-256: sha256=<HMAC-SHA256(app_secret, raw_body)>` | GET subscription: constant-time SHA-256 Verify Token check, raw challenge as `text/plain` | `POST /{version}/{phone_number_id}/messages` with Bearer auth |
+
+Existing Lark/Feishu bots must grant `im:resource` in the developer console before attachment downloads work; until then downloads return `channel_media_fetch_failed`.
 
 For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Configure the webhook URL and subscribe to both `im.message.receive_v1` and `card.action.trigger` only in the Lark/Feishu Developer Console. The console inputs map to NyxID fields as follows:
 
@@ -457,7 +646,7 @@ Meta subscriptions are app-wide: every bot URL filters out messages whose `metad
 
 Rotate credentials with `nyxid channel-bot update <BOT_ID> --token-env WHATSAPP_ACCESS_TOKEN --app-secret-env META_APP_SECRET`, or PATCH `bot_token`/`app_secret`. Rotation preserves the Verify Token and phone identity. The Verify Bot action preserves WhatsApp's subscription secret; existing platforms retain their original verification lifecycle and response statuses.
 
-Inbound text, button replies, and interactive button/list selections normalize to text (title preferred, ID fallback). Image and sticker attachments use the `image` category; audio, video, and documents use `audio`, `video`, and `file`. Captions become text. Each attachment carries its media ID as `file_key` and a versioned Graph lookup URL. Fetch that URL with the bot's Bearer token to obtain the short-lived download `url`, then fetch the download URL with the same authentication. NyxID does not expose bot tokens to agents; agents needing media must have a separately authorized credential/proxy connection. Location and contact cards normalize to readable text; full details remain in the individual message's `raw_platform_data`. Orders use `unknown`; reaction, system, unsupported, unknown, and unrecognized types are skipped. Status-only and error-only deliveries are acknowledged without dispatch. Every message in a batch is processed independently.
+Inbound text, button replies, and interactive button/list selections normalize to text (title preferred, ID fallback). Image and sticker attachments use the `image` category; audio, video, and documents use `audio`, `video`, and `file`. Captions become text. Each attachment carries its media ID as `file_key` and a versioned Graph lookup URL. Agents fetch the NyxID `download_url` with their assigned API key or callback reply token. NyxID performs the two Graph requests with the bot bearer; bot credentials never leave the relay. Location and contact cards normalize to readable text; full details remain in the individual message's `raw_platform_data`. Orders use `unknown`; reaction, system, unsupported, unknown, and unrecognized types are skipped. Status-only and error-only deliveries are acknowledged without dispatch. Every message in a batch is processed independently.
 
 Replies support plain text, `metadata.template` objects, or `metadata.interactive` objects. Template and interactive content cannot be combined. Metadata cannot override the recipient, `recipient_type`, or `messaging_product`. `context.message_id` carries the original inbound message ID. Text splits into sequential messages of at most 4096 Unicode characters and returns the last `wamid`. A later chunk failure can leave earlier chunks delivered; there is no automatic outbound retry. Editing is unsupported. Outside the 24-hour customer service window, send an approved template; Graph code 131047 identifies that condition. Rate-limit and delivery errors use locally authored messages and numeric codes, never upstream text that could echo credentials.
 
@@ -524,6 +713,99 @@ The `raw_platform_data` field on the callback payload serves the advanced use ca
 
 ---
 
+## Media
+
+`PlatformAdapter::media_capabilities()` is required on every adapter. Conversation discovery and owner conversation detail expose `capabilities.media.inbound` and `.outbound` as arrays of `image`, `file`, `audio`, and `video`. Device conversations and OpenClaw have empty arrays. Capability declarations describe implemented transports; platform permissions, account limits, and WhatsApp's messaging window still apply.
+
+### Inbound downloads
+
+Callbacks preserve existing provider fields and add `content.attachments[i].download_url`. Agent history (`GET /channel-relay/messages/{conversation_id}`) returns the same attachment metadata and absolute download URLs. A document may carry `content.type = "file"` with no text: runtimes should process its attachments instead of dropping it as an unsupported text message.
+
+`GET /api/v1/channel-relay/messages/{message_id}/attachments/{index}` accepts either the conversation's assigned, live API key or a valid reply token bound to that exact inbound message, conversation, platform and agent. Reading validates the signature and live bindings **without consuming the JTI**; the token may download repeatedly and still send its single reply. Relay, delegated, service-account, and ordinary user credentials are forbidden. Device conversations are refused because they have no bot. Inactive bots cannot fetch. API-key downloads also consume the key's configured per-agent rate-limit bucket before context resolution; exceeding it returns 429. Unknown indexes return `channel_attachment_not_found` (404).
+
+NyxID resolves the live bot credential and calls the adapter's `fetch_attachment`. The response includes `Content-Type`, `Content-Length`, sanitized `Content-Disposition: attachment; filename="..."`, and `Cache-Control: private, no-store`. Downloads have a 30-second request timeout. `CHANNEL_MEDIA_MAX_BYTES` defaults to 20 MiB (Telegram's bot download limit). Content-Length is checked first; streamed chunks are counted before copying into the bounded buffer. The adapter returns ephemeral `FetchedMedia` bytes, then the handler writes them to the response. Nothing is written to disk or persisted as content. Provider URLs may expire; a retained metadata row is not an archival copy of a file.
+
+| Adapter | Fetch path | Allowed media hosts |
+|---|---|---|
+| Telegram / telegram-new | `getFile(file_id)` → `/file/bot{token}/{file_path}` | `api.telegram.org` (adapter-owned base) |
+| Lark / Feishu | `/open-apis/im/v1/messages/{message_id}/resources/{key}?type=image\|file`, tenant bearer | Adapter base host (`open.larksuite.com` / `open.feishu.cn`) |
+| Slack | `url_private`, bot bearer | `files.slack.com`, `*.slack.com` |
+| Discord | Attachment CDN URL | `cdn.discordapp.com`, `media.discordapp.net` |
+| WhatsApp | Graph media-ID lookup → temporary URL, bearer on both | `graph.facebook.com`, `lookaside.fbsbx.com` |
+| X | Media URL with user bearer | `pbs.twimg.com`, `video.twimg.com`, `ton.twitter.com` |
+
+Webhook URLs are untrusted input even after parsing. Adapter allowlists, HTTPS/443, public DNS/IP checks, address pinning, and disabled redirects prevent SSRF. Credentials are never sent to a rejected host. Fetch errors use locally authored messages and never echo a URL. A debug record includes only message ID, index and byte count; downloads are not audited.
+
+### Outbound attachments
+
+Both `/channel-relay/reply` (`reply.attachments`) and `/channel-relay/send` (`message.attachments`) accept up to ten entries:
+
+```json
+{
+  "kind": "file",
+  "source": { "type": "base64", "data": "aGVsbG8=" },
+  "filename": "report.txt",
+  "mime_type": "text/plain",
+  "caption": "Your report"
+}
+```
+
+Alternatively use `"source": { "type": "url", "url": "https://public.example/report.pdf" }`. URL sources require public HTTPS hosts and use the same DNS pinning, redirect prohibition, timeout and byte cap. Base64 is decoded with a length check before allocation. Filename, MIME type and caption are optional. Attachment-only sends are accepted for declared kinds; undeclared kinds produce a validation error listing supported kinds. `/reply/update` remains text/platform-card only and rejects nonempty attachments.
+
+The service materializes every source before dispatch. At the adapter boundary, `OutboundReply.attachments` is `Vec<MaterializedAttachment>` (kind, bytes, filename, MIME type, caption), not the public source shape. Secret/content-bearing Debug implementations redact these values.
+
+| Adapter | Native upload/send path |
+|---|---|
+| Telegram / telegram-new | Multipart `sendPhoto`, `sendDocument`, `sendAudio`, `sendVideo`; captions, reply anchor and topic ID preserved. Text goes first. |
+| Discord | One multipart message with `files[n]` and `payload_json`; text/captions joined into message content. Deferred interaction follow-ups retain their existing routing. |
+| Slack | `files.getUploadURLExternal` → PUT bytes → `files.completeUploadExternal` with channel/thread and initial comment; `files.info` resolves the share timestamp. Text goes first. |
+| Lark / Feishu | `im/v1/images` or `im/v1/files`, then an image/file message. Audio/video use file upload (`file_type=stream`). Text/captions are preceding text messages. |
+| WhatsApp | Multipart `/{phone_number_id}/media`, then image/document/audio/video message with media ID. Audio captions are separate text messages. |
+| X | OAuth2 multipart `/2/media/upload` with `dm_image`, `dm_video`, or `dm_gif`, processing-status wait when needed, then DM `attachments: [{media_id}]`. |
+
+Editing a media send targets the returned media message ID. Telegram uses `editMessageText` for text messages and falls back to `editMessageCaption` for media captions; Discord `PATCH` edits `content` on any bot message. Slack `chat.update` and Lark/Feishu message edits do not apply to file/image messages and surface as classified refusals. WhatsApp and X have no edit API. `/reply/update` does not replace attachment bytes.
+
+The result is the last platform message ID; Slack may omit it if no share timestamp is available. Lark/Feishu need `im:resource`; Slack needs file read/write scopes; existing X OAuth connections need fresh consent to `media.write`. Platform size/type restrictions can be stricter than NyxID's cap.
+
+Send idempotency fingerprints include attachment kind, source URL or SHA-256 of decoded bytes, filename, MIME type and caption. Changing any of them with the same key returns 409. The source URL identifies URL-based content; changing bytes behind the same URL cannot be detected on an already-completed replay. A multi-message send can partially succeed before a later upload fails; NyxID cannot roll back a platform send. Existing claim/retry semantics apply.
+
+### ADR-013 metadata boundary
+
+Inbound `ChannelMessage.attachments` stores only `StoredAttachment { content_type, provider_ref, platform_message_id, file_key, image_key, filename, mime_type, size_bytes }`. Provider references are routing metadata needed to fetch an attachment; they are not its bytes. Old rows without the field deserialize as an empty list. The legacy cleanup retains new provider-reference metadata while removing historical content fields. Outbound rows store only the first attachment's `content_type` and an empty attachment list, never sources, bytes, captions or filenames. Audits contain only attachment kinds/count plus existing routing identifiers; idempotency rows store a fingerprint, never source content. No media is put in token claims and no new telemetry events are introduced.
+
+## Platform catalog
+
+`GET /api/v1/channel-platforms` is the authoritative inventory, derived from `registered_adapters()`, registration/managed/platform-credential descriptors, ingestion, display names and capability declarations. It includes disabled adapters (`enabled: false`). `platform_credentials.configured` is a non-secret boolean indicating stored or linked admin credentials, not a live provider health check. The metadata-only route is in `api_v1_delegated`, admits JWT sessions, API keys, service accounts and delegated `account:read`, and does not belong in the delegated deny list. The media GET does belong in that deny list.
+
+Response shape (field lists and flow values vary by descriptor):
+
+```jsonc
+{
+  "platforms": [{
+    "platform": "telegram", "display_name": "Telegram bot token", "enabled": true,
+    "managed_only": false, "managed_only_message": "This platform requires managed onboarding",
+    "ingestion": { "mode": "webhook" }, // or { "mode": "poll", "min_interval_secs": 60 }
+    "registration": {
+      "documentation_url": "https://core.telegram.org/bots/api#setwebhook",
+      "fields": [{ "name": "bot_token", "label": "Bot token", "secret": true,
+        "hint": "Connect an existing Telegram bot using its BotFather token.",
+        "required": true, "patchable": false, "clearable": false,
+        "storage": "bot_token_encrypted", "webhook_secret": false, "platform_fallback": null }],
+      "token_fields": ["bot_token"], "extra_fields": [], // extra_fields uses the same field shape
+      "required_suffix": "", "automatic_webhook": true, "webhook_ingestion": true,
+      "webhook_secret_label": null, "create_response_status": "active", "setup_instructions": []
+    },
+    "managed_onboarding": null, // or { "flow", "provider", "bootstrap_fields": [], "completion_fields": [] }
+    "platform_credentials": null, // or { "provider": "meta", "configured": true }
+    "capabilities": { "initiated_send": true, "reply_to": true, "thread": true, "edit": true,
+      "media": { "inbound": ["image", "file", "audio", "video"], "outbound": ["image", "file", "audio", "video"] } },
+    "webhook_path": "/api/v1/webhooks/channel/telegram/{bot_id}"
+  }]
+}
+```
+
+The frontend queries this inventory for labels, enabled choices, required/secret fields, and managed-flow dispatch. Only React flow components and presentation-specific mappings stay local. Telegram's native browser creation remains its dedicated component and route (`telegram-new` is managed-only, with no generic managed-onboarding descriptor). `nyxid channel-bot platforms [--output json]` exposes the same inventory to CLI integrations; `register --help` points to it.
+
 ## Callback Contract
 
 ### NyxID -> Agent (Webhook POST)
@@ -587,7 +869,8 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `sender.display_name` | string | Yes | Display name from the platform (Telegram `first_name`, Discord `username`). `null` if not provided. |
 | `content.type` | string | No | Content kind: `text`, `image`, `file`, `audio`, `video`, `location`, `sticker`, or `unknown`. |
 | `content.text` | string | Yes | Text body. Present for `text`; may contain caption for media. `null` for non-text without caption. |
-| `content.attachments` | array | No | Non-text attachments: `{ content_type, url, platform_message_id, file_key, image_key, filename, mime_type, size_bytes }`. Omitted when empty. `platform_message_id`, `file_key`, and `image_key` are provider-scoped opaque handles, present only when the platform exposes them. For Lark/Feishu, `url` is the authenticated message-resource endpoint; NyxID forwards the reference and does not download or store the attachment body. |
+| `content.attachments` | array | No | Non-text attachment metadata: `{ content_type, url, download_url, platform_message_id, file_key, image_key, filename, mime_type, size_bytes }`. Omitted when empty. Raw provider fields remain compatible; use `download_url` for authenticated, bounded downloads through NyxID. |
+| `content.attachments[].download_url` | string | No | Absolute `{BASE_URL}/api/v1/channel-relay/messages/{message_id}/attachments/{index}`. Assigned agent API key or this callback's reply token required. No token is embedded in the URL. |
 | `reply_to_message_id` | UUID | Yes | NyxID `message_id` of the message being replied to. `null` for standalone messages. |
 | `thread_id` | string | Yes | Platform-native thread ID (Discord threads, Lark threads). `null` if not in a thread. |
 | `timestamp` | ISO 8601 | No | When the message was sent on the platform (not when NyxID received it). |
@@ -667,27 +950,9 @@ Authorization: Bearer nyxid_ag_xxxxx
 
 Scoped to the bot owner's account -- only resolves identities linked to the user who registered the bot.
 
-### Agent -> NyxID (Sync Reply, HTTP 200)
+### Callback acknowledgment
 
-Agent returns a reply in the callback response body:
-
-```json
-{
-  "reply": {
-    "text": "The weather in Tokyo is 22C and sunny.",
-    "reply_to_platform_message_id": "optional, for threading",
-    "metadata": null
-  }
-}
-```
-
-**Reply Field Reference:**
-
-| Field | Type | Nullable | Description |
-|---|---|---|---|
-| `reply.text` | string | Yes | The text response to send back to the chat. Required for text replies. |
-| `reply.reply_to_platform_message_id` | string | Yes | Platform-native message ID to reply to (for threading). If set, the reply will appear as a threaded response on platforms that support it (Telegram reply, Discord thread, Lark thread). |
-| `reply.metadata` | object | Yes | Platform-specific extras (e.g., Telegram `parse_mode`, Discord embed objects). Passed through to the platform adapter. `null` for plain text replies. |
+Return `202 Accepted` with an empty body, then POST the reply asynchronously. Inline HTTP 200 response bodies are not sent to the platform (ADR-013). `reply.text` is optional when declared media attachments or supported platform metadata carry the content.
 
 ### Agent -> NyxID (Async, HTTP 202 then POST later)
 
@@ -712,8 +977,9 @@ Content-Type: application/json
 | Field | Type | Nullable | Description |
 |---|---|---|---|
 | `message_id` | UUID | No | The `message_id` from the original inbound callback payload. Identifies which message this reply is for, so NyxID can resolve the correct conversation and platform to send the reply to. |
-| `reply.text` | string | Yes | The text response to send back to the chat. |
-| `reply.metadata` | object | Yes | Platform-specific extras, same as sync reply. |
+| `reply.text` | string | Yes | Text to send; optional for supported attachment-only replies. |
+| `reply.attachments` | array | No | Up to ten outbound attachment sources; defaults to empty. See [Media](#media). |
+| `reply.metadata` | object | Yes | Platform-specific extras supported by the adapter. |
 
 <a id="reply-token"></a>
 #### Reply Token
@@ -722,10 +988,10 @@ Each inbound callback carries a short-lived `reply_token` (RS256 JWT) that lets 
 
 | Property | Value |
 |---|---|
-| `aud` | `channel-relay/reply` (rejected everywhere else) |
+| `aud` | `channel-relay/reply` (accepted only for reply, reply/update, and bound inbound media reads) |
 | `token_type` | `relay_reply` |
 | TTL | `JWT_RELAY_REPLY_TTL_SECS` (default 1800 = 30 min) |
-| Max uses | `1` (duplicate `jti` → `401 "Reply token already used"`) |
+| Max sends | `1` (duplicate `jti` → `401 "Reply token already used"`); attachment reads never consume it, and edits require prior consumption |
 | Claim bindings | `api_key_id`, `conversation_id`, `inbound_message_id`, `platform` — all four must match the reply request; body's `message_id` must equal `inbound_message_id` |
 | Revocation coupling | At reply time NyxID re-checks that the bound `api_key_id` is still active; a revoked key invalidates all outstanding tokens immediately |
 | Replay store | MongoDB `reply_token_uses` collection, TTL-indexed on `exp_at` |
@@ -733,7 +999,7 @@ Each inbound callback carries a short-lived `reply_token` (RS256 JWT) that lets 
 
 The reply-token path skips the API-key branch's "caller must be the assigned agent for this conversation" check: the token was minted for a specific inbound message, so allowing the original callback recipient to complete its reply even after the conversation is reassigned is intentional. Narrowness is enforced by the four claim bindings above.
 
-A leaked reply token's blast radius is a single reply to a single message for at most 30 minutes. Contrast with a leaked `full_key`, which grants unbounded access to everything the agent key can do until manually revoked.
+A leaked reply token authorizes one reply, later edits of that reply, and reads of the bound inbound message's attachments until expiry (default 30 minutes). Contrast with a leaked `full_key`, which grants unbounded access to everything the agent key can do until manually revoked.
 
 ### Callback Flow Decision
 
@@ -741,13 +1007,10 @@ A leaked reply token's blast radius is a single reply to a single message for at
 flowchart TD
     CB[Agent Callback POST] --> STATUS{Response Status?}
 
-    STATUS -->|200 + body| SYNC[Parse reply JSON]
-    SYNC --> SEND[send_reply via adapter]
-    SEND --> LOG_OUT[Log outbound message]
-
-    STATUS -->|202 no body| ASYNC[Mark callback_status = delivered]
+    STATUS -->|2xx, body ignored| ASYNC[Mark callback_status = delivered]
     ASYNC --> WAIT[Agent calls /channel-relay/reply later]
-    WAIT --> SEND
+    WAIT --> SEND[send_reply via adapter]
+    SEND --> LOG_OUT[Store outbound routing metadata]
 
     STATUS -->|4xx / 5xx| ERR[Mark callback_status = failed]
     ERR --> OPT{Send error<br/>msg to chat?}
@@ -761,6 +1024,12 @@ flowchart TD
 ---
 
 ## API Endpoints
+
+### Platform Discovery (authenticated)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/channel-platforms` | JWT/session, API key, service account, or delegated `account:read` token | All registered adapters, display names, registration/onboarding descriptors, configured booleans, ingestion and capabilities. |
 
 ### Bot Management (authenticated, human-only)
 
@@ -788,6 +1057,10 @@ flowchart TD
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/api/v1/channel-relay/reply` | API key **or** reply token | Agent sends async reply to a message. See [Reply Token](#reply-token). |
+| `POST` | `/api/v1/channel-relay/send` | Assigned API key or human owner | Initiate an opted-in target-addressed message; optional idempotency key. |
+| `GET` | `/api/v1/channel-relay/conversations` | API key | Paginated active assignments, addressability, opt-in, and outbound capabilities. |
+| `POST` | `/api/v1/channel-relay/reply/update` | API key **or** consumed reply token | Edit an anchored reply or API-key-authorized initiated message on Telegram, Discord, Slack, Lark, or Feishu. |
+| `GET` | `/api/v1/channel-relay/messages/{message_id}/attachments/{index}` | Assigned API key **or** reply token | Download inbound media without consuming the reply token. |
 | `GET` | `/api/v1/channel-relay/messages/{conversation_id}` | API key | Get conversation message history |
 | `GET` | `/api/v1/channel-relay/resolve-sender` | API key | Resolve a platform sender to a NyxID user (query params: `platform`, `platform_id`) |
 
@@ -819,6 +1092,7 @@ graph TD
         T4[Replay attacks]
         T5[Message injection in group chats]
         T6[Agent impersonation on async reply]
+        T7[Unprompted message spam]
     end
 
     subgraph Mitigations
@@ -828,6 +1102,7 @@ graph TD
         M4[X-NyxID-Timestamp + replay window]
         M5[platform_sender_id scoping on routes]
         M6[api_key_id must match conversation agent]
+        M7[Default-off human opt-in and per-conversation send limit]
     end
 
     T1 --> M1
@@ -836,17 +1111,24 @@ graph TD
     T4 --> M4
     T5 --> M5
     T6 --> M6
+    T7 --> M7
 ```
 
 | Concern | Mitigation |
 |---|---|
 | **SSRF** | Callback URLs validated: HTTPS-only in production, block RFC 1918/loopback ranges, optional domain allowlist |
+| **Forged webhook attachment URLs** | Adapter-owned host allowlists, public-IP validation and DNS pinning, and no redirects. Credentials are never sent to a rejected host. |
+| **Agent-supplied media URL sources** | HTTPS only, with the same public-host validation, IP pinning and redirect prohibition. |
+| **Oversized media** | Content-Length pre-check plus streamed byte cap; base64 length checked before allocation. The raised JSON body cap applies only to `/reply` and `/send`. |
+| **Download abuse** | Assigned-key or exact-reply-token binding and live authorization; API-key downloads use the per-agent limiter when configured. Reply-token reads do not consume the send JTI and remain subject to the group's global per-IP limiter. |
+| **Large `/send` JSON before admission** | `/send` still parses the now-larger JSON body before its per-conversation limiter. The group's global per-IP limiter mitigates this work, and the route body cap remains bounded. |
 | **Bot token storage** | AES-256 encrypted at rest (same pattern as `UserApiKey.credential_encrypted`). Never returned in API responses. Only `platform_bot_username` is exposed. |
 | **Webhook forgery** | Per-platform verification: Telegram secret header, Discord Ed25519, Lark / Feishu Verification Token checks plus optional Encrypt Key signature verification and AES decryption. All comparisons use constant-time equality where applicable. |
 | **WhatsApp verification** | POST HMAC verifies the exact raw body with the Meta App Secret before phone-number filtering. GET subscription checks SHA-256 of the one-time Verify Token in constant time. Bodies, secrets, and upstream free-form errors are never logged. |
 | **Replay attacks** | Callbacks include `X-NyxID-Timestamp`; agents should reject messages older than 5 minutes. Callback JWTs also expire after 5 minutes with 60s skew tolerance. |
 | **Callback authentication** | `X-NyxID-Callback-Token` is an RS256 JWT verifiable through `/.well-known/jwks.json`; its `body_sha256` claim binds the exact request bytes. `X-NyxID-Signature` HMAC is dual-emitted during transition and will be removed later. |
 | **Agent impersonation** | Async reply endpoint accepts two auth paths: (a) the agent API key, which must match the conversation's `agent_api_key_id`; or (b) a per-callback reply token bound to a specific `inbound_message_id`, `conversation_id`, `api_key_id`, and `platform`, single-use, 30-min TTL, and revalidated against live `api_key.is_active` on every call. See [Reply Token](#reply-token). |
+| **Proactive spam** | Default-off, human-only conversation opt-in; live assignment/key checks; concrete chat address and bot scope; shared per-conversation 1/s burst-5 admission before auth. A caller knowing a conversation UUID can consume its bucket, an intentional consequence of pre-auth limiting. |
 | **Rate limiting** | Per-bot rate limiting on inbound webhooks. Per-agent rate limiting on callback dispatch (reuses `PerAgentRateLimiter` from agent isolation). |
 
 ### Migrating a stuck Lark / Feishu bot
@@ -1180,9 +1462,13 @@ graph LR
 | Variable | Default | Description |
 |---|---|---|
 | `JWT_RELAY_CALLBACK_TTL_SECS` | `300` | Lifetime for `X-NyxID-Callback-Token` JWTs |
+| `CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND` | `1` | Shared per-conversation proactive send rate |
+| `CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST` | `5` | Proactive send burst capacity |
+| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` | Per-attachment download/materialization cap (20 MiB); only reply/send body limits are raised to `ceil(cap / 3) * 4 + 65536`. |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots a user can register |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
+| `CHANNEL_POLL_INTERVAL_SECS` | `30` | Generic polling sweep interval; `0` disables. Each adapter's minimum interval, backoff and lease also apply. |
 
 ---
 
@@ -1273,3 +1559,7 @@ sequenceDiagram
     N->>DC: Create message in channel
     DC->>Bob: "Report: ..."
 ```
+
+## Aurinko email channel
+
+Aurinko is an account-token email adapter with a separate application signing secret. Signed subscription challenges work during pending setup; account/subscription-bound notifications fetch mail and deliver it inline under producer-owned retries. Durable metadata claims distinguish active work from completion, preserve callback UUIDs across retries, and fence uncertain message-bound replies. This adapter returns retryable HTTP failures rather than the legacy always-ACK behavior. See [Aurinko integration](./AURINKO_INTEGRATION.md) for setup, CLI/API contracts, filtering, routing, credential lifecycle, and deletion outcomes.

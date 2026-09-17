@@ -20,6 +20,9 @@ pub struct UserService {
     /// FK to UserApiKey (None for no-auth auto-connected services)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
+    /// Selected credential source. Absent preserves legacy resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_binding: Option<String>,
     /// "bearer" | "header" | "query" | "basic" | "none"
     pub auth_method: String,
     /// Header name or query param name (e.g., "Authorization", "x-api-key", "key")
@@ -150,6 +153,7 @@ mod tests {
             slug: "llm-openai".to_string(),
             endpoint_id: uuid::Uuid::new_v4().to_string(),
             api_key_id: Some(uuid::Uuid::new_v4().to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("svc-id".to_string()),
@@ -200,6 +204,7 @@ mod tests {
             slug: "test".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: Some("ak".to_string()),
+            credential_binding: None,
             auth_method: "header".to_string(),
             auth_key_name: "X-API-Key".to_string(),
             catalog_service_id: None,
@@ -251,6 +256,7 @@ mod tests {
             slug: "test".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: None,
@@ -309,6 +315,7 @@ mod tests {
             slug: "auto-svc".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
@@ -357,6 +364,7 @@ mod tests {
             slug: "legacy".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: Some("ak".to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,

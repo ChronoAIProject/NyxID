@@ -7,6 +7,12 @@
 // touch that endpoint.
 
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useAppForm } from "@/components/ui/form";
+import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
+import { createServiceAccountSchema } from "@/schemas/service-accounts";
+import { useAuthStore } from "@/stores/auth-store";
 import { Info, Plus, Trash2 } from "lucide-react";
 import QRCode from "qrcode";
 import { Button } from "@/components/ui/button";
@@ -106,11 +112,14 @@ function initialAccessScope(prefill: ApiKeyCreatePrefill): AccessScopeState {
   // the CLI's ApiKeyCreatePrefill struct defaults to `false` in Rust,
   // so we can't trust it as "user explicitly unticked" — we have to
   // infer from the CSV presence instead.
-  const allowAllServices = !servicesCsv;
+  const allowAllServices =
+    prefill.allow_all_services ||
+    (!servicesCsv && !prefill.allow_auto_connected_services);
   const allowAllNodes = !nodesCsv;
 
   return {
     allowAllServices,
+    allowAutoConnectedServices: prefill.allow_auto_connected_services ?? false,
     allowAllNodes,
     selectedServiceIds,
     selectedNodeIds,
@@ -149,6 +158,8 @@ export function ApiKeyCreateConfirm({
         name,
         scopes: Array.from(scopes).join(" "),
         allow_all_services: access.allowAllServices,
+        allow_auto_connected_services:
+          access.allowAutoConnectedServices ?? false,
         allow_all_nodes: access.allowAllNodes,
       };
       if (platform) body.platform = platform;
@@ -291,15 +302,23 @@ export function ApiKeyCreateConfirm({
               value={ownerId}
               onChange={(e) => {
                 setOwnerId(e.target.value);
+                setAccess((current) => ({
+                  ...current,
+                  selectedServiceIds: new Set(),
+                  selectedNodeIds: new Set(),
+                  allowAutoConnectedServices: false,
+                }));
               }}
               className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground transition-colors duration-300 focus-visible:outline-none"
             >
               <option value="">Personal (your account)</option>
-              {orgs.data?.map((org) => (
-                <option key={org.id} value={org.id}>
-                  Org · {org.display_name ?? org.id}
-                </option>
-              ))}
+              {orgs.data
+                ?.filter((org) => org.your_role === "admin")
+                .map((org) => (
+                  <option key={org.id} value={org.id}>
+                    Org · {org.display_name ?? org.id}
+                  </option>
+                ))}
             </select>
             <p className="mt-1 text-xs text-muted-foreground">
               Org-owned keys authenticate as the org; every admin of
@@ -308,7 +327,11 @@ export function ApiKeyCreateConfirm({
           </Field>
         ) : null}
         <ScopePicker value={scopes} onChange={setScopes} />
-        <AccessScopeCard value={access} onChange={setAccess} />
+        <AccessScopeCard
+          value={access}
+          onChange={setAccess}
+          ownerId={ownerId}
+        />
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
@@ -578,16 +601,36 @@ export function ServiceAccountCreateConfirm({
   pairingId,
   onSuccess,
 }: ServiceAccountCreateConfirmProps) {
-  const [name, setName] = useState(prefill.name ?? "");
-  const [scopes, setScopes] = useState(prefill.scopes ?? "openid profile");
-  const [description, setDescription] = useState(prefill.description ?? "");
-  const [roleIds, setRoleIds] = useState(prefill.role_ids_csv ?? "");
+  const form = useAppForm({
+    resolver: zodResolver(createServiceAccountSchema),
+    defaultValues: {
+      name: prefill.name ?? "", allowed_scopes: prefill.scopes ?? "openid profile",
+      description: prefill.description ?? "", role_ids: prefill.role_ids_csv ?? "",
+    },
+  });
+  const name = form.watch("name");
+  const scopes = form.watch("allowed_scopes");
+  const description = form.watch("description") ?? "";
+  const roleIds = form.watch("role_ids") ?? "";
   const [ownerId, setOwnerId] = useState(prefill.org_id ?? "");
+  const currentUser = useAuthStore((state) => state.user);
+  const identity = useQuery({
+    queryKey: ["wizard-current-user", pairingId],
+    enabled: !currentUser,
+    queryFn: async () => {
+      await useAuthStore.getState().checkAuth({ ephemeral: true });
+      const user = useAuthStore.getState().user;
+      if (!user) throw new Error("Unable to load your account. Check your CLI login and retry.");
+      return user;
+    },
+    retry: false,
+  });
   const orgs = useOrgs();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (!(await form.trigger())) return;
     setLoading(true);
     setError(null);
     try {
@@ -645,31 +688,23 @@ export function ServiceAccountCreateConfirm({
             id="pair-sa-name"
             value={name}
             onChange={(e) => {
-              setName(e.target.value);
+              form.setValue("name", e.target.value);
             }}
             placeholder="e.g. ci-deploys"
             autoFocus
           />
         </Field>
         <Field label="Allowed scopes" htmlFor="pair-sa-scopes">
-          <Input
-            id="pair-sa-scopes"
-            value={scopes}
-            onChange={(e) => {
-              setScopes(e.target.value);
-            }}
-            placeholder="openid profile"
-          />
-          <p className="text-xs text-muted-foreground">
-            Space-separated. The SA may only request these scopes.
-          </p>
+          <ServiceAccountScopePicker id="pair-sa-scopes" value={scopes}
+            onChange={(value) => form.setValue("allowed_scopes", value)}
+            ownerId={ownerId || currentUser?.id || ""} />
         </Field>
         <Field label="Description (optional)" htmlFor="pair-sa-desc">
           <Input
             id="pair-sa-desc"
             value={description}
             onChange={(e) => {
-              setDescription(e.target.value);
+              form.setValue("description", e.target.value);
             }}
             placeholder="What this account is for"
           />
@@ -679,7 +714,7 @@ export function ServiceAccountCreateConfirm({
             id="pair-sa-roles"
             value={roleIds}
             onChange={(e) => {
-              setRoleIds(e.target.value);
+              form.setValue("role_ids", e.target.value);
             }}
             placeholder="role-id-1,role-id-2"
           />
@@ -704,6 +739,9 @@ export function ServiceAccountCreateConfirm({
           </Field>
         ) : null}
       </div>
+      {!currentUser && identity.isPending && <p role="status">Loading your account…</p>}
+      {!currentUser && identity.isError && <div role="alert"><ErrorLine message={identity.error.message} /><Button variant="outline" onClick={() => void identity.refetch()}>Retry account</Button></div>}
+      {Object.entries(form.formState.errors).map(([field, value]) => <ErrorLine key={field} message={value.message ?? "Invalid value"} />)}
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={submitDisabled}>
         {loading ? "Creating..." : "Create Service Account"}

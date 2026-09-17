@@ -870,7 +870,9 @@ pub async fn list_metadata(
         .await?;
     Ok(rows
         .into_iter()
-        .filter(|row| find_flag(&row.flag_key).is_some())
+        .filter(|row| {
+            find_flag(&row.flag_key).is_some() && (row.description.is_some() || row.owner.is_some())
+        })
         .map(|row| (row.flag_key.clone(), row))
         .collect())
 }
@@ -931,6 +933,56 @@ pub async fn set_metadata(
             AppError::Internal("feature flag metadata upsert did not return the row".to_string())
         })?;
     Ok(Some(row))
+}
+
+/// Sparse metadata update. Keep empty rows internally so a concurrent disjoint
+/// write cannot be deleted by cleanup after the update.
+pub async fn patch_metadata(
+    db: &mongodb::Database,
+    flag_key: &str,
+    description: Option<Option<&str>>,
+    owner: Option<Option<&str>>,
+    actor_id: &str,
+) -> AppResult<Option<FeatureFlagMetadata>> {
+    find_flag(flag_key)
+        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    let collection = db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION);
+    let mut set = doc! {};
+    for (field, value, limit) in [
+        ("description", description, MAX_FLAG_DESCRIPTION_LEN),
+        ("owner", owner, MAX_FLAG_OWNER_LEN),
+    ] {
+        if let Some(value) = value {
+            let value = normalize_metadata_field(value, limit, field)?;
+            set.insert(
+                field,
+                value.map(bson::Bson::String).unwrap_or(bson::Bson::Null),
+            );
+        }
+    }
+    let row = if set.is_empty() {
+        collection.find_one(doc! { "flag_key": flag_key }).await?
+    } else {
+        let now = bson::DateTime::from_chrono(Utc::now());
+        let mut insert =
+            doc! { "_id": Uuid::new_v4().to_string(), "flag_key": flag_key, "created_at": now };
+        for field in ["description", "owner"] {
+            if !set.contains_key(field) {
+                insert.insert(field, bson::Bson::Null);
+            }
+        }
+        set.insert("updated_at", now);
+        set.insert("updated_by", actor_id);
+        collection
+            .find_one_and_update(
+                doc! { "flag_key": flag_key },
+                doc! { "$set": set, "$setOnInsert": insert },
+            )
+            .upsert(true)
+            .return_document(ReturnDocument::After)
+            .await?
+    };
+    Ok(row.filter(|row| row.description.is_some() || row.owner.is_some()))
 }
 
 /// Cascade helper: drop every override for an org (used when the org is deleted).
@@ -1737,5 +1789,52 @@ mod tests {
                 .expect("resolve revoked member")
                 .contains(&"example_ui".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn admin_form_metadata_patch_preserves_disjoint_writes_and_clears() {
+        let db = connect_test_database("admin_form_metadata_patch")
+            .await
+            .expect("Mongo required");
+        set_metadata(&db, "example_ui", Some("Old"), Some("Original owner"), "a")
+            .await
+            .unwrap();
+        patch_metadata(&db, "example_ui", None, Some(Some("New owner")), "b")
+            .await
+            .unwrap();
+        let saved = patch_metadata(&db, "example_ui", Some(Some("New description")), None, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.owner.as_deref(), Some("New owner"));
+        let saved = patch_metadata(&db, "example_ui", Some(None), None, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.description.is_none());
+        assert_eq!(saved.owner.as_deref(), Some("New owner"));
+        assert!(
+            patch_metadata(&db, "example_ui", None, Some(Some("  ")), "a")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!list_metadata(&db).await.unwrap().contains_key("example_ui"));
+        let saved = patch_metadata(&db, "example_ui", None, Some(Some("Restored")), "b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.owner.as_deref(), Some("Restored"));
+        let unchanged = patch_metadata(&db, "example_ui", None, None, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.updated_at, saved.updated_at);
+        // PUT remains a full replacement.
+        let replaced = set_metadata(&db, "example_ui", Some("PUT"), None, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(replaced.owner.is_none());
     }
 }

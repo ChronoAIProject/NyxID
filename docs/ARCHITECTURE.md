@@ -20,6 +20,7 @@ This document describes the system architecture, component design, data flows, a
 - [Delegated Access](#delegated-access)
 - [Service Accounts](#service-accounts)
 - [Transaction Approval](#transaction-approval)
+- [Telegram New Channels](#telegram-new-channels)
 - [Deployment Architecture](#deployment-architecture)
 
 ---
@@ -646,6 +647,19 @@ Client                     NyxID Backend                     Downstream
 ```
 
 ### Collection Details
+
+#### Aurinko email coordination
+
+The `aurinko` channel adapter extends the existing registry and relay. Its backend descriptor supplies registration fields, setup instructions, and capabilities to the platform catalog. It supports anchored text replies; initiated sends, edits, and channel media are unavailable. The separate `api-aurinko` AI Service uses ordinary owner-scoped catalog credentials and MCP discovery.
+
+| Collection | Persisted coordination state |
+|---|---|
+| `channel_email_subscriptions` | Bot/account/subscription binding and signing-secret verification fingerprint |
+| `channel_email_batches` | Notification digest and rotating progress offset, with a 31-day TTL |
+| `channel_email_receipts` | Stable inbound UUID-v4 and durable completion marker |
+| `channel_email_sends` | Irreversible send-attempt barrier and optional provider reply ID |
+
+These documents use person/org `user_id` ownership, UUID-string identifiers, and BSON dates. Message content stays transient under ADR-013. Existing shared Mongo coordination serializes lifecycle and ingress work; only Aurinko opts into these hooks. A partial index enforces one active Aurinko bot per account without constraining existing platforms. Bot/owner cleanup removes email metadata; receipts and send barriers otherwise survive ordinary message-log expiry. See [Aurinko integration](AURINKO_INTEGRATION.md).
 
 #### users
 
@@ -1951,6 +1965,18 @@ Approval is triggered for **all non-session authentication methods** (API keys, 
 - `Delegated` -- Delegated access token (from token exchange or MCP injection), approval required
 - `ServiceAccount` -- Service account client credentials, approval required
 - `AccessToken` -- Access token cookie (non-session), approval required
+
+---
+
+## Telegram New Channels
+
+`telegram-new` adds manager-assisted bot creation alongside the existing manual-token `telegram` adapter. After connection, it uses the same [channel relay](CHANNEL_BOT_RELAY.md), conversation routing, and asynchronous replies. It does not change the general onboarding wizard.
+
+The `telegram_new` handler delegates creation and Telegram consent to `telegram_new_service`, administrator configuration to `telegram_new_admin`, and token acquisition and connection recovery to `telegram_new_connect`. `telegram_new_api` bounds and sanitizes Telegram API responses. Credentials use the existing envelope encryption; the manager is configured through admin platform credentials.
+
+Two collections hold setup metadata: `telegram_bot_requests` stores actor/destination bindings, hashed challenges, revisions, and request expiry; `telegram_managed_bot_events` stores immutable creation provenance and subsequent management revisions. Neither stores ordinary chat content or raw updates. The registration transaction checks shared Telegram identity and owner quota, inserts the pending `ChannelBot`, consumes creation provenance, and transitions the request to provisioning. Durable pending state and renewable per-bot leases support retries without duplicate registration. Observed management changes suspend both incoming messages and outgoing replies.
+
+See [Telegram New](TELEGRAM_NEW.md) for the state machine, administrator steps, MongoDB and rollout requirements, and staging checks that must pass before customer enablement.
 
 ---
 

@@ -1181,6 +1181,7 @@ Admin routes under the admin router:
 - Registration tokens are one-time use with configurable TTL
 
 ### Credential Isolation
+- Catalog master credentials always use NyxID server transport, including legacy internal services without `platform_key`. HTTP/WebSocket and MCP ignore existing owner `NodeServiceBinding` routes for these rows. This is intentional hardening in 0.20: a server-held operator key must never be forwarded to an owner node. Services using a node-owned credential retain node routing; explicit platform-bound connections reject `node_id` changes with a validation error.
 - Credentials never transit through NyxID when using node proxy
 - NyxID sends only request metadata (method, path, headers, body) to the node
 - The node injects credentials locally before forwarding to the downstream service

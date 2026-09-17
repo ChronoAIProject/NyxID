@@ -130,6 +130,10 @@ pub struct UpdateServiceAccountRequest {
     pub description: Option<String>,
     pub allowed_scopes: Option<String>,
     pub role_ids: Option<Vec<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub rate_limit_override: Option<Option<u64>>,
     pub is_active: Option<bool>,
 }
@@ -165,6 +169,7 @@ pub struct ServiceAccountItem {
     pub is_active: bool,
     pub rate_limit_override: Option<u64>,
     pub created_by: String,
+    pub owner_id: String,
     pub created_at: String,
     pub updated_at: String,
     pub last_authenticated_at: Option<String>,
@@ -228,6 +233,7 @@ pub struct RevokeTokensResponse {
 
 fn sa_to_item(sa: ServiceAccount) -> ServiceAccountItem {
     ServiceAccountItem {
+        owner_id: sa.effective_owner_user_id().to_string(),
         purpose: sa.purpose,
         platform_protected: sa.platform_protected,
         credential_generation: sa.credential_generation,
@@ -693,12 +699,26 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn account_update_distinguishes_omitted_and_cleared_rate_limit() {
+        let unchanged: UpdateServiceAccountRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(unchanged.rate_limit_override.is_none());
+        let cleared: UpdateServiceAccountRequest =
+            serde_json::from_value(serde_json::json!({"rate_limit_override": null})).unwrap();
+        assert_eq!(cleared.rate_limit_override, Some(None));
+        let set: UpdateServiceAccountRequest =
+            serde_json::from_value(serde_json::json!({"rate_limit_override": 5})).unwrap();
+        assert_eq!(set.rate_limit_override, Some(Some(5)));
+    }
+
+    #[test]
     fn service_account_authorization_projection_excludes_free_text_and_secret_prefix() {
         let item = ServiceAccountItem {
             purpose: crate::models::service_account::ServiceAccountPurpose::General,
             platform_protected: false,
             credential_generation: 0,
             curation_grant: None,
+            owner_id: "owner".into(),
             id: "sa-1".to_string(),
             name: "Bearer nyxid_ag_abcdefghijklmnop".to_string(),
             description: Some("Bearer secret".to_string()),

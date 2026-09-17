@@ -22,6 +22,7 @@ use crate::services::{
 fn llm_credential_class(
     resolved_via_user_service: bool,
     master_credential: bool,
+    credential_source: Option<&str>,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if target.auth_method == "none" && target.credential.is_empty() {
@@ -31,6 +32,8 @@ fn llm_credential_class(
         // catalog master credential; classify by whose key was used.
         if master_credential {
             CredentialClass::NyxidManagedMaster
+        } else if credential_source == Some("platform") {
+            CredentialClass::NyxidPlatformOauthApp
         } else {
             CredentialClass::UserOwned
         }
@@ -87,7 +90,7 @@ pub(crate) fn enforce_llm_billing_classification(
 }
 
 fn supports_stream_options_include_usage(provider_slug: &str) -> bool {
-    matches!(provider_slug, "openai" | "deepseek")
+    matches!(provider_slug, "openai" | "deepseek" | "xai")
 }
 
 fn should_force_stream_usage(provider_slug: &str, path: &str, body: &serde_json::Value) -> bool {
@@ -289,6 +292,7 @@ pub async fn llm_proxy_request(
     // with the "Provider ... connection required" error, even though the
     // user has a perfectly valid UserService linked by catalog_service_id.
     let mut is_auto_connected_for_approval = false;
+    let mut credential_source = None;
     let (target, resolved_via_user_service, master_credential, owner_for_approval) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
@@ -305,6 +309,7 @@ pub async fn llm_proxy_request(
         .await?
         {
             Some(resolution) => {
+                credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
                 let effective_owner = resolution
                     .org_routing
@@ -364,10 +369,20 @@ pub async fn llm_proxy_request(
     let billing_resource_owner_id = owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmProvider,
@@ -380,7 +395,7 @@ pub async fn llm_proxy_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(resolved_via_user_service, master_credential, &target),
+        credential_class,
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
@@ -660,6 +675,7 @@ pub async fn gateway_request(
     // See `llm_proxy_request` for why we pass `None` as the slug here
     // instead of `provider_slug` -- the URL's provider slug does not
     // match UserService.slug, which is user-chosen at provision time.
+    let mut credential_source = None;
     let (target, resolved_via_user_service, master_credential) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
@@ -676,6 +692,7 @@ pub async fn gateway_request(
         .await?
         {
             Some(resolution) => {
+                credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
                 effective_owner_for_approval = Some(
                     resolution
@@ -788,10 +805,20 @@ pub async fn gateway_request(
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmGateway,
@@ -804,7 +831,7 @@ pub async fn gateway_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(resolved_via_user_service, master_credential, &target),
+        credential_class,
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
@@ -1048,13 +1075,49 @@ async fn resolve_provider_slug_with_fallback(
         COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
     };
 
-    // Find the primary provider
-    let primary_provider = db
-        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
-        .find_one(doc! { "slug": primary_slug, "is_active": true })
-        .await?;
+    use futures::TryStreamExt;
 
-    if let Some(ref provider) = primary_provider {
+    // Both candidates share one provider batch and one owner-grant snapshot.
+    let mut candidate_slugs = vec![primary_slug];
+    if primary_slug == "openai" {
+        candidate_slugs.push("openai-codex");
+    }
+    let providers: Vec<ProviderConfig> = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find(doc! { "slug": { "$in": candidate_slugs }, "is_active": true })
+        .await?
+        .try_collect()
+        .await?;
+    let primary_provider = providers.iter().find(|p| p.slug == primary_slug);
+    if let Some(provider) = primary_provider
+        && let Ok(service) =
+            llm_gateway_service::resolve_llm_service_for_provider(db, provider).await
+    {
+        let grants =
+            crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id)
+                .await?;
+        if crate::services::platform_key_service::available_with_grants(
+            &service,
+            Some(provider),
+            user_id,
+            &grants,
+        ) {
+            return Ok(primary_slug.to_string());
+        }
+        // A new-path BYOK connection may not have a legacy provider token.
+        if crate::services::user_service_service::find_by_catalog_service_id(
+            db,
+            user_id,
+            &service.id,
+        )
+        .await?
+        .is_some()
+        {
+            return Ok(primary_slug.to_string());
+        }
+    }
+
+    if let Some(provider) = primary_provider {
         // Check if user has an active token
         let token = db
             .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
@@ -1072,12 +1135,9 @@ async fn resolve_provider_slug_with_fallback(
 
     // Fall back to openai-codex for OpenAI models
     if primary_slug == "openai" {
-        let codex_provider = db
-            .collection::<ProviderConfig>(PROVIDER_CONFIGS)
-            .find_one(doc! { "slug": "openai-codex", "is_active": true })
-            .await?;
+        let codex_provider = providers.iter().find(|p| p.slug == "openai-codex");
 
-        if let Some(ref provider) = codex_provider {
+        if let Some(provider) = codex_provider {
             let token = db
                 .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
                 .find_one(doc! {
@@ -1763,6 +1823,100 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn gateway_provider_selection_batches_grants_and_reuses_primary_and_fallback_providers() {
+        use crate::models::{
+            downstream_service::{
+                self, PlatformKeyAudience, PlatformKeyConfig, test_helpers::dummy_service,
+            },
+            org_membership::{self, OrgRole},
+            provider_config::{self, ProviderConfig},
+            user::{self, UserType},
+            user_provider_token,
+        };
+        use crate::test_utils::{connect_transaction_test_database, test_membership, test_user};
+        use mongodb::bson::{self, doc};
+        let db = connect_transaction_test_database("gateway_selection_batch").await;
+        let actor = uuid::Uuid::new_v4().to_string();
+        let org = uuid::Uuid::new_v4().to_string();
+        db.collection::<user::User>(user::COLLECTION_NAME)
+            .insert_many([
+                test_user(&actor, UserType::Person),
+                test_user(&org, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<org_membership::OrgMembership>(org_membership::COLLECTION_NAME)
+            .insert_one(test_membership(&org, &actor, OrgRole::Member, None))
+            .await
+            .unwrap();
+        let mut providers = vec![];
+        for slug in ["openai", "openai-codex"] {
+            let now = bson::DateTime::now();
+            let provider: ProviderConfig = bson::from_document(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(), "slug": slug, "name": slug,
+                "provider_type": "api_key", "is_active": true, "created_by": "test",
+                "created_at": now, "updated_at": now,
+            })
+            .unwrap();
+            db.collection::<ProviderConfig>(provider_config::COLLECTION_NAME)
+                .insert_one(&provider)
+                .await
+                .unwrap();
+            providers.push(provider);
+        }
+        let mut catalog = dummy_service();
+        catalog.slug = "llm-openai".into();
+        catalog.is_active = true;
+        catalog.provider_config_id = Some(providers[0].id.clone());
+        catalog.platform_key = Some(PlatformKeyConfig {
+            enabled: true,
+            audience: PlatformKeyAudience::Restricted,
+            allowed_owner_ids: vec![org.clone()],
+        });
+        catalog.credential_encrypted = vec![1];
+        db.collection::<downstream_service::DownstreamService>(downstream_service::COLLECTION_NAME)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let now = bson::DateTime::now();
+        db.collection::<bson::Document>(user_provider_token::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(), "user_id": &actor,
+                "provider_config_id": &providers[1].id, "token_type": "oauth2", "status": "active",
+                "created_at": now, "updated_at": now,
+            })
+            .await
+            .unwrap();
+        // Profiling applies only to this isolated test database.
+        for (iteration, expected) in [(1, "openai"), (2, "openai-codex")] {
+            db.run_command(doc! {"profile": 2}).await.unwrap();
+            let selected = super::resolve_provider_slug_with_fallback(&db, &actor, "openai").await;
+            db.run_command(doc! {"profile": 0}).await.unwrap();
+            assert_eq!(selected.unwrap(), expected);
+            for collection in [
+                org_membership::COLLECTION_NAME,
+                provider_config::COLLECTION_NAME,
+            ] {
+                assert_eq!(
+                    db.collection::<bson::Document>("system.profile")
+                        .count_documents(doc! {"command.find": collection})
+                        .await
+                        .unwrap(),
+                    iteration
+                );
+            }
+            db.collection::<org_membership::OrgMembership>(org_membership::COLLECTION_NAME)
+                .update_many(
+                    doc! {},
+                    doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+                )
+                .await
+                .unwrap();
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn gateway_uses_configured_llm_body_limit() {
         let mut state = crate::test_utils::test_app_state_no_db().await;
         state.config.llm_max_body_size = 4;
@@ -1783,6 +1937,43 @@ mod tests {
             result,
             Err(AppError::RequestBodyTooLarge { max_bytes: 4, .. })
         ));
+    }
+
+    #[test]
+    fn shared_oauth_app_is_classified_for_platform_charging() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.requires_user_credential = true;
+        let target = crate::services::proxy_service::ProxyTarget {
+            base_url: service.base_url.clone(),
+            auth_method: "bearer".into(),
+            auth_key_name: "Authorization".into(),
+            credential: "test-token".into(),
+            service,
+            catalog_default_headers: Vec::new(),
+            user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
+            connection_id: None,
+        };
+        for (source, expected) in [
+            (
+                Some("platform"),
+                crate::models::usage_meter::CredentialClass::NyxidPlatformOauthApp,
+            ),
+            (
+                Some("byo"),
+                crate::models::usage_meter::CredentialClass::UserOwned,
+            ),
+            (None, crate::models::usage_meter::CredentialClass::UserOwned),
+        ] {
+            assert_eq!(
+                super::llm_credential_class(true, false, source, &target),
+                expected
+            );
+            assert_eq!(
+                super::llm_credential_class(true, true, source, &target),
+                crate::models::usage_meter::CredentialClass::NyxidManagedMaster
+            );
+        }
     }
 
     #[test]

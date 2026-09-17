@@ -200,12 +200,20 @@ pub async fn update_user(
     let mut set_doc = doc! {};
 
     if let Some(name) = display_name {
+        let name = name.trim();
         if name.len() > 200 {
             return Err(AppError::ValidationError(
                 "Display name must be 200 characters or less".to_string(),
             ));
         }
-        set_doc.insert("display_name", name);
+        set_doc.insert(
+            "display_name",
+            if name.is_empty() {
+                bson::Bson::Null
+            } else {
+                bson::Bson::String(name.to_string())
+            },
+        );
     }
 
     if let Some(new_email) = email {
@@ -254,17 +262,25 @@ pub async fn update_user(
     }
 
     if let Some(url) = avatar_url {
+        let url = url.trim();
         if url.len() > 2048 {
             return Err(AppError::ValidationError(
                 "Avatar URL must be 2048 characters or less".to_string(),
             ));
         }
-        if !url.starts_with("https://") {
+        if !url.is_empty() && !url.starts_with("https://") {
             return Err(AppError::ValidationError(
                 "Avatar URL must use https:// scheme".to_string(),
             ));
         }
-        set_doc.insert("avatar_url", url);
+        set_doc.insert(
+            "avatar_url",
+            if url.is_empty() {
+                bson::Bson::Null
+            } else {
+                bson::Bson::String(url.to_string())
+            },
+        );
     }
 
     // Early return if no actual fields changed
@@ -451,6 +467,9 @@ async fn delete_user_cascade_internal(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    // Busy email effects must leave the user able to authenticate and retry.
+    crate::services::channel_bot_service::delete_owner_aurinko_channels(db, target_user_id).await?;
+
     // Phase 1: mark user inactive so they cannot authenticate during cleanup
     let now = Utc::now();
     db.collection::<User>(USERS)
@@ -467,6 +486,10 @@ async fn delete_user_cascade_internal(
     let user_filter = doc! { "user_id": target_user_id };
 
     let user_scoped_collections = [
+        crate::models::channel_email::SUBSCRIPTIONS,
+        crate::models::channel_email::SENDS,
+        crate::models::channel_email::BATCHES,
+        crate::models::channel_email::RECEIPTS,
         SESSIONS,
         REFRESH_TOKENS,
         API_KEYS,
@@ -927,6 +950,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1123,5 +1147,27 @@ mod tests {
 
         let result = force_password_reset(&db, &user_id).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn admin_form_empty_user_fields_are_null() {
+        let db = connect_test_database("admin_form_user_clear")
+            .await
+            .expect("Mongo required");
+        let id = Uuid::new_v4().to_string();
+        seed_person(&db, &id, "clear@example.com").await;
+        let updated = update_user(&db, &id, Some("   "), None, Some("  "))
+            .await
+            .unwrap();
+        assert!(updated.display_name.is_none());
+        assert!(updated.avatar_url.is_none());
+        let raw = db
+            .collection::<bson::Document>(USERS)
+            .find_one(doc! { "_id": id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.get("display_name"), Some(&bson::Bson::Null));
+        assert_eq!(raw.get("avatar_url"), Some(&bson::Bson::Null));
     }
 }

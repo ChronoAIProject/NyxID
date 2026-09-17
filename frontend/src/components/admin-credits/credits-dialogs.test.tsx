@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AllowanceForm, IssueGrantForm } from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
@@ -13,7 +14,7 @@ const tokenService = {
   effective_platform_metric: "tokens",
 } as DownstreamService;
 
-function AllowanceHarness() {
+function AllowanceHarness({ mixed = false, onSubmit = vi.fn() }: { readonly mixed?: boolean; readonly onSubmit?: (value: AllowanceForm) => Promise<void> }) {
   const form = useAppForm<AllowanceForm>({
     defaultValues: {
       service_ref: "",
@@ -29,10 +30,10 @@ function AllowanceHarness() {
       open
       onOpenChange={vi.fn()}
       form={form}
-      services={[tokenService]}
+      services={[mixed ? { ...tokenService, billing: { byok_pricing: { metric: "requests", credits_per_unit: "1" }, platform_key_pricing: { metric: "tokens", credits_per_unit: "0.01" } } } as DownstreamService : tokenService]}
       pending={false}
       editingAllowance={null}
-      onSubmit={vi.fn()}
+      onSubmit={onSubmit}
     />
   );
 }
@@ -84,4 +85,15 @@ describe("credits dialogs", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/A credit is wallet currency/)).toBeInTheDocument();
   });
+});
+
+it("selects the allowance unit for mixed credential lanes", async () => {
+  const onSubmit = vi.fn().mockResolvedValue(undefined);
+  render(<AllowanceHarness mixed onSubmit={onSubmit} />);
+  await userEvent.click(screen.getByText("Token service"));
+  await userEvent.click(screen.getByRole("combobox", { name: "Allowance unit" }));
+  await userEvent.click(screen.getByRole("option", { name: "requests" }));
+  expect(screen.getByText("Free requests")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Create allowance" }));
+  expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ metric: "requests" }), expect.anything());
 });

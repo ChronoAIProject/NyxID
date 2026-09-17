@@ -271,10 +271,19 @@ async fn handle_ssh_socket(
             return;
         }
     };
+    let credential_class = if node_route.is_some() {
+        CredentialClass::NodeManaged
+    } else {
+        CredentialClass::NoAuth
+    };
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, &resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            &resource_owner_id,
+            credential_class,
+        )
         .await
     {
         Ok(owner) => owner,
@@ -307,11 +316,7 @@ async fn handle_ssh_socket(
         Some(service_slug.clone()),
         node_intent,
         "ssh".to_string(),
-        if node_route.is_some() {
-            CredentialClass::NodeManaged
-        } else {
-            CredentialClass::NoAuth
-        },
+        credential_class,
         BillingMetric::Bytes,
         None,
         false,
@@ -1420,6 +1425,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -1452,6 +1458,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -1594,7 +1602,11 @@ mod tests {
         let payer = state
             .billing
             .owner_resolver()
-            .resolve_for_resource(&billing_principal_user_id, &auth_context.owner_user_id)
+            .resolve_for_execution(
+                &billing_principal_user_id,
+                &auth_context.owner_user_id,
+                crate::models::usage_meter::CredentialClass::NodeManaged,
+            )
             .await
             .expect("resolve service-account SSH payer");
 

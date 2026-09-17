@@ -1,3 +1,4 @@
+import { inferenceMetadataSchema, platformKeyConfigSchema, lanePricingViewSchema } from "./platform-keys";
 import { z } from "zod";
 import { isValidHttpUrl } from "./http-url";
 import {
@@ -279,6 +280,11 @@ export type WsFrameInjection = z.infer<typeof wsFrameInjectionSchema>;
 
 export const updateServiceSchema = z
   .object({
+    inference: inferenceMetadataSchema.nullish(),
+    platform_key: platformKeyConfigSchema.optional(),
+    credential: z.string().optional(),
+    byok_pricing: lanePricingViewSchema.nullish(),
+    platform_key_pricing: lanePricingViewSchema.nullish(),
     service_type: z.enum(SERVICE_TYPES),
     visibility: z.enum(VISIBILITY_OPTIONS).optional(),
     name: z
@@ -309,6 +315,7 @@ export const updateServiceSchema = z
     forward_access_token: z.boolean().optional(),
     inject_delegation_token: z.boolean().optional(),
     platform_billable: z.boolean().optional(),
+    platform_charge_nyxid_credentials_only: z.boolean().optional(),
     platform_metric: z.enum(["auto", "tokens", "requests", "bytes"]).optional(),
     platform_price: z
       .string()
@@ -364,6 +371,7 @@ export const updateServiceSchema = z
     supports_streaming: z.boolean().optional(),
     host: optionalString,
     port: optionalString,
+    ssh_auth_mode: sshAuthModeSchema.optional(),
     certificate_auth_enabled: z.boolean().optional(),
     certificate_ttl_minutes: optionalString,
     allowed_principals: optionalString,
@@ -395,7 +403,9 @@ export const updateServiceSchema = z
       {
         host: value.host,
         port: value.port,
-        certificate_auth_enabled: value.certificate_auth_enabled,
+        certificate_auth_enabled: value.ssh_auth_mode
+          ? value.ssh_auth_mode === "cert"
+          : value.certificate_auth_enabled,
         certificate_ttl_minutes: value.certificate_ttl_minutes,
         allowed_principals: value.allowed_principals,
       },

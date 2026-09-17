@@ -381,6 +381,17 @@ pub enum AppError {
     #[error("Agent Key login credential not found")]
     AgentKeyCredentialNotFound,
 
+    #[error("Login code is invalid")]
+    LoginCodeInvalid,
+    #[error("Login code expired")]
+    LoginCodeExpired,
+    #[error("Login code was cancelled")]
+    LoginCodeCancelled,
+    #[error("Login code was already redeemed")]
+    LoginCodeRedeemed,
+    #[error("Too many login code attempts")]
+    LoginCodeRateLimited,
+
     #[error("Connect link not found")]
     ConnectLinkNotFound,
 
@@ -443,6 +454,26 @@ pub enum AppError {
 
     #[error("Device channel conversations do not support replies")]
     DeviceChannelReplyNotAllowed,
+
+    #[error("Conversation is not reachable: {0}")]
+    ChannelConversationNotReachable(String),
+    #[error("Channel media is not supported")]
+    ChannelMediaUnsupported,
+    #[error("Channel media exceeds the configured size limit")]
+    ChannelMediaTooLarge,
+    #[error("Channel media fetch failed: {0}")]
+    ChannelMediaFetchFailed(String),
+    #[error("Channel attachment not found")]
+    ChannelAttachmentNotFound,
+
+    #[error("Platform does not support initiated messages")]
+    ChannelPlatformSendUnsupported,
+
+    #[error("Conversation has no concrete platform chat address")]
+    ChannelConversationNotAddressable,
+
+    #[error("Agent-initiated messages are not enabled for this conversation")]
+    ChannelAgentInitiateNotAllowed,
 
     #[error("Organization accounts cannot authenticate directly")]
     OrgCannotAuthenticate,
@@ -532,6 +563,9 @@ pub enum AppError {
 
     #[error("Oracle login snapshot not found: {0}")]
     OracleLoginSnapshotNotFound(String),
+
+    #[error("Installation credential expired; enroll with a fresh credential")]
+    OracleWorkerCredentialRenewalRequired,
 
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
@@ -659,6 +693,10 @@ impl AppError {
             Self::AuthDeviceCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::AuthDeviceUserCodeInvalid => StatusCode::BAD_REQUEST,
             Self::AgentKeyLoginNotFound => StatusCode::NOT_FOUND,
+            Self::LoginCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::LoginCodeExpired | Self::LoginCodeRedeemed => StatusCode::GONE,
+            Self::LoginCodeCancelled => StatusCode::FORBIDDEN,
+            Self::LoginCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::AgentKeyLoginExpired => StatusCode::GONE,
             Self::AgentKeyLoginPending => StatusCode::BAD_REQUEST,
             Self::AgentKeyLoginSlowDown => StatusCode::TOO_MANY_REQUESTS,
@@ -689,6 +727,14 @@ impl AppError {
             Self::ChannelPlatformError(_) => StatusCode::BAD_GATEWAY,
             Self::ChannelPlatformEditUnsupported => StatusCode::NOT_IMPLEMENTED,
             Self::DeviceChannelReplyNotAllowed => StatusCode::BAD_REQUEST,
+            Self::ChannelConversationNotReachable(_) => StatusCode::BAD_REQUEST,
+            Self::ChannelMediaUnsupported => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::ChannelMediaTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::ChannelMediaFetchFailed(_) => StatusCode::BAD_GATEWAY,
+            Self::ChannelAttachmentNotFound => StatusCode::NOT_FOUND,
+            Self::ChannelPlatformSendUnsupported => StatusCode::NOT_IMPLEMENTED,
+            Self::ChannelConversationNotAddressable => StatusCode::BAD_REQUEST,
+            Self::ChannelAgentInitiateNotAllowed => StatusCode::FORBIDDEN,
             Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
             Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
             Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
@@ -719,6 +765,7 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
             Self::ServicePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::ServicePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::ServicePoolMemberInvalid(_) => StatusCode::BAD_REQUEST,
@@ -834,6 +881,11 @@ impl AppError {
             Self::AuthDeviceCodeRateLimited => 11206,
             Self::AuthDeviceUserCodeInvalid => 11207,
             Self::AgentKeyLoginNotFound => 11900,
+            Self::LoginCodeInvalid => 12000,
+            Self::LoginCodeExpired => 12001,
+            Self::LoginCodeCancelled => 12002,
+            Self::LoginCodeRedeemed => 12003,
+            Self::LoginCodeRateLimited => 12004,
             Self::AgentKeyLoginExpired => 11901,
             Self::AgentKeyLoginPending => 11902,
             Self::AgentKeyLoginSlowDown => 11903,
@@ -864,6 +916,14 @@ impl AppError {
             Self::ChannelPlatformError(_) => 10005,
             Self::ChannelPlatformEditUnsupported => 10007,
             Self::DeviceChannelReplyNotAllowed => 10006,
+            Self::ChannelConversationNotReachable(_) => 10011,
+            Self::ChannelMediaUnsupported => 10012,
+            Self::ChannelMediaTooLarge => 10013,
+            Self::ChannelMediaFetchFailed(_) => 10014,
+            Self::ChannelAttachmentNotFound => 10015,
+            Self::ChannelPlatformSendUnsupported => 10010,
+            Self::ChannelConversationNotAddressable => 10009,
+            Self::ChannelAgentInitiateNotAllowed => 10008,
             Self::OrgCannotAuthenticate => 1403,
             Self::OrgQueryTimeout => 8100,
             Self::OrgNotFound(_) => 8101,
@@ -894,6 +954,7 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => 11013,
             Self::OracleWorkerLabelUnavailable(_) => 11014,
             Self::OracleLoginSnapshotNotFound(_) => 11015,
+            Self::OracleWorkerCredentialRenewalRequired => 11016,
             Self::ServicePoolNotFound(_) => 11400,
             Self::ServicePoolSlugTaken(_) => 11401,
             Self::ServicePoolMemberInvalid(_) => 11402,
@@ -1045,6 +1106,11 @@ impl AppError {
             Self::AuthDeviceCodeRateLimited => "auth_device_rate_limited",
             Self::AuthDeviceUserCodeInvalid => "auth_device_user_code_invalid",
             Self::AgentKeyLoginNotFound => "agent_key_login_not_found",
+            Self::LoginCodeInvalid => "login_code_invalid",
+            Self::LoginCodeExpired => "login_code_expired",
+            Self::LoginCodeCancelled => "login_code_cancelled",
+            Self::LoginCodeRedeemed => "login_code_redeemed",
+            Self::LoginCodeRateLimited => "login_code_rate_limited",
             Self::AgentKeyLoginExpired => "agent_key_login_expired",
             Self::AgentKeyLoginPending => "agent_key_login_pending",
             Self::AgentKeyLoginSlowDown => "agent_key_login_slow_down",
@@ -1075,6 +1141,14 @@ impl AppError {
             Self::ChannelPlatformError(_) => "channel_platform_error",
             Self::ChannelPlatformEditUnsupported => "edit_unsupported",
             Self::DeviceChannelReplyNotAllowed => "device_channel_reply_not_allowed",
+            Self::ChannelConversationNotReachable(_) => "channel_conversation_not_reachable",
+            Self::ChannelMediaUnsupported => "channel_media_unsupported",
+            Self::ChannelMediaTooLarge => "channel_media_too_large",
+            Self::ChannelMediaFetchFailed(_) => "channel_media_fetch_failed",
+            Self::ChannelAttachmentNotFound => "channel_attachment_not_found",
+            Self::ChannelPlatformSendUnsupported => "channel_platform_send_unsupported",
+            Self::ChannelConversationNotAddressable => "channel_conversation_not_addressable",
+            Self::ChannelAgentInitiateNotAllowed => "channel_agent_initiate_not_allowed",
             Self::OrgCannotAuthenticate => "org_cannot_authenticate",
             Self::OrgQueryTimeout => "org_query_timeout",
             Self::OrgNotFound(_) => "org_not_found",
@@ -1105,6 +1179,9 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => "oracle_worker_command_not_found",
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
+            Self::OracleWorkerCredentialRenewalRequired => {
+                "oracle_worker_credential_renewal_required"
+            }
             Self::ServicePoolNotFound(_) => "service_pool_not_found",
             Self::ServicePoolSlugTaken(_) => "service_pool_slug_taken",
             Self::ServicePoolMemberInvalid(_) => "service_pool_member_invalid",
@@ -1626,6 +1703,7 @@ mod tests {
             AppError::OracleWorkerCommandNotFound("".into()).error_code(),
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
+            AppError::OracleWorkerCredentialRenewalRequired.error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),
@@ -2325,10 +2403,58 @@ mod tests {
                 1015,
             ),
             (
+                AppError::ChannelMediaUnsupported,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "channel_media_unsupported",
+                10012,
+            ),
+            (
+                AppError::ChannelMediaTooLarge,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "channel_media_too_large",
+                10013,
+            ),
+            (
+                AppError::ChannelMediaFetchFailed("provider unavailable".into()),
+                StatusCode::BAD_GATEWAY,
+                "channel_media_fetch_failed",
+                10014,
+            ),
+            (
+                AppError::ChannelAttachmentNotFound,
+                StatusCode::NOT_FOUND,
+                "channel_attachment_not_found",
+                10015,
+            ),
+            (
                 AppError::ChannelPlatformEditUnsupported,
                 StatusCode::NOT_IMPLEMENTED,
                 "edit_unsupported",
                 10007,
+            ),
+            (
+                AppError::ChannelAgentInitiateNotAllowed,
+                StatusCode::FORBIDDEN,
+                "channel_agent_initiate_not_allowed",
+                10008,
+            ),
+            (
+                AppError::ChannelConversationNotAddressable,
+                StatusCode::BAD_REQUEST,
+                "channel_conversation_not_addressable",
+                10009,
+            ),
+            (
+                AppError::ChannelPlatformSendUnsupported,
+                StatusCode::NOT_IMPLEMENTED,
+                "channel_platform_send_unsupported",
+                10010,
+            ),
+            (
+                AppError::ChannelConversationNotReachable("target refused delivery".to_string()),
+                StatusCode::BAD_REQUEST,
+                "channel_conversation_not_reachable",
+                10011,
             ),
             (
                 AppError::DeviceChannelReplyNotAllowed,

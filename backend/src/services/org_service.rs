@@ -710,6 +710,16 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             .delete_many(doc! { "conversation_id": { "$in": &conv_id_array } })
             .await?;
     }
+    for collection in [
+        crate::models::channel_email::SUBSCRIPTIONS,
+        crate::models::channel_email::SENDS,
+        crate::models::channel_email::BATCHES,
+        crate::models::channel_email::RECEIPTS,
+    ] {
+        db.collection::<bson::Document>(collection)
+            .delete_many(doc! { "user_id": org_user_id })
+            .await?;
+    }
     db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
@@ -818,16 +828,17 @@ pub async fn create_membership(
             ));
         }
 
-        // Reactivate revoked row in-place.
-        let now = Utc::now();
+        // BSON stores milliseconds; every rejoin must have a distinct authority epoch.
+        let now = Utc::now().max(row.created_at + chrono::Duration::milliseconds(1));
         let now_bson = bson::DateTime::from_chrono(now);
         let allowed = match &allowed_service_ids {
             None => bson::Bson::Null,
             Some(ids) => bson::to_bson(ids).map_err(|e| AppError::Internal(e.to_string()))?,
         };
-        collection
+        let changed = collection
             .update_one(
-                doc! { "_id": &row.id },
+                doc! { "_id": &row.id, "revoked_at": row.revoked_at.map(bson::DateTime::from_chrono),
+                    "created_at": bson::DateTime::from_chrono(row.created_at) },
                 doc! { "$set": {
                     "role": role.as_str(),
                     "scope_source": scope_source.as_str(),
@@ -837,6 +848,11 @@ pub async fn create_membership(
                 }},
             )
             .await?;
+        if changed.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Membership changed; retry the invitation".into(),
+            ));
+        }
         return Ok(OrgMembership {
             id: row.id,
             org_user_id: org_user_id.to_string(),

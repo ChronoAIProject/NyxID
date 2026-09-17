@@ -40,6 +40,8 @@ pub struct CreateConversationRequest {
     pub platform_sender_id: Option<String>,
     #[serde(default)]
     pub default_agent: Option<bool>,
+    #[serde(default)]
+    pub allow_agent_initiated: Option<bool>,
     /// When set, create this conversation route under the given org.
     /// The referenced `channel_bot_id` and `agent_api_key_id` must both
     /// belong to the same org. Caller must be an admin of the target org.
@@ -53,6 +55,8 @@ pub struct UpdateConversationRequest {
     pub agent_api_key_id: Option<String>,
     #[serde(default)]
     pub default_agent: Option<bool>,
+    #[serde(default)]
+    pub allow_agent_initiated: Option<bool>,
     #[serde(default)]
     pub is_active: Option<bool>,
 }
@@ -83,6 +87,8 @@ pub struct ConversationItem {
     pub platform_sender_id: Option<String>,
     pub agent_api_key_id: String,
     pub default_agent: bool,
+    pub allow_agent_initiated: bool,
+    pub capabilities: crate::services::channel_platform::ChannelCapabilities,
     pub is_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message_at: Option<String>,
@@ -200,6 +206,7 @@ fn normalize_conversation_type<'a>(value: Option<&'a str>, default: &'a str) -> 
 }
 
 fn conversation_to_item(
+    state: &AppState,
     conv: &crate::models::channel_conversation::ChannelConversation,
 ) -> ConversationItem {
     ConversationItem {
@@ -211,6 +218,11 @@ fn conversation_to_item(
         platform_sender_id: conv.platform_sender_id.clone(),
         agent_api_key_id: conv.agent_api_key_id.clone(),
         default_agent: conv.default_agent,
+        allow_agent_initiated: conv.allow_agent_initiated,
+        capabilities: crate::services::channel_adapters::outbound_capabilities(
+            &conv.platform,
+            &state.token_exchange_cache,
+        ),
         is_active: conv.is_active,
         last_message_at: conv.last_message_at.map(|dt| dt.to_rfc3339()),
         created_at: conv.created_at.to_rfc3339(),
@@ -239,6 +251,9 @@ pub async fn create_conversation(
     tele: TelemetryContext,
     Json(body): Json<CreateConversationRequest>,
 ) -> AppResult<(StatusCode, Json<ConversationItem>)> {
+    if body.allow_agent_initiated.is_some() {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+    }
     let actor = auth_user.user_id.to_string();
 
     // Resolve the effective owner. Admins of the target org when
@@ -294,7 +309,7 @@ pub async fn create_conversation(
 
     Ok((
         StatusCode::CREATED,
-        Json(conversation_to_item(&conversation)),
+        Json(conversation_to_item(&state, &conversation)),
     ))
 }
 
@@ -372,6 +387,7 @@ async fn create_bot_conversation(
         body.platform_sender_id.as_deref(),
         &body.agent_api_key_id,
         default_agent,
+        body.allow_agent_initiated.unwrap_or(false),
     )
     .await
 }
@@ -431,6 +447,7 @@ async fn create_device_conversation(
         None,
         &body.agent_api_key_id,
         false,
+        body.allow_agent_initiated.unwrap_or(false),
     )
     .await
 }
@@ -447,7 +464,10 @@ pub async fn list_conversations(
         channel_routing_service::list_conversations(&state.db, &owner_id, params.bot_id.as_deref())
             .await?;
     let total = conversations.len() as u64;
-    let items = conversations.iter().map(conversation_to_item).collect();
+    let items = conversations
+        .iter()
+        .map(|conv| conversation_to_item(&state, conv))
+        .collect();
     Ok(Json(ConversationListResponse {
         conversations: items,
         total,
@@ -463,7 +483,7 @@ pub async fn get_conversation(
     let actor = auth_user.user_id.to_string();
     let (_owner_id, conversation) =
         resolve_conversation_owner(&state, &actor, &conversation_id, false).await?;
-    Ok(Json(conversation_to_item(&conversation)))
+    Ok(Json(conversation_to_item(&state, &conversation)))
 }
 
 /// PUT /api/v1/channel-conversations/{id}
@@ -473,6 +493,9 @@ pub async fn update_conversation(
     Path(conversation_id): Path<String>,
     Json(body): Json<UpdateConversationRequest>,
 ) -> AppResult<Json<ConversationItem>> {
+    if body.allow_agent_initiated.is_some() {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+    }
     let actor = auth_user.user_id.to_string();
     let (owner_id, _conv) =
         resolve_conversation_owner(&state, &actor, &conversation_id, true).await?;
@@ -496,6 +519,7 @@ pub async fn update_conversation(
         body.agent_api_key_id.as_deref(),
         body.default_agent,
         body.is_active,
+        body.allow_agent_initiated,
     )
     .await?;
 
@@ -509,7 +533,7 @@ pub async fn update_conversation(
         })),
     );
 
-    Ok(Json(conversation_to_item(&updated)))
+    Ok(Json(conversation_to_item(&state, &updated)))
 }
 
 /// DELETE /api/v1/channel-conversations/{id}

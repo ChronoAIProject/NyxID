@@ -37,6 +37,7 @@ pub enum UsageStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CredentialClass {
     NyxidManagedMaster,
+    NyxidPlatformOauthApp,
     UserOwned,
     AgentOverrideUserOwned,
     NodeManaged,
@@ -93,6 +94,19 @@ pub struct UsageFunding {
     pub settlement_claimed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallet_charge_credits: Option<i64>,
+    /// Gross cost of the full finalized quantity at the settlement rate,
+    /// including units covered by allowances. Display only; never a wallet debit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_charge_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_funded_quantity: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_funded_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_funded_micros: Option<i64>,
+    /// Exact wallet-funded cost before rounding to whole debit credits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_funded_micros: Option<i64>,
     /// Lago quantity funded by the wallet, in millionths of one metered
     /// unit. None preserves legacy whole-quantity event behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]

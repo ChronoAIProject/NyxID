@@ -114,6 +114,14 @@ fn detect_partial_installs(home: &Path) -> Vec<AiToolTarget> {
 }
 
 fn is_partial_install(home: &Path, tool: AiToolTarget) -> bool {
+    if matches!(tool, AiToolTarget::Codex) {
+        return crate::commands::ai_setup::codex_skill_roots(home)
+            .iter()
+            .any(|root| {
+                let dir = root.join("nyxid");
+                dir.join("SKILL.md").exists() && !dir.join(CANARY_REFERENCE).exists()
+            });
+    }
     let dir = match skill_install_dir(home, tool) {
         Some(d) => d,
         None => return false,
@@ -124,7 +132,7 @@ fn is_partial_install(home: &Path, tool: AiToolTarget) -> bool {
 fn skill_install_dir(home: &Path, tool: AiToolTarget) -> Option<PathBuf> {
     match tool {
         AiToolTarget::ClaudeCode => Some(home.join(".claude/skills/nyxid")),
-        AiToolTarget::Codex => Some(home.join(".codex/skills/nyxid")),
+        AiToolTarget::Codex => Some(home.join(".agents/skills/nyxid")),
         AiToolTarget::Openclaw => Some(home.join(".openclaw/skills/nyxid")),
         AiToolTarget::Cursor | AiToolTarget::Generic => None,
     }
@@ -207,6 +215,21 @@ mod tests {
     }
 
     #[test]
+    fn codex_legacy_partial_install_remains_detectable_after_canonical_install() {
+        let home = temp_home();
+        install_skill(&home, AiToolTarget::Codex, true);
+        let legacy = home.join(".codex/skills/nyxid");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("SKILL.md"), "fixture legacy").unwrap();
+        assert!(is_partial_install(&home, AiToolTarget::Codex));
+        let reference = legacy.join(CANARY_REFERENCE);
+        fs::create_dir_all(reference.parent().unwrap()).unwrap();
+        fs::write(reference, "fixture reference").unwrap();
+        assert!(!is_partial_install(&home, AiToolTarget::Codex));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn detect_flags_partial_claude_install() {
         let home = temp_home();
         install_skill(&home, AiToolTarget::ClaudeCode, false);
@@ -269,12 +292,13 @@ mod tests {
     fn is_self_referential_matches_login() {
         assert!(is_self_referential(&Commands::Login(
             crate::cli::LoginArgs {
-                base_url: String::new(),
+                base_url: None,
                 password: false,
                 device: false,
                 agent_key: false,
                 email: None,
-                profile: None
+                profile: None,
+                ..Default::default()
             }
         )));
     }
@@ -282,12 +306,13 @@ mod tests {
     #[test]
     fn should_run_returns_false_for_login() {
         assert!(!should_run(&Commands::Login(crate::cli::LoginArgs {
-            base_url: String::new(),
+            base_url: None,
             password: false,
             device: false,
             agent_key: false,
             email: None,
-            profile: None
+            profile: None,
+            ..Default::default()
         })));
     }
 
@@ -309,7 +334,7 @@ mod tests {
         assert!(
             skill_install_dir(&home, AiToolTarget::Codex)
                 .unwrap()
-                .ends_with(".codex/skills/nyxid")
+                .ends_with(".agents/skills/nyxid")
         );
         assert!(
             skill_install_dir(&home, AiToolTarget::Openclaw)

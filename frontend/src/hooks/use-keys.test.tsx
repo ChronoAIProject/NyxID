@@ -184,6 +184,14 @@ describe("mutation hooks pin their request contracts", () => {
     await result.current.mutateAsync({ keyId: "k1", label: "Renamed" });
 
     expect(mockPut).toHaveBeenCalledWith("/keys/k1", { label: "Renamed" });
+
+    await result.current.mutateAsync({
+      keyId: "k1",
+      recommended_skills: ["read-docs"],
+    });
+    expect(mockPut).toHaveBeenLastCalledWith("/keys/k1", {
+      recommended_skills: ["read-docs"],
+    });
   });
 
   it("useUpdateEndpoint PUTs the url/label/spec triple to /endpoints/{id}", async () => {

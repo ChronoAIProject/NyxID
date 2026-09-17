@@ -13,6 +13,7 @@ export interface ServiceAccount {
   readonly is_active: boolean;
   readonly rate_limit_override: number | null;
   readonly created_by: string;
+  readonly owner_id?: string;
   readonly created_at: string;
   readonly updated_at: string;
   readonly last_authenticated_at: string | null;

@@ -103,6 +103,11 @@ pub struct BillingRouteSpec {
 #[cfg(test)]
 pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
+        handler: "handlers::codex_connection::verify",
+        route: "/api/v1/providers/codex-connection/verify",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::llm_gateway::gateway_request",
         route: "/api/v1/llm/gateway/v1/{*path}",
         policy: BillingRoutePolicy::Metered(BillingIngress::LlmGateway),

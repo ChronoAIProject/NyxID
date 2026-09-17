@@ -127,6 +127,22 @@ NyxID writes a durable `usage_meter` ledger, can push finalized rows into Lago, 
 | `BILLING_FAIL_CLOSED` | `false` | Incident kill switch. When `BILLING_ENABLED=true`, rejects billable forwarding even when Lago is healthy; when billing is disabled it has no effect. |
 | `BILLING_RESALE_ENABLED` | `false` | Explicit opt-in for the dormant catalog resale layer. Resale still also requires `ServiceBilling.resale_billable=true` and final `CredentialClass::NyxidManagedMaster`. |
 
+Platform-key access and lane pricing add no environment variables. The existing
+`PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` / `PLATFORM_SERVICE_RATE_LIMIT_BURST`
+gate applies to all final platform-key traffic, including provider-linked services.
+Restricted grants are checked against the live catalog on every execution.
+
+`billing.byok_pricing` and `billing.platform_key_pricing` select independent prices
+by final credential class. With either lane present, a missing lane is free and a
+synced matching lane supersedes legacy platform pricing. Pending/failed matching
+lanes use legacy pricing until synchronization succeeds. No lanes keeps legacy
+behavior. `NoAuth` has no lane charge. The existing billing feature flag, wallet
+rollout, Lago configuration and reconcile interval still govern charging and sync.
+Each lane owns `platform_svc_{slug}_byok` or `platform_svc_{slug}_pk` on
+`LAGO_PLAN_CODE`; clearing persists cleanup until both charge and cache are removed.
+Resale is unchanged and independently gated by `BILLING_RESALE_ENABLED`.
+See [platform keys and inference](PLATFORM_KEYS_AND_INFERENCE.md).
+
 ### Billing flag matrix
 
 `BILLING_ENABLED`, `BILLING_RESALE_ENABLED`, and `BILLING_FAIL_CLOSED` are independent. `BILLING_ENABLED` controls platform metering, wallet provisioning, and the reservation gate; it does not implicitly enable catalog resale. `BILLING_RESALE_ENABLED` controls only the resale ledger layer, and `BILLING_FAIL_CLOSED` is consulted only when `BILLING_ENABLED=true`.
@@ -185,7 +201,7 @@ Complete the Stripe sandbox checkout opened by the command. The verifier passes 
 | `JWT_ISSUER` | `nyxid` | JWT `iss` claim value |
 | `JWT_ACCESS_TTL_SECS` | `900` (15 min) | Access token lifetime in seconds |
 | `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Refresh token lifetime in seconds |
-| `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens are single-use, scoped to one inbound message + conversation + agent, and cannot be used against other NyxID endpoints. |
+| `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens authorize one send, scoped to one inbound message + conversation + agent. Repeated attachment downloads do not consume the send; edits require the consumed send token. |
 | `JWT_RELAY_CALLBACK_TTL_SECS` | `300` (5 min) | Lifetime of the signed channel-relay callback JWT sent in `X-NyxID-Callback-Token`. |
 | `JWT_RELAY_ACCESS_TTL_SECS` | `300` (5 min) | Lifetime of the `X-NyxID-User-Token` relay access token shipped to a bot callback URL. Kept short (vs. the 900s general access token) because it is a first-party bearer credential that leaves NyxID's trust boundary. It is usable only on proxy/LLM surfaces (rejected elsewhere), inherits the originating agent key's service/node allowlist, and is invalidated when that agent key is revoked. |
 | `JWT_ASSISTANT_FORWARD_TTL_SECS` | `300` (5 min) | **LEGACY / tombstone.** Was the TTL of the retired `assistant_forward` marker token. Live assistant capability uses a standard delegated access token whose 300-second lifetime is the compile-time constant `crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS`; there is no environment variable for that lifetime, so setting this variable changes no live assistant token. See [Assistant Chat Architecture](chat/01-architecture.md#authorization-is-not-caller-passthrough). |
@@ -356,7 +372,7 @@ The approval system works without Telegram -- users can always approve/reject vi
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OAUTH_REFRESH_SWEEP_INTERVAL_SECS` | `600` (10 min) | Interval between proactive OAuth refresh sweeps. `0` disables the sweep (lazy proxy-time refresh still applies). |
+| `OAUTH_REFRESH_SWEEP_INTERVAL_SECS` | `600` (10 min) | Interval between proactive OAuth refresh sweeps. Also deletes channel-started `pending_auth` connections older than one hour. `0` disables both tasks (lazy proxy-time refresh still applies). |
 | `CONNECTION_EXPIRY_NOTIFICATIONS` | `true` | Sends a one-time notification when an OAuth connection changes from healthy to unusable. Audit events are always recorded. |
 | `OAUTH_REFRESH_SWEEP_WINDOW_SECS` | `900` (15 min) | How far ahead the sweep looks for expiring access tokens. Keep larger than the proxy-time 5-minute refresh buffer so the sweep wins for idle services. |
 
@@ -457,15 +473,19 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 | `INVITE_CODE_REQUIRED` | `true` | Gate new-user registration behind invite codes. Set to `false` for public registration. Accepts: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false** (SSO-only). The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated — existing users can always authenticate via direct API call even when the UI is hidden. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
 
-## Channel Bot Relay (Deprecated)
+## Channel Bot Relay
 
-> **Deprecated:** These vars apply to the legacy channel bot relay flow (see [#191](https://github.com/ChronoAIProject/NyxID/issues/191)). New deployments should use bot-as-service connections instead (`api-telegram-bot`, `api-lark-bot`, `api-feishu-bot`, `api-discord-bot`).
+Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND` | `1` | Shared per-conversation proactive send rate, checked before authentication; deliberately lower than replies because unsolicited messages are a spam surface |
+| `CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST` | `5` | Burst capacity for proactive sends, including retries/idempotent replays |
+| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/reply` and `/send` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64. |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
+| `CHANNEL_POLL_INTERVAL_SECS` | `30` | Interval for the generic channel poll sweep; `0` disables it. Only polling adapters participate. X has a 60-second minimum per bot; provider backoff and MongoDB leases can defer the next poll. Webhook channels are unaffected. |
 
 ## Oracle Relay
 

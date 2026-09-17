@@ -3,6 +3,39 @@ use serde::{Deserialize, Serialize};
 pub use super::channel_registration::{BotCredentials, RegistrationDescriptor, RegistrationValues};
 use crate::errors::AppResult;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum Ingestion {
+    Webhook,
+    Poll { min_interval_secs: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialResolution {
+    StoredToken,
+    OAuthConnection {
+        provider_slug: &'static str,
+        required_scopes: &'static [&'static str],
+    },
+}
+
+pub struct PollOutcome {
+    pub messages: Vec<InboundMessage>,
+    pub cursor: Option<String>,
+    pub backoff: Option<std::time::Duration>,
+    /// Locally authored operational notice, never upstream response text.
+    pub notice: Option<String>,
+}
+
+impl std::fmt::Debug for PollOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PollOutcome")
+            .field("message_count", &self.messages.len())
+            .field("backoff", &self.backoff)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Verified bot identity returned by the platform after token validation.
 #[derive(Debug, Clone)]
 pub struct BotIdentity {
@@ -11,7 +44,7 @@ pub struct BotIdentity {
 }
 
 /// A normalized inbound message parsed from any platform's webhook payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub platform_message_id: String,
     /// Platform-native conversation/chat identifier
@@ -28,12 +61,12 @@ pub struct InboundMessage {
     pub reply_to_platform_message_id: Option<String>,
     /// Thread or topic identifier (platform-specific)
     pub thread_id: Option<String>,
-    /// Raw webhook payload for auditing and debugging
+    /// Ephemeral raw webhook payload for the callback; never audit or log content.
     pub raw_data: serde_json::Value,
 }
 
 /// A file or media attachment on an inbound message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InboundAttachment {
     /// Content category: "image", "file", "audio", "video"
     pub content_type: String,
@@ -54,9 +87,159 @@ pub struct InboundAttachment {
     pub size_bytes: Option<u64>,
 }
 
+/// Adapter-declared normalized media types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    File,
+    Audio,
+    Video,
+}
+
+impl MediaKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::File => "file",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct MediaCapabilities {
+    pub inbound: &'static [MediaKind],
+    pub outbound: &'static [MediaKind],
+}
+impl MediaCapabilities {
+    pub const NONE: Self = Self {
+        inbound: &[],
+        outbound: &[],
+    };
+    pub const ALL: Self = Self {
+        inbound: &[
+            MediaKind::Image,
+            MediaKind::File,
+            MediaKind::Audio,
+            MediaKind::Video,
+        ],
+        outbound: &[
+            MediaKind::Image,
+            MediaKind::File,
+            MediaKind::Audio,
+            MediaKind::Video,
+        ],
+    };
+}
+
+/// Public request shape. Sources and captions never enter persistent storage.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OutboundAttachment {
+    pub kind: MediaKind,
+    pub source: OutboundMediaSource,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub caption: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutboundMediaSource {
+    Url { url: String },
+    Base64 { data: String },
+}
+
+/// Internal adapter boundary: all sources have been validated and materialized.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MaterializedAttachment {
+    pub kind: MediaKind,
+    pub bytes: bytes::Bytes,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub caption: Option<String>,
+}
+
+pub struct FetchedMedia {
+    pub bytes: bytes::Bytes,
+    pub mime_type: Option<String>,
+    pub filename: Option<String>,
+}
+
+macro_rules! redacted_media_debug {
+    ($($ty:ty),+) => {$(
+        impl std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($ty), "([REDACTED])"))
+            }
+        }
+    )+};
+}
+redacted_media_debug!(
+    InboundMessage,
+    InboundAttachment,
+    OutboundAttachment,
+    OutboundMediaSource,
+    MaterializedAttachment,
+    FetchedMedia
+);
+
+/// Additive discovery response, keeping the transport declaration independent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ChannelCapabilities {
+    #[serde(flatten)]
+    pub outbound: OutboundCapabilities,
+    pub media: MediaCapabilities,
+}
+
+/// What the native outbound transport actually preserves. Contract-tested in channel_adapters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct OutboundCapabilities {
+    /// Can deliver to a conversation without an inbound anchor.
+    pub initiated_send: bool,
+    /// Honors OutboundReply.reply_to_platform_message_id.
+    pub reply_to: bool,
+    /// Reads a thread key from metadata; adapter documentation names the keys.
+    pub thread: bool,
+    /// Implements edit_reply natively.
+    pub edit: bool,
+}
+
+impl OutboundCapabilities {
+    pub const NONE: Self = Self {
+        initiated_send: false,
+        reply_to: false,
+        thread: false,
+        edit: false,
+    };
+}
+
+/// Channel-owned classification of upstream refusals. Matched refusals expose only
+/// adapter-owned markers; other failures retain up to 200 characters of diagnostic detail.
+pub fn classify_upstream_refusal(
+    platform: &str,
+    description: &str,
+    markers: &[&str],
+) -> crate::errors::AppError {
+    let normalized = description.to_lowercase();
+    if let Some(marker) = markers
+        .iter()
+        .find(|marker| normalized.contains(&marker.to_lowercase()))
+    {
+        crate::errors::AppError::ChannelConversationNotReachable(format!("{platform}: {marker}"))
+    } else {
+        let description: String = description.chars().take(200).collect();
+        crate::errors::AppError::ChannelPlatformError(format!(
+            "{platform} send failed: {description}"
+        ))
+    }
+}
+
 /// A reply to send back to the chat platform.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OutboundReply {
+    #[serde(default)]
+    pub attachments: Vec<MaterializedAttachment>,
     pub text: Option<String>,
     /// Platform message ID to reply to (for threading)
     pub reply_to_platform_message_id: Option<String>,
@@ -65,11 +248,27 @@ pub struct OutboundReply {
 }
 
 /// A previously-sent outbound message edit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OutboundEdit {
     pub text: Option<String>,
     /// Platform-specific metadata for edit operations (e.g. Lark cards).
     pub metadata: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for OutboundReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundReply")
+            .field("content", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for OutboundEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutboundEdit")
+            .field("content", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Decrypted, platform-specific webhook verification material prepared by the
@@ -125,6 +324,7 @@ pub struct PreparedWebhook {
 /// dispatch processing in the background; inline adapters can verify challenges.
 pub enum WebhookPolicy {
     Inline,
+    RetryAwareInline,
     Immediate(Option<serde_json::Value>),
     Challenge(serde_json::Value),
 }
@@ -146,6 +346,100 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 pub trait PlatformAdapter: Send + Sync {
     /// Platform identifier (e.g. "telegram", "discord", "lark", "feishu").
     fn platform_id(&self) -> &str;
+
+    fn outbound_capabilities(&self) -> OutboundCapabilities;
+    fn media_capabilities(&self) -> MediaCapabilities;
+
+    fn display_name(&self) -> &str {
+        self.platform_id()
+    }
+
+    async fn fetch_attachment(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _attachment: &InboundAttachment,
+        _max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        Err(crate::errors::AppError::ChannelMediaUnsupported)
+    }
+
+    fn ingestion(&self) -> Ingestion {
+        Ingestion::Webhook
+    }
+
+    fn credential_resolution(&self) -> CredentialResolution {
+        CredentialResolution::StoredToken
+    }
+
+    async fn poll_inbound(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _cursor: Option<&str>,
+    ) -> AppResult<PollOutcome> {
+        Err(super::channel_managed::unavailable())
+    }
+
+    fn serializes_lifecycle(&self) -> bool {
+        false
+    }
+
+    fn persists_reply_attempt(&self) -> bool {
+        false
+    }
+
+    async fn retryable_webhook(
+        &self,
+        _context: &super::channel_retry_ingress::IngressContext<'_>,
+        _bot_id: &str,
+        _headers: &axum::http::HeaderMap,
+        _query: &std::collections::HashMap<String, String>,
+        _body: &[u8],
+    ) -> AppResult<Option<String>> {
+        Err(crate::errors::AppError::BadRequest(
+            "Unsupported webhook protocol".into(),
+        ))
+    }
+
+    async fn setup_bot_webhook(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        token: &str,
+        url: &str,
+        secret: &str,
+    ) -> AppResult<()> {
+        self.register_webhook(http, token, url, secret).await
+    }
+
+    async fn remove_bot_webhook(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        token: &str,
+    ) -> AppResult<()> {
+        self.register_webhook(http, token, "", "").await
+    }
+
+    // Preserve the legacy send arguments while supplying persisted bot/message
+    // authority to adapters that fence irreversible sends.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_bound_reply(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.send_reply(http, credentials, conversation_id, reply)
+            .await
+    }
 
     fn platform_credentials(&self) -> Option<super::channel_managed::PlatformCredentialDescriptor> {
         None
@@ -339,7 +633,8 @@ pub trait PlatformAdapter: Send + Sync {
     async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>>;
 
     /// Send a reply back to the platform conversation.
-    /// Returns the platform-assigned message ID of the sent reply, if available.
+    /// A returned ID proves platform acceptance, not that a recipient saw the message.
+    /// An adapter that cannot dispatch must return an explicit error, never Ok(None).
     async fn send_reply(
         &self,
         http: &reqwest::Client,
@@ -349,10 +644,17 @@ pub trait PlatformAdapter: Send + Sync {
     ) -> AppResult<Option<String>>;
 
     /// Edit a previously-sent platform message.
+    /// `credentials` are the same as for `send_reply`: token plus managed platform secrets.
+    /// `conversation_id` is the platform chat/channel ID already resolved by the handler
+    /// (outbound row → parent inbound row → concrete route), never a wildcard.
+    /// `platform_message_id` is the upstream ID returned by the original send.
+    /// The default returns `ChannelPlatformEditUnsupported`; adapters that override
+    /// this method must declare `edit: true` in their outbound capabilities.
     async fn edit_reply(
         &self,
         _http: &reqwest::Client,
-        _bot_token: &str,
+        _credentials: &BotCredentials<'_>,
+        _conversation_id: &str,
         _platform_message_id: &str,
         _edit: &OutboundEdit,
     ) -> AppResult<()> {
@@ -461,6 +763,7 @@ mod tests {
     #[test]
     fn outbound_reply_serde_roundtrip() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".to_string()),
             reply_to_platform_message_id: Some("msg-123".to_string()),
             metadata: Some(serde_json::json!({"parse_mode": "markdown"})),
@@ -478,6 +781,7 @@ mod tests {
     #[test]
     fn outbound_reply_serde_roundtrip_with_none_fields() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: None,
             reply_to_platform_message_id: None,
             metadata: None,

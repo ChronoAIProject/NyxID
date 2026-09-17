@@ -63,7 +63,7 @@ function serviceCanBeScopedToKey(
   service: KeyInfo,
   targetOrgId: string | undefined,
 ): boolean {
-  if (service.auto_connected || !service.is_active) return false;
+  if (!service.is_active) return false;
   return sourceMatchesSelectedOwner(service.credential_source, targetOrgId);
 }
 
@@ -130,7 +130,10 @@ export function ApiKeyCreateDialog({
   const watchAllowedServices = form.watch("allowed_service_ids") ?? [];
   const watchTargetOrg = form.watch("target_org_id");
   const setupRequiresServiceSelection =
-    setupMode && !watchAllServices && watchAllowedServices.length === 0;
+    setupMode &&
+    !watchAllServices &&
+    !form.watch("allow_auto_connected_services") &&
+    watchAllowedServices.length === 0;
   const initializedSetupRef = useRef(false);
 
   useEffect(() => {
@@ -330,6 +333,10 @@ export function ApiKeyCreateDialog({
                               // Reset service scope selections when owner
                               // changes so stale selections do not
                               // round-trip to the backend.
+                              form.setValue(
+                                "allow_auto_connected_services",
+                                false,
+                              );
                               form.setValue("allowed_service_ids", []);
                               form.setValue("allowed_node_ids", []);
                               form.setValue("allow_all_services", true);
@@ -393,6 +400,10 @@ export function ApiKeyCreateDialog({
                     .map((service) => ({
                       id: service.id,
                       name: service.label || service.slug,
+                      auto_connected: service.auto_connected,
+                      platform_grant_eligible:
+                        !!watchTargetOrg ||
+                        service.credential_source?.type !== "org",
                     }))}
                   nodes={(nodes ?? [])
                     .filter((node) =>

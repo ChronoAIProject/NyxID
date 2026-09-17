@@ -470,6 +470,39 @@ mod tests {
             "api-twilio should publish form-encoded call creation"
         );
 
+        let twitter = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "slug": "api-twitter" })
+            .await
+            .unwrap()
+            .unwrap();
+        let twitter_endpoints =
+            crate::services::service_endpoint_service::list_endpoints(&db, &twitter.id)
+                .await
+                .unwrap();
+        assert_eq!(twitter_endpoints.len(), 9);
+        for (name, method, path) in [
+            (
+                "send_dm",
+                "POST",
+                "/dm_conversations/with/{participant_id}/messages",
+            ),
+            ("list_dm_events", "GET", "/dm_events"),
+            (
+                "get_dm_conversation_with_user",
+                "GET",
+                "/dm_conversations/with/{participant_id}/dm_events",
+            ),
+        ] {
+            let endpoint = twitter_endpoints
+                .iter()
+                .find(|e| e.name == name)
+                .expect("DM operation synced");
+            assert_eq!(endpoint.method, method);
+            assert_eq!(endpoint.path, path);
+            assert!(endpoint.is_active);
+        }
+
         // Re-running must stay idempotent (same rows, no duplicates).
         sync_seeded_service_endpoints(&db)
             .await

@@ -139,6 +139,12 @@ async fn decrypt_master_credential_string(
     })
 }
 
+/// Catalog master credentials stay on NyxID, including legacy internal rows.
+/// Owner nodes may inject their own keys but must never receive this key.
+pub fn uses_server_held_master(target: &ProxyTarget) -> bool {
+    !target.service.requires_user_credential && target.auth_method != "none"
+}
+
 fn master_credential_required(service: &DownstreamService) -> bool {
     // Identity propagation is additive to the service's own auth method. A
     // bearer row may inject both its catalog credential and a delegation token.
@@ -151,6 +157,13 @@ pub async fn authorize_master_credential(
     service: &DownstreamService,
     actor: &EffectiveActor,
 ) -> AppResult<AuthorizedMasterCredential> {
+    if service.platform_key.is_some() {
+        super::platform_key_service::require(db, service, &actor.user_id).await?;
+        validate_actor_addressed_master_credential_policy(service)?;
+        return Ok(AuthorizedMasterCredential::new(
+            &service.credential_encrypted,
+        ));
+    }
     validate_master_credential_service(service)?;
     validate_actor_addressed_master_credential_policy(service)?;
 
@@ -209,6 +222,15 @@ pub async fn authorize_master_credential_server_chosen(
     _db: &mongodb::Database,
     service: &DownstreamService,
 ) -> AppResult<AuthorizedMasterCredential> {
+    if let Some(config) = &service.platform_key
+        && (!config.enabled
+            || config.audience != crate::models::downstream_service::PlatformKeyAudience::Public
+            || !crate::services::platform_key_service::has_platform_key(service))
+    {
+        return Err(AppError::NotFound("Service not found".to_string()));
+    }
+    // The remaining legacy server-selected gates (public visibility,
+    // internal master shape) still apply; no anonymous grants are added.
     if !master_credential_required(service) {
         tracing::error!(
             service_id = %service.id,
@@ -466,7 +488,17 @@ fn is_allowed_forward_header(name_lower: &str) -> bool {
 /// Header names are normalized by `HeaderMap`, matching remains
 /// case-insensitive, and repeated values retain their map iteration order for
 /// the existing deterministic merge rules in `merge_into_header_list`.
+#[cfg(test)]
 pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String, String)> {
+    collect_forward_headers_with_defaults(headers, &[])
+}
+
+/// An overridable service default also admits the caller's value. Recheck the
+/// default-header denylist so legacy rows cannot open reserved header names.
+pub(crate) fn collect_forward_headers_with_defaults(
+    headers: &http::HeaderMap,
+    default_layers: &[&[DefaultRequestHeader]],
+) -> Vec<(String, String)> {
     // W3C Trace Context requires `tracestate` to be ignored when its
     // accompanying `traceparent` is absent or invalid. Validate before the
     // generic allowlist walk so direct and node-routed HTTP use one policy.
@@ -477,7 +509,15 @@ pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String,
         .iter()
         .filter_map(|(name, value)| {
             let name_lower = name.as_str().to_ascii_lowercase();
-            if !is_allowed_forward_header(&name_lower) {
+            let overridable_default =
+                !default_request_header::is_denylisted_header_name(&name_lower)
+                    && default_layers
+                        .iter()
+                        .flat_map(|layer| layer.iter())
+                        .any(|header| {
+                            header.overridable && header.name.eq_ignore_ascii_case(&name_lower)
+                        });
+            if !is_allowed_forward_header(&name_lower) && !overridable_default {
                 return None;
             }
             if name_lower == "traceparent" && !traceparent_valid {
@@ -990,6 +1030,11 @@ pub async fn resolve_curation_proxy_target(
         .find_one(doc! {"_id": service_id, "is_active": true, "service_type": "http"})
         .await?
         .ok_or_else(|| AppError::NotFound("HTTP catalog service not found".into()))?;
+    if service.proxy_operation_policy.is_none() {
+        return Err(AppError::Forbidden(
+            "Curation proxy target requires an explicit proxy operation policy".into(),
+        ));
+    }
     if service.service_category == "provider" {
         return Err(AppError::Forbidden(
             "Provider services cannot be proxied".into(),
@@ -1080,6 +1125,20 @@ pub async fn resolve_proxy_target(
         ));
     }
 
+    if service.platform_key.is_some()
+        && user_conn.is_none()
+        && !user_has_legacy_personal_connection(db, user_id, None, Some(&service.id)).await?
+    {
+        return resolve_catalog_platform_target(
+            db,
+            encryption_keys,
+            user_id,
+            service,
+            platform_user_rate_limit,
+        )
+        .await;
+    }
+
     // For services requiring user credentials, a connection record is mandatory
     if service.requires_user_credential && user_conn.is_none() {
         return Err(AppError::Forbidden(
@@ -1165,6 +1224,36 @@ pub async fn resolve_proxy_target(
 
 /// Resolve proxy target with lenient credential handling for node-routed requests.
 ///
+async fn resolve_catalog_platform_target(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    owner_id: &str,
+    mut service: DownstreamService,
+    rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
+) -> AppResult<ProxyTarget> {
+    let actor = EffectiveActor::from_user_id(owner_id);
+    let authorized = authorize_master_credential(db, &service, &actor).await?;
+    let (auth_method, auth_key_name) =
+        super::platform_key_service::effective_auth(db, &service).await?;
+    crate::mw::rate_limit::enforce_platform_user_limit(db, rate_limit, &service.id, owner_id)
+        .await?;
+    let credential = decrypt_master_credential_string(encryption_keys, &authorized).await?;
+    service.auth_method = auth_method.clone();
+    service.auth_key_name = auth_key_name.clone();
+    service.requires_user_credential = false;
+    Ok(ProxyTarget {
+        base_url: service.base_url.clone(),
+        auth_method,
+        auth_key_name,
+        credential,
+        catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+        user_service_default_headers: vec![],
+        ws_frame_injections: service.ws_frame_injections.clone(),
+        connection_id: None,
+        service,
+    })
+}
+
 /// Unlike `resolve_proxy_target()`, this does NOT require a connection record or
 /// credential for "connection" services. Returns `(ProxyTarget, has_credential)`
 /// where `has_credential` indicates whether a server-side credential was resolved
@@ -1221,6 +1310,19 @@ pub async fn resolve_proxy_target_lenient(
     // concrete URL (either the user's gateway override or the seed
     // base_url for non-gateway services).
     // See ChronoAIProject/NyxID#160.
+    if service.platform_key.is_some()
+        && !user_has_legacy_personal_connection(db, user_id, None, Some(&service.id)).await?
+    {
+        let target = resolve_catalog_platform_target(
+            db,
+            encryption_keys,
+            user_id,
+            service,
+            platform_user_rate_limit,
+        )
+        .await?;
+        return Ok((target, true));
+    }
     if service.auth_method == "none" {
         let (base_url, has_server_credential) =
             match resolve_gateway_url_override(db, user_id, &service).await {
@@ -1331,6 +1433,8 @@ pub struct UserServiceResolution {
     /// credential (auto-provisioned UserService with no user key), not a
     /// key the user supplied. Drives resale credential classification.
     pub master_credential: bool,
+    /// OAuth app provenance of the resolved UserApiKey, for platform charging.
+    pub credential_source: Option<String>,
     /// Set when the resolved UserService was reached via org membership
     /// (the actor has no personal copy). `None` means personal credentials.
     pub org_routing: Option<OrgRouting>,
@@ -1448,165 +1552,177 @@ pub async fn resolve_proxy_target_from_user_service(
     catalog_service_id: Option<&str>,
     execution_context: ProxyExecutionContext<'_>,
 ) -> AppResult<Option<UserServiceResolution>> {
-    let credential_resolution = ProxyCredentialResolution::materialize(execution_context);
-    // NyxID#974 routing boundary: identical-instance service pools belong
-    // here, before `finish_resolution()`, because this function is the
-    // authoritative place that preserves personal/legacy/org precedence and
-    // chooses the concrete `UserService`. `node_routing_service` only handles
-    // node failover after a service member has already been selected.
+    // Keep catalog/credential resolution state on the heap; callers combine
+    // several of these futures when revalidating delegated execution.
+    Box::pin(async move {
+        let credential_resolution = ProxyCredentialResolution::materialize(execution_context);
+        // NyxID#974 routing boundary: identical-instance service pools belong
+        // here, before `finish_resolution()`, because this function is the
+        // authoritative place that preserves personal/legacy/org precedence and
+        // chooses the concrete `UserService`. `node_routing_service` only handles
+        // node failover after a service member has already been selected.
 
-    // 1. Personal lookup (short-circuit for the common case).
-    let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
-    if let Some(us) = personal {
-        return Ok(Some(
-            finish_resolution(
-                db,
-                encryption_keys,
-                user_id,
-                us,
-                None,
-                None,
-                credential_resolution,
-            )
-            .await?,
-        ));
-    }
-    if catalog_service_id.is_none()
-        && let Some((us, pool_selection)) = lookup_service_pool_member(db, user_id, slug).await?
-    {
-        tracing::debug!(
-            user_id = %user_id,
-            pool_id = %pool_selection.pool_id,
-            pool_slug = %pool_selection.pool_slug,
-            chosen_user_service_id = %pool_selection.selected_member_id,
-            strategy = %pool_selection.strategy.as_str(),
-            "Resolved proxy target via service pool"
-        );
-        return Ok(Some(
-            finish_resolution(
-                db,
-                encryption_keys,
-                user_id,
-                us,
-                None,
-                Some(pool_selection),
-                credential_resolution,
-            )
-            .await?,
-        ));
-    }
-
-    // 2. Legacy personal guard. Preserves the invariant that pre-migration
-    //    personal connections beat org-shared credentials. See function doc.
-    if user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id).await? {
-        return Ok(None);
-    }
-
-    // 3. Org fallback. Bounded by a wall-clock timeout so a degraded Mongo
-    //    doesn't make every proxy 404 hang.
-    let memberships =
-        match crate::services::org_service::find_active_memberships_with_timeout(db, user_id).await
+        // 1. Personal lookup (short-circuit for the common case).
+        let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
+        if let Some(us) = personal {
+            return Ok(Some(
+                finish_resolution(
+                    db,
+                    encryption_keys,
+                    user_id,
+                    us,
+                    None,
+                    None,
+                    credential_resolution,
+                )
+                .await?,
+            ));
+        }
+        if catalog_service_id.is_none()
+            && let Some((us, pool_selection)) =
+                lookup_service_pool_member(db, user_id, slug).await?
         {
-            Ok(rows) => rows,
-            Err(crate::errors::AppError::OrgQueryTimeout) => return Err(AppError::OrgQueryTimeout),
-            Err(crate::errors::AppError::NotFound(_)) => {
+            tracing::debug!(
+                user_id = %user_id,
+                pool_id = %pool_selection.pool_id,
+                pool_slug = %pool_selection.pool_slug,
+                chosen_user_service_id = %pool_selection.selected_member_id,
+                strategy = %pool_selection.strategy.as_str(),
+                "Resolved proxy target via service pool"
+            );
+            return Ok(Some(
+                finish_resolution(
+                    db,
+                    encryption_keys,
+                    user_id,
+                    us,
+                    None,
+                    Some(pool_selection),
+                    credential_resolution,
+                )
+                .await?,
+            ));
+        }
+
+        // 2. Legacy personal guard. Preserves the invariant that pre-migration
+        //    personal connections beat org-shared credentials. See function doc.
+        if user_has_legacy_personal_connection(db, user_id, slug, catalog_service_id).await? {
+            return Ok(None);
+        }
+
+        // 3. Org fallback. Bounded by a wall-clock timeout so a degraded Mongo
+        //    doesn't make every proxy 404 hang.
+        let memberships =
+            match crate::services::org_service::find_active_memberships_with_timeout(db, user_id)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(crate::errors::AppError::OrgQueryTimeout) => {
+                    return Err(AppError::OrgQueryTimeout);
+                }
+                Err(crate::errors::AppError::NotFound(_)) => {
+                    tracing::debug!(
+                        resolution_user_id = %user_id,
+                        "Proxy resolution id is not a user; treating org memberships as empty"
+                    );
+                    Vec::new()
+                }
+                Err(e) => return Err(e),
+            };
+        if memberships.is_empty() {
+            return Ok(None);
+        }
+
+        // 3. Walk memberships in priority order. find_active_memberships_with_timeout
+        //    has already moved primary_org_id to the front.
+        let mut role_denied = false;
+        for membership in &memberships {
+            let org_us =
+                lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
+            let (org_us, pool_selection) = if let Some(org_us) = org_us {
+                (org_us, None)
+            } else if catalog_service_id.is_none() {
+                match lookup_service_pool_member(db, &membership.org_user_id, slug).await? {
+                    Some((svc, selection)) => (svc, Some(selection)),
+                    None => continue,
+                }
+            } else {
+                continue;
+            };
+
+            // Role check: Viewer cannot proxy.
+            if !membership.role.can_proxy() {
+                role_denied = true;
                 tracing::debug!(
-                    resolution_user_id = %user_id,
-                    "Proxy resolution id is not a user; treating org memberships as empty"
+                    user_id = %user_id,
+                    org_user_id = %membership.org_user_id,
+                    role = ?membership.role,
+                    "Org membership role insufficient for proxy"
                 );
-                Vec::new()
+                continue;
             }
-            Err(e) => return Err(e),
-        };
-    if memberships.is_empty() {
-        return Ok(None);
-    }
 
-    // 3. Walk memberships in priority order. find_active_memberships_with_timeout
-    //    has already moved primary_org_id to the front.
-    let mut role_denied = false;
-    for membership in &memberships {
-        let org_us =
-            lookup_user_service(db, &membership.org_user_id, slug, catalog_service_id).await?;
-        let (org_us, pool_selection) = if let Some(org_us) = org_us {
-            (org_us, None)
-        } else if catalog_service_id.is_none() {
-            match lookup_service_pool_member(db, &membership.org_user_id, slug).await? {
-                Some((svc, selection)) => (svc, Some(selection)),
-                None => continue,
+            if !admin_only_allows_role(&org_us, membership.role) {
+                role_denied = true;
+                tracing::debug!(
+                    user_id = %user_id,
+                    org_user_id = %membership.org_user_id,
+                    user_service_id = %org_us.id,
+                    role = ?membership.role,
+                    "Org membership role blocked by admin_only service policy"
+                );
+                continue;
             }
-        } else {
-            continue;
-        };
 
-        // Role check: Viewer cannot proxy.
-        if !membership.role.can_proxy() {
-            role_denied = true;
-            tracing::debug!(
-                user_id = %user_id,
-                org_user_id = %membership.org_user_id,
-                role = ?membership.role,
-                "Org membership role insufficient for proxy"
-            );
-            continue;
-        }
-
-        if !admin_only_allows_role(&org_us, membership.role) {
-            role_denied = true;
-            tracing::debug!(
-                user_id = %user_id,
-                org_user_id = %membership.org_user_id,
-                user_service_id = %org_us.id,
-                role = ?membership.role,
-                "Org membership role blocked by admin_only service policy"
-            );
-            continue;
-        }
-
-        // Scope check: inherited role defaults or member overrides may
-        // restrict access to a subset.
-        let effective_scope =
-            crate::services::org_role_scope_service::effective_scope_for_membership(db, membership)
+            // Scope check: inherited role defaults or member overrides may
+            // restrict access to a subset.
+            let effective_scope =
+                crate::services::org_role_scope_service::effective_scope_for_membership(
+                    db, membership,
+                )
                 .await?;
-        if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &org_us.id) {
-            role_denied = true;
-            tracing::debug!(
-                user_id = %user_id,
-                org_user_id = %membership.org_user_id,
-                user_service_id = %org_us.id,
-                "User not in effective service scope for this org membership"
-            );
-            continue;
+            if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &org_us.id)
+            {
+                role_denied = true;
+                tracing::debug!(
+                    user_id = %user_id,
+                    org_user_id = %membership.org_user_id,
+                    user_service_id = %org_us.id,
+                    "User not in effective service scope for this org membership"
+                );
+                continue;
+            }
+
+            let routing = OrgRouting {
+                org_user_id: membership.org_user_id.clone(),
+                member_user_id: user_id.to_string(),
+                membership_id: membership.id.clone(),
+            };
+            return Ok(Some(
+                finish_resolution(
+                    db,
+                    encryption_keys,
+                    &membership.org_user_id,
+                    org_us,
+                    Some(routing),
+                    pool_selection,
+                    credential_resolution,
+                )
+                .await?,
+            ));
         }
 
-        let routing = OrgRouting {
-            org_user_id: membership.org_user_id.clone(),
-            member_user_id: user_id.to_string(),
-            membership_id: membership.id.clone(),
-        };
-        return Ok(Some(
-            finish_resolution(
-                db,
-                encryption_keys,
-                &membership.org_user_id,
-                org_us,
-                Some(routing),
-                pool_selection,
-                credential_resolution,
-            )
-            .await?,
-        ));
-    }
-
-    // No org service matched. If at least one was found but blocked by role
-    // or scope, surface that as a 403 instead of a generic 404 -- the user
-    // gets a clearer error and the audit trail captures the denial.
-    if role_denied {
-        return Err(AppError::OrgRoleInsufficient(
-            "your role in the owning org does not permit using this service".to_string(),
-        ));
-    }
-    Ok(None)
+        // No org service matched. If at least one was found but blocked by role
+        // or scope, surface that as a 403 instead of a generic 404 -- the user
+        // gets a clearer error and the audit trail captures the denial.
+        if role_denied {
+            return Err(AppError::OrgRoleInsufficient(
+                "your role in the owning org does not permit using this service".to_string(),
+            ));
+        }
+        Ok(None)
+    })
+    .await
 }
 
 /// Return true when the user has a legacy (pre-migration) personal
@@ -1931,95 +2047,101 @@ async fn resolve_proxy_target_by_user_service_id_with_mode(
     expected_catalog_service_id: Option<&str>,
     credential_resolution: ProxyCredentialResolution<'_>,
 ) -> AppResult<Option<UserServiceResolution>> {
-    let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
-        Some(s) => s,
-        None => return Ok(None),
-    };
+    // Keep catalog/credential resolution state on the heap; callers combine
+    // several of these futures when revalidating delegated execution.
+    Box::pin(async move {
+        let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
 
-    // Verify the selected UserService matches the route's identity.
-    // The slug handler passes expected_slug; the catalog-id handler
-    // passes expected_catalog_service_id. Both must match if provided.
-    if let Some(slug) = expected_slug
-        && svc.slug != slug
-    {
-        return Err(AppError::BadRequest(format!(
-            "_nyxid_via UserService '{user_service_id}' has slug '{}', \
-             but the route requested '{slug}'",
-            svc.slug
-        )));
-    }
-    if let Some(catalog_id) = expected_catalog_service_id {
-        let svc_catalog = svc.catalog_service_id.as_deref().unwrap_or("");
-        if svc_catalog != catalog_id {
+        // Verify the selected UserService matches the route's identity.
+        // The slug handler passes expected_slug; the catalog-id handler
+        // passes expected_catalog_service_id. Both must match if provided.
+        if let Some(slug) = expected_slug
+            && svc.slug != slug
+        {
             return Err(AppError::BadRequest(format!(
-                "_nyxid_via UserService '{user_service_id}' belongs to catalog \
-                 service '{svc_catalog}', but the route requested '{catalog_id}'"
+                "_nyxid_via UserService '{user_service_id}' has slug '{}', \
+             but the route requested '{slug}'",
+                svc.slug
             )));
         }
-    }
-
-    // Access gate: resolve the actor's relationship to the service owner.
-    let access =
-        crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id).await?;
-    let allowed = match &access {
-        crate::services::org_service::OwnerAccess::Direct => true,
-        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
-            access.allows_resource(&svc.id)
-        }
-        crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
-            role.can_proxy()
-                && admin_only_allows_role(&svc, *role)
-                && access.allows_resource(&svc.id)
-        }
-        crate::services::org_service::OwnerAccess::Forbidden => false,
-    };
-    if !allowed {
-        return Err(AppError::OrgRoleInsufficient(
-            "you do not have proxy access to this service".to_string(),
-        ));
-    }
-
-    // Build the org_routing context if the service is org-owned.
-    let org_routing = if svc.user_id != actor_user_id {
-        // The service belongs to an org; build the routing context from
-        // the OwnerAccess that we already resolved above. We know the
-        // access is at least AsOrgAdmin or AsOrgMember (Viewer was
-        // rejected), so we can extract the membership_id.
-        let (org_user_id, membership_id) = match &access {
-            crate::services::org_service::OwnerAccess::AsOrgAdmin {
-                org_user_id,
-                membership_id,
-                ..
+        if let Some(catalog_id) = expected_catalog_service_id {
+            let svc_catalog = svc.catalog_service_id.as_deref().unwrap_or("");
+            if svc_catalog != catalog_id {
+                return Err(AppError::BadRequest(format!(
+                    "_nyxid_via UserService '{user_service_id}' belongs to catalog \
+                 service '{svc_catalog}', but the route requested '{catalog_id}'"
+                )));
             }
-            | crate::services::org_service::OwnerAccess::AsOrgMember {
-                org_user_id,
-                membership_id,
-                ..
-            } => (org_user_id.clone(), membership_id.clone()),
-            _ => unreachable!("Direct and Forbidden already handled"),
-        };
-        Some(OrgRouting {
-            org_user_id,
-            member_user_id: actor_user_id.to_string(),
-            membership_id,
-        })
-    } else {
-        None
-    };
+        }
 
-    let owner_id = svc.user_id.clone();
-    Ok(Some(
-        finish_resolution(
-            db,
-            encryption_keys,
-            &owner_id,
-            svc,
-            org_routing,
-            None,
-            credential_resolution,
-        )
-        .await?,
-    ))
+        // Access gate: resolve the actor's relationship to the service owner.
+        let access =
+            crate::services::org_service::resolve_owner_access(db, actor_user_id, &svc.user_id)
+                .await?;
+        let allowed = match &access {
+            crate::services::org_service::OwnerAccess::Direct => true,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. } => {
+                access.allows_resource(&svc.id)
+            }
+            crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } => {
+                role.can_proxy()
+                    && admin_only_allows_role(&svc, *role)
+                    && access.allows_resource(&svc.id)
+            }
+            crate::services::org_service::OwnerAccess::Forbidden => false,
+        };
+        if !allowed {
+            return Err(AppError::OrgRoleInsufficient(
+                "you do not have proxy access to this service".to_string(),
+            ));
+        }
+
+        // Build the org_routing context if the service is org-owned.
+        let org_routing = if svc.user_id != actor_user_id {
+            // The service belongs to an org; build the routing context from
+            // the OwnerAccess that we already resolved above. We know the
+            // access is at least AsOrgAdmin or AsOrgMember (Viewer was
+            // rejected), so we can extract the membership_id.
+            let (org_user_id, membership_id) = match &access {
+                crate::services::org_service::OwnerAccess::AsOrgAdmin {
+                    org_user_id,
+                    membership_id,
+                    ..
+                }
+                | crate::services::org_service::OwnerAccess::AsOrgMember {
+                    org_user_id,
+                    membership_id,
+                    ..
+                } => (org_user_id.clone(), membership_id.clone()),
+                _ => unreachable!("Direct and Forbidden already handled"),
+            };
+            Some(OrgRouting {
+                org_user_id,
+                member_user_id: actor_user_id.to_string(),
+                membership_id,
+            })
+        } else {
+            None
+        };
+
+        let owner_id = svc.user_id.clone();
+        Ok(Some(
+            finish_resolution(
+                db,
+                encryption_keys,
+                &owner_id,
+                svc,
+                org_routing,
+                None,
+                credential_resolution,
+            )
+            .await?,
+        ))
+    })
+    .await
 }
 
 /// Mirrors `resolve_proxy_target_from_user_service` exactly so that the
@@ -2315,15 +2437,7 @@ async fn lookup_user_service(
 }
 
 fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
-    service.visibility == "public"
-        && service.service_category == "internal"
-        && master_credential_required(service)
-        && service.auth_method != "token_exchange"
-        && !service.requires_user_credential
-        && service.service_type == "http"
-        && service.is_active
-        && !service.credential_encrypted.is_empty()
-        && service.provider_config_id.is_none()
+    super::platform_key_service::legacy_public_master(service)
 }
 
 fn is_auto_provisionable_catalog_service(
@@ -2399,6 +2513,11 @@ async fn verify_auto_provision_eligibility(
         }
     };
 
+    if ds.platform_key.is_some() && super::platform_key_service::binding(user_service) == "platform"
+    {
+        return super::platform_key_service::require(db, &ds, effective_owner_id).await;
+    }
+
     let spr_count = db
         .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
         .count_documents(doc! { "service_id": catalog_id })
@@ -2453,6 +2572,10 @@ async fn finish_resolution(
     pool_selection: Option<service_pool_service::PoolSelection>,
     credential_resolution: ProxyCredentialResolution<'_>,
 ) -> AppResult<UserServiceResolution> {
+    // Keep catalog/credential resolution state on the heap; callers combine
+    // several of these futures when revalidating delegated execution.
+    Box::pin(async move {
+
     let materialize_credentials = credential_resolution.materialize_credentials;
     let connection_expiry_notifier = credential_resolution.connection_expiry_notifier;
     let platform_user_rate_limit = credential_resolution.platform_user_rate_limit;
@@ -2495,6 +2618,85 @@ async fn finish_resolution(
         .clone()
         .unwrap_or_default();
 
+    if super::platform_key_service::binding(&user_service) == "platform"
+        && (user_service.auth_method != "none"
+            || user_service.credential_binding.as_deref() == Some("platform"))
+    {
+        let catalog_service = load_catalog_service_for_user_service(db, &user_service).await?;
+        if !super::platform_key_service::has_platform_key(&catalog_service) {
+            return Err(AppError::NotFound(
+                "Service is no longer available".to_string(),
+            ));
+        }
+
+        if user_service.node_id.is_some() {
+            return Err(AppError::ValidationError(
+                "Platform keys cannot be routed through a node".to_string(),
+            ));
+        }
+        let (auth_method, auth_key_name) =
+            super::platform_key_service::effective_auth(db, &catalog_service).await?;
+        let actor = EffectiveActor::from_user_id(effective_owner_id);
+        let authorized = authorize_master_credential(db, &catalog_service, &actor).await?;
+        let credential = if materialize_credentials {
+            crate::mw::rate_limit::enforce_platform_user_limit(
+                db,
+                platform_user_rate_limit,
+                &catalog_service.id,
+                &actor.user_id,
+            )
+            .await?;
+            let decrypted_bytes = Zeroizing::new(
+                decrypt_authorized_master_credential(encryption_keys, &authorized).await?,
+            );
+            String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+                tracing::error!("Credential UTF-8 decode failed: {e}");
+                AppError::Internal("Failed to decode credential".to_string())
+            })?
+        } else {
+            String::new()
+        };
+        let now = chrono::Utc::now();
+        let mut minimal_service = build_minimal_downstream_service(
+            &user_service,
+            &endpoint,
+            now,
+            None,
+            catalog_billing.clone(),
+        );
+        apply_catalog_proxy_authorization(&mut minimal_service, &catalog_proxy_authorization);
+        minimal_service.base_url = catalog_service.base_url.clone();
+        minimal_service.auth_method = auth_method.clone();
+        minimal_service.auth_key_name = auth_key_name.clone();
+        minimal_service.token_exchange_config = catalog_service.token_exchange_config.clone();
+        minimal_service.inference = catalog_service.inference.clone();
+
+        return Ok(UserServiceResolution {
+            target: ProxyTarget {
+                base_url: catalog_service.base_url.clone(),
+                auth_method,
+                auth_key_name,
+                credential,
+                service: minimal_service,
+                catalog_default_headers: catalog_default_headers.clone(),
+                user_service_default_headers: user_service_default_headers.clone(),
+                ws_frame_injections: effective_ws_frame_injections.clone(),
+                connection_id: None,
+            },
+            catalog_service_slug: catalog_service_slug.clone(),
+            node_id: None,
+            user_service_id: user_service.id.clone(),
+            has_server_credential: true,
+            api_key_id: None,
+            credential_epoch: 1,
+            master_credential: true,
+            credential_source: None,
+            org_routing,
+            pool_selection,
+            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
+        });
+    }
+
     // Handle no-auth services (may have no api_key_id)
     if user_service.auth_method == "none" {
         let now = chrono::Utc::now();
@@ -2531,71 +2733,7 @@ async fn finish_resolution(
             api_key_id: None,
             credential_epoch: 1,
             master_credential: false,
-            org_routing,
-            pool_selection,
-            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
-        });
-    }
-
-    if user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
-        && user_service.api_key_id.is_none()
-    {
-        let catalog_service = load_catalog_service_for_user_service(db, &user_service).await?;
-        if !is_public_internal_master_credential_service(&catalog_service) {
-            return Err(AppError::NotFound(
-                "Service is no longer available".to_string(),
-            ));
-        }
-
-        let actor = EffectiveActor::from_user_id(effective_owner_id);
-        let authorized = authorize_master_credential(db, &catalog_service, &actor).await?;
-        let credential = if materialize_credentials {
-            crate::mw::rate_limit::enforce_platform_user_limit(
-                db,
-                platform_user_rate_limit,
-                &catalog_service.id,
-                &actor.user_id,
-            )
-            .await?;
-            let decrypted_bytes = Zeroizing::new(
-                decrypt_authorized_master_credential(encryption_keys, &authorized).await?,
-            );
-            String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-                tracing::error!("Credential UTF-8 decode failed: {e}");
-                AppError::Internal("Failed to decode credential".to_string())
-            })?
-        } else {
-            String::new()
-        };
-        let now = chrono::Utc::now();
-        let mut minimal_service = build_minimal_downstream_service(
-            &user_service,
-            &endpoint,
-            now,
-            None,
-            catalog_billing.clone(),
-        );
-        apply_catalog_proxy_authorization(&mut minimal_service, &catalog_proxy_authorization);
-
-        return Ok(UserServiceResolution {
-            target: ProxyTarget {
-                base_url: endpoint.url.clone(),
-                auth_method: user_service.auth_method.clone(),
-                auth_key_name: user_service.auth_key_name.clone(),
-                credential,
-                service: minimal_service,
-                catalog_default_headers: catalog_default_headers.clone(),
-                user_service_default_headers: user_service_default_headers.clone(),
-                ws_frame_injections: effective_ws_frame_injections.clone(),
-                connection_id: None,
-            },
-            catalog_service_slug: catalog_service_slug.clone(),
-            node_id: user_service.node_id.clone(),
-            user_service_id: user_service.id.clone(),
-            has_server_credential: true,
-            api_key_id: None,
-            credential_epoch: 1,
-            master_credential: true,
+            credential_source: None,
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2689,6 +2827,7 @@ async fn finish_resolution(
             api_key_id: Some(api_key.id.clone()),
             credential_epoch: api_key.credential_epoch,
             master_credential: false,
+            credential_source: api_key.credential_source.clone(),
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2751,10 +2890,13 @@ async fn finish_resolution(
         api_key_id: Some(api_key.id.clone()),
         credential_epoch: api_key.credential_epoch,
         master_credential: false,
+        credential_source: api_key.credential_source.clone(),
         org_routing,
         pool_selection,
         is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
     })
+
+    }).await
 }
 
 async fn load_catalog_service_for_user_service(
@@ -3325,9 +3467,8 @@ fn build_minimal_downstream_service(
     token_exchange_config: Option<crate::models::downstream_service::TokenExchangeConfig>,
     billing: Option<crate::models::service_billing::ServiceBilling>,
 ) -> DownstreamService {
-    let platform_managed_catalog_service = user_service.source.as_deref()
-        == Some(AUTO_PROVISION_SOURCE)
-        && user_service.api_key_id.is_none()
+    let platform_managed_catalog_service = super::platform_key_service::binding(user_service)
+        == "platform"
         && user_service.auth_method != "none"
         && user_service.catalog_service_id.is_some();
 
@@ -3347,6 +3488,7 @@ fn build_minimal_downstream_service(
         auth_method: user_service.auth_method.clone(),
         auth_key_name: user_service.auth_key_name.clone(),
         credential_encrypted: vec![],
+        platform_key: None,
         auth_type: None,
         openapi_spec_url: None,
         asyncapi_spec_url: None,
@@ -3374,6 +3516,8 @@ fn build_minimal_downstream_service(
         repository_url: None,
         issues_url: None,
         capabilities: None,
+        inference: None,
+        inference_admin_modified: false,
         billing,
         auth_notes: None,
         known_limitations: None,
@@ -3591,7 +3735,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     //
     // The shared builder applies this exact sequence for both direct and
     // node-routed HTTP requests.
-    let outbound_headers = collect_forward_headers(&headers);
+    let outbound_headers = collect_forward_headers_with_defaults(
+        &headers,
+        &[
+            target.catalog_default_headers.as_slice(),
+            target.user_service_default_headers.as_slice(),
+        ],
+    );
     let outbound_headers = build_effective_outbound_headers(
         target,
         outbound_headers,
@@ -4435,6 +4585,47 @@ mod tests {
     // ---- forward header allowlist tests (NyxID#161) ----
 
     #[test]
+    fn overridable_defaults_admit_caller_headers_without_opening_reserved_names() {
+        let mut headers = http::HeaderMap::new();
+        for name in [
+            "acme-version",
+            "custom-version",
+            "locked-version",
+            "unconfigured-version",
+            "authorization",
+            "host",
+            "x-nyxid-user-id",
+            "connection",
+        ] {
+            headers.insert(
+                http::HeaderName::from_static(name),
+                "caller".parse().unwrap(),
+            );
+        }
+        let make_default = |name: &str, overridable| DefaultRequestHeader {
+            name: name.into(),
+            value: "default".into(),
+            overridable,
+            sensitive: false,
+        };
+        let catalog = vec![
+            make_default("Acme-Version", true),
+            make_default("locked-version", false),
+            make_default("Authorization", true),
+            make_default("Host", true),
+            make_default("X-NyxID-User-Id", true),
+            make_default("Connection", true),
+        ];
+        let user = vec![make_default("Custom-Version", true)];
+        let forwarded = collect_forward_headers_with_defaults(&headers, &[&catalog, &user]);
+        assert_eq!(forwarded.len(), 2);
+        for name in ["acme-version", "custom-version"] {
+            assert!(forwarded.contains(&(name.into(), "caller".into())));
+        }
+        assert!(collect_forward_headers(&headers).is_empty());
+    }
+
+    #[test]
     fn forward_allowlist_accepts_explicit_entries() {
         assert!(is_allowed_forward_header("content-type"));
         assert!(is_allowed_forward_header("user-agent"));
@@ -5140,6 +5331,7 @@ mod tests {
                 allowed_service_ids: vec![],
                 allowed_node_ids: vec![],
                 allow_all_services: true,
+                allow_auto_connected_services: false,
                 allow_all_nodes: true,
                 rate_limit_per_second: None,
                 rate_limit_burst: None,
@@ -5362,6 +5554,7 @@ mod tests {
                 auth_method: "none".to_string(),
                 auth_key_name: "Authorization".to_string(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -5387,6 +5580,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -6389,6 +6584,7 @@ mod tests {
                 auth_method: "token_exchange".to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -6414,6 +6610,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -6581,6 +6779,7 @@ mod tests {
             slug: "api-lark-bot".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: Some("ak-1".to_string()),
+            credential_binding: None,
             auth_method: "token_exchange".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
@@ -6721,6 +6920,7 @@ mod tests {
                 auth_method: "body".to_string(),
                 auth_key_name: "app_secret".to_string(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -6746,6 +6946,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -6944,6 +7146,7 @@ mod tests {
                 auth_method: auth_method.to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -6969,6 +7172,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -7188,6 +7393,7 @@ mod tests {
             auth_method: "bearer".into(),
             auth_key_name: String::new(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -7211,6 +7417,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

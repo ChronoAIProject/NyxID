@@ -50,7 +50,11 @@ Service accounts differ from user accounts in several key ways:
 
 ### Creating a Service Account
 
-Admins create service accounts via the admin API:
+Global admins create personal service accounts via the admin API. Organization admins can create accounts for their organization with `target_org_id`.
+
+The scope field offers suggestions from [the options API](OPTIONS_API.md): supported code-defined scopes and scopes already configured on service accounts belonging to the authorized owner. Suggestions help prefill the field; they are not a complete permission vocabulary or an authorization grant. The field shows every selected scope as a full, wrapping pill with Edit and Remove controls. Click or keyboard-activate a pill to edit it in place; Enter finishes the replacement and Escape cancels. The dropdown hides selected values and loads all suggestion pages automatically. For colon-delimited configured values, choose prefixes to navigate to a complete scope; for example, previously configured `reports:finance:read` can be reached through `reports:` and `reports:finance:`. Prefix navigation does not grant or save an intermediate scope. Type a full custom scope and press Enter, or paste space-separated scopes. Typed custom values reach the form immediately, so Save includes an unfinished draft without changing the field layout during the click. Arrow keys explicitly select a suggestion; Enter without an active suggestion adds exactly what you typed. Custom entry remains available when suggestions cannot load. All admin, organization, shared edit, assistant, and CLI wizard forms use this picker.
+
+Scope strings remain free-form. Existing values stay editable, and custom scopes can be created or updated without appearing in suggestions. Adding an unknown name does not create a new permission check. The picker deduplicates tokens when you edit the selection; it preserves the original stored string until an edit.
 
 ```http
 POST /api/v1/admin/service-accounts HTTP/1.1
@@ -60,7 +64,7 @@ Content-Type: application/json
 {
   "name": "CI Pipeline Bot",
   "description": "Automated CI/CD pipeline that runs LLM evaluations",
-  "allowed_scopes": "llm:proxy llm:status proxy:*",
+  "allowed_scopes": "llm:proxy proxy:*",
   "role_ids": ["role-uuid-1"]
 }
 ```
@@ -74,7 +78,7 @@ Response:
   "client_secret": "sas_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "name": "CI Pipeline Bot",
   "description": "Automated CI/CD pipeline that runs LLM evaluations",
-  "allowed_scopes": "llm:proxy llm:status proxy:*",
+  "allowed_scopes": "llm:proxy proxy:*",
   "created_at": "2025-01-15T10:00:00Z"
 }
 ```
@@ -107,7 +111,7 @@ Content-Type: application/json
 
 {
   "name": "CI Pipeline Bot (Production)",
-  "allowed_scopes": "llm:proxy llm:status"
+  "allowed_scopes": "llm:proxy"
 }
 ```
 
@@ -326,7 +330,7 @@ Alternatively, the SA can connect providers using its own token:
 2. Authenticate as the SA to get a token:
    ```
    POST /oauth/token
-   grant_type=client_credentials&client_id=sa_...&client_secret=sas_...&scope=providers:write llm:proxy
+   grant_type=client_credentials&client_id=sa_...&client_secret=sas_...&scope=llm:proxy
    ```
 3. Use the SA token to connect providers:
    - **API key:** `POST /api/v1/providers/{provider_id}/connect/api-key`
@@ -390,7 +394,7 @@ GET /api/v1/proxy/<service_id>/items?query=test HTTP/1.1
 Authorization: Bearer <sa_access_token>
 ```
 
-Requires `proxy` or `proxy:*`. General service accounts resolve the effective owner's service connections. There is no implemented `proxy:<service_id>` scope. Curation accounts use the stricter purpose and exact catalog target boundary described below.
+Requires `proxy` or its `proxy:*` alias. General service accounts resolve the effective owner's service connections; scope strings do not implement per-service grants. Curation accounts instead enforce the exact live Ornn target and dedicated credential boundary described below.
 
 ### Provider Management
 
@@ -411,7 +415,7 @@ Content-Type: application/json
 }
 ```
 
-Requires `providers:read` and `providers:write` scopes respectively.
+These routes use their existing authentication and ownership checks. The strings `providers:read` and `providers:write` are accepted as custom scope values but are not enforced permission gates for these operations.
 
 ---
 
@@ -483,32 +487,33 @@ class NyxIDClient:
 
 ## Scopes and Access Control
 
-### Available Scopes
+### Scope Suggestions and Existing Checks
 
-| Scope | Access |
-|-------|--------|
-| `proxy` or `proxy:*` | General proxy access; also admits the LLM gateway for General accounts |
-| `catalog:skills:read` | Granted curation discovery, skills, and history |
-| `catalog:skills:write` | Granted recommendation changes and restore |
-| `llm:proxy` | LLM gateway proxy requests |
-| `llm:status` | LLM status endpoint |
-| `connections:read` | List service connections |
-| `connections:write` | Connect/disconnect services |
-| `providers:read` | List providers and tokens |
-| `providers:write` | Connect to providers, store API keys |
+| Value | Existing behavior |
+|-------|-------------------|
+| `proxy` | Passes the proxy scope check and the LLM gateway scope check; resource and owner checks still apply |
+| `proxy:*` | Existing alias of `proxy`; accepted as custom input and suggested when already configured |
+| `llm:proxy` | Passes the LLM gateway scope check, including status |
+| `roles` | Includes assigned roles and permissions in OAuth userinfo |
+| `catalog:skills:read` | Granted Curation discovery, skills, and history |
+| `catalog:skills:write` | Granted Curation recommendation changes and restore |
+| `groups` | Accepted as custom input; service accounts have no group memberships, so userinfo groups are empty |
+
+The default suggestion menu includes `proxy`, `llm:proxy`, and `roles`. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
+
+General account create/update continue storing free-form scope strings. Curation accounts restrict scopes to the grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation.
 
 ### Routes Accessible to Service Accounts
 
-| Endpoint | Required Scope |
-|----------|---------------|
-| `ANY /api/v1/llm/{provider}/v1/*` | `llm:proxy` |
-| `ANY /api/v1/llm/gateway/v1/*` | `llm:proxy` |
-| `GET /api/v1/llm/status` | `llm:status` |
-| `ANY /api/v1/proxy/{service_id}/*` | `proxy` or `proxy:*`; Curation additionally requires its exact live Ornn target |
-| `GET /api/v1/connections` | `connections:read` |
-| `POST /api/v1/connections` | `connections:write` |
-| `GET /api/v1/providers` | `providers:read` |
-| `POST /api/v1/providers/*/connect` | `providers:write` |
+The general route table below does not widen Curation access: that purpose permits only its catalog-curation routes and exact granted HTTP proxy target.
+
+| Endpoint | Existing scope check |
+|----------|----------------------|
+| `ANY /api/v1/llm/{provider}/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
+| `ANY /api/v1/llm/gateway/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
+| `GET /api/v1/llm/status` | `proxy`, `proxy:*`, or `llm:proxy` |
+| `ANY /api/v1/proxy/{service_id}/*` | `proxy` or `proxy:*`; Curation additionally requires the exact live Ornn target |
+| Connection/provider management | Existing route authentication and ownership checks; no separate connections/providers scope enforcement |
 
 ### Routes Blocked for Service Accounts
 
@@ -574,7 +579,7 @@ Expired tokens are automatically cleaned up by a MongoDB TTL index on the `servi
 - **RS256 signed** JWTs verified on every request
 - **Per-token revocation** via `jti` claim and `service_account_tokens` collection
 - **Active check** on every request -- deactivating a service account immediately blocks all requests
-- **Scope enforcement** -- tokens can only access resources within their granted scope
+- **Scope checks** -- proxy and LLM routes check recognized scope values alongside existing resource authorization; custom scope names do not add enforcement to other routes
 
 ### Rate Limiting
 
@@ -645,7 +650,7 @@ All service account operations are logged:
 
 A dedicated service account can autonomously assign, replace, remove, clear, and restore recommended skills for exact permitted catalog services. The account has one embedded live grant and a persisted write budget shared by all backend replicas. There is no per-change approval or semantic review gate.
 
-NyxID stores recommendation names and optional immutable references. **Ornn owns package content create/read/update and its retained immutable versions.** NyxID does not store, fetch, validate, publish, or delete package bytes. Configuring an Ornn proxy target here does not prove that Ornn accepts the machine identity or restricts it to the intended resources/actions. That integration requires executable verification in Ornn and Aevatar before describing this feature as complete content CRU. Package and version deletion must remain denied there.
+NyxID stores recommendation names and optional immutable references. **Ornn owns package content create/read/update and its retained immutable versions.** NyxID does not store, fetch, validate, publish, or delete package bytes. The companion [Ornn change #1247](https://github.com/ChronoAIProject/Ornn/issues/1247) adds content-only `ornn:skill:publish` alongside existing exact object write grants. The combined contract below supports content CRU and recommendation management; source implementation and local/CI checks do not establish deployed Ornn/Aevatar verification. Package and version deletion remain outside this identity's authority.
 
 ### Upgrade order and rollback
 
@@ -683,6 +688,45 @@ A Curation bearer may use only `/api/v1/catalog-curation/...` and ordinary HTTP 
 The Ornn proxy uses the granted catalog URL and the service account's own connection or delegated provider credential. It never inherits its creator's UserService, endpoint override, gateway URL, node, or broad credential, and does not fall back to a catalog master credential. Explicitly disconnecting the SA connection blocks execution. A platform admin attaches the separately scoped Ornn credential using the existing SA provider/connection management surface. General-purpose account routing keeps its existing behavior.
 
 Every SA access token must have a live token row matching its account, JWT ID, exact scope, expiry, revocation state, and current credential generation. SA JWTs carry `sgen`; missing legacy generations count as zero only while the current account is generation zero. Rotation advances generation atomically with replacing the secret, including when old-secret issuance finishes after rotation. MCP bearer authentication and OAuth introspection use the same validation. Curation cannot use a General-era MCP session as a fallback.
+
+### Separate Ornn identity and endpoint
+
+Before enabling content authoring, deploy the companion Ornn publish permission and
+complete the NyxID replica upgrade above. Assign the SA a downstream role containing
+only `ornn:skill:read` and `ornn:skill:publish`; use JWT or Both identity propagation.
+The assertion subject and permissions come from the SA, not its administrator.
+For existing skills an Ornn owner/admin grants the SA UUID exact write access once:
+`{"type":"user","id":"<SA UUID>","level":"write"}`. It can then upload new versions
+without further human review. For new readable skills, send a raw ZIP to
+`POST /api/v1/skills?public=true`; default creation remains private. Publish-only
+updates must omit `isPrivate`, including unchanged/null/multipart values.
+
+Use a **dedicated Ornn catalog service** so other clients retain their existing
+endpoint configuration. With `base_url=https://ornn.example` (origin only), configure
+this existing `proxy_operation_policy` on that catalog row:
+
+```json
+{"rules":[
+  {"method":"GET","path_template":"/api/v1/skill-search"},
+  {"method":"GET","path_template":"/api/v1/skill-format/rules"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/json"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/versions"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/versions/{version}/download"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/closure"},
+  {"method":"POST","path_template":"/api/v1/skills"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}"}
+]}
+```
+
+Paths are relative to the configured base URL. Queries such as `public=true` do not
+need another rule. This policy denies unlisted methods/paths before execution,
+including Ornn's auth-only assistant/audit/account routes. It is required both when
+a grant selects the target and on every Curation resolution; removing it fails
+closed. An explicit empty policy is valid and denies all operations. General
+accounts keep the existing optional-policy behavior. The read/publish role by
+itself is not an execution-route allowlist. Do not grant broad create/update/delete,
+admin, build or playground permissions, and do not configure wildcard route rules.
 
 ### Machine recommendation API
 

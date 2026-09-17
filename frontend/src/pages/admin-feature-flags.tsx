@@ -1,11 +1,18 @@
-import { type ReactNode, useEffect, useState } from "react";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { StaleFormNotice } from "@/components/shared/stale-form-notice";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { ChevronDown, Search, User } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/page-header";
 import { PowerButtonIcon } from "@/components/icons/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -72,6 +79,9 @@ export function AdminFeatureFlagsPage() {
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
   const [drafts, setDrafts] = useState<Record<string, ScopeState>>({});
+  const draftVersions = useRef<Record<string, number>>({});
+  const draftBaselines = useRef<Record<string, ScopeState>>({});
+  const [applying, setApplying] = useState(false);
   const [search, setSearch] = useState("");
   const [openKeys, setOpenKeys] = useState<string[]>([]);
   const flags: FlagRow[] = (data?.flags ?? []).map((flag) => ({
@@ -115,44 +125,111 @@ export function AdminFeatureFlagsPage() {
   };
   const stateFor = (flag: string, type: ScopeType, id: string): ScopeState =>
     drafts[draftKey(flag, type, id)] ?? persisted(flag, type, id);
-  const stage = (flag: string, type: ScopeType, id: string, s: ScopeState) =>
-    setDrafts((prev) => ({ ...prev, [draftKey(flag, type, id)]: s }));
+  const stage = (flag: string, type: ScopeType, id: string, s: ScopeState) => {
+    const key = draftKey(flag, type, id);
+    if (!(key in drafts))
+      draftBaselines.current[key] = persisted(flag, type, id);
+    draftVersions.current[key] = (draftVersions.current[key] ?? 0) + 1;
+    setDrafts((prev) => ({ ...prev, [key]: s }));
+  };
 
   const pending = Object.entries(drafts).filter(([k, v]) => {
     const [flag, type, id] = k.split("\u001f");
-    return v !== persisted(flag ?? "", (type ?? "global") as ScopeType, id ?? "");
+    return (
+      v !== persisted(flag ?? "", (type ?? "global") as ScopeType, id ?? "")
+    );
   });
   const pendingCount = pending.length;
 
-  async function applyChanges() {
-    try {
-      await Promise.all(
-        pending.map(async ([key, scopeState]) => {
-          const [flagKey = "", type = "global", id = ""] = key.split("\u001f");
-          const targetKind =
-            type === "user" ? "user" : type === "org" ? "org" : "global";
-          const targetKey = targetKind === "global" ? null : id;
-          if (scopeState === "inherit") {
-            await clearOverride.mutateAsync({ flagKey, targetKind, targetKey });
-          } else {
-            await setOverride.mutateAsync({
-              flagKey,
-              body: {
-                target_kind: targetKind,
-                target_key: targetKey,
-                enabled: scopeState === "enabled",
-              },
-            });
-          }
-        }),
-      );
-      setDrafts({});
-      toast.success(
-        `${pendingCount} change${pendingCount === 1 ? "" : "s"} applied`,
-      );
-    } catch {
-      toast.error("Failed to apply feature flag changes");
-    }
+  type RolloutChange = {
+    key: string;
+    flagKey: string;
+    type: ScopeType;
+    id: string;
+    before: ScopeState;
+    after: ScopeState;
+    version: number;
+  };
+  const rolloutReview = useChangeReview<RolloutChange[]>(
+    async (batch) => {
+      setApplying(true);
+      try {
+        const results = await Promise.allSettled(
+          batch.map(async (item) => {
+            const targetKey = item.type === "global" ? null : item.id;
+            if (item.after === "inherit")
+              await clearOverride.mutateAsync({
+                flagKey: item.flagKey,
+                targetKind: item.type,
+                targetKey,
+              });
+            else
+              await setOverride.mutateAsync({
+                flagKey: item.flagKey,
+                body: {
+                  target_kind: item.type,
+                  target_key: targetKey,
+                  enabled: item.after === "enabled",
+                },
+              });
+          }),
+        );
+        const successful = batch.filter(
+          (_, index) => results[index]?.status === "fulfilled",
+        );
+        for (const item of successful)
+          draftBaselines.current[item.key] = item.after;
+        setDrafts((current) => {
+          const next = { ...current };
+          for (const item of successful)
+            if (draftVersions.current[item.key] === item.version)
+              delete next[item.key];
+          return next;
+        });
+        const failed = batch.filter(
+          (_, index) => results[index]?.status === "rejected",
+        );
+        if (failed.length)
+          toast.error(
+            `Applied ${successful.length}; failed: ${failed.map((item) => `${item.flagKey} / ${item.type} ${item.id}`).join(", ")}. Review remaining changes before retrying.`,
+          );
+        else toast.success(`${successful.length} changes applied`);
+      } finally {
+        setApplying(false);
+      }
+    },
+    (batch) =>
+      batch.some(
+        (item) =>
+          !flagByKey(item.flagKey) ||
+          persisted(item.flagKey, item.type, item.id) !== item.before,
+      ),
+  );
+
+  function applyChanges() {
+    const batch = pending.map(([key, after]): RolloutChange => {
+      const [flagKey = "", type = "global", id = ""] = key.split("\u001f");
+      return {
+        key,
+        flagKey,
+        type: type as ScopeType,
+        id,
+        before:
+          draftBaselines.current[key] ??
+          persisted(flagKey, type as ScopeType, id),
+        after,
+        version: draftVersions.current[key] ?? 0,
+      };
+    });
+    rolloutReview.review(
+      batch,
+      batch.map((item) => ({
+        field: `${item.flagKey} / ${item.type === "global" ? "Global — all users" : `${item.type}: ${item.id}`}`,
+        before: item.before,
+        after:
+          item.after === "inherit" ? "Inherit (remove override)" : item.after,
+      })),
+    );
   }
 
   const q = search.trim().toLowerCase();
@@ -170,12 +247,16 @@ export function AdminFeatureFlagsPage() {
       prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
     );
   const pendingKeys = new Set(pending.map(([k]) => k));
-  const dirtyFlags = new Set(
-    pending.map(([k]) => k.split("\u001f")[0] ?? ""),
-  );
+  const dirtyFlags = new Set(pending.map(([k]) => k.split("\u001f")[0] ?? ""));
 
   return (
     <div className="space-y-6">
+      {rolloutReview.dialog}
+      {error && data && (
+        <p role="alert">
+          Unable to refresh feature flags. Your drafts are retained.
+        </p>
+      )}
       <PageHeader
         title="Feature Flags"
         description="Platform-wide feature rollout. Configure each flag globally, per organization, and per user."
@@ -187,10 +268,20 @@ export function AdminFeatureFlagsPage() {
             {pendingCount} unsaved change{pendingCount === 1 ? "" : "s"}
           </span>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={() => setDrafts({})}>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={applying}
+              onClick={() => setDrafts({})}
+            >
               Discard
             </Button>
-            <Button variant="primary" size="sm" onClick={applyChanges}>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={applying}
+              onClick={applyChanges}
+            >
               Apply changes
             </Button>
           </div>
@@ -208,13 +299,13 @@ export function AdminFeatureFlagsPage() {
         />
       </div>
 
-      {isLoading ? (
+      {isLoading && !data ? (
         <div className="space-y-2" aria-label="Loading feature flags">
           {Array.from({ length: 3 }).map((_, index) => (
             <Skeleton key={index} className="h-24 w-full" />
           ))}
         </div>
-      ) : error ? (
+      ) : error && !data ? (
         <FlagsEmptyState
           title="Failed to load feature flags"
           subtitle="Please try again later."
@@ -224,30 +315,29 @@ export function AdminFeatureFlagsPage() {
           title="No feature flags"
           subtitle="Flags are declared in code. None have been defined yet."
         />
-      ) : filtered.length === 0 ? (
-        <Card>
-          <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
-            No flags match “{search.trim()}”.
-          </CardContent>
-        </Card>
       ) : (
         <div className="space-y-2">
-          {filtered.map((flag) => (
-            <FlagCard
+          {filtered.length === 0 && <p>No flags match “{search.trim()}”.</p>}
+          {flags.map((flag) => (
+            <div
               key={flag.key}
-              flag={flag}
-              open={isOpen(flag.key)}
-              dirty={dirtyFlags.has(flag.key)}
-              onToggle={() => toggle(flag.key)}
-              stateFor={(type, id) => stateFor(flag.key, type, id)}
-              isPending={(type, id) =>
-                pendingKeys.has(draftKey(flag.key, type, id))
-              }
-              stage={(type, id, s) => stage(flag.key, type, id, s)}
-              stagedUsers={stagedIds(drafts, flag.key, "user")}
-              stagedOrgs={stagedIds(drafts, flag.key, "org")}
-              canWrite={canWrite}
-            />
+              hidden={!filtered.some((item) => item.key === flag.key)}
+            >
+              <FlagCard
+                flag={flag}
+                open={isOpen(flag.key)}
+                dirty={dirtyFlags.has(flag.key)}
+                onToggle={() => toggle(flag.key)}
+                stateFor={(type, id) => stateFor(flag.key, type, id)}
+                isPending={(type, id) =>
+                  pendingKeys.has(draftKey(flag.key, type, id))
+                }
+                stage={(type, id, s) => stage(flag.key, type, id, s)}
+                stagedUsers={stagedIds(drafts, flag.key, "user")}
+                stagedOrgs={stagedIds(drafts, flag.key, "org")}
+                canWrite={canWrite}
+              />
+            </div>
           ))}
         </div>
       )}
@@ -289,13 +379,13 @@ function FlagCard({
   const userIds = uniq([...flag.users.map((u) => u.id), ...stagedUsers]);
   const labelFor = (type: ScopeType, id: string) =>
     type === "user"
-      ? flag.users.find((user) => user.id === id)?.label ??
+      ? (flag.users.find((user) => user.id === id)?.label ??
         stagedUserLabels[id] ??
-        id
+        id)
       : type === "org"
-        ? flag.orgs.find((org) => org.id === id)?.label ??
+        ? (flag.orgs.find((org) => org.id === id)?.label ??
           stagedOrgLabels[id] ??
-          id
+          id)
         : id;
 
   // Collapsed summary pills: Global + configured orgs/users (non-inherit).
@@ -386,8 +476,11 @@ function FlagCard({
         </div>
       </button>
 
-      {open && (
-        <div className="space-y-4 border-t border-border/60 bg-muted/20 px-3 py-3">
+      {
+        <div
+          hidden={!open}
+          className="space-y-4 border-t border-border/60 bg-muted/20 px-3 py-3"
+        >
           <Group label="Documentation">
             <FlagMetadataEditor flag={flag} canWrite={canWrite} />
           </Group>
@@ -469,7 +562,7 @@ function FlagCard({
             })}
           </Group>
         </div>
-      )}
+      }
     </Card>
   );
 }
@@ -477,9 +570,9 @@ function FlagCard({
 /**
  * Inline editor for a flag's admin-authored description and owner.
  *
- * Seeded once when the card opens: a background list refetch must never
- * overwrite what an admin is mid-way through typing. Saving is a full replace,
- * so a blank field clears that side of the metadata (description falls back to
+ * Pristine editors follow refreshed metadata, including before first expansion.
+ * Once editing begins, refetches preserve the draft. Saving sends only changed fields;
+ * a blank field explicitly clears that side of the metadata (description falls back to
  * the code-declared text).
  */
 function FlagMetadataEditor({
@@ -493,25 +586,67 @@ function FlagMetadataEditor({
   const [description, setDescription] = useState(flag.customDescription ?? "");
   const [owner, setOwner] = useState(flag.owner ?? "");
 
-  const trimmedDescription = description.trim();
-  const trimmedOwner = owner.trim();
-  const dirty =
-    trimmedDescription !== (flag.customDescription ?? "") ||
-    trimmedOwner !== (flag.owner ?? "");
-
-  async function save() {
-    try {
-      await update.mutateAsync({
-        flagKey: flag.key,
-        body: {
-          description: trimmedDescription || null,
-          owner: trimmedOwner || null,
-        },
-      });
+  const current = {
+    description: flag.customDescription ?? null,
+    owner: flag.owner ?? null,
+  };
+  const [baseline, setBaseline] = useState(current);
+  const [observed, setObserved] = useState(current);
+  const [hydrationPending, setHydrationPending] = useState(false);
+  const next = {
+    description: description.trim() || null,
+    owner: owner.trim() || null,
+  };
+  const patch = changedFields(baseline, next);
+  const dirty = Object.keys(patch).length > 0;
+  const stale = hasFieldConflicts(baseline, current, patch);
+  const review = useChangeReview<{
+    flagKey: string;
+    body: Partial<typeof next>;
+    before: typeof next;
+  }>(
+    async ({ flagKey, body }) => {
+      const saved = await update.mutateAsync({ flagKey, body });
+      const values = {
+        description: saved.custom_description,
+        owner: saved.owner,
+      };
+      setBaseline(values);
+      setDescription(values.description ?? "");
+      setOwner(values.owner ?? "");
+      setHydrationPending(false);
       toast.success("Flag details saved");
-    } catch {
-      toast.error("Failed to save flag details");
-    }
+    },
+    (pending) => hasFieldConflicts(pending.before, current, pending.body),
+    flag.key,
+  );
+
+  const sourceChanged =
+    observed.description !== current.description ||
+    observed.owner !== current.owner;
+  if (sourceChanged) setObserved(current);
+  const pristine =
+    description === (baseline.description ?? "") &&
+    owner === (baseline.owner ?? "");
+  if (
+    (sourceChanged || hydrationPending) &&
+    pristine &&
+    !review.saving &&
+    !update.isPending
+  ) {
+    setBaseline(current);
+    setDescription(current.description ?? "");
+    setOwner(current.owner ?? "");
+    setHydrationPending(false);
+  } else if (sourceChanged) {
+    setHydrationPending(true);
+  }
+
+  function save() {
+    review.review(
+      { flagKey: flag.key, body: patch, before: baseline },
+      describeChanges(baseline, patch),
+    );
   }
 
   if (!canWrite) {
@@ -533,6 +668,18 @@ function FlagMetadataEditor({
 
   return (
     <div className="space-y-2.5 px-3 py-2.5">
+      {review.dialog}
+      {stale && (
+        <StaleFormNotice
+          onReload={() => {
+            setBaseline(current);
+            setDescription(current.description ?? "");
+            setOwner(current.owner ?? "");
+            setHydrationPending(false);
+            review.cancel();
+          }}
+        />
+      )}
       <div className="space-y-1">
         <Label
           htmlFor={`flag-description-${flag.key}`}
@@ -542,6 +689,7 @@ function FlagMetadataEditor({
         </Label>
         <Input
           id={`flag-description-${flag.key}`}
+          disabled={review.saving || update.isPending}
           value={description}
           maxLength={MAX_FEATURE_FLAG_DESCRIPTION_LENGTH}
           onChange={(event) => setDescription(event.target.value)}
@@ -558,6 +706,7 @@ function FlagMetadataEditor({
         </Label>
         <Input
           id={`flag-owner-${flag.key}`}
+          disabled={review.saving || update.isPending}
           value={owner}
           maxLength={MAX_FEATURE_FLAG_OWNER_LENGTH}
           onChange={(event) => setOwner(event.target.value)}
@@ -588,7 +737,7 @@ function FlagMetadataEditor({
             variant="primary"
             size="sm"
             onClick={save}
-            disabled={!dirty || update.isPending}
+            disabled={stale || !dirty || update.isPending}
           >
             {update.isPending ? "Saving…" : "Save details"}
           </Button>
@@ -641,7 +790,10 @@ function AccountSearchPicker({
   const normalizedSearch = search.trim();
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedSearch(normalizedSearch), 300);
+    const timer = window.setTimeout(
+      () => setDebouncedSearch(normalizedSearch),
+      300,
+    );
     return () => window.clearTimeout(timer);
   }, [normalizedSearch]);
 
@@ -652,9 +804,12 @@ function AccountSearchPicker({
     kind,
   );
   const waitingForSearch = normalizedSearch !== debouncedSearch;
-  const results = debouncedSearch && !waitingForSearch
-    ? (data?.users ?? []).filter((account) => !excludedIds.includes(account.id))
-    : [];
+  const results =
+    debouncedSearch && !waitingForSearch
+      ? (data?.users ?? []).filter(
+          (account) => !excludedIds.includes(account.id),
+        )
+      : [];
 
   // A flag card renders one picker per scope, so only fetch defaults while this
   // picker's dropdown is actually open; identical keys dedupe across cards.
@@ -707,7 +862,9 @@ function AccountSearchPicker({
       {normalizedSearch ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
           {isLoading || waitingForSearch ? (
-            <p className="px-3 py-2 text-xs text-muted-foreground">Searching…</p>
+            <p className="px-3 py-2 text-xs text-muted-foreground">
+              Searching…
+            </p>
           ) : results.length === 0 ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">
               {isOrg
@@ -729,7 +886,9 @@ function AccountSearchPicker({
         showDefaults && (
           <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
             {defaultsLoading ? (
-              <p className="px-3 py-2 text-xs text-muted-foreground">Loading…</p>
+              <p className="px-3 py-2 text-xs text-muted-foreground">
+                Loading…
+              </p>
             ) : defaults.length === 0 ? (
               <p className="px-3 py-2 text-xs text-muted-foreground">
                 {isOrg
@@ -882,7 +1041,11 @@ function ScopeRow({
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 function word(s: ScopeState): string {
-  return s === "enabled" ? "Enabled" : s === "disabled" ? "Disabled" : "Inherit";
+  return s === "enabled"
+    ? "Enabled"
+    : s === "disabled"
+      ? "Disabled"
+      : "Inherit";
 }
 function kindVariant(kind: FlagKind): "info" | "accent" | "secondary" {
   return kind === "experiment"

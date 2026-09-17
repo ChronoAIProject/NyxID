@@ -712,6 +712,24 @@ pub enum EventDedupClaimResult {
 pub struct EventDedupStore;
 
 impl EventDedupStore {
+    /// A live claim must not be acknowledged as delivered by retry-aware ingress.
+    pub async fn is_committed(
+        db: &mongodb::Database,
+        namespace: &str,
+        scope: &str,
+        event_id: &str,
+    ) -> AppResult<bool> {
+        Ok(db
+            .collection::<EventDedupRecord>(EVENT_DEDUP_COLLECTION_NAME)
+            .find_one(doc! {
+                "_id": hash_parts(&[namespace, scope, event_id]),
+                "state": event_state(EventDedupState::Committed),
+                "$expr": { "$gt": ["$expires_at", "$$NOW"] },
+            })
+            .await?
+            .is_some())
+    }
+
     pub async fn claim(
         db: &mongodb::Database,
         namespace: &str,

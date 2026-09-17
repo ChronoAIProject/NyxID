@@ -60,6 +60,8 @@ pub struct OraclePool {
     /// Whether this pool may drive a worker browser to extract arbitrary URLs.
     #[serde(default)]
     pub allow_extract: bool,
+    #[serde(default = "default_require_model_match")]
+    pub require_model_match: bool,
     /// Maximum tasks dispatched (in flight) at once across all workers.
     pub max_workers: u32,
     /// Maximum queued (not yet dispatched) tasks before submits are rejected.
@@ -96,6 +98,10 @@ impl std::fmt::Debug for OraclePool {
     }
 }
 
+pub fn default_require_model_match() -> bool {
+    true
+}
+
 pub const DEFAULT_MAX_WORKERS: u32 = 3;
 pub const DEFAULT_MAX_QUEUE_LENGTH: u32 = 50;
 pub const DEFAULT_PER_USER_MAX_INFLIGHT: u32 = 2;
@@ -124,6 +130,7 @@ mod tests {
 
     fn make_pool() -> OraclePool {
         OraclePool {
+            require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: "chatgpt-pro".to_string(),
@@ -132,7 +139,7 @@ mod tests {
             visibility: OraclePoolVisibility::Platform,
             worker_token_hash: "deadbeef".repeat(8),
             chatgpt_project_url: None,
-            default_model_label: Some("chatgpt-5.5-pro".to_string()),
+            default_model_label: Some("chatgpt-6-pro".to_string()),
             allow_extract: false,
             max_workers: DEFAULT_MAX_WORKERS,
             max_queue_length: DEFAULT_MAX_QUEUE_LENGTH,
@@ -155,6 +162,17 @@ mod tests {
         assert!(!restored.allow_extract);
         assert_eq!(restored.max_workers, DEFAULT_MAX_WORKERS);
         assert_eq!(restored.task_timeout_secs, DEFAULT_TASK_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn oracle_legacy_pool_requires_model_match() {
+        let mut doc = bson::to_document(&make_pool()).unwrap();
+        doc.remove("require_model_match");
+        assert!(
+            bson::from_document::<OraclePool>(doc)
+                .unwrap()
+                .require_model_match
+        );
     }
 
     #[test]
