@@ -1572,7 +1572,22 @@ export async function selectModelSwitcher(page, requested) {
         await page.locator('body').press('Escape', interactionOptions(cleanup));
         await budgetPause(cleanup, 100);
       }
-    } catch {} finally { cleanup.controller.abort(); clearTimeout(cleanupTimer); }
+    } catch {} finally {
+      // Drop the switcher marker before returning. readModelSwitcher stamps
+      // data-nyx-switcher on whichever control it claims, and on a page with no
+      // header switcher that claim falls through to the composer pill itself.
+      // Every composer-picker selector excludes marked elements, so a marker
+      // that outlives this call makes pickerSnapshot report pill_source=none
+      // and the worker can never select a model again: only readModelSwitcher
+      // clears markers, and it is the same path that keeps failing. Observed on
+      // a live worker 2026-09-17 - one tab stuck on picker_unavailable while
+      // its two siblings on the same machine were healthy, cleared by removing
+      // the attribute alone, with no restart.
+      await page.locator('body').evaluate(body =>
+        body.querySelectorAll('[data-nyx-switcher]').forEach(el => el.removeAttribute('data-nyx-switcher'))
+      ).catch(() => {});
+      cleanup.controller.abort(); clearTimeout(cleanupTimer);
+    }
   }
   return result;
 }
