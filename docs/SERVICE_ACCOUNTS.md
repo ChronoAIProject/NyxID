@@ -720,7 +720,8 @@ this existing `proxy_operation_policy` on that catalog row:
 ```
 
 Paths are relative to the configured base URL. Queries such as `public=true` do not
-need another rule. This policy denies unlisted methods/paths before execution,
+need another rule. This policy denies unlisted methods/paths with
+`404 Service operation not found` before execution,
 including Ornn's auth-only assistant/audit/account routes. It is required both when
 a grant selects the target and on every Curation resolution; removing it fails
 closed. An explicit empty policy is valid and denies all operations. General

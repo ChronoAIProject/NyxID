@@ -764,6 +764,8 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
             StatusCode::OK
         );
     }
+    let allowed_request_count = catalog.received_requests().await.unwrap().len();
+    assert_eq!(allowed_request_count, 3);
     for (method, path) in [
         ("POST", "/api/v1/assistant/chat"),
         ("POST", "/api/v1/skills/owned-skill/audit"),
@@ -771,18 +773,21 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         ("DELETE", "/api/v1/skills/owned-skill"),
         ("PATCH", "/api/v1/skills/owned-skill"),
     ] {
+        let (status, body) = request(
+            &f.state,
+            method,
+            &format!("/api/v1/proxy/{}{path}", f.service.id),
+            &bearer,
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+        assert_eq!(body["error_code"], 1003);
+        assert_eq!(body["message"], "Not found: Service operation not found");
         assert_eq!(
-            request(
-                &f.state,
-                method,
-                &format!("/api/v1/proxy/{}{path}", f.service.id),
-                &bearer,
-                Some(json!({}))
-            )
-            .await
-            .0,
-            StatusCode::FORBIDDEN,
-            "{method} {path}"
+            catalog.received_requests().await.unwrap().len(),
+            allowed_request_count,
+            "blocked {method} {path} must not reach upstream"
         );
     }
     assert_eq!(
