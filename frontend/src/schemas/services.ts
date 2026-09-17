@@ -150,9 +150,35 @@ function applySshFieldValidation(
   }
 }
 
+export const proxyOperationPolicySchema = z.object({
+  rules: z.array(z.object({
+    method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
+    path_template: z.string().refine((path) => new TextEncoder().encode(path).length <= 2048, "Path must be at most 2048 bytes").refine((path) => {
+      if (!path.startsWith("/") || /[%?#\\]/.test(path) || Array.from(path).some((char) => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127) || path.includes("//")) return false;
+      if (path === "/") return true;
+      return path.slice(1).split("/").every((part) => part !== "" && part !== "." && part !== ".." &&
+        (/^\{[A-Za-z0-9_]+\}$/.test(part) || !Array.from(part).some((char) => "{}*[]()|".includes(char))));
+    }, "Use an absolute path with optional {parameter} segments; wildcards and query strings are not allowed"),
+  })).max(256),
+});
+export type ProxyOperationPolicy = z.infer<typeof proxyOperationPolicySchema>;
+
+const sharedServiceFields = {
+  inference: inferenceMetadataSchema.nullish(),
+  platform_key: platformKeyConfigSchema.optional(),
+  credential: z.string().optional(),
+  byok_pricing: lanePricingViewSchema.nullish(),
+  platform_key_pricing: lanePricingViewSchema.nullish(),
+  proxy_operation_policy: proxyOperationPolicySchema.nullish(),
+};
+export const sharedServiceSchema = z.object(sharedServiceFields);
+export type SharedServiceFormData = z.infer<typeof sharedServiceSchema>;
+
 // CR-6: Aligned with backend max length of 200 characters
 export const createServiceSchema = z
   .object({
+    ...sharedServiceFields,
+    provider_config_id: z.string().optional(),
     name: z
       .string()
       .min(1, "Name is required")
@@ -167,7 +193,6 @@ export const createServiceSchema = z
     auth_type: z.enum(AUTH_TYPES).optional(),
     /// JSON body key for `body` auth. Required when `auth_type === "body"`.
     auth_key_name: optionalString,
-    credential: optionalString,
     service_category: z.enum(SERVICE_CATEGORIES).optional(),
     host: optionalString,
     port: optionalString,
@@ -201,7 +226,7 @@ export const createServiceSchema = z
         });
       }
 
-      if (value.credential && value.service_category !== "internal") {
+      if (value.credential && !value.platform_key && value.service_category !== "internal") {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["service_category"],
@@ -280,11 +305,7 @@ export type WsFrameInjection = z.infer<typeof wsFrameInjectionSchema>;
 
 export const updateServiceSchema = z
   .object({
-    inference: inferenceMetadataSchema.nullish(),
-    platform_key: platformKeyConfigSchema.optional(),
-    credential: z.string().optional(),
-    byok_pricing: lanePricingViewSchema.nullish(),
-    platform_key_pricing: lanePricingViewSchema.nullish(),
+    ...sharedServiceFields,
     service_type: z.enum(SERVICE_TYPES),
     visibility: z.enum(VISIBILITY_OPTIONS).optional(),
     name: z

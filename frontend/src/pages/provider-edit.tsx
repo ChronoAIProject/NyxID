@@ -1,3 +1,4 @@
+import { ProviderServices } from "@/components/providers/provider-services";
 import type { ProviderConfig } from "@/types/api";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
@@ -149,6 +150,7 @@ function ProviderEditForm({ provider }: { readonly provider: ProviderConfig }) {
         title={`Edit ${provider.name}`}
       />
 
+      <ProviderServices provider={provider} />
       <div className="max-w-2xl">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">

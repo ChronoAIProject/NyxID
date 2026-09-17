@@ -43,6 +43,7 @@ frontend/src/components/service-icons/api-slack-bot.tsx
 frontend/src/components/service-icons/api-slack.tsx
 frontend/src/components/service-icons/api-spotify.tsx
 frontend/src/components/service-icons/api-telegram-bot.tsx
+frontend/src/components/service-icons/api-telnyx.tsx
 frontend/src/components/service-icons/api-tiktok.tsx
 frontend/src/components/service-icons/api-twilio.tsx
 frontend/src/components/service-icons/api-twitch.tsx

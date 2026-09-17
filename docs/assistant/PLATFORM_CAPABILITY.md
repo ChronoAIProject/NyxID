@@ -1,3 +1,5 @@
+> Historical design discussion. Current service configuration and retirement behavior is documented in [SERVICE_CONFIGURATION.md](../SERVICE_CONFIGURATION.md) and [PLATFORM_KEYS_AND_INFERENCE.md](../PLATFORM_KEYS_AND_INFERENCE.md). These proposals are not deployment instructions.
+
 # Selling Capability to Someone Else's AI
 
 > **Superseded (2026-08-21):** replaced by `ONBOARDING_CAPABILITIES.md` — the converged onboarding-scoped plan after two adversarial reviews. Kept as working history.

@@ -447,23 +447,18 @@ fn oauth_public_cors() -> CorsLayer {
 ///
 /// The no-state builder remains for integration tests and compatibility
 /// callers that attach application state themselves; production uses
-/// `build_router_with_state` so the platform-operations feature gate can be
-/// installed at the router boundary.
+/// `build_router_with_state` for state-aware authentication middleware.
 #[allow(dead_code)]
 pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     build_router_internal(None)
 }
 
-/// Build the production router with state-aware middleware attached to the
-/// caller-facing platform-operations nest. Admin platform-ops routes remain
-/// deliberately ungated so operators can stage templates and configuration.
+/// Build the production router with state-aware authentication middleware.
 pub fn build_router_with_state(state: AppState) -> (Router<AppState>, Router<AppState>) {
     build_router_internal(Some(state))
 }
 
-fn build_router_internal(
-    platform_gate_state: Option<AppState>,
-) -> (Router<AppState>, Router<AppState>) {
+fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, Router<AppState>) {
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
@@ -681,6 +676,14 @@ fn build_router_internal(
             get(handlers::user_tokens::generic_oauth_callback)
                 .post(handlers::user_tokens::generic_oauth_callback_post),
         )
+        .route(
+            "/{provider_id}/services",
+            get(handlers::providers::list_linked_services),
+        )
+        .route(
+            "/{provider_id}/services/{service_id}",
+            put(handlers::providers::link_service),
+        )
         .route("/{provider_id}", get(handlers::providers::get_provider))
         .route("/{provider_id}", put(handlers::providers::update_provider))
         .route(
@@ -815,28 +818,6 @@ fn build_router_internal(
         );
 
     let admin_routes = Router::new()
-        .route(
-            "/platform-ops",
-            get(handlers::admin_platform_ops::list_platform_operations),
-        )
-        .route(
-            "/platform-ops/vendor-requirements",
-            get(handlers::admin_platform_ops::get_vendor_requirements),
-        )
-        .route(
-            "/platform-ops/vendor-templates",
-            get(handlers::admin_platform_ops::list_vendor_templates)
-                .post(handlers::admin_platform_ops::create_vendor_template),
-        )
-        .route(
-            "/platform-ops/vendor-templates/{template_id}",
-            put(handlers::admin_platform_ops::update_vendor_template)
-                .delete(handlers::admin_platform_ops::disable_vendor_template),
-        )
-        .route(
-            "/platform-ops/{op}",
-            put(handlers::admin_platform_ops::update_platform_operation),
-        )
         .route(
             "/feature-flags",
             get(handlers::admin_feature_flags::list_feature_flags),
@@ -1480,7 +1461,7 @@ fn build_router_internal(
             "/send",
             post(handlers::channel_relay::send_message).layer(DefaultBodyLimit::max(
                 crate::services::channel_media_service::request_body_limit(
-                    platform_gate_state
+                    router_state
                         .as_ref()
                         .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
                             state.config.channel_media_max_bytes
@@ -1496,7 +1477,7 @@ fn build_router_internal(
             "/reply",
             post(handlers::channel_relay::async_reply).layer(DefaultBodyLimit::max(
                 crate::services::channel_media_service::request_body_limit(
-                    platform_gate_state
+                    router_state
                         .as_ref()
                         .map_or(crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES, |state| {
                             state.config.channel_media_max_bytes
@@ -1748,26 +1729,6 @@ fn build_router_internal(
             )
     )
     .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
-
-    let platform_operation_routes = Router::new()
-        .route("/x-search", post(handlers::platform_ops::x_search))
-        .route("/speak", post(handlers::platform_ops::speak))
-        .route("/call-and-say", post(handlers::platform_ops::call_and_say));
-    let platform_operation_routes = match platform_gate_state {
-        Some(state) => platform_operation_routes.layer(middleware::from_fn_with_state(
-            state,
-            handlers::platform_ops::platform_services_feature_gate,
-        )),
-        None => platform_operation_routes,
-    }
-    // Every current and future caller-facing operation inherits the flag gate
-    // at the nest boundary. Admin routes are mounted separately below and
-    // intentionally stay ungated for staged provisioning.
-    .layer(middleware::from_fn(reject_delegated_tokens))
-    .layer(middleware::from_fn(reject_service_account_tokens))
-    .layer(middleware::from_fn(reject_relay_tokens));
-
-    let api_v1_platform_operations = Router::new().nest("/platform-ops", platform_operation_routes);
 
     // Routes accessible by both users and service accounts (block delegated tokens)
     let api_v1_shared = Router::new()
@@ -2023,7 +1984,6 @@ fn build_router_internal(
     let api_v1 = api_v1_public
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
-        .merge(api_v1_platform_operations)
         .merge(api_v1_human_only);
 
     let well_known_routes = Router::new()
@@ -2150,4 +2110,46 @@ fn build_router_internal(
     let private = private.merge(mcp_transport_routes).merge(public_mcp_routes);
 
     (public_oauth, private)
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn platform_operation_routes_are_unmounted() {
+        let Some(db) = crate::test_utils::connect_test_database("removed_operation_routes").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (_, private) = build_router_with_state(state.clone());
+        let app = private.with_state(state);
+        for (method, path) in [
+            ("POST", "/api/v1/platform-ops/x-search"),
+            ("POST", "/api/v1/platform-ops/speak"),
+            ("POST", "/api/v1/platform-ops/call-and-say"),
+            ("GET", "/api/v1/admin/platform-ops"),
+            ("PUT", "/api/v1/admin/platform-ops/x_search"),
+            ("GET", "/api/v1/admin/platform-ops/vendor-templates"),
+            ("POST", "/api/v1/admin/platform-ops/vendor-templates"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+        }
+        db.drop().await.unwrap();
+    }
 }

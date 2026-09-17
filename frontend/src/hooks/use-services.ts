@@ -44,6 +44,7 @@ export function useCreateService() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["services"] });
+      void queryClient.invalidateQueries({ queryKey: ["provider-services"] });
     },
   });
 }
@@ -63,6 +64,7 @@ export function useUpdateService() {
     },
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ["services"] });
+      void queryClient.invalidateQueries({ queryKey: ["provider-services"] });
       void queryClient.invalidateQueries({
         queryKey: ["services", variables.serviceId],
       });
@@ -79,6 +81,7 @@ export function useDeleteService() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["services"] });
+      void queryClient.invalidateQueries({ queryKey: ["provider-services"] });
     },
   });
 }
@@ -100,6 +103,7 @@ export function useUpdateSshAuthMode() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["services"] });
+      void queryClient.invalidateQueries({ queryKey: ["provider-services"] });
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
       void queryClient.invalidateQueries({ queryKey: ["user-services"] });
     },
@@ -254,6 +258,27 @@ export function useDisconnectService() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["connections"] });
+    },
+  });
+}
+
+export function useProviderServices(providerId: string) {
+  return useQuery({
+    queryKey: ["provider-services", providerId],
+    queryFn: async () => (await api.get<{ services: readonly DownstreamService[] }>(`/providers/${providerId}/services`)).services,
+    enabled: Boolean(providerId),
+  });
+}
+
+export function useLinkProviderService() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ providerId, serviceId }: { providerId: string; serviceId: string }) =>
+      api.put<DownstreamService>(`/providers/${providerId}/services/${serviceId}`, {}),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["provider-services"] });
+      void queryClient.invalidateQueries({ queryKey: ["services"] });
+      void queryClient.invalidateQueries({ queryKey: ["catalog"] });
     },
   });
 }

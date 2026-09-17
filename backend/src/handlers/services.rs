@@ -37,6 +37,7 @@ use super::services_helpers::{
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateServiceRequest {
+    pub provider_config_id: Option<String>,
     pub name: String,
     pub slug: Option<String>,
     pub description: Option<String>,
@@ -140,6 +141,10 @@ pub struct SshServiceConfigResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    pub provider_config_id: Option<String>,
+    /// Admin-only inspection: false for absent/encrypted-empty material, null for
+    /// unreadable material or a caller without inspection permission.
+    pub credential_configured: Option<bool>,
     pub id: String,
     pub name: String,
     pub slug: String,
@@ -400,7 +405,11 @@ pub struct UpdateServiceRequest {
     #[serde(default)]
     pub anonymous_endpoints: Option<Vec<AnonymousEndpointRule>>,
     /// Replace the data-plane operation allowlist. Empty rules deny all.
-    pub proxy_operation_policy: Option<ProxyOperationPolicy>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub proxy_operation_policy: Option<Option<ProxyOperationPolicy>>,
 }
 
 impl std::fmt::Debug for UpdateServiceRequest {
@@ -799,6 +808,7 @@ pub async fn list_services(
         filter.insert("service_category", category.as_str());
     }
 
+    filter.extend(crate::services::retired_service_service::exclusion_filter());
     let services: Vec<DownstreamService> = state
         .db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -814,13 +824,13 @@ pub async fn list_services(
     let catalog_ids: Vec<&str> = services.iter().map(|s| s.id.as_str()).collect();
     let mut viewer_routing = compute_viewer_routing(&state.db, &user_id_str, &catalog_ids).await?;
 
-    let items: Vec<ServiceResponse> = services
-        .into_iter()
-        .map(|svc| {
-            let routing = viewer_routing.remove(&svc.id);
-            service_to_response_with_viewer(svc, routing.as_ref())
-        })
-        .collect();
+    let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
+    let inspection_keys = can_inspect.then_some(state.encryption_keys.as_ref());
+    let mut items = Vec::with_capacity(services.len());
+    for svc in services {
+        let routing = viewer_routing.remove(&svc.id);
+        items.push(service_to_response_with_viewer(inspection_keys, svc, routing.as_ref()).await);
+    }
 
     Ok(Json(ServiceListResponse { services: items }))
 }
@@ -853,6 +863,24 @@ pub async fn create_service(
     }
 
     let service_type = normalize_service_type(body.service_type.as_deref())?;
+    if body.provider_config_id.is_some()
+        && (service_type != "http" || body.auth_method.as_deref() == Some("oidc"))
+    {
+        return Err(AppError::ValidationError(
+            "Only downstream HTTP services can be linked to a provider".into(),
+        ));
+    }
+
+    if body
+        .credential
+        .as_ref()
+        .is_some_and(|key| !key.trim().is_empty())
+        && (service_type != "http" || matches!(body.auth_method.as_deref(), Some("none" | "oidc")))
+    {
+        return Err(AppError::ValidationError(
+            "This service has no downstream shared-credential injection path".into(),
+        ));
+    }
 
     // CR-18: Validate input lengths before doing work based on input
     if body.name.len() > 200 {
@@ -1031,12 +1059,14 @@ pub async fn create_service(
         let service_category =
             derive_http_service_category(&auth_method, body.service_category.as_deref())?;
         let requires_user_credential = service_category == "connection";
-        validate_master_credential_shape(
-            &auth_method,
-            !credential.is_empty() && auth_method != "oidc",
-            &service_category,
-            None,
-        )?;
+        if body.platform_key.is_none() {
+            validate_master_credential_shape(
+                &auth_method,
+                !credential.is_empty() && auth_method != "oidc",
+                &service_category,
+                body.provider_config_id.as_deref(),
+            )?;
+        }
 
         let (encrypted_cred, oauth_client_id) = if auth_method == "oidc" {
             let callback_url = format!("{}/callback", base_url.trim_end_matches('/'));
@@ -1065,7 +1095,11 @@ pub async fn create_service(
 
             (enc, Some(client.id))
         } else {
-            let enc = state.encryption_keys.encrypt(credential.as_bytes()).await?;
+            let enc = if credential.trim().is_empty() {
+                Vec::new()
+            } else {
+                state.encryption_keys.encrypt(credential.as_bytes()).await?
+            };
             (enc, None)
         };
 
@@ -1213,11 +1247,16 @@ pub async fn create_service(
     }
     if let Some(config) = body.platform_key.as_mut() {
         require_admin(&state, &auth_user).await?;
-        crate::services::platform_key_service::validate_config(&state.db, config, None).await?;
+        crate::services::platform_key_service::validate_config(
+            &state.db,
+            config,
+            body.provider_config_id.as_deref(),
+        )
+        .await?;
     }
     validate_service_billing(body.billing.as_ref())?;
 
-    let new_service = DownstreamService {
+    let mut new_service = DownstreamService {
         id: id.clone(),
         name: body.name.clone(),
         slug: slug.clone(),
@@ -1229,7 +1268,14 @@ pub async fn create_service(
         auth_type,
         auth_key_name,
         credential_encrypted: encrypted_cred,
-        platform_key: body.platform_key.clone(),
+        platform_key: body.platform_key.clone().or_else(|| {
+            (body
+                .credential
+                .as_ref()
+                .is_some_and(|key| !key.trim().is_empty())
+                && auth_method != "oidc")
+                .then(Default::default)
+        }),
         openapi_spec_url,
         asyncapi_spec_url,
         streaming_supported,
@@ -1247,7 +1293,7 @@ pub async fn create_service(
         forward_access_token: body.forward_access_token,
         inject_delegation_token: false,
         delegation_token_scope: "llm:proxy".to_string(),
-        provider_config_id: None,
+        provider_config_id: body.provider_config_id.clone(),
         homepage_url: body.homepage_url.clone(),
         repository_url: body.repository_url.clone(),
         issues_url: body.issues_url.clone(),
@@ -1270,13 +1316,25 @@ pub async fn create_service(
         created_at: now,
         updated_at: now,
     };
+    crate::services::retired_service_service::require_available(&new_service)?;
     anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&new_service)?;
 
-    state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .insert_one(&new_service)
+    if let Some(provider_id) = body.provider_config_id.as_deref() {
+        crate::services::provider_link_service::link(
+            &state.db,
+            provider_id,
+            &id,
+            Some(&new_service),
+        )
         .await?;
+        new_service = fetch_service(&state, &id).await?;
+    } else {
+        state
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&new_service)
+            .await?;
+    }
 
     for (changed, event) in [
         (body.platform_key.is_some(), "service_platform_key_changed"),
@@ -1343,7 +1401,9 @@ pub async fn create_service(
     // so the viewer-routing fields default to "no binding" without a
     // lookup query.
     let created = fetch_service(&state, &id).await?;
-    Ok(Json(service_to_response_with_viewer(created, None)))
+    Ok(Json(
+        service_to_response_with_viewer(Some(&state.encryption_keys), created, None).await,
+    ))
 }
 
 /// DELETE /api/v1/services/:service_id
@@ -1475,10 +1535,15 @@ pub async fn get_service(
     let mut viewer_routing =
         compute_viewer_routing(&state.db, &viewer_id, &[service.id.as_str()]).await?;
     let routing = viewer_routing.remove(&service.id);
-    Ok(Json(service_to_response_with_viewer(
-        service,
-        routing.as_ref(),
-    )))
+    let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
+    Ok(Json(
+        service_to_response_with_viewer(
+            can_inspect.then_some(state.encryption_keys.as_ref()),
+            service,
+            routing.as_ref(),
+        )
+        .await,
+    ))
 }
 
 /// PUT /api/v1/services/{service_id}
@@ -1508,14 +1573,22 @@ pub async fn update_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
-    let is_platform_vendor = catalog_spec_sync::is_platform_vendor_service(&service);
-    if is_platform_vendor && (body.openapi_spec_url.is_some() || body.asyncapi_spec_url.is_some()) {
-        return Err(AppError::BadRequest(
-            "Platform vendor rows cannot configure OpenAPI or AsyncAPI specs".to_string(),
-        ));
-    }
-    if body.inference.is_some() || body.platform_key.is_some() || body.credential.is_some() {
+    if body.inference.is_some()
+        || body.platform_key.is_some()
+        || body.credential.is_some()
+        || body.proxy_operation_policy.is_some()
+    {
         require_admin(&state, &auth_user).await?;
+    }
+    if body.platform_key.is_none()
+        && service.platform_key.is_none()
+        && body
+            .credential
+            .as_ref()
+            .is_some_and(|key| !key.trim().is_empty())
+        && !crate::services::platform_key_service::legacy_master_credential(&service)
+    {
+        body.platform_key = Some(Default::default());
     }
     if let Some(config) = body.platform_key.as_mut() {
         crate::services::platform_key_service::validate_config(
@@ -1577,16 +1650,18 @@ pub async fn update_service(
 
     // Build the $set document with only provided fields
     let mut set_doc = doc! {};
-    if let Some(credential) = &body.credential {
-        if credential.trim().is_empty() {
-            return Err(AppError::ValidationError(
-                "credential must not be empty".into(),
-            ));
-        }
+    if let Some(credential) = body
+        .credential
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         if service.service_type != "http" || service.auth_method == "oidc" {
             return Err(AppError::ValidationError(
                 "This service does not accept a downstream master credential".into(),
             ));
+        }
+        if service.auth_method == "none" {
+            crate::services::platform_key_service::effective_auth(&state.db, &service).await?;
         }
         if service.platform_key.is_none() && body.platform_key.is_none() {
             validate_master_credential_shape(
@@ -1829,18 +1904,14 @@ pub async fn update_service(
             } else {
                 service.asyncapi_spec_url.clone()
             };
-            http_docs_refresh = if is_platform_vendor {
-                None
-            } else {
-                Some(
-                    api_docs_service::discover_service_docs(
-                        docs_base_url,
-                        explicit_openapi,
-                        explicit_asyncapi,
-                    )
-                    .await,
+            http_docs_refresh = Some(
+                api_docs_service::discover_service_docs(
+                    docs_base_url,
+                    explicit_openapi,
+                    explicit_asyncapi,
                 )
-            };
+                .await,
+            );
         }
         "ssh" => {
             let has_http_only_updates = body.base_url.is_some()
@@ -2142,7 +2213,9 @@ pub async fn update_service(
     }
 
     if let Some(policy) = body.proxy_operation_policy.clone() {
-        let normalized = crate::services::proxy_authorization::normalize_policy(policy)?;
+        let normalized = policy
+            .map(crate::services::proxy_authorization::normalize_policy)
+            .transpose()?;
         set_doc.insert(
             "proxy_operation_policy",
             bson::to_bson(&normalized)
@@ -2160,6 +2233,13 @@ pub async fn update_service(
     )?;
 
     if set_doc.is_empty() {
+        if body
+            .credential
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return get_service(State(state), auth_user, Path(service_id)).await;
+        }
         return Err(AppError::ValidationError(
             "At least one field must be provided for update".to_string(),
         ));
@@ -2403,10 +2483,15 @@ pub async fn update_service(
     let mut viewer_routing =
         compute_viewer_routing(&state.db, &actor_id, &[updated.id.as_str()]).await?;
     let routing = viewer_routing.remove(&updated.id);
-    Ok(Json(service_to_response_with_viewer(
-        updated,
-        routing.as_ref(),
-    )))
+    let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
+    Ok(Json(
+        service_to_response_with_viewer(
+            can_inspect.then_some(state.encryption_keys.as_ref()),
+            updated,
+            routing.as_ref(),
+        )
+        .await,
+    ))
 }
 
 /// POST /api/v1/services/{service_id}/resync-identity
@@ -2875,6 +2960,7 @@ mod tests {
         base_url: String,
     ) -> CreateServiceRequest {
         CreateServiceRequest {
+            provider_config_id: None,
             name: name.to_string(),
             slug: Some(slug.to_string()),
             description: None,
@@ -2906,6 +2992,328 @@ mod tests {
             anonymous_endpoints: vec![],
             proxy_operation_policy: None,
         }
+    }
+
+    #[tokio::test]
+    async fn linked_shared_service_preserves_secrets_and_policy_and_enforces_admin_access() {
+        let Some(db) = connect_test_database("admin_shared_service").await else {
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let person_id = seed_user(&db, false).await;
+        let state = test_app_state(db.clone());
+        crate::services::provider_service::seed_default_providers(&db, &state.encryption_keys)
+            .await
+            .unwrap();
+        let provider = db
+            .collection::<crate::models::provider_config::ProviderConfig>(
+                crate::models::provider_config::COLLECTION_NAME,
+            )
+            .find_one(doc! { "slug": "telnyx" })
+            .await
+            .unwrap()
+            .unwrap();
+        crate::services::provider_service::seed_default_services(&db, &state.encryption_keys)
+            .await
+            .unwrap();
+        let seeded = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "slug": "api-telnyx" })
+            .await
+            .unwrap()
+            .unwrap();
+        // Legacy create encrypted an absent credential. Status uses the crypto
+        // API without rewriting the record or its legacy access configuration.
+        for visibility in ["public", "private"] {
+            let mut legacy = dummy_service();
+            legacy.id = uuid::Uuid::new_v4().to_string();
+            legacy.slug = format!("legacy-empty-{visibility}");
+            legacy.visibility = visibility.into();
+            legacy.service_category = "internal".into();
+            legacy.provider_config_id = None;
+            legacy.platform_key = None;
+            legacy.credential_encrypted = state.encryption_keys.encrypt(b"").await.unwrap();
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&legacy)
+                .await
+                .unwrap();
+            let Json(response) = super::get_service(
+                State(state.clone()),
+                test_auth_user(&admin_id),
+                Path(legacy.id.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.credential_configured, Some(false));
+            assert!(response.platform_key.is_none());
+            let unchanged = super::fetch_service(&state, &legacy.id).await.unwrap();
+            assert_eq!(unchanged.credential_encrypted, legacy.credential_encrypted);
+        }
+        let mut no_auth = dummy_service();
+        no_auth.id = uuid::Uuid::new_v4().to_string();
+        no_auth.auth_method = "none".into();
+        no_auth.provider_config_id = None;
+        no_auth.credential_encrypted.clear();
+        no_auth.platform_key = None;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&no_auth)
+            .await
+            .unwrap();
+        let request = serde_json::from_value(
+            serde_json::json!({ "credential": "rejected-fixture", "platform_key": {} }),
+        )
+        .unwrap();
+        assert!(matches!(
+            update_service(
+                State(state.clone()),
+                test_auth_user(&admin_id),
+                Default::default(),
+                Path(no_auth.id),
+                Json(request)
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        let request = serde_json::from_value(serde_json::json!({ "name": "No auth", "base_url": "https://example.com", "auth_type": "none", "credential": "rejected-fixture", "platform_key": {} })).unwrap();
+        assert!(matches!(
+            create_service(
+                State(state.clone()),
+                test_auth_user(&admin_id),
+                Default::default(),
+                Json(request)
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        let mut legacy_private = dummy_service();
+        legacy_private.id = uuid::Uuid::new_v4().to_string();
+        legacy_private.slug = "legacy-private-master".into();
+        legacy_private.service_category = "internal".into();
+        legacy_private.visibility = "private".into();
+        legacy_private.provider_config_id = None;
+        legacy_private.platform_key = None;
+        legacy_private.auth_method = "bearer".into();
+        legacy_private.requires_user_credential = false;
+        legacy_private.credential_encrypted = state
+            .encryption_keys
+            .encrypt(b"private-fixture")
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&legacy_private)
+            .await
+            .unwrap();
+        for payload in [
+            serde_json::json!({ "name": "Private label" }),
+            serde_json::json!({ "credential": "private-rotated-fixture" }),
+        ] {
+            let request = serde_json::from_value(payload).unwrap();
+            let Json(updated) = update_service(
+                State(state.clone()),
+                test_auth_user(&admin_id),
+                Default::default(),
+                Path(legacy_private.id.clone()),
+                Json(request),
+            )
+            .await
+            .unwrap();
+            assert!(updated.platform_key.is_none());
+            assert_eq!(updated.visibility, "private");
+            assert_eq!(updated.credential_configured, Some(true));
+        }
+        let staged: UpdateServiceRequest =
+            serde_json::from_value(serde_json::json!({ "credential": "staged-fixture" })).unwrap();
+        let Json(staged) = update_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Default::default(),
+            Path(seeded.id.clone()),
+            Json(staged),
+        )
+        .await
+        .unwrap();
+        assert_eq!(staged.credential_configured, Some(true));
+        assert!(!staged.platform_key.as_ref().unwrap().enabled);
+        assert!(
+            staged
+                .platform_key
+                .as_ref()
+                .unwrap()
+                .allowed_owner_ids
+                .is_empty()
+        );
+        let delegated = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "provider_config_id": { "$ne": null }, "auth_method": "none" })
+            .await
+            .unwrap()
+            .unwrap();
+        let request =
+            serde_json::from_value(serde_json::json!({ "credential": "delegated-fixture" }))
+                .unwrap();
+        let Json(staged_delegated) = update_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Default::default(),
+            Path(delegated.id),
+            Json(request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(staged_delegated.credential_configured, Some(true));
+        assert!(!staged_delegated.platform_key.unwrap().enabled);
+        let (base_url, server) = spawn_empty_docs_server().await;
+        let request: CreateServiceRequest = serde_json::from_value(serde_json::json!({
+            "name": "Shared Telnyx", "base_url": base_url, "auth_type": "bearer", "service_category": "connection",
+            "provider_config_id": provider.id, "credential": "first-fixture", "platform_key": {},
+            "proxy_operation_policy": { "rules": [{ "method": "GET", "path_template": "/models" }] }
+        })).unwrap();
+        let Json(response) = create_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Default::default(),
+            Json(request),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert!(response.requires_user_credential);
+        assert_eq!(
+            response.provider_config_id.as_deref(),
+            Some(provider.id.as_str())
+        );
+        assert!(!response.platform_key.as_ref().unwrap().enabled);
+        assert_eq!(response.credential_configured, Some(true));
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json.get("credential").is_none() && json.get("credential_encrypted").is_none());
+        let load = || async {
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(doc! { "_id": &response.id })
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        let before_noop = load().await;
+        let original = before_noop.credential_encrypted.clone();
+        let request: UpdateServiceRequest =
+            serde_json::from_value(serde_json::json!({ "credential": "  " })).unwrap();
+        let Json(unchanged) = update_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Default::default(),
+            Path(response.id.clone()),
+            Json(request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(load().await.credential_encrypted, original);
+        assert_eq!(load().await.updated_at, before_noop.updated_at);
+        assert_eq!(unchanged.credential_configured, Some(true));
+        assert_eq!(
+            unchanged.proxy_operation_policy,
+            before_noop.proxy_operation_policy
+        );
+        assert!(matches!(
+            update_service(
+                State(state.clone()),
+                test_auth_user(&admin_id),
+                Default::default(),
+                Path(response.id.clone()),
+                Json(serde_json::from_value(serde_json::json!({})).unwrap())
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        let request: UpdateServiceRequest = serde_json::from_value(serde_json::json!({ "credential": "second-fixture", "platform_key": { "enabled": true, "audience": "restricted", "allowed_owner_ids": [person_id] } })).unwrap();
+        let _ = update_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Default::default(),
+            Path(response.id.clone()),
+            Json(request),
+        )
+        .await
+        .unwrap();
+        let stored = load().await;
+        assert_ne!(stored.credential_encrypted, original);
+        let Json(non_admin_view) = super::get_service(
+            State(state.clone()),
+            test_auth_user(&person_id),
+            Path(response.id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(non_admin_view.credential_configured, None);
+        assert!(
+            crate::services::platform_key_service::available(&db, &stored, &person_id)
+                .await
+                .unwrap()
+        );
+        assert!(stored.proxy_operation_policy.is_some());
+        let path = crate::services::proxy_authorization::CanonicalPath::from_mcp_literal("/models")
+            .unwrap();
+        assert!(
+            crate::services::proxy_authorization::authorize_proxy_operation(&stored, "GET", &path)
+                .is_ok()
+        );
+        assert!(
+            crate::services::proxy_authorization::authorize_proxy_operation(&stored, "POST", &path)
+                .is_err()
+        );
+        let request: UpdateServiceRequest = serde_json::from_value(serde_json::json!({ "platform_key": { "enabled": true, "audience": "restricted", "allowed_owner_ids": [] }, "proxy_operation_policy": null })).unwrap();
+        let _ = update_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Default::default(),
+            Path(response.id.clone()),
+            Json(request),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !crate::services::platform_key_service::available(&db, &load().await, &person_id)
+                .await
+                .unwrap()
+        );
+        assert!(load().await.proxy_operation_policy.is_none());
+        let denied = super::super::providers::link_service(
+            State(state.clone()),
+            test_auth_user(&person_id),
+            Path((provider.id.clone(), response.id.clone())),
+        )
+        .await;
+        assert!(matches!(denied, Err(AppError::Forbidden(_))));
+        let denied = super::super::providers::list_linked_services(
+            State(state.clone()),
+            test_auth_user(&person_id),
+            Path(provider.id.clone()),
+        )
+        .await;
+        assert!(matches!(denied, Err(AppError::Forbidden(_))));
+        let request: CreateServiceRequest = serde_json::from_value(serde_json::json!({ "name": "No orphan", "base_url": "https://example.com", "auth_type": "oidc", "provider_config_id": provider.id })).unwrap();
+        let before = db
+            .collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        assert!(
+            create_service(
+                State(state),
+                test_auth_user(&admin_id),
+                Default::default(),
+                Json(request)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::oauth_client::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            before
+        );
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

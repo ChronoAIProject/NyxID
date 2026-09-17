@@ -113,6 +113,7 @@ export function ServiceEditPage() {
   useEffect(() => {
     if (service) {
       form.reset({
+        proxy_operation_policy: service.proxy_operation_policy,
         inference: service.inference,
         platform_key: service.platform_key ?? undefined,
         credential: "",
@@ -258,7 +259,7 @@ export function ServiceEditPage() {
                   .map((s) => s.trim())
                   .filter(Boolean),
                 developer_app_ids: data.developer_app_ids ?? [],
-                ...(user?.is_admin ? { inference: data.inference, platform_key: data.platform_key, ...(data.credential?.trim() ? { credential: data.credential.trim() } : {}) } : {}),
+                ...(user?.is_admin ? { proxy_operation_policy: data.proxy_operation_policy, inference: data.inference, platform_key: data.platform_key, ...(data.credential?.trim() ? { credential: data.credential } : {}) } : {}),
                 capabilities: {
                   supports_proxy_read: data.supports_proxy_read ?? false,
                   supports_proxy_write: data.supports_proxy_write ?? false,
@@ -970,7 +971,7 @@ export function ServiceEditPage() {
                     </div>
 
                     <Separator className="my-2" />
-                    {user?.is_admin && <PlatformServiceFields form={form} service={service} />}
+                    {user?.is_admin && <PlatformServiceFields service={service} credentialSupported={service.auth_method !== "oidc" && (service.auth_method !== "none" || Boolean(service.provider_config_id))} />}
                     <div className="space-y-4">
                       <div className="space-y-1">
                         <h3 className="text-[13px] font-semibold">Billing</h3>

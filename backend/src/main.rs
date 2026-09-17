@@ -547,11 +547,9 @@ async fn main() {
         .await
         .expect("Failed to backfill inference metadata");
 
-    // Seed the admin-managed platform vendor provisioning templates. Existing
-    // rows are never overwritten so operators can edit or disable templates.
-    services::platform_vendor_template_service::seed_default_templates(&db, "system")
+    services::retired_service_service::retire_legacy_vendors(&db)
         .await
-        .expect("Failed to seed platform vendor templates");
+        .expect("Failed to retire legacy vendor credential stores");
 
     // Materialize ServiceEndpoint rows for seeded catalog services from the
     // hosted overlay specs so /api/v1/mcp/config publishes concrete
