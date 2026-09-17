@@ -1,6 +1,7 @@
 use crate::{
     errors::{AppError, AppResult},
     models::{
+        org_membership::{OrgMembership, OrgRole},
         service_change_event::{COLLECTION_NAME, ServiceChangeEvent},
         user::{COLLECTION_NAME as USERS, User},
         user_service::UserService,
@@ -50,6 +51,7 @@ pub async fn summaries(
     db: &Database,
     reader: &Reader<'_>,
     ids: &[String],
+    memberships: &[OrgMembership],
 ) -> AppResult<HashMap<String, UserService>> {
     let services: Vec<UserService> = db
         .collection::<UserService>("user_services")
@@ -64,20 +66,32 @@ pub async fn summaries(
         .await?
         .try_collect()
         .await?;
-    let mut access = HashMap::new();
+    let mut scopes = HashMap::new();
     for owner in active {
-        access.insert(
-            owner.id.clone(),
-            org_service::resolve_owner_access(db, reader.actor_id, &owner.id).await?,
-        );
+        if owner.id == reader.actor_id {
+            scopes.insert(owner.id, None);
+        } else if owner.user_type.is_org()
+            && let Some(membership) = memberships.iter().find(|m| {
+                m.org_user_id == owner.id
+                    && m.member_user_id == reader.actor_id
+                    && m.revoked_at.is_none()
+                    && m.role == OrgRole::Admin
+            })
+        {
+            let scope = crate::services::org_role_scope_service::effective_scope_for_membership(
+                db, membership,
+            )
+            .await?;
+            scopes.insert(owner.id, scope);
+        }
     }
     Ok(services
         .into_iter()
         .filter(|s| {
             reader.allows(&s.id)
-                && access
-                    .get(&s.user_id)
-                    .is_some_and(|a| a.can_write() && a.allows_resource(&s.id))
+                && scopes.get(&s.user_id).is_some_and(|scope| {
+                    crate::services::org_role_scope_service::scope_allows(scope, &s.id)
+                })
         })
         .map(|s| (s.id.clone(), s))
         .collect())

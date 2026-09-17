@@ -117,6 +117,21 @@ pub async fn enrich_summaries(
     auth: &AuthUser,
     keys: &mut [crate::handlers::keys::KeyResponse],
 ) -> AppResult<()> {
+    let memberships = crate::services::org_service::list_memberships_for_member(
+        db,
+        &auth.user_id.to_string(),
+        false,
+    )
+    .await?;
+    enrich_summaries_with_memberships(db, auth, keys, &memberships).await
+}
+
+pub async fn enrich_summaries_with_memberships(
+    db: &mongodb::Database,
+    auth: &AuthUser,
+    keys: &mut [crate::handlers::keys::KeyResponse],
+    memberships: &[crate::models::org_membership::OrgMembership],
+) -> AppResult<()> {
     let actor = auth.user_id.to_string();
     let reader = read::Reader {
         actor_id: &actor,
@@ -124,7 +139,7 @@ pub async fn enrich_summaries(
             .then_some(auth.allowed_service_ids.as_slice()),
     };
     let ids: Vec<_> = keys.iter().map(|k| k.id.clone()).collect();
-    let summaries = read::summaries(db, &reader, &ids).await?;
+    let summaries = read::summaries(db, &reader, &ids, memberships).await?;
     for key in keys {
         key.authorship = summaries.get(&key.id).map(|s| AuthorshipResponse {
             created_by: s.created_by.as_ref().map(Into::into),

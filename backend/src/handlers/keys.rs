@@ -1238,9 +1238,19 @@ pub async fn list_keys(
     let user_id_str = auth_user.user_id.to_string();
 
     let providers = crate::services::platform_key_service::load_providers(&state.db).await?;
-    let views =
-        unified_key_service::list_keys(&state.db, &state.encryption_keys, &user_id_str, &providers)
-            .await?;
+    let grants = crate::services::platform_key_service::OwnerGrants::load_for_listing(
+        &state.db,
+        &user_id_str,
+    )
+    .await?;
+    let views = unified_key_service::list_keys_with_grants(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &grants,
+        &providers,
+    )
+    .await?;
     let mut keys = views
         .into_iter()
         .map(key_response_from_view)
@@ -1260,7 +1270,13 @@ pub async fn list_keys(
         Some(&providers),
     )
     .await?;
-    crate::handlers::service_history::enrich_summaries(&state.db, &auth_user, &mut keys).await?;
+    crate::handlers::service_history::enrich_summaries_with_memberships(
+        &state.db,
+        &auth_user,
+        &mut keys,
+        grants.memberships(),
+    )
+    .await?;
     Ok(Json(KeyListResponse { keys }))
 }
 

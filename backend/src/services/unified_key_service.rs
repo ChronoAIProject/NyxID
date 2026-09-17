@@ -2380,6 +2380,7 @@ async fn reconcile_stale_auto_provisions(
 /// personal ones, grouped per org. Viewer-role org services are returned with
 /// `credential_source.allowed = false` so the frontend can render them as
 /// read-only.
+#[cfg(test)]
 pub async fn list_keys(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -2389,17 +2390,17 @@ pub async fn list_keys(
     // Reconciliation and rendering share the request's ACL/provider snapshot.
     // The handler also reuses providers to render revocation capabilities.
     let grants = OwnerGrants::load_for_listing(db, user_id).await?;
-    auto_provision_with_grants(db, user_id, &grants, providers).await?;
     list_keys_with_grants(db, encryption_keys, user_id, &grants, providers).await
 }
 
-async fn list_keys_with_grants(
+pub async fn list_keys_with_grants(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     grants: &OwnerGrants,
     providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<Vec<KeyView>> {
+    auto_provision_with_grants(db, user_id, grants, providers).await?;
     // Disabled services are included here and nowhere else: `/keys` is the
     // management surface that owns the Enable control, so a paused row has to
     // stay visible for the pause to be reversible. Each `KeyView` carries
