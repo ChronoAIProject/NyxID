@@ -921,33 +921,32 @@ Migration between backends: `nyxid node migrate --to keychain` or `nyxid node mi
 
 ### WebSocket Client
 
-The connection loop uses exponential backoff reconnection:
+The connection loop delays every retry, including clean closes, EOF, read errors,
+and authentication/ownership rejection. The delay is sampled from half to all
+of a doubling window: 1–2s, 2–4s, 4–8s, 8–16s, 16–32s, then 30–60s. Jitter
+spreads reconnecting fleets. Only at least 60 seconds in the authenticated
+serving loop resets the window; connect/auth time and teardown time do not count.
+Shutdown interrupts both the connection and the retry sleep.
 
-```rust
-pub async fn run_connection_loop(config: &NodeConfig, credentials: &CredentialStore) -> ! {
-    let mut backoff = ExponentialBackoff::new(
-        Duration::from_millis(100), // initial
-        Duration::from_secs(60),    // max
-        2.0,                        // multiplier
-    );
+A single lifecycle connects via TLS WebSocket, sends `auth`, waits for `auth_ok`,
+then handles heartbeat and proxy messages. NyxID sends `auth_ok` and records
+`Node connected via WebSocket` only after claiming the MongoDB owner lease and
+publishing the local connection. A live lease from another generation, including
+one left by a crashed process, rejects the handshake with Close `4008` until
+release or expiry (`NODE_OWNER_LEASE_TTL_SECS`, default 90s). Restarting with the
+same `INSTANCE_NAME` does not bypass generation fencing. This ordering also
+makes older CLI versions enter their existing authentication-error backoff.
+`register_ok` remains the one-time registration response carrying credentials.
 
-    loop {
-        match connect_and_serve(config, credentials).await {
-            Ok(()) => {
-                // Clean disconnect: reset backoff, reconnect immediately
-                backoff.reset();
-            }
-            Err(e) => {
-                let delay = backoff.next_delay();
-                tracing::warn!(error = %e, delay_ms = delay.as_millis(), "Connection failed");
-                tokio::time::sleep(delay).await;
-            }
-        }
-    }
-}
-```
-
-A single connection lifecycle: connect via TLS WebSocket, send `auth` message, wait for `auth_ok`, then enter the main message loop handling `heartbeat_ping`, `proxy_request`, and `error` messages. Reader and writer run as separate tasks communicating through an mpsc channel.
+Same-node claim/publication is serialized locally, while MongoDB preserves
+cross-replica exclusivity. Replacement and removal signal the writer separately
+from its bounded data queue, so a full queue or retained sender cannot strand an
+idle reader or socket reservation. Writer completion ends the reader, and
+cleanup matches the exact connection and generation before releasing ownership.
+Handshake acknowledgements and terminal Close delivery have 10-second bounds.
+Established data writes retain the configured heartbeat and operation timeout
+policies; they have no separate short upload deadline. Lifecycle cancellation
+interrupts a blocked write, including a large proxy upload.
 
 ### Proxy Executor
 
