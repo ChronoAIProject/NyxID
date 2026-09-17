@@ -354,6 +354,131 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
 }
 
 #[tokio::test]
+async fn telegram_new_start_sends_readable_instructions_before_the_creation_keyboard() {
+    let (state, actor, server) = fixture().await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let headers = headers(&state).await;
+    let (request, link) = service
+        .begin(&actor, &actor, "Customer Support", true)
+        .await
+        .unwrap();
+    let challenge = reqwest::Url::parse(&link)
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "start")
+        .unwrap()
+        .1
+        .to_string();
+    webhook(
+        &service,
+        &headers,
+        message(json!({"text": format!("/start {challenge}")})),
+    )
+    .await;
+    webhook(&service, &headers, message(json!({"text": "/start"}))).await;
+
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 4);
+    for replies in sent.chunks_exact(2) {
+        let instructions = replies[0].body_json::<Value>().unwrap();
+        assert_eq!(instructions["chat_id"], 700);
+        assert!(instructions.get("reply_markup").is_none());
+        let text = instructions["text"].as_str().unwrap();
+        assert!(text.contains("Create your Telegram bot"));
+        assert!(text.contains("Personal account:"));
+        assert!(text.contains("https://app.nyxid.test"));
+        assert!(text.contains("latest Telegram app"));
+        assert!(!text.contains(&challenge));
+        let keyboard = replies[1].body_json::<Value>().unwrap();
+        assert_eq!(keyboard["chat_id"], 700);
+        assert_eq!(
+            keyboard["reply_markup"]["keyboard"][0][0]["request_managed_bot"],
+            json!({"request_id": 1, "suggested_name": "Customer Support", "suggested_username": "customer_support_bot"}),
+        );
+    }
+    let bound = service.get(&actor, &request.id).await.unwrap();
+    assert_eq!(bound.status, Status::WaitingBot);
+    assert_eq!(bound.telegram_user_id, Some(700));
+    assert_eq!(bound.start_update_id, Some(1));
+}
+
+#[tokio::test]
+async fn telegram_new_keyboard_failure_is_acknowledged_after_instructions() {
+    let (state, _, server) = fixture().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{MANAGER}/sendMessage")))
+        .and(|request: &wiremock::Request| {
+            request
+                .body_json::<Value>()
+                .unwrap()
+                .get("reply_markup")
+                .is_some()
+        })
+        .respond_with(ResponseTemplate::new(400))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    service
+        .webhook(
+            &headers(&state).await,
+            &serde_json::to_vec(&message(json!({"text": "/start"}))).unwrap(),
+        )
+        .await
+        .unwrap();
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 2);
+    let instructions = sent[0].body_json::<Value>().unwrap();
+    assert!(instructions.get("reply_markup").is_none());
+    assert!(
+        instructions["text"]
+            .as_str()
+            .unwrap()
+            .contains("Create your Telegram bot")
+    );
+    assert!(
+        instructions["text"]
+            .as_str()
+            .unwrap()
+            .contains("send /start to try again")
+    );
+}
+
+#[tokio::test]
+async fn telegram_new_instruction_failure_remains_retryable_without_sending_keyboard() {
+    let (state, _, server) = fixture().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{MANAGER}/sendMessage")))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let result = service
+        .webhook(
+            &headers(&state).await,
+            &serde_json::to_vec(&message(json!({"text": "/start"}))).unwrap(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::errors::AppError::ChannelPlatformError(_))
+    ));
+    let sent = server.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0]
+            .body_json::<Value>()
+            .unwrap()
+            .get("reply_markup")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn telegram_new_failed_webhook_resumes_same_saved_bot_after_expiry() {
     let (state, actor, server) = fixture().await;
     let pending = waiting_consent(&state, &actor, &server).await;
@@ -1544,8 +1669,18 @@ mod claims {
         .await;
         assert!(server.received_requests().await.unwrap().is_empty());
         webhook(&service, &headers, message(json!({"text": "/start"}))).await;
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 2);
+        let instructions = sent[0].body_json::<Value>().unwrap();
+        assert!(instructions.get("reply_markup").is_none());
         assert!(
-            server.received_requests().await.unwrap()[0]
+            instructions["text"]
+                .as_str()
+                .unwrap()
+                .contains("Create your Telegram bot")
+        );
+        assert!(
+            sent[1]
                 .body_json::<Value>()
                 .unwrap()["reply_markup"]["keyboard"][0][0]["request_managed_bot"]
                 .is_object()
