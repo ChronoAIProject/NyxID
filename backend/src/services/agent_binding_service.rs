@@ -932,6 +932,7 @@ mod tests {
         let binding_hook = key_mutations::TransactionCollisionHook::new(barrier.clone());
         let rotation_hook = key_mutations::TransactionCollisionHook::new(barrier);
 
+        let encryption_keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
         let (create_result, rotation_result) = tokio::join!(
             create_binding_with_collision_hook(
                 &db,
@@ -943,6 +944,7 @@ mod tests {
             ),
             key_service::rotate_api_key_with_scope_authorization_and_id_with_collision_hook(
                 &db,
+                &encryption_keys,
                 &user_id,
                 Some(&user_id),
                 &predecessor_id,
@@ -1001,6 +1003,7 @@ mod tests {
         let binding_hook = key_mutations::TransactionCollisionHook::new(barrier.clone());
         let rotation_hook = key_mutations::TransactionCollisionHook::new(barrier);
 
+        let encryption_keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
         let (delete_result, rotation_result) = tokio::join!(
             delete_binding_with_collision_hook(
                 &db,
@@ -1011,6 +1014,7 @@ mod tests {
             ),
             key_service::rotate_api_key_with_scope_authorization_and_id_with_collision_hook(
                 &db,
+                &encryption_keys,
                 &user_id,
                 Some(&user_id),
                 &predecessor_id,

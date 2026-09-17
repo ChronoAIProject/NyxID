@@ -104,5 +104,9 @@ pub mod user_service;
 pub mod user_service_connection;
 pub mod ws_frame_injection;
 
+pub mod assistant_acknowledgement;
+pub mod assistant_agent_credential;
+pub mod assistant_conversation;
+pub mod assistant_message;
 pub mod catalog_skill_revision;
 pub mod channel_email;

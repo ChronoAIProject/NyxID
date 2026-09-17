@@ -11,9 +11,10 @@ import { ApprovalsView } from "@/components/assistant/approvals-view";
 import {
   AssistantChatPage,
   DirectAssistantChatPage,
+  NyxAgentAssistantChatPage,
 } from "@/components/assistant/assistant-chat-page";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
-import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
+import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import { useAssistantChat } from "@/hooks/use-assistant-chat";
@@ -165,7 +166,7 @@ function AssistantWorkspacePage({
 
   const title = view === "plugins" ? "Plugins" : "Approvals";
   const sidebar = (
-    <AssistantSidebar
+    <AssistantEngineSidebar engine="actor"
       conversations={conversations}
       activeConversationId={undefined}
       activeView={view}
@@ -197,6 +198,7 @@ export function AssistantPage({
   readonly view?: "chat" | "plugins" | "approvals";
 }) {
   const directEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
+  const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const selectedConversationId = useRouterState({
     select: (state) =>
       parseAssistantSearch(state.location.search as Record<string, unknown>).c,
@@ -228,13 +230,14 @@ export function AssistantPage({
       </Suspense>
     );
   }
-  if (
-    assistantChatSurface({
+  const surface = assistantChatSurface({
+      nyxagentEnabled,
       directEnabled,
       drafting,
       selectedConversationId,
-    }) === "direct"
-  ) {
+    });
+  if (surface === "nyxagent") return <NyxAgentAssistantChatPage />;
+  if (surface === "direct") {
     return <DirectAssistantChatPage />;
   }
   return <AssistantChatPage />;

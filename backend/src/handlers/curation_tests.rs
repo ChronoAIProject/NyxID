@@ -220,9 +220,30 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
         "/api/v1/triggers".into(),
         "/api/v1/services".into(),
         "/api/v1/catalog".into(),
+        "/api/v1/orgs".into(),
+        "/api/v1/keys".into(),
+        "/api/v1/user-services".into(),
+        "/api/v1/endpoints".into(),
+        "/api/v1/api-keys/external".into(),
+        "/api/v1/assistant/nyxagent/conversations".into(),
+        "/api/v1/assistant/nyxagent/models".into(),
     ] {
         let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+    }
+    for (method, path) in [
+        ("POST", "/api/v1/assistant/nyxagent/turns".to_string()),
+        (
+            "PATCH",
+            format!("/api/v1/assistant/nyxagent/conversations/{other}/access-mode"),
+        ),
+        (
+            "POST",
+            format!("/api/v1/assistant/nyxagent/conversations/{other}/acknowledgements/{other}"),
+        ),
+    ] {
+        let (status, body) = request(&f.state, method, &path, &bearer, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
     }
     let req = Request::builder()
         .uri(format!("/api/v1/proxy/{}/packages", f.service.id))

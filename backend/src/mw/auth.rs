@@ -20,6 +20,10 @@ use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, Service
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
+/// Internal chat acknowledgement capability. Never accepted by the public key
+/// scope registry, and never grants management access on human-only REST routes.
+pub const ASSISTANT_ACCOUNT_SCOPE: &str = "assistant:account";
+
 /// Authenticated user extracted from session cookie or Bearer token.
 ///
 /// This acts as an Axum extractor: handlers that include `AuthUser` in their
@@ -134,6 +138,13 @@ fn extract_request_user_agent(parts: &Parts) -> Option<String> {
 }
 
 impl AuthUser {
+    /// Effective service allowlist for restricted API-key inventory reads.
+    /// Other authentication classes retain their existing inventory behavior.
+    pub fn api_key_service_scope(&self) -> Option<&[String]> {
+        (self.auth_method == AuthMethod::ApiKey && !self.allow_all_services)
+            .then_some(self.allowed_service_ids.as_slice())
+    }
+
     /// Resource owner whose approval settings should be consulted.
     pub fn effective_approval_owner_user_id(&self) -> String {
         self.approval_owner_user_id

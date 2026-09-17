@@ -11,7 +11,7 @@ const MOCK_USER = {
   created_at: "2025-11-20T08:00:00Z",
   capabilities: {
     billing_available: true,
-    enabled_features: ["experimental:ai-assistant"],
+    enabled_features: ["experimental:ai-assistant", ...(globalThis.__nyxidAssistantHttpFaults?.nyxagentEnabled ? ["assistant:nyxagent-engine"] : [])],
   },
 };
 

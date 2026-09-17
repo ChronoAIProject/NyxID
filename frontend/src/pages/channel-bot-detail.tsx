@@ -374,7 +374,7 @@ function AddRouteDialog({
     );
   }
 
-  const activeApiKeys = (apiKeys ?? []).filter((k) => k.is_active);
+  const activeApiKeys = (apiKeys ?? []).filter((k) => k.is_active && k.platform !== "nyxid-assistant");
   const keysWithCallback = activeApiKeys.filter((k) => k.callback_url);
 
   return (

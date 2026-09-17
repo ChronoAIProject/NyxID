@@ -306,9 +306,7 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 }
                 OutputFormat::Table => {
-                    let key = result["full_key"].as_str().unwrap_or("-");
-                    eprintln!("Key rotated!");
-                    eprintln!("New Key: {key}  (save this -- shown only once)");
+                    write_rotation_table(&mut std::io::stderr().lock(), &result)?;
                 }
             }
             Ok(())
@@ -490,6 +488,21 @@ fn confirm_durable_action(yes: bool, prompt: &str) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!("Cancelled")
+}
+
+fn write_rotation_table(writer: &mut impl Write, result: &Value) -> Result<()> {
+    let key = result["full_key"].as_str().unwrap_or("-");
+    if key.is_empty() && result["platform"].as_str() == Some("nyxid-assistant") {
+        writeln!(
+            writer,
+            "Key rotated. This key is managed by the NyxID assistant; \
+             the new secret is stored encrypted on the server and is never shown."
+        )?;
+    } else {
+        writeln!(writer, "Key rotated!")?;
+        writeln!(writer, "New Key: {key}  (save this -- shown only once)")?;
+    }
+    Ok(())
 }
 
 fn print_durable_value(output: &OutputFormat, value: &Value, label: &str) -> Result<()> {
@@ -1499,6 +1512,37 @@ mod option_tests {
         })
         .await
         .expect("rotate table should succeed");
+    }
+
+    #[test]
+    fn rotate_table_explains_private_assistant_keys_without_a_save_prompt() {
+        let mut output = Vec::new();
+        write_rotation_table(
+            &mut output,
+            &serde_json::json!({"full_key": "", "platform": "nyxid-assistant"}),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Key rotated. This key is managed by the NyxID assistant; \
+             the new secret is stored encrypted on the server and is never shown.\n"
+        );
+    }
+
+    #[test]
+    fn rotate_table_retains_normal_output_unless_both_managed_conditions_match() {
+        for (key, platform) in [("nyx_test", "nyxid-assistant"), ("", "codex")] {
+            let mut output = Vec::new();
+            write_rotation_table(
+                &mut output,
+                &serde_json::json!({"full_key": key, "platform": platform}),
+            )
+            .unwrap();
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!("Key rotated!\nNew Key: {key}  (save this -- shown only once)\n")
+            );
+        }
     }
 
     #[tokio::test]

@@ -847,6 +847,8 @@ pub enum CatalogCommands {
 }
 
 // ---- Service (C11-C13, I21-I23) ----
+// Inventory reads (`service list` / `service show`) work on an Agent Key
+// profile within its service scope. Mutating commands need an account login.
 
 #[derive(Args, Default)]
 pub struct CatalogServiceArgs {
@@ -1574,6 +1576,9 @@ pub enum BillingCommands {
 }
 
 // ---- API Key ----
+// Scope helpers used by `api-key create` / `api-key bind` read `/keys`, which
+// works on Agent Key profiles. NyxID API-key management itself, including
+// listing, creation, and binding mutations, requires an account login.
 
 #[derive(Subcommand)]
 pub enum ApiKeyCommands {
@@ -1773,10 +1778,12 @@ pub enum ApiKeyCommands {
 
 // ---- Org ----
 //
-// All org commands hit /api/v1/orgs/* and are gated by org membership
-// (read) or admin role (write) on the server. The actor's auth comes from
-// the standard `AuthArgs`. There is no profile-aware switching here -- the
-// caller is always the actor; org credentials are resolved server-side.
+// Org reads (`org list`, `org show`, `org member list`,
+// `org role-scope list`, and `--org` resolution) work with an Agent Key
+// profile. Mutating commands and invite reads require an account login.
+// The server applies membership/admin ACLs, or Direct read access for an
+// org-owned key. Standard AuthArgs supplies the actor; there is no implicit
+// profile switching, and org credentials are resolved server-side.
 
 #[derive(Subcommand)]
 pub enum OrgCommands {
@@ -4328,6 +4335,8 @@ pub enum ApprovalCommands {
 }
 
 // ---- Endpoint (I24) ----
+// `endpoint list` works on an Agent Key profile within its service scope;
+// mutating commands need an account login.
 
 #[derive(Subcommand)]
 pub enum EndpointCommands {
@@ -4359,6 +4368,8 @@ pub enum EndpointCommands {
 }
 
 // ---- ExternalKey (I25-I26) ----
+// `external-key list` works on an Agent Key profile within its service scope;
+// mutating commands need an account login.
 
 #[derive(Subcommand)]
 pub enum ExternalKeyCommands {

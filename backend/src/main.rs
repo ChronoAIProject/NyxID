@@ -372,6 +372,7 @@ async fn main() {
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+    services::assistant_nyxagent::warn_at_startup(&db).await;
 
     // Load JWT signing keys early: DB-backed CLI subcommands may audit-log
     // before the server state is built, and the audit-chain key can fall back
@@ -1316,6 +1317,8 @@ async fn main() {
         trusted_proxies: Arc::new(state.config.trusted_proxy_ips.clone()),
     };
     let trusted_proxy_ranges = Arc::new(state.config.trusted_proxy_ips.clone());
+    let rate_limit_exempt_ips =
+        mw::rate_limit::RateLimitExemptIps(Arc::new(state.config.rate_limit_exempt_ips.clone()));
 
     // Global response-header policy (security headers + the SSE
     // anti-buffering mark) wraps the FULLY MERGED router, so every route
@@ -1350,6 +1353,7 @@ async fn main() {
     .layer(Extension(per_ip_rate_limiter))
     .layer(Extension(global_rate_limiter))
     .layer(Extension(trusted_proxy_ranges))
+    .layer(Extension(rate_limit_exempt_ips))
     .layer(TraceLayer::new_for_http());
 
     // Bind both listeners before serving. Internal routes never enter the

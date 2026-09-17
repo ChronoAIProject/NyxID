@@ -3154,7 +3154,10 @@ mod tests {
             .layer(middleware::from_fn(rate_limit_middleware))
             .layer(Extension(per_ip))
             .layer(Extension(global))
-            .layer(Extension(Arc::new(Vec::<TrustedProxyRange>::new())));
+            .layer(Extension(Arc::new(Vec::<TrustedProxyRange>::new())))
+            .layer(Extension(
+                crate::mw::rate_limit::RateLimitExemptIps::default(),
+            ));
 
         let query_uri = "/api/v1/assistant/actions?revision=nyxid-assistant-actions.v7";
         for _ in 0..3 {

@@ -110,6 +110,7 @@ export interface ActionCardContentBlock {
 }
 
 export interface Conversation {
+  readonly active_turn?: { readonly turn_id: string; readonly started_at: string } | null;
   readonly id: string;
   readonly title: string;
   readonly created_at: string;

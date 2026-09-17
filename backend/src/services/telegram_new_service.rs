@@ -579,12 +579,13 @@ impl TelegramNewService<'_> {
                     "active": true, "status": "waiting_bot",
                 })
                 .await?;
-            let text = match pending {
-                Some(request) if self.owner_still_authorized(&request).await? => creation_message(&request),
-                _ => "<b>Create your Telegram bot</b>\n\nTap <b>Create bot</b> and finish Telegram's name and username form. Then use the private claim code to choose an account in NyxID and connect your bot.\n\nAlready created a bot? Send /recover @YourBotUsername for a new claim code.".into(),
+            let pending = match pending {
+                Some(request) if self.owner_still_authorized(&request).await? => Some(request),
+                _ => None,
             };
-            self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": text, "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}, "reply_markup": {"keyboard": [[{"text": "Create bot", "request_managed_bot": {"request_id": 1}}]], "resize_keyboard": true, "one_time_keyboard": true}})).await?;
-            return Ok(());
+            return self
+                .send_creation_prompt(token, user_id, pending.as_ref())
+                .await;
         }
         if let Some(challenge) = message["text"]
             .as_str()
@@ -623,7 +624,8 @@ impl TelegramNewService<'_> {
                             doc! {"$set": {"status": "waiting_bot"}},
                         )
                         .await?;
-                    self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": creation_message(&request), "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}, "reply_markup": {"keyboard": [[{"text": "Create bot", "request_managed_bot": {"request_id": 1, "suggested_name": request.label.chars().take(64).collect::<String>(), "suggested_username": suggested_bot_username(&request.label)}}]], "resize_keyboard": true, "one_time_keyboard": true}})).await?;
+                    self.send_creation_prompt(token, user_id, Some(&request))
+                        .await?;
                 }
             }
             return Ok(());
@@ -722,6 +724,38 @@ impl TelegramNewService<'_> {
             self.send_consent(token, &request).await?;
         } else {
             self.send_claim(manager_id, bot_id, user_id, token, !is_creation).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_creation_prompt(
+        &self,
+        token: &str,
+        user: i64,
+        request: Option<&TelegramBotRequest>,
+    ) -> AppResult<()> {
+        let text = match request {
+            Some(request) => creation_message(request),
+            None => "<b>Create your Telegram bot</b>\n\nTap <b>Create bot</b> and finish Telegram's name and username form. Then use the private claim code to choose an account in NyxID and connect your bot.\n\nAlready created a bot? Send /recover @YourBotUsername for a new claim code.".into(),
+        };
+        self.api.call(token, "sendMessage", json!({
+            "chat_id": user,
+            "text": format!("{text}\n\nIf no Create bot button appears, send /start to try again. If the next message is blank or the button is still missing, open this chat in the latest Telegram app to continue."),
+            "parse_mode": "HTML",
+            "link_preview_options": {"is_disabled": true},
+        })).await?;
+
+        let mut creation = json!({"request_id": 1});
+        if let Some(request) = request {
+            creation["suggested_name"] = json!(request.label.chars().take(64).collect::<String>());
+            creation["suggested_username"] = json!(suggested_bot_username(&request.label));
+        }
+        if let Err(error) = self.api.call(token, "sendMessage", json!({
+            "chat_id": user,
+            "text": "Tap Create bot below to open Telegram's creation form.",
+            "reply_markup": {"keyboard": [[{"text": "Create bot", "request_managed_bot": creation}]], "resize_keyboard": true, "one_time_keyboard": true},
+        })).await {
+            tracing::warn!(telegram_user_id = user, %error, "Telegram creation keyboard delivery failed after instructions were sent");
         }
         Ok(())
     }

@@ -88,6 +88,13 @@ host route. If route detection fails, NyxID falls back to `HOSTNAME` and then
 
 ## Assistant Diagnostics
 
+The default NyxAgent assistant introduces **no environment variable**. Its catalog
+slug `llm-nyx` and default-on feature flag `assistant:nyxagent-engine` are code-level
+configuration. The catalog row provides the upstream base URL. Readiness reports
+its required authentication settings; see [NyxAgent engine](chat/08-nyxagent-engine.md).
+Existing encryption-provider settings protect its per-conversation assistant credentials. Chat acknowledgements and access modes
+introduce no environment variables; permissions are stored per conversation.
+
 The Aevatar assistant chat wire-log diagnostic has no environment variable. It
 is gated by the `experimental:aevatar-chat-wire-log` runtime feature flag
 (default off), toggled platform-wide, per org cohort, or per user through the
@@ -237,8 +244,24 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
 | `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | When true, a platform-credentialed catalog row with no `proxy_operation_policy` is refused on actor-addressed paths (`/proxy/s/{slug}`, `/llm/*`). Ships **disabled** so deploying changes no existing behaviour; enable per environment once every such row either carries a policy or is confirmed to receive no actor-addressed traffic. Server-chosen surfaces (the assistant) are unaffected either way — they cannot name an operation, so a policy has no meaning there. |
 | `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` (IPv4) or `/128` (IPv6); IPv4-mapped IPv6 addresses are normalized to IPv4. **Only list proxies configured to overwrite client-supplied forwarded headers.** From an allowlisted peer, resolution prefers `CF-Connecting-IP`, then scans `X-Forwarded-For` right-to-left while skipping trusted proxy hops, then uses `X-Real-IP`, then the TCP peer. `CF-Connecting-IP` is the primary Cloudflare path because it does not depend on a complete proxy-hop list. The XFF fallback requires every hop to be listed, including Cloudflare's published IPv4 and IPv6 ranges when Cloudflare is in front; otherwise the rightmost unlisted Cloudflare edge becomes the apparent client and rate-limit key. From an untrusted peer, strict public/device-login paths ignore all forwarded headers. The global limiter and node WebSocket attribution retain their legacy XFF-first behavior only while this setting is empty, then switch to the trusted resolver when configured. Invalid entries are dropped with a warning. Until this is set behind an internal ingress, requester IP and country are unavailable and strict public per-IP buckets can collapse to the ingress peer. |
+| `RATE_LIMIT_EXEMPT_IPS` | *(empty)* | Comma-separated client IPv4/IPv6 addresses or CIDRs exempt from the general per-IP and cluster-wide global request budgets. Matching requests consume neither budget and are admitted even when the global budget is exhausted. Invalid entries are dropped with a warning. This does not exempt authentication, account, API-key/agent, platform-service, public-proxy, device/login, or other dedicated protocol limits, nor connection capacity limits. |
 
 Deploy the resolver code before changing `TRUSTED_PROXY_IPS`. The code-only deploy is backward compatible for the global limiter and node WebSocket path. Setting the variable is the activation step: Cloudflare client attribution becomes verified, auth-device request/poll/preview limits key by the actual client, and the global/WS paths stop accepting forwarded headers from peers outside the allowlist.
+
+`TRUSTED_PROXY_IPS` authenticates forwarding hops; it never grants a rate-limit
+exemption by itself. To exempt an operator-controlled client, set
+`RATE_LIMIT_EXEMPT_IPS=192.0.2.25,2001:db8:1234::/48` with that client's actual
+addresses. Behind ingress, also configure `TRUSTED_PROXY_IPS` with the sanitized
+forwarding hops. Do not use a shared ingress/NAT address as a client exemption
+unless every client represented by that address is intended to be exempt.
+
+Exemptions always use the TCP peer trust boundary, even when the general bucket
+key still uses legacy forwarded-header behavior with `TRUSTED_PROXY_IPS` empty.
+An untrusted peer cannot claim an exempt address in a forwarding header. A
+trusted proxy must supply a usable client header: missing/malformed headers do
+not fall back to exempting the proxy itself, and malformed intervening XFF hops
+are not skipped to find an exempt prefix. Missing peer information never becomes
+an exempt loopback address. IPv4-mapped IPv6 addresses normalize to IPv4.
 
 Before enabling trusted proxy attribution in production:
 

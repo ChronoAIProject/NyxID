@@ -20,6 +20,7 @@ export const FEATURE_FLAG = {
   BILLING: "experimental:billing",
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
   DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
+  NYXAGENT_ENGINE: "assistant:nyxagent-engine",
 } as const;
 
 type FeatureFlagKey = (typeof FEATURE_FLAG)[keyof typeof FEATURE_FLAG];

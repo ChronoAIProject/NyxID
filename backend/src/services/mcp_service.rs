@@ -39,6 +39,8 @@ use crate::services::{
 /// How the service was resolved -- carries enough identity for unambiguous execution.
 #[allow(dead_code)]
 pub enum McpToolSource {
+    /// Native account tools dispatched through the service layer.
+    Internal,
     /// Platform service (DownstreamService)
     Platform { downstream_service_id: String },
     /// User-managed service (UserService -- personal or org-shared)
@@ -3625,6 +3627,11 @@ pub async fn execute_tool(
     // (not cached loader flags -- credential state may have changed).
     let (target, node_route, has_server_credential, billing_context_builder) = match &service.source
     {
+        McpToolSource::Internal => {
+            return Err(AppError::Forbidden(
+                "Native tools require chat acknowledgement dispatch".into(),
+            ));
+        }
         McpToolSource::UserManaged {
             user_service_id, ..
         } => {
@@ -4045,7 +4052,7 @@ pub async fn execute_tool_resolved(
     // When a node route exists, swallow errors -- the node agent may inject
     // the credential locally, matching proxy.rs:891 behavior.
     let delegated = match &service.source {
-        McpToolSource::UserManaged { .. } => Vec::new(),
+        McpToolSource::UserManaged { .. } | McpToolSource::Internal => Vec::new(),
         McpToolSource::Platform {
             downstream_service_id,
         } => {
@@ -4516,6 +4523,7 @@ pub fn list_connected_services(
         })
         .map(|service| {
             let source = match &service.source {
+                McpToolSource::Internal => "internal",
                 McpToolSource::Platform { .. } => "platform",
                 McpToolSource::UserManaged { .. } => "user_service",
             };
@@ -5594,7 +5602,9 @@ mod tests {
             McpToolSource::UserManaged {
                 user_service_id, ..
             } => assert_eq!(user_service.service_id, *user_service_id),
-            McpToolSource::Platform { .. } => panic!("expected user-managed source"),
+            McpToolSource::Platform { .. } | McpToolSource::Internal => {
+                panic!("expected user-managed source")
+            }
         }
     }
 

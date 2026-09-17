@@ -112,6 +112,7 @@ describe("feature flag catalog", () => {
   it("pins the backend registry key literals", () => {
     expect(FEATURE_FLAG).toEqual({
       AI_ASSISTANT: "experimental:ai-assistant",
+      NYXAGENT_ENGINE: "assistant:nyxagent-engine",
       BILLING: "experimental:billing",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
       DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",

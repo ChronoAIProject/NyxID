@@ -149,6 +149,39 @@ pub async fn find_org_by_key(db: &mongodb::Database, key: &str) -> AppResult<Use
         .ok_or_else(|| AppError::OrgNotFound(key.to_string()))
 }
 
+/// Resolve the read role for an already-loaded org using the actor's
+/// polymorphic owner identity.
+/// Direct ownership projects to Admin for reads without creating or requiring
+/// a membership. Other actors need an active membership; service scope does
+/// not restrict org metadata. Write handlers keep their membership-only ACLs.
+pub async fn read_role_for_org(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    org: &User,
+) -> AppResult<OrgRole> {
+    let role = if actor_user_id == org.id {
+        OrgRole::Admin
+    } else {
+        get_active_membership(db, &org.id, actor_user_id)
+            .await?
+            .ok_or(AppError::OrgMembershipRequired)?
+            .role
+    };
+    Ok(role)
+}
+
+/// Load an org and resolve the actor's read role. Resolve the org first to
+/// preserve OrgNotFound versus OrgMembershipRequired.
+pub async fn get_org_for_read(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    org_user_id: &str,
+) -> AppResult<(User, OrgRole)> {
+    let org = get_org_user(db, org_user_id).await?;
+    let role = read_role_for_org(db, actor_user_id, &org).await?;
+    Ok((org, role))
+}
+
 /// Suffix used for the synthetic placeholder email generated when an org is
 /// created without an explicit contact email. Kept as a const so UI/API
 /// normalizers can hide it behind a single check.

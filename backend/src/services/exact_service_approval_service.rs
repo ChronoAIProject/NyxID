@@ -1222,7 +1222,7 @@ async fn approval_target(
         mcp_service::McpToolSource::UserManaged {
             user_service_id, ..
         } => user_service_id,
-        mcp_service::McpToolSource::Platform { .. } => {
+        mcp_service::McpToolSource::Platform { .. } | mcp_service::McpToolSource::Internal => {
             return Err(AppError::BadRequest(
                 "exact_service_requires_user_service".to_string(),
             ));

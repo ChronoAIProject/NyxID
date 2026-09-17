@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.23.2"
+version = "0.24.1"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -94,6 +94,8 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+# Virtual time for WebSocket lifecycle deadline regressions.
+tokio = { workspace = true, features = ["test-util"] }
 wiremock = "0.6"
 # Used only by `test_utils` (compiled under `#[cfg(test)]`) to register an
 # `atexit` hook that drops the per-test databases at process exit. Already in
