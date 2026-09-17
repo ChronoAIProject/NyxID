@@ -132,6 +132,9 @@ pub struct RowContract {
     pub auth_none: bool,
     pub forward_access_token: bool,
     pub no_delegation: bool,
+    /// Informational only. With `auth_method = none` a stored catalog credential
+    /// is never injected (the service-credential layer is a no-op for `none`),
+    /// so a leftover blob on the row cannot replace the assistant key.
     pub no_master_credential: bool,
 }
 impl RowContract {
@@ -142,7 +145,6 @@ impl RowContract {
             && self.auth_none
             && self.forward_access_token
             && self.no_delegation
-            && self.no_master_credential
     }
 }
 pub fn row_contract(row: Option<&DownstreamService>) -> RowContract {

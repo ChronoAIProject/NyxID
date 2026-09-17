@@ -566,3 +566,27 @@ async fn stale_fences_allow_rename_delete_and_stop_is_a_noop() {
     ));
     assert!(messages(&db, "owner", &row.id, 100, None).await.is_err());
 }
+
+#[test]
+fn row_contract_ignores_a_stored_credential_when_auth_is_none() {
+    let mut row = crate::models::downstream_service::test_helpers::dummy_service();
+    row.slug = SERVICE_SLUG.into();
+    row.is_active = true;
+    row.auth_method = "none".into();
+    row.requires_user_credential = false;
+    row.forward_access_token = true;
+    row.inject_delegation_token = false;
+    row.credential_encrypted = vec![1, 2, 3];
+    let contract = row_contract(Some(&row));
+    assert!(!contract.no_master_credential);
+    assert!(
+        contract.valid(),
+        "a never-injected blob must not take the assistant down"
+    );
+    row.auth_method = "bearer".into();
+    assert!(!row_contract(Some(&row)).valid());
+    row.auth_method = "none".into();
+    row.forward_access_token = false;
+    assert!(!row_contract(Some(&row)).valid());
+    assert!(!row_contract(None).valid());
+}

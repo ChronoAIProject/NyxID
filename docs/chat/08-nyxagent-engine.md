@@ -24,8 +24,9 @@ No request accepts an owner, upstream URL, secret, or upstream session ID.
 
 The active admin-managed catalog row `llm-nyx` supplies the destination.
 Required settings: `requires_user_credential=false`, `auth_method=none`,
-`forward_access_token=true`, `inject_delegation_token=false`, empty master
-credential. A user-owned service cannot shadow this row. `execute_admin_proxy`
+`forward_access_token=true`, `inject_delegation_token=false`. A stored master
+credential is reported by readiness but does not fail the contract: with
+`auth_method=none` the service-credential layer never injects it. A user-owned service cannot shadow this row. `execute_admin_proxy`
 performs the existing billing/proxy checks. Turns, model discovery, and upstream
 session deletion carry `Metered(Proxy)` billing policy. The initial hop uses
 server transport; user credential-node settings cannot reroute it.
@@ -402,7 +403,8 @@ and Delete; Stop remains available in the existing composer.
 ## Readiness and verified resolutions
 
 `GET /assistant/readiness` adds `nyxagent.enabled`, `nyxagent.row` (present, active,
-no user credential, auth none, token forwarding, no delegation, no master key),
+no user credential, auth none, token forwarding, no delegation, and the
+informational stored-master-key flag),
 and `nyxagent.credential_exists`. Startup warns about an invalid/missing row.
 It reveals no raw key, ciphertext, or upstream session binding. Readiness verifies
 the catalog contract in [Deployment prerequisites](#deployment-prerequisites),
