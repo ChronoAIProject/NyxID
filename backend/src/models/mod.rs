@@ -108,3 +108,4 @@ pub mod user_service_connection;
 pub mod ws_frame_injection;
 
 pub mod channel_email;
+pub mod service_change_event;

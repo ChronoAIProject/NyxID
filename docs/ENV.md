@@ -10,7 +10,7 @@ For deployment-specific guidance on these variables, see [DEPLOYMENT.md](DEPLOYM
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `DATABASE_URL` | MongoDB connection string | `mongodb://localhost:27017/nyxid` |
+| `DATABASE_URL` | MongoDB connection string | `mongodb://localhost:27017/nyxid?replicaSet=nyxid-rs&directConnection=true` |
 | `ENCRYPTION_KEY` | 32-byte hex-encoded AES-256 key (64 hex chars) | Output of `openssl rand -hex 32` |
 
 ## Encryption
@@ -500,3 +500,8 @@ See [ORACLE_RELAY.md](ORACLE_RELAY.md) for the full design.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RUST_LOG` | `nyxid=info,tower_http=info` | Tracing filter string |
+
+
+## Service-history database topology
+
+All service-instance writes require transactions. Startup rejects standalone MongoDB before indexes or migrations. Use MongoDB 8 on a replica set or mongos. Bundled Compose creates authenticated `nyxid-rs` with a persistent internal keyfile and a primary-election initializer; backend startup waits for it. Local host connections to Compose use `directConnection=true`; external databases must use their actual replica-set/mongos URI. Existing data volumes require a coordinated backup and maintenance migration; see [SERVICE_HISTORY.md](SERVICE_HISTORY.md#mongodb-deployment-prerequisite). There is no new history environment variable or TTL.

@@ -413,11 +413,9 @@ export function ConnectCard({
           });
           void queryClient.invalidateQueries({
             queryKey: ["keys"],
-            exact: true,
           });
           void queryClient.invalidateQueries({
             queryKey: ["keys", current.keyId],
-            exact: true,
           });
         }}
       />

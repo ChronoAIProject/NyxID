@@ -714,10 +714,18 @@ fn test_db_heartbeat_loop(uri: String, run_id: String, started_at_secs: u64, sto
         match stop.recv_timeout(TEST_DB_RUN_HEARTBEAT_INTERVAL) {
             Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let _ = runtime.block_on(tokio::time::timeout(
-                    STALE_TEST_DB_METADATA_TIMEOUT,
-                    renew_test_db_run_record(&client, &run_id, started_at_secs, unix_time_secs()),
-                ));
+                let _ = runtime.block_on(async {
+                    tokio::time::timeout(
+                        STALE_TEST_DB_METADATA_TIMEOUT,
+                        renew_test_db_run_record(
+                            &client,
+                            &run_id,
+                            started_at_secs,
+                            unix_time_secs(),
+                        ),
+                    )
+                    .await
+                });
             }
         }
     }
@@ -2432,6 +2440,9 @@ pub(crate) fn test_user_service(
     node_id: Option<&str>,
 ) -> UserService {
     UserService {
+        deleted_at: None,
+        created_by: None,
+        last_change: None,
         id: service_id.to_string(),
         user_id: user_id.to_string(),
         slug: slug.to_string(),

@@ -1,7 +1,7 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
-use mongodb::{ClientSession, Database, options::ReturnDocument};
+use mongodb::{Database, options::ReturnDocument};
 use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -95,13 +95,13 @@ pub fn has_server_credential(api_key: &UserApiKey) -> bool {
 
 /// List all API keys for a user (summary only, no decrypted values).
 pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<UserApiKey>> {
-    let keys: Vec<UserApiKey> = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
-        .find(doc! { "user_id": user_id })
-        .sort(doc! { "created_at": -1 })
-        .await?
-        .try_collect()
-        .await?;
+    let keys: Vec<UserApiKey> =
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+            .find(doc! { "user_id": user_id })
+            .sort(doc! { "created_at": -1 })
+            .await?
+            .try_collect()
+            .await?;
     Ok(keys)
 }
 
@@ -124,10 +124,11 @@ pub async fn find_api_key(
     user_id: &str,
     key_id: &str,
 ) -> AppResult<Option<UserApiKey>> {
-    Ok(db
-        .collection::<UserApiKey>(COLLECTION_NAME)
-        .find_one(doc! { "_id": key_id, "user_id": user_id })
-        .await?)
+    Ok(
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+            .find_one(doc! { "_id": key_id, "user_id": user_id })
+            .await?,
+    )
 }
 
 /// Create a new API key with an encrypted credential.
@@ -138,7 +139,7 @@ pub async fn create_api_key(
     params: CreateApiKeyParams<'_>,
 ) -> AppResult<UserApiKey> {
     let api_key = build_api_key(encryption_keys, user_id, params).await?;
-    db.collection::<UserApiKey>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .insert_one(&api_key)
         .await?;
     Ok(api_key)
@@ -154,7 +155,7 @@ pub async fn create_api_key_with_id(
 ) -> AppResult<UserApiKey> {
     let mut api_key = build_api_key(encryption_keys, user_id, params).await?;
     api_key.id = id.to_string();
-    db.collection::<UserApiKey>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .insert_one(&api_key)
         .await?;
     Ok(api_key)
@@ -274,10 +275,11 @@ pub async fn build_api_key(
 /// encrypt and validate before any write occurs.
 pub async fn insert_api_key_in_session(
     db: &Database,
-    session: &mut ClientSession,
+    session: &mut crate::services::service_history::transaction::Transaction,
     api_key: &UserApiKey,
 ) -> AppResult<()> {
-    let collection = db.collection::<UserApiKey>(COLLECTION_NAME);
+    let collection =
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME);
     collection.insert_one(api_key).session(session).await?;
     Ok(())
 }
@@ -296,7 +298,8 @@ pub async fn create_api_key_from_provider_token(
         ));
     }
 
-    let collection = db.collection::<UserApiKey>(COLLECTION_NAME);
+    let collection =
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME);
 
     // Reuse an existing UserApiKey that already points at this provider token.
     // The `{source, source_id}` unique partial index enforces the invariant
@@ -378,7 +381,16 @@ pub async fn sync_provider_token_to_api_keys(
     user_id: &str,
     provider_config_id: &str,
 ) -> AppResult<()> {
-    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, None).await
+    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, None, false).await
+}
+
+/// Operational refresh is explicit: reconciliation and replacement callers keep normal capture.
+pub async fn sync_refreshed_provider_token_to_api_keys(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider_config_id: &str,
+) -> AppResult<()> {
+    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, None, true).await
 }
 
 /// Fresh-authorization variant: identical to
@@ -398,14 +410,21 @@ pub async fn sync_provider_token_to_api_keys_after_authorization(
     provider_config_id: &str,
 ) -> AppResult<()> {
     let authorized_at = bson::DateTime::from_chrono(Utc::now());
-    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, Some(authorized_at)).await
+    sync_provider_token_to_api_keys_impl(
+        db,
+        user_id,
+        provider_config_id,
+        Some(authorized_at),
+        false,
+    )
+    .await
 }
 
 /// Apply an explicitly authorized API-key replacement in the transaction that
 /// stores its provider token. The supplied snapshot avoids syncing a later login.
 pub(crate) async fn replace_provider_api_key_in_transaction(
     db: &mongodb::Database,
-    session: &mut mongodb::ClientSession,
+    session: &mut crate::services::service_history::transaction::Transaction,
     token: &UserProviderToken,
 ) -> AppResult<()> {
     let filter = doc! {
@@ -413,7 +432,7 @@ pub(crate) async fn replace_provider_api_key_in_transaction(
         "connection_id": null, "status": {"$nin": ["revoked", "failed"]},
         "credential_type": {"$ne": "node_managed"},
     };
-    let keys = db.collection::<UserApiKey>(COLLECTION_NAME);
+    let keys = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME);
     keys.update_many(
         filter.clone(),
         vec![doc! {"$set": {
@@ -445,6 +464,7 @@ async fn sync_provider_token_to_api_keys_impl(
     user_id: &str,
     provider_config_id: &str,
     last_authorized_at: Option<bson::DateTime>,
+    routine_refresh: bool,
 ) -> AppResult<()> {
     // Exclude terminal failure keys from provider-token sync. Without
     // this filter, a placeholder that was revoked via the
@@ -459,17 +479,17 @@ async fn sync_provider_token_to_api_keys_impl(
     // `connection_id: null` filter scopes this to legacy keys only
     // (B2 fix). Multi-connection keys deliberately have `connection_id:
     // Some(uuid)` and are excluded from the legacy fan-out path.
-    let keys: Vec<UserApiKey> = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
-        .find(doc! {
-            "user_id": user_id,
-            "provider_config_id": provider_config_id,
-            "status": { "$nin": ["revoked", "failed"] },
-            "connection_id": null,
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let keys: Vec<UserApiKey> =
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+            .find(doc! {
+                "user_id": user_id,
+                "provider_config_id": provider_config_id,
+                "status": { "$nin": ["revoked", "failed"] },
+                "connection_id": null,
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     if keys.is_empty() {
         return Ok(());
@@ -524,33 +544,27 @@ async fn sync_provider_token_to_api_keys_impl(
             set_doc.insert("last_authorized_at", ts);
         }
 
-        // A fresh OAuth authorization is a user-initiated credential
-        // replacement. Background/lazy syncs pass `None` and must leave the
-        // epoch unchanged so routine token refreshes do not cause false
-        // execution-authority drift.
-        //
-        // The bump is an aggregation expression, so it requires a *pipeline*
-        // update; it cannot ride along in `set_doc` below, which is a classic
-        // update document (MongoDB would store the literal `{$add: ...}`
-        // sub-document, corrupting the `i64` field). The credential write
-        // itself deliberately stays a classic update because `set_doc` carries
-        // provider-derived strings (`error_message`, `token_scopes`,
-        // `credential_type`) that a pipeline would reinterpret as field paths
-        // whenever they begin with `$`. Bumping first means a failure between
-        // the two writes fails closed: pending approvals drift rather than the
-        // credential being replaced with the epoch left stale.
         if last_authorized_at.is_some() {
-            db.collection::<UserApiKey>(COLLECTION_NAME)
-                .update_one(
-                    doc! { "_id": &key.id },
-                    vec![doc! { "$set": { "credential_epoch": credential_epoch_add_expr() } }],
-                )
+            // Literalize provider strings so a leading '$' cannot become an aggregation path.
+            // Epoch and replacement now commit atomically in the existing pipeline semantics.
+            let mut literal_set = bson::Document::new();
+            for (field, value) in set_doc {
+                literal_set.insert(field, doc! { "$literal": value });
+            }
+            literal_set.insert("credential_epoch", credential_epoch_add_expr());
+            crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+                .update_one(doc! { "_id": &key.id }, vec![doc! { "$set": literal_set }])
                 .await?;
+        } else {
+            let write =
+                crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+                    .update_one(doc! { "_id": &key.id }, doc! { "$set": set_doc });
+            if routine_refresh {
+                write.routine_refresh().await?;
+            } else {
+                write.await?;
+            }
         }
-
-        db.collection::<UserApiKey>(COLLECTION_NAME)
-            .update_one(doc! { "_id": &key.id }, doc! { "$set": set_doc })
-            .await?;
     }
 
     Ok(())
@@ -634,8 +648,7 @@ pub async fn write_oauth_tokens_to_key(
     // callback must not resurrect it back to `active`. A fresh add
     // (`pending_auth`) and a re-authorization of a live connection
     // (`active` / `expired`) are both still matched.
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "connection_id": connection_id,
@@ -703,8 +716,7 @@ pub async fn write_chat_oauth_tokens_to_key(
     set_doc.insert("credential_encrypted", bson::Bson::Null);
     set_doc.insert("credential_epoch", credential_epoch_add_expr());
 
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "connection_id": connection_id,
@@ -742,8 +754,7 @@ pub async fn fail_pending_placeholders_for_provider(
     error_message: &str,
 ) -> AppResult<u64> {
     let message = normalize_error_message(error_message);
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_many(
             doc! {
                 "user_id": user_id,
@@ -787,8 +798,7 @@ pub async fn fail_connection_placeholder(
     error_message: &str,
 ) -> AppResult<u64> {
     let message = normalize_error_message(error_message);
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "connection_id": connection_id,
@@ -827,8 +837,7 @@ pub async fn fail_chat_oauth_placeholder(
     error_message: &str,
 ) -> AppResult<u64> {
     let message = normalize_error_message(error_message);
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "connection_id": connection_id,
@@ -919,8 +928,7 @@ pub async fn begin_chat_oauth_attempt(
     let reset_statuses = vec!["failed", "refresh_failed", "expired", "pending_auth"];
     let should_reset = || doc! { "$in": ["$status", &reset_statuses] };
     let now = bson::DateTime::from_chrono(Utc::now());
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "user_id": user_id,
@@ -992,7 +1000,7 @@ pub async fn fail_oauth_placeholders(
 
 /// Expire abandoned channel attempts without touching completed OAuth connections.
 pub async fn expire_pending_channel_connections(db: &mongodb::Database) -> AppResult<u64> {
-    let result = db.collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .delete_many(doc! {
             "source": "channel_onboarding",
             "credential_type": "oauth2",
@@ -1038,6 +1046,18 @@ pub async fn expire_pending_channel_connections(db: &mongodb::Database) -> AppRe
 /// state currently exists. No-op for non-pending rows, non-OAuth keys, or
 /// keys without a `provider_config_id`.
 pub async fn reconcile_pending_oauth_placeholder(
+    db: &mongodb::Database,
+    user_id: &str,
+    api_key_id: &str,
+) -> AppResult<()> {
+    crate::services::service_history::context::scope(
+        crate::services::service_history::context::system("oauth_placeholder_reconciliation"),
+        reconcile_pending_oauth_placeholder_impl(db, user_id, api_key_id),
+    )
+    .await
+}
+
+async fn reconcile_pending_oauth_placeholder_impl(
     db: &mongodb::Database,
     user_id: &str,
     api_key_id: &str,
@@ -1161,7 +1181,7 @@ pub async fn reconcile_pending_oauth_placeholder(
     let message = normalize_error_message(
         "Authorization timed out or was cancelled. Cancel and re-run the wizard to try again.",
     );
-    db.collection::<UserApiKey>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "_id": api_key_id,
@@ -1212,8 +1232,7 @@ pub async fn mark_provider_connection_pending_by_connection_id(
     connection_id: &str,
     credential_type: &str,
 ) -> AppResult<()> {
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "user_id": user_id,
@@ -1237,15 +1256,15 @@ pub async fn mark_provider_connection_pending_by_connection_id(
         .await?;
 
     if result.matched_count == 0 {
-        let active = db
-            .collection::<UserApiKey>(COLLECTION_NAME)
-            .count_documents(doc! {
-                "user_id": user_id,
-                "connection_id": connection_id,
-                "status": "active",
-            })
-            .await?
-            > 0;
+        let active =
+            crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+                .count_documents(doc! {
+                    "user_id": user_id,
+                    "connection_id": connection_id,
+                    "status": "active",
+                })
+                .await?
+                > 0;
         if !active {
             return Err(AppError::NotFound(
                 "Provider connection not found for this user".to_string(),
@@ -1325,8 +1344,7 @@ pub async fn promote_node_managed_api_key(
     // both states so promotion works for the common case where the
     // node_managed key was created without any provider link
     // (thirty-third-round Codex P1).
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "_id": key_id,
@@ -1373,8 +1391,7 @@ async fn reset_provider_api_key_state(
     credential_type: &str,
     status: &str,
 ) -> AppResult<()> {
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! { "_id": key_id, "user_id": user_id },
             doc! {
@@ -1464,8 +1481,7 @@ pub async fn embed_byo_oauth_client_on_connection(
     client_id_encrypted: Vec<u8>,
     client_secret_encrypted: Option<Vec<u8>>,
 ) -> AppResult<()> {
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "connection_id": connection_id,
@@ -1585,14 +1601,14 @@ pub async fn update_api_key(
     }
 
     let result = if credential.is_some() {
-        db.collection::<UserApiKey>(COLLECTION_NAME)
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
             .update_one(
                 doc! { "_id": key_id, "user_id": user_id },
                 vec![doc! { "$set": set_doc }],
             )
             .await?
     } else {
-        db.collection::<UserApiKey>(COLLECTION_NAME)
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
             .update_one(
                 doc! { "_id": key_id, "user_id": user_id },
                 doc! { "$set": set_doc },
@@ -1635,16 +1651,14 @@ pub async fn claim_api_key_if_pending(
     // conditional update, so `matched_count == 0` on the main
     // update can be unambiguously interpreted as "status already
     // changed" (not "key doesn't exist").
-    let existing = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let existing = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .find_one(doc! { "_id": key_id, "user_id": user_id })
         .await?;
     if existing.is_none() {
         return Err(AppError::NotFound("API key not found".to_string()));
     }
 
-    let claimed = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
+    let claimed = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .find_one_and_update(
             doc! {
                 "_id": key_id,
@@ -1692,10 +1706,10 @@ pub async fn ensure_api_key_not_in_use(
     if !excluded_service_ids.is_empty() {
         filter.insert("_id", doc! { "$nin": excluded_service_ids });
     }
-    let ref_count = db
-        .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .count_documents(filter)
-        .await?;
+    let ref_count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_SERVICES)
+            .count_documents(filter)
+            .await?;
     if ref_count > 0 {
         return Err(AppError::Conflict(
             "API key is in use by active services".to_string(),
@@ -1710,10 +1724,11 @@ pub async fn claim_api_key(
     user_id: &str,
     key_id: &str,
 ) -> AppResult<Option<UserApiKey>> {
-    Ok(db
-        .collection::<UserApiKey>(COLLECTION_NAME)
-        .find_one_and_delete(doc! { "_id": key_id, "user_id": user_id })
-        .await?)
+    Ok(
+        crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
+            .find_one_and_delete(doc! { "_id": key_id, "user_id": user_id })
+            .await?,
+    )
 }
 
 pub async fn cleanup_claimed_api_key(
@@ -1751,14 +1766,7 @@ pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
 
 /// Update last_used_at and updated_at timestamps (fire-and-forget, called from proxy).
 pub async fn touch_last_used(db: &mongodb::Database, key_id: &str) {
-    let now = bson::DateTime::from_chrono(Utc::now());
-    let _ = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": key_id },
-            doc! { "$set": { "last_used_at": &now, "updated_at": &now } },
-        )
-        .await;
+    let _ = crate::services::service_history::mutation::touch_credential_usage(db, key_id).await;
 }
 
 #[cfg(test)]
@@ -2522,6 +2530,7 @@ mod tests {
     ) -> OAuthState {
         let now = Utc::now();
         OAuthState {
+            history_context: crate::services::service_history::context::current(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.to_string(),
             provider_config_id: provider_id.to_string(),

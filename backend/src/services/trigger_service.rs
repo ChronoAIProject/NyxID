@@ -954,8 +954,7 @@ async fn validate_associations(
     delivery: &TriggerDelivery,
 ) -> AppResult<()> {
     if let Some(service_id) = user_service_id {
-        let exists = db
-            .collection::<UserService>(USER_SERVICES)
+        let exists = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find_one(doc! { "_id": service_id, "user_id": user_id })
             .await?
             .is_some();

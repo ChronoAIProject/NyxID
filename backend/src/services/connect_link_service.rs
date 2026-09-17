@@ -370,6 +370,12 @@ pub async fn complete(
     ensure_actor_can_manage(db, actor_user_id, &current).await?;
     let current = claim_expiry(db, current, Some(actor_user_id)).await?;
     ensure_pending(&current)?;
+    if let Some(mut context) = crate::services::service_history::context::current() {
+        context.change_group_id = current.id.clone();
+        context.operation = "hosted_connect_link".into();
+        context.actor.app_id = current.requesting_app_id.clone().or(context.actor.app_id);
+        crate::services::service_history::context::replace(context);
+    }
     let catalog = load_catalog_info_by_id(db, &current.service_id).await?;
 
     if let Some(service_id) = current.completed_user_service_id.clone() {
@@ -569,8 +575,7 @@ pub async fn complete_oauth_callback(
     owner_user_id: &str,
     connection_id: &str,
 ) -> AppResult<LinkView> {
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! {
             "user_id": owner_user_id,
             "connection_id": connection_id,
@@ -578,8 +583,7 @@ pub async fn complete_oauth_callback(
         })
         .await?
         .ok_or(AppError::ConnectLinkNotFound)?;
-    let service = db
-        .collection::<UserService>(USER_SERVICES)
+    let service = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(doc! {
             "user_id": owner_user_id,
             "api_key_id": &api_key.id,
@@ -693,14 +697,13 @@ async fn resume_existing_completion(
     catalog: CatalogConnectInfo,
     service_id: &str,
 ) -> AppResult<CompleteResult> {
-    let service = db
-        .collection::<UserService>(USER_SERVICES)
+    let service = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(doc! { "_id": service_id, "user_id": &link.user_id, "is_active": true })
         .await?
         .ok_or(AppError::ConnectLinkNotFound)?;
     let key = match service.api_key_id.as_deref() {
         Some(key_id) => {
-            db.collection::<UserApiKey>(USER_API_KEYS)
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .find_one(doc! { "_id": key_id, "user_id": &link.user_id })
                 .await?
         }
@@ -1244,11 +1247,12 @@ pub async fn dispatch_terminal_webhook_by_token_if_needed(
 async fn view_for_link(db: &mongodb::Database, link: ConnectLink) -> AppResult<LinkView> {
     let service = load_catalog_info_by_id(db, &link.service_id).await?;
     let completed_service_slug = match link.completed_user_service_id.as_deref() {
-        Some(id) if link.status == ConnectLinkStatus::Completed => db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! { "_id": id, "user_id": &link.user_id })
-            .await?
-            .map(|service| service.slug),
+        Some(id) if link.status == ConnectLinkStatus::Completed => {
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! { "_id": id, "user_id": &link.user_id })
+                .await?
+                .map(|service| service.slug)
+        }
         _ => None,
     };
     Ok(LinkView {
@@ -1835,6 +1839,14 @@ mod tests {
             )
             .await
             .unwrap();
+            let app_id = Uuid::new_v4().to_string();
+            db.collection::<ConnectLink>(CONNECT_LINKS)
+                .update_one(
+                    doc! { "_id": &created.id },
+                    doc! { "$set": { "requesting_app_id": &app_id } },
+                )
+                .await
+                .unwrap();
             let raw_token = created.connect_url.rsplit('/').next().unwrap().to_string();
             let Json(preview) = handlers::preview_connect_link(
                 State(state.clone()),
@@ -1856,20 +1868,36 @@ mod tests {
             .unwrap();
             assert_eq!(status.scopes, preview.scopes);
             for attempt in 0..if device { 1 } else { 2 } {
-                let Json(completed) = handlers::complete_connect_link(
-                    State(state.clone()),
-                    test_auth_user(&actor),
-                    ConnectInfo("127.0.0.1:43210".parse().unwrap()),
-                    HeaderMap::new(),
-                    Json(handlers::CompleteConnectLinkRequest {
-                        token: raw_token.clone(),
-                        credential: None,
-                        use_platform_key: None,
-                        endpoint_url: None,
-                        oauth_client_id: None,
-                        oauth_client_secret: None,
-                        device_state: None,
-                    }),
+                use crate::services::service_history::context;
+                let context = crate::models::service_change_event::HistoryContext {
+                    actor: crate::models::service_change_event::HistoryActor {
+                        kind: crate::models::service_change_event::HistoryActorKind::Person,
+                        id: actor.clone(),
+                        name: "Completing user".into(),
+                        person_id: Some(actor.clone()),
+                        api_key_id: None,
+                        app_id: None,
+                    },
+                    change_group_id: Uuid::new_v4().to_string(),
+                    operation: "test_request".into(),
+                };
+                let Json(completed) = context::scope(
+                    context,
+                    handlers::complete_connect_link(
+                        State(state.clone()),
+                        test_auth_user(&actor),
+                        ConnectInfo("127.0.0.1:43210".parse().unwrap()),
+                        HeaderMap::new(),
+                        Json(handlers::CompleteConnectLinkRequest {
+                            token: raw_token.clone(),
+                            credential: None,
+                            use_platform_key: None,
+                            endpoint_url: None,
+                            oauth_client_id: None,
+                            oauth_client_secret: None,
+                            device_state: None,
+                        }),
+                    ),
                 )
                 .await
                 .unwrap();
@@ -1883,6 +1911,18 @@ mod tests {
                     let params: std::collections::HashMap<_, _> =
                         url.query_pairs().into_owned().collect();
                     assert_eq!(params["scope"], "read:user read:org public_repo");
+                    let oauth = db
+                        .collection::<crate::models::oauth_state::OAuthState>(
+                            crate::models::oauth_state::COLLECTION_NAME,
+                        )
+                        .find_one(doc! { "_id": &params["state"] })
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let history = oauth.history_context.unwrap();
+                    assert_eq!(history.change_group_id, created.id);
+                    assert_eq!(history.actor.app_id.as_deref(), Some(app_id.as_str()));
+                    assert_eq!(history.actor.person_id.as_deref(), Some(actor.as_str()));
                     if attempt == 0 {
                         let redirect = user_tokens::generic_oauth_callback(
                             State(state.clone()),

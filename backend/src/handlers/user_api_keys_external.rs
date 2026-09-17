@@ -31,9 +31,7 @@ async fn load_readable_api_key(
     actor: &str,
     key_id: &str,
 ) -> AppResult<UserApiKey> {
-    let key = state
-        .db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let key = crate::services::service_history::collection::<UserApiKey>(&state.db, USER_API_KEYS)
         .find_one(doc! { "_id": key_id })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
@@ -447,19 +445,18 @@ pub async fn update_external_api_key(
     if rotating_credential {
         use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
         use futures::TryStreamExt;
-        let routed_services: Vec<UserService> = state
-            .db
-            .collection::<UserService>(USER_SERVICES)
-            .find(doc! {
-                "user_id": &owner_id,
-                "api_key_id": &key_id,
-                "node_id": { "$ne": null },
-                "is_active": true,
-                "auth_method": { "$ne": "none" },
-            })
-            .await?
-            .try_collect()
-            .await?;
+        let routed_services: Vec<UserService> =
+            crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+                .find(doc! {
+                    "user_id": &owner_id,
+                    "api_key_id": &key_id,
+                    "node_id": { "$ne": null },
+                    "is_active": true,
+                    "auth_method": { "$ne": "none" },
+                })
+                .await?
+                .try_collect()
+                .await?;
         for svc in &routed_services {
             if !auth_user.allow_all_services && !auth_user.allowed_service_ids.contains(&svc.id) {
                 return Err(AppError::ApiKeyScopeForbidden(format!(

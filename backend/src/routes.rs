@@ -1223,6 +1223,14 @@ fn build_router_internal(
 
     let unified_key_routes = Router::new()
         .route(
+            "/history/archived",
+            get(handlers::service_history::get_archived),
+        )
+        .route(
+            "/{service_id}/history",
+            get(handlers::service_history::get_history),
+        )
+        .route(
             "/",
             get(handlers::keys::list_keys).post(handlers::keys::create_key),
         )
@@ -2152,5 +2160,12 @@ fn build_router_internal(
         .layer(DefaultBodyLimit::disable());
     let private = private.merge(mcp_transport_routes).merge(public_mcp_routes);
 
-    (public_oauth, private)
+    (
+        public_oauth.layer(middleware::from_fn(
+            crate::services::service_history::context::middleware,
+        )),
+        private.layer(middleware::from_fn(
+            crate::services::service_history::context::middleware,
+        )),
+    )
 }

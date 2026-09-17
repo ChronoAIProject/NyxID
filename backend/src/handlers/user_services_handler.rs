@@ -32,9 +32,7 @@ async fn resolve_service_write_owner(
     actor: &str,
     service_id: &str,
 ) -> AppResult<String> {
-    let svc = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
+    let svc = crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
         .find_one(doc! { "_id": service_id })
         .await?
         .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;

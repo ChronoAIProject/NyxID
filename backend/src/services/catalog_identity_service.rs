@@ -254,20 +254,21 @@ pub async fn force_resync(
         let config = effective_identity_config(&target);
         let mut set_doc = identity_set_document(&config);
         set_doc.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
-        let result = match db
-            .collection::<UserService>(USER_SERVICES)
-            .update_many(
-                doc! { "catalog_service_id": &service.id },
-                doc! { "$set": set_doc },
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(error) => {
-                audit_resync_failure(db, actor, &service.id, &report, "user_services_update").await;
-                return Err(error.into());
-            }
-        };
+        let result =
+            match crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .update_many(
+                    doc! { "catalog_service_id": &service.id },
+                    doc! { "$set": set_doc },
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    audit_resync_failure(db, actor, &service.id, &report, "user_services_update")
+                        .await;
+                    return Err(error.into());
+                }
+            };
         for field in IDENTITY_FIELDS {
             report.record(field, result.matched_count, result.modified_count, 0);
         }
@@ -497,8 +498,7 @@ async fn reconcile_transition(
         return Ok(report);
     }
 
-    let total = db
-        .collection::<UserService>(USER_SERVICES)
+    let total = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .count_documents(doc! { "catalog_service_id": catalog_service_id })
         .await
         .map_err(|error| ReconciliationFailure {
@@ -513,8 +513,7 @@ async fn reconcile_transition(
         let mut set_doc = Document::new();
         set_doc.insert(change.name, change.current);
         set_doc.insert("updated_at", updated_at);
-        let result = db
-            .collection::<UserService>(USER_SERVICES)
+        let result = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .update_many(filter, doc! { "$set": set_doc })
             .await
             .map_err(|error| ReconciliationFailure {

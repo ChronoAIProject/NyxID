@@ -195,14 +195,14 @@ pub async fn validate_service_ids(
                 ));
             }
             for sid in service_ids {
-                let exists = db
-                    .collection::<UserService>(USER_SERVICES)
-                    .find_one(doc! {
-                        "_id": sid,
-                        "user_id": key_owner_user_id,
-                        "is_active": true,
-                    })
-                    .await?;
+                let exists =
+                    crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                        .find_one(doc! {
+                            "_id": sid,
+                            "user_id": key_owner_user_id,
+                            "is_active": true,
+                        })
+                        .await?;
                 if exists.is_none() || !access.allows_resource(sid) {
                     return Err(service_scope_error(sid));
                 }
@@ -213,8 +213,7 @@ pub async fn validate_service_ids(
     }
 
     for sid in service_ids {
-        let exists = db
-            .collection::<UserService>(USER_SERVICES)
+        let exists = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find_one(doc! {
                 "_id": sid,
                 "user_id": key_owner_user_id,
@@ -402,12 +401,12 @@ pub async fn validate_service_ids_with_session(
     session: &mut ClientSession,
 ) -> AppResult<()> {
     for service_id in service_ids {
-        let service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! { "_id": service_id, "is_active": true })
-            .session(&mut *session)
-            .await?
-            .ok_or_else(|| service_scope_error(service_id))?;
+        let service =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! { "_id": service_id, "is_active": true })
+                .session(&mut *session)
+                .await?
+                .ok_or_else(|| service_scope_error(service_id))?;
 
         match authorization {
             ScopeAuthorization::ActorPermissions { actor_user_id }
@@ -597,8 +596,7 @@ async fn selected_services_for_personal_key(
             continue;
         }
 
-        let exists = db
-            .collection::<UserService>(USER_SERVICES)
+        let exists = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find_one(doc! { "_id": service_id, "is_active": true })
             .await?;
         return Err(if exists.is_some() {
@@ -628,10 +626,10 @@ async fn selected_services_for_org_key(
 
     let mut selected = Vec::with_capacity(service_ids.len());
     for service_id in service_ids {
-        let service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! { "_id": service_id, "is_active": true })
-            .await?;
+        let service =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! { "_id": service_id, "is_active": true })
+                .await?;
         let Some(service) = service else {
             return Err(AppError::ApiKeyScopePlanNotFound(format!(
                 "UserService '{}' not found",
@@ -665,16 +663,16 @@ async fn configured_node_ids_for_service(
         // service, not by the selected UserService ID. Include every active
         // matching row so a multi-connection catalog service cannot expose a
         // node candidate that is absent from the authorization plan.
-        let peer_services: Vec<UserService> = db
-            .collection::<UserService>(USER_SERVICES)
-            .find(doc! {
-                "user_id": &service.user_id,
-                "catalog_service_id": catalog_service_id,
-                "is_active": true,
-            })
-            .await?
-            .try_collect()
-            .await?;
+        let peer_services: Vec<UserService> =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find(doc! {
+                    "user_id": &service.user_id,
+                    "catalog_service_id": catalog_service_id,
+                    "is_active": true,
+                })
+                .await?
+                .try_collect()
+                .await?;
         for peer in peer_services {
             if let Some(node_id) = peer.node_id
                 && !node_id.is_empty()
@@ -833,8 +831,7 @@ async fn build_base_scope_plan(
         selected_services_for_org_key(db, actor_user_id, &owner.id, selected_service_ids).await?
     };
     if allow_auto_connected_services {
-        let rows = db
-            .collection::<UserService>(USER_SERVICES)
+        let rows = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find(doc! {
                 "user_id": &owner.id,
                 "source": crate::models::user_service::AUTO_PROVISION_SOURCE,

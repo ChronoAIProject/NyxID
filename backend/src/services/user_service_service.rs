@@ -2,7 +2,7 @@ use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::options::FindOptions;
 use mongodb::{
-    ClientSession, Database,
+    Database,
     bson::{self, Document, doc},
     options::ReturnDocument,
 };
@@ -40,7 +40,7 @@ use crate::services::{
 ///   (`/<auth_key_name><credential>/...`), e.g. Telegram Bot API
 ///   (`/bot<token>/sendMessage`)
 /// - `none`: no credential injection
-const VALID_AUTH_METHODS: &[&str] = &[
+pub(crate) const VALID_AUTH_METHODS: &[&str] = &[
     "bearer",
     "bot_bearer",
     "header",
@@ -57,7 +57,7 @@ const VALID_AUTH_METHODS: &[&str] = &[
 ];
 
 /// Valid identity propagation modes.
-const VALID_IDENTITY_MODES: &[&str] = &["none", "headers", "jwt", "both"];
+pub(crate) const VALID_IDENTITY_MODES: &[&str] = &["none", "headers", "jwt", "both"];
 /// Identity propagation and delegation token configuration.
 #[derive(Clone, Debug)]
 pub struct IdentityConfig {
@@ -366,13 +366,13 @@ pub fn validate_service_auth_update(
 /// monotonic state-version increment inside a caller-owned transaction.
 pub async fn commit_user_service_mutation(
     db: &Database,
-    session: &mut ClientSession,
+    session: &mut crate::services::service_history::transaction::Transaction,
     owner_id: &str,
     service_id: &str,
     mut extra_set: Document,
 ) -> AppResult<UserService> {
     extra_set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
-    db.collection::<UserService>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .find_one_and_update(
             doc! { "_id": service_id, "user_id": owner_id },
             doc! {
@@ -409,13 +409,13 @@ async fn list_user_services_inner(
     if !include_disabled {
         filter.insert("is_active", true);
     }
-    let services: Vec<UserService> = db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find(filter)
-        .sort(doc! { "created_at": -1 })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find(filter)
+            .sort(doc! { "created_at": -1 })
+            .await?
+            .try_collect()
+            .await?;
     Ok(services)
 }
 
@@ -596,10 +596,11 @@ pub async fn find_user_service_by_id(
     db: &mongodb::Database,
     service_id: &str,
 ) -> AppResult<Option<UserService>> {
-    Ok(db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find_one(doc! { "_id": service_id, "is_active": true })
-        .await?)
+    Ok(
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find_one(doc! { "_id": service_id, "is_active": true })
+            .await?,
+    )
 }
 
 /// Get single user service by ID, verifying ownership.
@@ -608,7 +609,7 @@ pub async fn get_user_service(
     user_id: &str,
     service_id: &str,
 ) -> AppResult<UserService> {
-    db.collection::<UserService>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .find_one(doc! { "_id": service_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("User service not found".to_string()))
@@ -620,10 +621,11 @@ pub async fn find_by_slug(
     user_id: &str,
     slug: &str,
 ) -> AppResult<Option<UserService>> {
-    Ok(db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find_one(doc! { "user_id": user_id, "slug": slug, "is_active": true })
-        .await?)
+    Ok(
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find_one(doc! { "user_id": user_id, "slug": slug, "is_active": true })
+            .await?,
+    )
 }
 
 /// Resolve a user-service identifier by UUID or slug for a specific owner.
@@ -644,7 +646,8 @@ pub async fn resolve_service_id(
         ));
     }
 
-    let collection = db.collection::<UserService>(COLLECTION_NAME);
+    let collection =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME);
     if Uuid::parse_str(value).is_ok() {
         let service = collection
             .find_one(doc! { "_id": value, "is_active": true })
@@ -684,14 +687,15 @@ pub async fn find_by_catalog_service_id(
     user_id: &str,
     catalog_service_id: &str,
 ) -> AppResult<Option<UserService>> {
-    Ok(db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find_one(doc! {
-            "user_id": user_id,
-            "catalog_service_id": catalog_service_id,
-            "is_active": true,
-        })
-        .await?)
+    Ok(
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find_one(doc! {
+                "user_id": user_id,
+                "catalog_service_id": catalog_service_id,
+                "is_active": true,
+            })
+            .await?,
+    )
 }
 
 /// Return the IDs of every active `UserService` for `user_id` that
@@ -704,12 +708,12 @@ pub async fn user_service_ids_for_endpoint(
     user_id: &str,
     endpoint_id: &str,
 ) -> AppResult<Vec<String>> {
-    let services: Vec<UserService> = db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find(doc! { "user_id": user_id, "endpoint_id": endpoint_id })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find(doc! { "user_id": user_id, "endpoint_id": endpoint_id })
+            .await?
+            .try_collect()
+            .await?;
     Ok(services.into_iter().map(|s| s.id).collect())
 }
 
@@ -721,12 +725,12 @@ pub async fn user_service_ids_for_api_key(
     user_id: &str,
     user_api_key_id: &str,
 ) -> AppResult<Vec<String>> {
-    let services: Vec<UserService> = db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find(doc! { "user_id": user_id, "api_key_id": user_api_key_id })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find(doc! { "user_id": user_id, "api_key_id": user_api_key_id })
+            .await?
+            .try_collect()
+            .await?;
     Ok(services.into_iter().map(|s| s.id).collect())
 }
 
@@ -741,12 +745,12 @@ pub async fn user_service_ids_for_catalog(
     user_id: &str,
     catalog_service_id: &str,
 ) -> AppResult<Vec<String>> {
-    let services: Vec<UserService> = db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find(doc! { "user_id": user_id, "catalog_service_id": catalog_service_id })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find(doc! { "user_id": user_id, "catalog_service_id": catalog_service_id })
+            .await?
+            .try_collect()
+            .await?;
     Ok(services.into_iter().map(|s| s.id).collect())
 }
 
@@ -889,10 +893,10 @@ pub async fn create_user_service_with_id(
     }
 
     // Verify endpoint exists and belongs to user
-    let ep_count = db
-        .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
-        .count_documents(doc! { "_id": endpoint_id, "user_id": user_id })
-        .await?;
+    let ep_count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_ENDPOINTS)
+            .count_documents(doc! { "_id": endpoint_id, "user_id": user_id })
+            .await?;
     if ep_count == 0 {
         return Err(AppError::NotFound(
             "Endpoint not found or does not belong to user".to_string(),
@@ -901,10 +905,12 @@ pub async fn create_user_service_with_id(
 
     // Verify api_key exists and belongs to user (skip for no-auth services)
     if let Some(ak_id) = api_key_id {
-        let ak_count = db
-            .collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .count_documents(doc! { "_id": ak_id, "user_id": user_id })
-            .await?;
+        let ak_count = crate::services::service_history::collection::<mongodb::bson::Document>(
+            db,
+            USER_API_KEYS,
+        )
+        .count_documents(doc! { "_id": ak_id, "user_id": user_id })
+        .await?;
         if ak_count == 0 {
             return Err(AppError::NotFound(
                 "API key not found or does not belong to user".to_string(),
@@ -938,6 +944,9 @@ pub async fn create_user_service_with_id(
 
     let now = Utc::now();
     let service = UserService {
+        deleted_at: None,
+        created_by: None,
+        last_change: None,
         id: reserved_id
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -976,7 +985,7 @@ pub async fn create_user_service_with_id(
         rotation_predecessor_id: None,
     };
 
-    db.collection::<UserService>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .insert_one(&service)
         .await?;
 
@@ -1002,8 +1011,7 @@ pub async fn set_source_app_id(
     source_app_id: &str,
     connect_link_id: &str,
 ) -> AppResult<()> {
-    let result = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "_id": service_id,
@@ -1289,8 +1297,7 @@ pub async fn update_user_service(
         );
     }
 
-    let result = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! { "_id": service_id, "user_id": user_id },
             doc! {
@@ -1746,10 +1753,10 @@ pub async fn link_api_key(
     service_id: &str,
     api_key_id: &str,
 ) -> AppResult<()> {
-    let ak_count = db
-        .collection::<mongodb::bson::Document>(USER_API_KEYS)
-        .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
-        .await?;
+    let ak_count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_API_KEYS)
+            .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
+            .await?;
     if ak_count == 0 {
         return Err(AppError::NotFound(
             "API key not found or does not belong to user".to_string(),
@@ -1764,17 +1771,18 @@ pub async fn link_api_key(
     // round Codex P2). We also accept a re-attach of the same
     // `api_key_id` so an idempotent retry of a single request doesn't
     // return Conflict.
-    let current = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let current = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .find_one(doc! { "_id": service_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
     let stale_api_key_id = match current.api_key_id.as_deref() {
         Some(current_id) if current_id != api_key_id => {
-            let exists = db
-                .collection::<mongodb::bson::Document>(USER_API_KEYS)
-                .count_documents(doc! { "_id": current_id, "user_id": user_id })
-                .await?
+            let exists = crate::services::service_history::collection::<mongodb::bson::Document>(
+                db,
+                USER_API_KEYS,
+            )
+            .count_documents(doc! { "_id": current_id, "user_id": user_id })
+            .await?
                 > 0;
             (!exists).then_some(current_id.to_string())
         }
@@ -1789,8 +1797,7 @@ pub async fn link_api_key(
         binding_options.push(doc! { "api_key_id": stale_id });
     }
 
-    let result = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "_id": service_id,
@@ -1810,10 +1817,10 @@ pub async fn link_api_key(
         // Distinguish "service missing" from "service already bound to a
         // different api_key" so the caller can reclaim the orphan
         // credential it just provisioned.
-        let existing = db
-            .collection::<UserService>(COLLECTION_NAME)
-            .find_one(doc! { "_id": service_id, "user_id": user_id })
-            .await?;
+        let existing =
+            crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+                .find_one(doc! { "_id": service_id, "user_id": user_id })
+                .await?;
         return match existing {
             None => Err(AppError::NotFound("User service not found".to_string())),
             Some(_) => Err(AppError::Conflict(
@@ -1845,18 +1852,17 @@ pub async fn rebind_user_service_api_key(
     slug: &str,
     api_key_id: &str,
 ) -> AppResult<()> {
-    let ak_count = db
-        .collection::<mongodb::bson::Document>(USER_API_KEYS)
-        .count_documents(doc! { "_id": api_key_id, "user_id": user_id, "status": "active" })
-        .await?;
+    let ak_count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_API_KEYS)
+            .count_documents(doc! { "_id": api_key_id, "user_id": user_id, "status": "active" })
+            .await?;
     if ak_count == 0 {
         return Err(AppError::NotFound(
             "API key not found, inactive, or does not belong to user".to_string(),
         ));
     }
 
-    let result = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! { "user_id": user_id, "slug": slug, "is_active": true },
             doc! { "$set": {
@@ -1909,7 +1915,7 @@ pub async fn update_ssh_auth_mode(
         ssh_node_keys_stale_after_transition(current.ssh_node_keys_stale, from, mode);
     let now = Utc::now();
 
-    db.collection::<UserService>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! { "_id": service_id, "user_id": user_id },
             doc! {
@@ -2079,24 +2085,24 @@ pub async fn backfill_stale_catalog_auth_snapshots(db: &mongodb::Database) -> Ap
             .clone()
             .unwrap_or_else(|| "Authorization".to_string());
 
-        let result = db
-            .collection::<UserService>(COLLECTION_NAME)
-            .update_many(
-                doc! {
-                    "catalog_service_id": &svc.id,
-                    "auth_method": "none",
-                    "auth_key_name": "",
-                    "api_key_id": { "$ne": null },
-                },
-                doc! {
-                    "$set": {
-                        "auth_method": &spr.injection_method,
-                        "auth_key_name": &injection_key,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    }
-                },
-            )
-            .await?;
+        let result =
+            crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+                .update_many(
+                    doc! {
+                        "catalog_service_id": &svc.id,
+                        "auth_method": "none",
+                        "auth_key_name": "",
+                        "api_key_id": { "$ne": null },
+                    },
+                    doc! {
+                        "$set": {
+                            "auth_method": &spr.injection_method,
+                            "auth_key_name": &injection_key,
+                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        }
+                    },
+                )
+                .await?;
 
         if result.modified_count > 0 {
             tracing::info!(
@@ -2468,6 +2474,22 @@ mod tests {
         .expect("proxy_only should not require catalog principals");
         assert_eq!(updated.ssh_auth_mode, SshAuthMode::ProxyOnly);
         assert!(updated.ssh_node_keys_stale);
+        let event = db
+            .collection::<crate::models::service_change_event::ServiceChangeEvent>(
+                crate::models::service_change_event::COLLECTION_NAME,
+            )
+            .find_one(doc! { "service_id": &proxy_service_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.action, "service.ssh_changed");
+        let mode = event
+            .changes
+            .iter()
+            .find(|change| change.field == "ssh_auth_mode")
+            .unwrap();
+        assert_eq!(mode.before, Some(serde_json::json!("node_key")));
+        assert_eq!(mode.after, Some(serde_json::json!("proxy_only")));
     }
 
     #[test]

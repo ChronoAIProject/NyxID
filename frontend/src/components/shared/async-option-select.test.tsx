@@ -22,7 +22,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 function Picker({ owner = "owner", initial = [], custom = false }: { owner?: string; initial?: string[]; custom?: boolean }) {
   const [values, setValues] = useState(initial);
-  return <><AsyncOptionSelect optionSet="service-scope" context={{ owner_id: owner, principal_type: "service_account" }} label="Scopes" value={values} onChange={setValues} allowCustom={custom} delimiter=":" /><output aria-label="Selected scopes">{values.join(" ")}</output></>;
+  return <><AsyncOptionSelect optionSet="service-scope" context={{ owner_id: owner, kind: "service-scope", principal_type: "service_account" }} label="Scopes" value={values} onChange={setValues} allowCustom={custom} delimiter=":" /><output aria-label="Selected scopes">{values.join(" ")}</output></>;
 }
 
 function nestedResponse(url: string) {
@@ -120,7 +120,7 @@ describe("editable async options selection", () => {
       const offset = new URL(String(url), "http://localhost").searchParams.get("offset");
       if (offset === "0") initialRequests += 1;
       const changed = offset !== "0" || initialRequests > 1;
-      const data = optionsResponse(String(url), { version: changed ? "new" : "old", next_offset: changed ? null : 50 });
+      const data = optionsResponse(String(url), { version: changed ? "new" : "old", total: 150, next_offset: changed ? null : 50 });
       data.items = [{ ...data.items[0]!, label: changed ? "Fresh choice" : "Old choice" }];
       return new Response(JSON.stringify(data));
     });
@@ -228,7 +228,7 @@ describe("editable async options selection", () => {
   it("starts ArrowUp at the last unselected choice and blocks changes when disabled while open", async () => {
     fetchMock.mockImplementation(async (url) => new Response(JSON.stringify(nestedResponse(String(url)))));
     const changed = vi.fn();
-    const props = { optionSet: "service-scope" as const, context: { owner_id: "owner", principal_type: "service_account" as const }, label: "Scopes", value: ["roles"], onChange: changed, allowCustom: true };
+    const props = { optionSet: "service-scope" as const, context: { owner_id: "owner", kind: "service-scope" as const, principal_type: "service_account" as const }, label: "Scopes", value: ["roles"], onChange: changed, allowCustom: true };
     const user = userEvent.setup();
     const view = render(<AsyncOptionSelect {...props} />, { wrapper: optionsWrapper() });
     const input = screen.getByRole("combobox");
@@ -268,7 +268,7 @@ describe("editable async options selection", () => {
     fetchMock.mockImplementation(async (url) => {
       const offset = new URL(String(url), "http://localhost").searchParams.get("offset");
       if (offset === "100" && !retry) return new Response(JSON.stringify({ message: "Unavailable" }), { status: 503 });
-      const data = optionsResponse(String(url), { next_offset: offset === "0" ? 100 : null });
+      const data = optionsResponse(String(url), { total: 200, next_offset: offset === "0" ? 100 : null });
       data.items = [{ ...data.items[0]!, value: offset === "0" ? "first" : "last", label: offset === "0" ? "First page" : "Last page" }];
       return new Response(JSON.stringify(data));
     });
@@ -331,7 +331,7 @@ describe("editable async options selection", () => {
   it("respects external reset while a staged draft is pending", async () => {
     function Editor() {
       const [values, setValues] = useState(["roles"]);
-      return <><AsyncOptionSelect optionSet="service-scope" context={{ owner_id: "owner", principal_type: "service_account" }} label="Scopes" value={values} onChange={setValues} allowCustom /><button onClick={() => setValues(["proxy"])}>Reset scope form</button><button onClick={() => setValues(["roles", "unsaved"])}>Restore former values</button><output aria-label="Stored">{values.join(" ")}</output></>;
+      return <><AsyncOptionSelect optionSet="service-scope" context={{ owner_id: "owner", kind: "service-scope", principal_type: "service_account" }} label="Scopes" value={values} onChange={setValues} allowCustom /><button onClick={() => setValues(["proxy"])}>Reset scope form</button><button onClick={() => setValues(["roles", "unsaved"])}>Restore former values</button><output aria-label="Stored">{values.join(" ")}</output></>;
     }
     const user = userEvent.setup();
     render(<Editor />, { wrapper: optionsWrapper() });
@@ -350,7 +350,7 @@ describe("editable async options selection", () => {
     fetchMock.mockImplementation(async (url) => {
       const offset = new URL(String(url), "http://localhost").searchParams.get("offset");
       if (offset !== "0") return new Response(JSON.stringify({ message: "Access changed" }), { status });
-      return new Response(JSON.stringify(optionsResponse(String(url), { next_offset: 100 })));
+      return new Response(JSON.stringify(optionsResponse(String(url), { total: 200, next_offset: 100 })));
     });
     render(<Picker custom initial={["custom:retained"]} />, { wrapper: optionsWrapper() });
     await userEvent.click(screen.getByRole("combobox"));
@@ -397,4 +397,49 @@ describe("editable async options selection", () => {
     expect(screen.getByRole("button", { name: "Edit roles" })).toBeInTheDocument();
   });
 
+});
+
+function HistoryPicker() {
+  const [values, setValues] = useState<string[]>([]);
+  return <><AsyncOptionSelect optionSet="service-history-action" context={{ kind: "service-history" }} label="History actions" value={values} onChange={setValues} /><output aria-label="History filter">{values.join(",")}</output></>;
+}
+function staticHistoryOptions() {
+  return { option_set: "service-history-action", items: [{ value: "service.created", label: "Service created", description: "Created", group: "History", source: "backend_definition", owner_id: null, resource_id: null, disabled: false, disabled_reason: null }], total: 1, next_offset: null, version: "history-v1", freshness: { definitions_version: "v1", resources: "static", evaluated_at: "2026-09-17T00:00:00Z", max_age_seconds: 0 } };
+}
+describe("static history options", () => {
+  it("uses no fabricated owner context, keeps labels, and rejects custom input", async () => {
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify(staticHistoryOptions())));
+    render(<HistoryPicker />, { wrapper: optionsWrapper() });
+    const input = screen.getByRole("combobox");
+    expect(input).toHaveAttribute("placeholder", "Search choices…");
+    await userEvent.click(input);
+    await userEvent.click(await screen.findByRole("option", { name: "Service created" }));
+    expect(screen.getByRole("status", { name: "History filter" })).toHaveTextContent("service.created");
+    expect(screen.getByText("Service created")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit service.created" })).not.toBeInTheDocument();
+    await userEvent.type(input, "made-up.action{Enter}");
+    expect(screen.getByRole("status", { name: "History filter" })).toHaveTextContent(/^service.created$/);
+    for (const [url] of fetchMock.mock.calls) {
+      const params = new URL(String(url), "http://localhost").searchParams;
+      expect(params.has("owner_id")).toBe(false);
+      expect(params.has("principal_type")).toBe(false);
+      expect(params.has("service_account_id")).toBe(false);
+    }
+  });
+
+  it.each([1, 2])("rejects next_offset=%s at or beyond total and hides invalid choices", async (offset) => {
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ ...staticHistoryOptions(), next_offset: offset })));
+    render(<HistoryPicker />, { wrapper: optionsWrapper() });
+    await userEvent.click(screen.getByRole("combobox"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Suggestions unavailable");
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+  });
+
+  it("rejects a live resource response in a static set", async () => {
+    const response = staticHistoryOptions();
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ ...response, freshness: { ...response.freshness, resources: "live" } })));
+    render(<HistoryPicker />, { wrapper: optionsWrapper() });
+    await userEvent.click(screen.getByRole("combobox"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Suggestions unavailable");
+  });
 });

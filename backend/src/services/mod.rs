@@ -168,3 +168,4 @@ pub mod service_account_scope_service;
 pub mod channel_platform_catalog_service;
 
 pub mod channel_retry_ingress;
+pub mod service_history;

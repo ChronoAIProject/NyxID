@@ -5020,22 +5020,24 @@ pub async fn seed_default_services(
             );
         }
 
-        let user_res = db
-            .collection::<mongodb::bson::Document>(USER_SERVICES)
-            .update_many(
-                doc! {
-                    "catalog_service_id": { "$in": &telegram_service_ids },
-                    "auth_method": { "$ne": "path" },
-                },
-                doc! {
-                    "$set": {
-                        "auth_method": "path",
-                        "auth_key_name": "bot",
-                        "updated_at": bson::DateTime::from_chrono(now),
-                    }
-                },
-            )
-            .await?;
+        let user_res = crate::services::service_history::collection::<mongodb::bson::Document>(
+            db,
+            USER_SERVICES,
+        )
+        .update_many(
+            doc! {
+                "catalog_service_id": { "$in": &telegram_service_ids },
+                "auth_method": { "$ne": "path" },
+            },
+            doc! {
+                "$set": {
+                    "auth_method": "path",
+                    "auth_key_name": "bot",
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .await?;
         if user_res.modified_count > 0 {
             tracing::info!(
                 modified = user_res.modified_count,
@@ -5197,7 +5199,8 @@ async fn cleanup_legacy_gcp_sa_data(
         .collect();
 
     // Cascade-delete user-owned rows tied to the removed catalog slugs.
-    let user_service_col = db.collection::<UserService>(USER_SERVICES);
+    let user_service_col =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES);
     let user_services: Vec<UserService> = user_service_col
         .find(doc! { "slug": { "$in": REMOVED_SERVICE_SLUGS } })
         .await?
@@ -5338,16 +5341,16 @@ async fn delete_unreferenced(
     if candidate_ids.is_empty() {
         return Ok(0);
     }
-    let still_referenced: std::collections::HashSet<String> = db
-        .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .distinct(
-            referencing_field,
-            doc! { referencing_field: { "$in": candidate_ids } },
-        )
-        .await?
-        .into_iter()
-        .filter_map(|b| b.as_str().map(str::to_string))
-        .collect();
+    let still_referenced: std::collections::HashSet<String> =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_SERVICES)
+            .distinct(
+                referencing_field,
+                doc! { referencing_field: { "$in": candidate_ids } },
+            )
+            .await?
+            .into_iter()
+            .filter_map(|b| b.as_str().map(str::to_string))
+            .collect();
     let orphaned: Vec<&String> = candidate_ids
         .iter()
         .filter(|id| !still_referenced.contains(*id))
@@ -5355,11 +5358,12 @@ async fn delete_unreferenced(
     if orphaned.is_empty() {
         return Ok(0);
     }
-    Ok(db
-        .collection::<mongodb::bson::Document>(collection)
-        .delete_many(doc! { "_id": { "$in": &orphaned } })
-        .await?
-        .deleted_count)
+    Ok(
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, collection)
+            .delete_many(doc! { "_id": { "$in": &orphaned } })
+            .await?
+            .deleted_count,
+    )
 }
 
 /// Input for OAuth2 provider configuration fields.

@@ -1,3 +1,4 @@
+import { ServiceAuthorshipFooter, ArchivedServiceHistory } from "@/components/dashboard/service-history";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys } from "@/hooks/use-keys";
@@ -285,6 +286,7 @@ function KeyCardContent({
             </span>
           </div>
         </div>
+        <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       </CardContent>
     </Card>
   );
@@ -447,6 +449,7 @@ function ServiceTableRow({
           )}
         </div>
       </TableCell>
+      <TableCell><ServiceAuthorshipFooter authorship={keyInfo.authorship} /></TableCell>
     </TableRow>
   );
 }
@@ -485,15 +488,16 @@ function ServiceTableView({
             )}
           </div>
           <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
-            <Table>
+            <Table className="min-w-[1000px] table-fixed">
               <TableHeader>
                 <TableRow className="border-border/50 hover:bg-transparent">
-                  <TableHead className="w-[20%]">Name</TableHead>
-                  <TableHead className="w-[22%]">Endpoint</TableHead>
-                  <TableHead className="w-[10%]">Auth</TableHead>
-                  <TableHead className="w-[20%]">Proxy Slug</TableHead>
+                  <TableHead className="w-[16%]">Name</TableHead>
+                  <TableHead className="w-[18%]">Endpoint</TableHead>
+                  <TableHead className="w-[8%]">Auth</TableHead>
+                  <TableHead className="w-[16%]">Proxy Slug</TableHead>
                   <TableHead className="w-[10%]">Routing</TableHead>
-                  <TableHead className="w-[18%]">Status</TableHead>
+                  <TableHead className="w-[12%]">Status</TableHead>
+                  <TableHead className="w-[20%] min-w-52 text-right">Authorship</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -980,6 +984,7 @@ export function KeysPage() {
             showAutoConnected={showAutoConnected}
             viewMode={servicesViewMode}
           />
+          <ArchivedServiceHistory />
         </TabsContent>
 
         <TabsContent value="pools" className="mt-6">

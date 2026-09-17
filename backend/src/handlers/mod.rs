@@ -108,3 +108,5 @@ pub mod webhooks;
 
 pub mod channel_platforms;
 pub mod options;
+
+pub mod service_history;
