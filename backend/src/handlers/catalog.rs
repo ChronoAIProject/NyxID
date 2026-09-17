@@ -138,6 +138,9 @@ pub struct CatalogEntryResponse {
     pub examples_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: i64,
+    pub skills_manifest_digest: String,
     /// Declared credential fields for `token_exchange` services. Clients
     /// read this to render the correct multi-field credential form.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -360,6 +363,9 @@ fn catalog_entry_response(
         required_permissions: entry.required_permissions,
         examples_url: entry.examples_url,
         recommended_skills: entry.recommended_skills,
+        recommended_skill_refs: entry.recommended_skill_refs,
+        skills_revision: entry.skills_revision,
+        skills_manifest_digest: entry.skills_manifest_digest,
         token_exchange_credential_fields: entry.token_exchange_credential_fields,
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
             entry.default_request_headers,
@@ -872,6 +878,9 @@ mod tests {
 
     fn minimal_catalog_entry() -> crate::services::catalog_service::CatalogEntry {
         crate::services::catalog_service::CatalogEntry {
+            recommended_skill_refs: None,
+            skills_revision: 0,
+            skills_manifest_digest: String::new(),
             slug: "openai".to_string(),
             name: "OpenAI".to_string(),
             description: Some("AI API".to_string()),

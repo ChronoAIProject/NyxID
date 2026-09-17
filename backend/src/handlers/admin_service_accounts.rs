@@ -31,6 +31,14 @@ pub(crate) async fn require_admin_or_owning_org_admin(
         return Ok(());
     }
 
+    if sa.platform_protected
+        || sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+    {
+        return Err(AppError::Forbidden(
+            "Protected service accounts require platform admin".into(),
+        ));
+    }
+
     // Otherwise the SA must be org-owned and the caller must be admin of
     // that org. `effective_owner_user_id` falls back to created_by for
     // pre-owner-field records.
@@ -65,6 +73,14 @@ async fn require_admin_read_or_owning_org_admin(
         return Ok(());
     }
 
+    if sa.platform_protected
+        || sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+    {
+        return Err(AppError::Forbidden(
+            "Protected service accounts require platform administration".into(),
+        ));
+    }
+
     let owner = sa.effective_owner_user_id();
     let actor = auth_user.user_id.to_string();
     let access = org_service::resolve_owner_access(&state.db, &actor, owner).await?;
@@ -80,6 +96,7 @@ async fn require_admin_read_or_owning_org_admin(
 // --- Request types ---
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateServiceAccountRequest {
     pub name: String,
     pub description: Option<String>,
@@ -107,6 +124,7 @@ pub struct ServiceAccountListQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateServiceAccountRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -137,6 +155,10 @@ pub struct CreateServiceAccountResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ServiceAccountItem {
+    pub purpose: crate::models::service_account::ServiceAccountPurpose,
+    pub platform_protected: bool,
+    pub credential_generation: i64,
+    pub curation_grant: Option<CurationGrantResponse>,
     pub id: String,
     pub name: String,
     pub description: Option<String>,
@@ -212,6 +234,10 @@ pub struct RevokeTokensResponse {
 fn sa_to_item(sa: ServiceAccount) -> ServiceAccountItem {
     ServiceAccountItem {
         owner_id: sa.effective_owner_user_id().to_string(),
+        purpose: sa.purpose,
+        platform_protected: sa.platform_protected,
+        credential_generation: sa.credential_generation,
+        curation_grant: sa.curation_grant.map(CurationGrantResponse::from),
         id: sa.id,
         name: sa.name,
         description: sa.description,
@@ -283,6 +309,9 @@ pub(crate) async fn create_service_account_with_id(
             .await?;
 
     let role_ids = body.role_ids.unwrap_or_default();
+    if !role_ids.is_empty() {
+        require_admin(&state, &auth_user).await?;
+    }
 
     let (sa, raw_secret) = match reserved_id {
         Some(id) => {
@@ -440,6 +469,10 @@ pub async fn update_service_account(
     let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
     require_admin_or_owning_org_admin(&state, &auth_user, &existing).await?;
 
+    if body.role_ids.is_some() {
+        require_admin(&state, &auth_user).await?;
+    }
+
     let updated = service_account_service::update_service_account(
         &state.db,
         &sa_id,
@@ -449,6 +482,7 @@ pub async fn update_service_account(
         body.role_ids.as_deref(),
         body.rate_limit_override,
         body.is_active,
+        require_admin(&state, &auth_user).await.is_ok(),
     )
     .await?;
 
@@ -475,7 +509,12 @@ pub async fn delete_service_account(
     let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
     require_admin_or_owning_org_admin(&state, &auth_user, &existing).await?;
 
-    service_account_service::delete_service_account(&state.db, &sa_id).await?;
+    service_account_service::delete_service_account(
+        &state.db,
+        &sa_id,
+        require_admin(&state, &auth_user).await.is_ok(),
+    )
+    .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -510,7 +549,12 @@ pub async fn rotate_secret(
     let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
     require_admin_or_owning_org_admin(&state, &auth_user, &existing).await?;
 
-    let (updated, raw_secret) = service_account_service::rotate_secret(&state.db, &sa_id).await?;
+    let (updated, raw_secret) = service_account_service::rotate_secret(
+        &state.db,
+        &sa_id,
+        require_admin(&state, &auth_user).await.is_ok(),
+    )
+    .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -549,7 +593,12 @@ pub async fn revoke_tokens(
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
     require_admin_or_owning_org_admin(&state, &auth_user, &_sa).await?;
 
-    let revoked_count = service_account_service::revoke_all_tokens(&state.db, &sa_id).await?;
+    let revoked_count = service_account_service::revoke_all_tokens(
+        &state.db,
+        &sa_id,
+        require_admin(&state, &auth_user).await.is_ok(),
+    )
+    .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -565,6 +614,78 @@ pub async fn revoke_tokens(
         revoked_count,
         message: "All active tokens revoked".to_string(),
     }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct CurationGrantResponse {
+    pub id: String,
+    pub service_ids: Vec<String>,
+    pub ornn_proxy_service_id: Option<String>,
+    pub issued_by: String,
+    pub issued_at: String,
+    pub expires_at: Option<String>,
+    pub max_writes: i64,
+    pub window_seconds: i64,
+    pub window_started_at: String,
+    pub writes_used: i64,
+}
+
+impl From<crate::models::service_account::CurationGrant> for CurationGrantResponse {
+    fn from(g: crate::models::service_account::CurationGrant) -> Self {
+        Self {
+            id: g.id,
+            service_ids: g.service_ids,
+            ornn_proxy_service_id: g.ornn_proxy_service_id,
+            issued_by: g.issued_by,
+            issued_at: g.issued_at.to_rfc3339(),
+            expires_at: g.expires_at.map(|v| v.to_rfc3339()),
+            max_writes: g.max_writes,
+            window_seconds: g.window_seconds,
+            window_started_at: g.window_started_at.to_rfc3339(),
+            writes_used: g.writes_used,
+        }
+    }
+}
+
+pub async fn issue_curation_grant(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(input): Json<crate::services::curation_grant_service::IssueCurationGrant>,
+) -> AppResult<Json<ServiceAccountItem>> {
+    require_admin(&state, &auth).await?;
+    let sa = crate::services::curation_grant_service::issue(
+        &state.db,
+        &id,
+        &auth.user_id.to_string(),
+        input,
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "admin.sa.curation_granted",
+        Some(
+            serde_json::json!({"target_sa_id": id, "grant_id": sa.curation_grant.as_ref().map(|g| &g.id)}),
+        ),
+    );
+    Ok(Json(sa_to_item(sa)))
+}
+
+pub async fn revoke_curation_grant(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<ServiceAccountItem>> {
+    require_admin(&state, &auth).await?;
+    let sa = crate::services::curation_grant_service::revoke(&state.db, &id).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "admin.sa.curation_revoked",
+        Some(serde_json::json!({"target_sa_id": id})),
+    );
+    Ok(Json(sa_to_item(sa)))
 }
 
 #[cfg(test)]
@@ -593,6 +714,10 @@ mod tests {
     #[test]
     fn service_account_authorization_projection_excludes_free_text_and_secret_prefix() {
         let item = ServiceAccountItem {
+            purpose: crate::models::service_account::ServiceAccountPurpose::General,
+            platform_protected: false,
+            credential_generation: 0,
+            curation_grant: None,
             owner_id: "owner".into(),
             id: "sa-1".to_string(),
             name: "Bearer nyxid_ag_abcdefghijklmnop".to_string(),

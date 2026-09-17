@@ -498,6 +498,8 @@ mod tests {
 
     fn compatible_service() -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "svc-1".to_string(),
             name: "Service".to_string(),
             slug: "svc".to_string(),
