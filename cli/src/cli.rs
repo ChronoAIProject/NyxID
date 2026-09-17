@@ -847,6 +847,8 @@ pub enum CatalogCommands {
 }
 
 // ---- Service (C11-C13, I21-I23) ----
+// Inventory reads (`service list` / `service show`) work on an Agent Key
+// profile within its service scope. Mutating commands need an account login.
 
 #[derive(Args, Default)]
 pub struct CatalogServiceArgs {
@@ -1574,6 +1576,9 @@ pub enum BillingCommands {
 }
 
 // ---- API Key ----
+// Scope helpers used by `api-key create` / `api-key bind` read `/keys`, which
+// works on Agent Key profiles. NyxID API-key management itself, including
+// listing, creation, and binding mutations, requires an account login.
 
 #[derive(Subcommand)]
 pub enum ApiKeyCommands {
@@ -4330,6 +4335,8 @@ pub enum ApprovalCommands {
 }
 
 // ---- Endpoint (I24) ----
+// `endpoint list` works on an Agent Key profile within its service scope;
+// mutating commands need an account login.
 
 #[derive(Subcommand)]
 pub enum EndpointCommands {
@@ -4361,6 +4368,8 @@ pub enum EndpointCommands {
 }
 
 // ---- ExternalKey (I25-I26) ----
+// `external-key list` works on an Agent Key profile within its service scope;
+// mutating commands need an account login.
 
 #[derive(Subcommand)]
 pub enum ExternalKeyCommands {

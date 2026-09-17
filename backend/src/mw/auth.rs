@@ -134,6 +134,13 @@ fn extract_request_user_agent(parts: &Parts) -> Option<String> {
 }
 
 impl AuthUser {
+    /// Effective service allowlist for restricted API-key inventory reads.
+    /// Other authentication classes retain their existing inventory behavior.
+    pub fn api_key_service_scope(&self) -> Option<&[String]> {
+        (self.auth_method == AuthMethod::ApiKey && !self.allow_all_services)
+            .then_some(self.allowed_service_ids.as_slice())
+    }
+
     /// Resource owner whose approval settings should be consulted.
     pub fn effective_approval_owner_user_id(&self) -> String {
         self.approval_owner_user_id

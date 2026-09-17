@@ -100,7 +100,7 @@ The indexed expansion query only runs for restricted, opted-in keys.
 
 Ownership remains authoritative: a personal platform row cannot be selected for
 an org key, and expansion never includes a different owner's rows. Version 0.20
-includes explicit platform bindings in the auto-connected grant. Key listing,
+includes explicit platform bindings in the auto-connected grant. Human and delegated key listing,
 Agent Key login delivery (login options), and device-code approval/onboarding for
 the acting person's own account invoke shared provisioning, which may idempotently
 create org-owned auto-connected rows only through that person's own active
@@ -207,6 +207,8 @@ Optional metadata uses `serde(default)`; the platform-services grant is a defaul
 ## API Endpoints
 
 General agent keys can read org membership through `GET /api/v1/orgs`, `/orgs/{key}`, `/orgs/{key}/authorization`, `/orgs/{org_id}/members`, `/orgs/{org_id}/members/{member_id}/authorization`, and `/orgs/{org_id}/role-scopes` (all under `/api/v1`; `{key}` accepts UUID or slug). No extra scope or service allowlist is required; active membership governs reads and role scopes require admin. The actor is the key owner: person-owned keys see that person's memberships, while org-owned keys list their own org and receive Direct read access, projected as `your_role: "admin"` without a membership row. All writes, invites (including GET), and primary-org changes remain human-only for API keys. Scheduled-invocation keys remain rejected; delegated `account:read` parity is unchanged.
+
+Agent keys can also GET `/keys`, `/keys/{id_or_slug}`, `/keys/{id_or_slug}/authorization`, `/user-services`, `/endpoints` (including authorized `?org_id=`), `/endpoints/{id}/authorization`, `/endpoints/{id}/openapi-endpoints`, `/api-keys/external`, and `/api-keys/external/{id}/authorization`. These API-key reads perform no auto-provisioning or lazy pending-OAuth reconciliation. Restricted keys are filtered to their effective service allowlist, including auto-connected expansion; endpoints and credentials must back at least one allowed service. Personal keys list personal and org-shared services through active Member/Admin memberships and effective role scopes; Viewer-only org services are excluded. Org-owned keys list their own services with the existing `credential_source.type: "personal"` tag. `/keys` still includes disabled rows within key scope. All inventory writes and the entire NyxID `/api-keys` management router remain human-only for API keys; delegated `account:read` parity is unchanged.
 
 ### Credential Bindings
 

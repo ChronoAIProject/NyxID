@@ -1201,23 +1201,43 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::node_agent::decline_pending_credential),
         );
 
-    let unified_key_routes = Router::new()
+    // Metadata reads retain the existing service-account restriction. Writes
+    // remain in the human-only router; Axum merges methods on shared paths.
+    let service_inventory_read_routes = Router::new()
+        .route("/keys", get(handlers::keys::list_keys))
+        .route("/keys/{key_id}", get(handlers::keys::get_key))
         .route(
-            "/",
-            get(handlers::keys::list_keys).post(handlers::keys::create_key),
+            "/keys/{key_id}/authorization",
+            get(handlers::keys::get_key_authorization),
         )
+        .route(
+            "/user-services",
+            get(handlers::user_services_handler::list_user_services),
+        )
+        .route("/endpoints", get(handlers::user_endpoints::list_endpoints))
+        .route(
+            "/endpoints/{endpoint_id}/authorization",
+            get(handlers::user_endpoints::get_endpoint_authorization),
+        )
+        .route(
+            "/endpoints/{endpoint_id}/openapi-endpoints",
+            get(handlers::user_endpoints::list_openapi_endpoints),
+        )
+        .route(
+            "/api-keys/external",
+            get(handlers::user_api_keys_external::list_external_api_keys),
+        )
+        .route(
+            "/api-keys/external/{key_id}/authorization",
+            get(handlers::user_api_keys_external::get_external_api_key_authorization),
+        )
+        .layer(middleware::from_fn(reject_service_account_tokens));
+
+    let unified_key_routes = Router::new()
+        .route("/", post(handlers::keys::create_key))
         .route(
             "/{key_id}",
-            get(handlers::keys::get_key)
-                .put(handlers::keys::update_key)
-                .delete(handlers::keys::delete_key),
-        )
-        // Authorization-evidence projection of `/{key_id}`. Same ACL, strictly
-        // fewer properties: an evidence reader must not be handed the
-        // free-text carriers that its own secret-shape tripwire rejects.
-        .route(
-            "/{key_id}/authorization",
-            get(handlers::keys::get_key_authorization),
+            put(handlers::keys::update_key).delete(handlers::keys::delete_key),
         );
 
     let connect_link_routes = Router::new()
@@ -1262,27 +1282,13 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_service_account_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
-    let user_endpoint_routes = Router::new()
-        .route("/", get(handlers::user_endpoints::list_endpoints))
-        .route(
-            "/{endpoint_id}",
-            put(handlers::user_endpoints::update_endpoint)
-                .delete(handlers::user_endpoints::delete_endpoint),
-        )
-        .route(
-            "/{endpoint_id}/authorization",
-            get(handlers::user_endpoints::get_endpoint_authorization),
-        )
-        .route(
-            "/{endpoint_id}/openapi-endpoints",
-            get(handlers::user_endpoints::list_openapi_endpoints),
-        );
+    let user_endpoint_routes = Router::new().route(
+        "/{endpoint_id}",
+        put(handlers::user_endpoints::update_endpoint)
+            .delete(handlers::user_endpoints::delete_endpoint),
+    );
 
     let external_api_key_routes = Router::new()
-        .route(
-            "/",
-            get(handlers::user_api_keys_external::list_external_api_keys),
-        )
         .route(
             "/gcp-service-account",
             post(handlers::user_api_keys_external::create_gcp_service_account_key),
@@ -1291,17 +1297,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/{key_id}",
             put(handlers::user_api_keys_external::update_external_api_key)
                 .delete(handlers::user_api_keys_external::delete_external_api_key),
-        )
-        .route(
-            "/{key_id}/authorization",
-            get(handlers::user_api_keys_external::get_external_api_key_authorization),
         );
 
     let user_service_routes = Router::new()
-        .route(
-            "/",
-            get(handlers::user_services_handler::list_user_services),
-        )
         .route(
             "/{service_id}/ssh-auth-mode",
             patch(handlers::user_services_handler::patch_user_service_ssh_auth_mode),
@@ -1730,8 +1728,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     )
     .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
 
-    // Routes accessible by both users and service accounts (block delegated tokens)
+    // Shared management routes; individual groups retain service-account gates.
+    // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
+        .merge(service_inventory_read_routes)
         .route(
             "/auth/agent-key/self",
             get(handlers::auth_agent_key::get_self).delete(handlers::auth_agent_key::delete_self),
@@ -2116,6 +2116,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
 #[cfg(test)]
 mod org_membership_tests;
+
+#[cfg(test)]
+mod service_inventory_tests;
 
 #[cfg(test)]
 mod retirement_tests {

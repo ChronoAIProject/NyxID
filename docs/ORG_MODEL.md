@@ -62,6 +62,8 @@ graph LR
 | **Member** | No | Yes | Yes |
 | **Viewer** | No | No (`allowed: false`, 403 on proxy) | Yes (read-only) |
 
+API-key callers omit Viewer rows (a Viewer cannot call the service, matching the proxy).
+
 ### Scope: role defaults + per-member overrides
 
 Service scope has two layers: org-wide **role defaults** (`org_role_scopes`, one row per `(org_user_id, role)`) and **per-membership overrides** on `OrgMembership`. Each membership carries a `scope_source` discriminator:
@@ -447,6 +449,23 @@ General API keys, including Agent Key login credentials, can call these six GET 
 The actor is `AuthUser.user_id`, the key's polymorphic owner. Person-owned keys read that person's active memberships. An org-owned key lists only its owning org and has Direct read access to that org's profile, authorization metadata, roster, member authorization metadata, and role scopes. `your_role: "admin"` is the read-side projection of `OwnerAccess::Direct`, not a membership row; `is_primary` is false, while pending invite counts and enabled features use the ordinary helpers with the org actor and Admin role. Other orgs still require active membership.
 
 All org writes, all invite routes (including GET, which exposes redeemable bearer nonces), and `PATCH /users/me/primary-org` remain human-only for API keys. Service-account and relay tokens remain rejected. Delegated tokens retain exactly their existing parity: ordinary non-WebSocket GET reads require the exact `account:read` scope, while invites and mutations remain denied.
+
+General API keys can also call the nine AI-service inventory GETs listed below. These reads skip auto-provisioning and lazy pending-OAuth reconciliation; restricted keys see only their effective service allowlist and its backing endpoints/credentials. Personal keys list personal and org-shared services through active Member/Admin memberships and effective role scopes; Viewer-only org services are excluded. Org-owned keys act directly as the org, so its own services retain `credential_source.type: "personal"`. `/keys` alone includes disabled services, still subject to key filtering. `/endpoints?org_id=` requires Direct or admin access. Inventory writes and the entire NyxID `/api-keys` management router stay human-only for API keys; delegated `account:read`, service-account, relay, and scheduled-invocation behavior is unchanged.
+
+### AI-service inventory
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `GET` | `/keys` | human, delegated `account:read`, or API key within service scope | Personal and org-shared inventory, including disabled rows |
+| `GET` | `/keys/{id_or_slug}` | same authentication, owner/member ACL and key scope | Service detail |
+| `GET` | `/keys/{id_or_slug}/authorization` | same as service detail | Service authorization evidence |
+| `GET` | `/user-services` | same as inventory listing | Active service inventory |
+| `GET` | `/endpoints` | human, delegated `account:read`, or API key; Direct/admin for `org_id` | Owner endpoints, filtered to allowed backing services for restricted keys |
+| `GET` | `/endpoints/{id}/authorization` | owner/member ACL and API-key backing-service scope | Endpoint authorization evidence |
+| `GET` | `/endpoints/{id}/openapi-endpoints` | same as endpoint evidence | Endpoint operations |
+| `GET` | `/api-keys/external` | human, delegated `account:read`, or API key within backing-service scope | Owner credential metadata |
+| `GET` | `/api-keys/external/{id}/authorization` | owner/member ACL and API-key backing-service scope | Credential authorization evidence |
+| `POST`, `PUT`, `PATCH`, `DELETE` | Inventory mutation routes | human only, with existing owner/admin ACLs | Create, update, or delete inventory |
 
 ### Org CRUD
 
