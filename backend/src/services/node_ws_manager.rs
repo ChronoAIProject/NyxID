@@ -364,6 +364,8 @@ struct NodeConnection {
     /// Bounded channel to send WS messages to the node's write task (H4).
     /// Prevents memory exhaustion from slow/malicious nodes.
     tx: mpsc::Sender<NodeOutboundMessage>,
+    /// Out-of-band lifecycle signal: never blocked by a full outbound queue.
+    close_tx: tokio::sync::watch::Sender<Option<NodeOutboundMessage>>,
     /// Pending proxy request correlation map
     pending: Arc<DashMap<String, PendingRequest>>,
     proxy_dispatch_gate: Arc<std::sync::Mutex<()>>,
@@ -437,10 +439,20 @@ impl NodeSessionInfo {
     }
 }
 
+pub(crate) type NodeConnectionRegistration = (
+    Arc<DashMap<String, PendingRequest>>,
+    tokio::sync::watch::Receiver<Option<NodeOutboundMessage>>,
+);
+
 /// In-memory WebSocket connection manager for credential nodes.
 pub struct NodeWsManager {
     /// Active connections: node_id -> NodeConnection
     connections: DashMap<String, NodeConnection>,
+    /// Serialize MongoDB claim + local publication for the same node. Weak
+    /// entries are pruned on acquisition so retired node IDs do not accumulate.
+    connection_setup_locks: std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+    >,
     /// Proxy request timeout in seconds
     proxy_timeout_secs: u64,
     /// Maximum concurrent WebSocket connections (authenticated + pending auth)
@@ -1425,6 +1437,7 @@ impl NodeWsManager {
     pub fn new(proxy_timeout_secs: u64, max_connections: usize) -> Self {
         Self {
             connections: DashMap::new(),
+            connection_setup_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
             proxy_timeout_secs,
             max_connections,
             connection_reservations: AtomicUsize::new(0),
@@ -1473,6 +1486,26 @@ impl NodeWsManager {
         }
     }
 
+    pub(crate) async fn lock_connection_setup(
+        &self,
+        node_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .connection_setup_locks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            let entry = locks.entry(node_id.to_string()).or_default();
+            entry.upgrade().unwrap_or_else(|| {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                *entry = Arc::downgrade(&lock);
+                lock
+            })
+        };
+        lock.lock_owned().await
+    }
+
     /// Register a new WebSocket connection with a pre-created sender.
     /// Returns the pending request map for the WS reader task to deliver responses.
     #[cfg(test)]
@@ -1482,6 +1515,7 @@ impl NodeWsManager {
         tx: mpsc::Sender<NodeOutboundMessage>,
     ) -> Arc<DashMap<String, PendingRequest>> {
         self.register_connection_with_id(node_id, uuid::Uuid::new_v4().to_string(), tx)
+            .0
     }
 
     pub(crate) fn register_connection_with_id(
@@ -1489,7 +1523,8 @@ impl NodeWsManager {
         node_id: &str,
         connection_id: String,
         tx: mpsc::Sender<NodeOutboundMessage>,
-    ) -> Arc<DashMap<String, PendingRequest>> {
+    ) -> NodeConnectionRegistration {
+        let (close_tx, close_rx) = tokio::sync::watch::channel(None);
         let pending = Arc::new(DashMap::new());
         let ssh_tunnels = Arc::new(DashMap::new());
         let web_terminals = Arc::new(DashMap::new());
@@ -1498,11 +1533,12 @@ impl NodeWsManager {
         let ws_proxies = Arc::new(DashMap::new());
         let return_pending = pending.clone();
 
-        self.connections.insert(
+        let previous = self.connections.insert(
             node_id.to_string(),
             NodeConnection {
                 connection_id,
                 tx,
+                close_tx,
                 pending,
                 proxy_dispatch_gate: Arc::new(std::sync::Mutex::new(())),
                 ssh_tunnels,
@@ -1517,7 +1553,20 @@ impl NodeWsManager {
             },
         );
 
-        return_pending
+        if let Some(previous) = previous {
+            // Cloned pending maps can outlive the map entry. Explicitly fail
+            // them and ask the old writer to close, even if its reader is idle.
+            Self::signal_close(&previous, 4007, "Connection replaced");
+            Self::clear_connection(&previous);
+        }
+        (return_pending, close_rx)
+    }
+
+    fn signal_close(conn: &NodeConnection, code: u16, reason: &str) {
+        conn.close_tx.send_replace(Some(NodeOutboundMessage::Close {
+            code,
+            reason: reason.to_string(),
+        }));
     }
 
     /// Remove a node's connection (called on WS close).
@@ -1541,6 +1590,9 @@ impl NodeWsManager {
     }
 
     fn clear_connection(conn: &NodeConnection) {
+        if conn.close_tx.borrow().is_none() {
+            Self::signal_close(conn, 1000, "Connection closed");
+        }
         conn.pending.clear();
         conn.ssh_tunnels.clear();
         conn.web_terminals.clear();
@@ -1583,6 +1635,7 @@ impl NodeWsManager {
     }
 
     async fn close_connection(conn: &NodeConnection, code: u16, reason: &str) {
+        Self::signal_close(conn, code, reason);
         Self::clear_connection(conn);
         let close_msg = NodeOutboundMessage::Close {
             code,
@@ -4179,6 +4232,93 @@ mod tests {
         let mut ids = mgr.connected_node_ids();
         ids.sort();
         assert_eq!(ids, vec!["node-a", "node-b"]);
+    }
+
+    #[tokio::test]
+    async fn replacement_signals_close_even_with_full_queue_and_retained_senders() {
+        let manager = NodeWsManager::new(30, 10);
+        let (old_tx, _old_rx) = mpsc::channel(1);
+        let retained_sender = old_tx.clone();
+        old_tx
+            .try_send(NodeOutboundMessage::Text("queued request".to_string()))
+            .unwrap();
+        let (pending, mut close) =
+            manager.register_connection_with_id("node-a", "old".to_string(), old_tx);
+        let (reply, result) = oneshot::channel();
+        pending.insert("in-flight".to_string(), PendingRequest::Awaiting(reply));
+        let (new_tx, _new_rx) = mpsc::channel(1);
+        manager.register_connection_with_id("node-a", "new".to_string(), new_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(1), close.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &*close.borrow(),
+            Some(NodeOutboundMessage::Close { code: 4007, .. })
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), result)
+                .await
+                .unwrap()
+                .is_err(),
+            "replacement must fail old in-flight requests immediately"
+        );
+        assert!(pending.is_empty());
+        assert_eq!(
+            retained_sender.capacity(),
+            0,
+            "normal queue was full throughout replacement"
+        );
+        assert!(!manager.unregister_connection_if("node-a", "old"));
+        assert!(manager.has_connection("node-a", "new"));
+    }
+
+    #[tokio::test]
+    async fn removal_between_publication_and_readiness_retains_close_signal() {
+        let manager = NodeWsManager::new(30, 10);
+        let (tx, _rx) = mpsc::channel(1);
+        let (_, mut close_rx) =
+            manager.register_connection_with_id("node", "connection".to_string(), tx);
+        assert!(
+            manager
+                .disconnect_connection_if("node", "connection", 4006, "deleted")
+                .await
+        );
+        // Registration returned the receiver before publication. No lookup or
+        // subscription is needed after an awaited auth_ok write completes.
+        tokio::time::timeout(std::time::Duration::from_secs(1), close_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &*close_rx.borrow(),
+            Some(NodeOutboundMessage::Close { code: 4006, .. })
+        ));
+        assert!(!manager.is_connected("node"));
+    }
+
+    #[tokio::test]
+    async fn setup_serializes_same_node_without_blocking_other_nodes() {
+        let manager = Arc::new(NodeWsManager::new(30, 10));
+        let first = manager.lock_connection_setup("node-a").await;
+        let waiting = manager.lock_connection_setup("node-a");
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        let other = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            manager.lock_connection_setup("node-b"),
+        )
+        .await
+        .unwrap();
+        drop(first);
+        let next = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .unwrap();
+        drop((next, other));
     }
 
     #[test]
