@@ -3696,6 +3696,485 @@
           "requiresApproval": true
         }
       }
+    },
+    "/v1/email/sync": {
+      "post": {
+        "operationId": "start_email_sync",
+        "tags": [
+          "EmailSync"
+        ],
+        "summary": "Start a new email sync",
+        "description": "Requires Mail.Read. Synchronizes the authorized mailbox through NyxID. Keep sync cursors in the caller; this operation does not expose mailbox credentials.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "daysWithin",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false,
+            "description": "Scan emails received within last 'daysWithin' days.\n"
+          },
+          {
+            "in": "query",
+            "name": "bodyType",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "syncUpdatedToken": {
+                      "type": "string"
+                    },
+                    "syncDeletedToken": {
+                      "type": "string"
+                    },
+                    "ready": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "start_email_sync",
+          "description": "Start a new email sync",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        }
+      }
+    },
+    "/v1/email/sync/updated": {
+      "get": {
+        "operationId": "get_updated_emails",
+        "tags": [
+          "EmailSync"
+        ],
+        "summary": "Request changed emails (deltas)",
+        "description": "Requires Mail.Read. Synchronizes the authorized mailbox through NyxID. Keep sync cursors in the caller; this operation does not expose mailbox credentials.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "deltaToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A token received as nextDeltaToken from a previous sync request or a start sync request"
+          },
+          {
+            "in": "query",
+            "name": "pageToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A token received as nextPageToken from a previous page request"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextPageToken": {
+                      "type": "string",
+                      "description": "A token received as nextPageToken from a previous page request"
+                    },
+                    "nextDeltaToken": {
+                      "type": "string",
+                      "description": "A token received as nextDeltaToken from a previous sync request or a start sync request"
+                    },
+                    "length": {
+                      "type": "integer"
+                    },
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "threadId": {
+                            "type": "string"
+                          },
+                          "createdTime": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "lastModifiedTime": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "sentAt": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "receivedAt": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "internetMessageId": {
+                            "type": "string"
+                          },
+                          "subject": {
+                            "type": "string"
+                          },
+                          "sysLabels": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "junk",
+                                "trash",
+                                "sent",
+                                "inbox",
+                                "unread",
+                                "flagged",
+                                "important",
+                                "draft"
+                              ]
+                            }
+                          },
+                          "keywords": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "sysClassifications": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "personal",
+                                "social",
+                                "promotions",
+                                "updates",
+                                "forums"
+                              ]
+                            }
+                          },
+                          "sensitivity": {
+                            "type": "string",
+                            "enum": [
+                              "normal",
+                              "private",
+                              "personal",
+                              "confidential"
+                            ]
+                          },
+                          "meetingMessageMethod": {
+                            "type": "string",
+                            "enum": [
+                              "request",
+                              "reply",
+                              "cancel",
+                              "counter",
+                              "other"
+                            ]
+                          },
+                          "from": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "address": {
+                                "type": "string",
+                                "description": "Format: email."
+                              },
+                              "raw": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "to": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "cc": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "bcc": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "replyTo": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "hasAttachments": {
+                            "type": "boolean"
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "bodySnippet": {
+                            "type": "string"
+                          },
+                          "attachments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "mimeType": {
+                                  "type": "string"
+                                },
+                                "size": {
+                                  "type": "integer"
+                                },
+                                "inline": {
+                                  "type": "boolean"
+                                },
+                                "contentId": {
+                                  "type": "string"
+                                },
+                                "content": {
+                                  "type": "string"
+                                },
+                                "contentLocation": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "inReplyTo": {
+                            "type": "string"
+                          },
+                          "references": {
+                            "type": "string"
+                          },
+                          "threadIndex": {
+                            "type": "string"
+                          },
+                          "internetHeaders": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "nativeProperties": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          },
+                          "folderId": {
+                            "type": "string"
+                          },
+                          "webLink": {
+                            "type": "string"
+                          },
+                          "omitted": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "threadId",
+                                "body",
+                                "attachments",
+                                "recipients",
+                                "internetHeaders"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Sync cursor expired. Start a new email sync and use its new sync tokens."
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "get_updated_emails",
+          "description": "Request changed emails (deltas)",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/v1/email/sync/deleted": {
+      "get": {
+        "operationId": "get_deleted_emails",
+        "tags": [
+          "EmailSync"
+        ],
+        "summary": "Request deleted emails (deltas)",
+        "description": "Requires Mail.Read. Synchronizes the authorized mailbox through NyxID. Keep sync cursors in the caller; this operation does not expose mailbox credentials.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "deltaToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A token received as nextDeltaToken from a previous sync request or a start sync request"
+          },
+          {
+            "in": "query",
+            "name": "pageToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A token received as nextPageToken from a previous page request"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextPageToken": {
+                      "type": "string",
+                      "description": "A token received as nextPageToken from a previous page request"
+                    },
+                    "nextDeltaToken": {
+                      "type": "string",
+                      "description": "A token received as nextDeltaToken from a previous sync request or a start sync request"
+                    },
+                    "length": {
+                      "type": "integer"
+                    },
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "folderId": {
+                            "type": "string"
+                          },
+                          "internetMessageId": {
+                            "type": "string"
+                          },
+                          "timestamp": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Sync cursor expired. Start a new email sync and use its new sync tokens."
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "get_deleted_emails",
+          "description": "Request deleted emails (deltas)",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
     }
   }
 }

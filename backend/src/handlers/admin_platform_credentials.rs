@@ -103,6 +103,8 @@ async fn response(
                 })),
         callback_url: if descriptor.provider == "telegram-new" {
             Some(super::telegram_new::service(state).manager_callback())
+        } else if descriptor.provider == "aurinko" {
+            None
         } else if matches!(
             descriptor.backing,
             crate::services::channel_managed::PlatformCredentialBacking::ProviderOAuth { .. }

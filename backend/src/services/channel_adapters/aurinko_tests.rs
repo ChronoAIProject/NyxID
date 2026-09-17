@@ -1082,6 +1082,34 @@ async fn aurinko_catalog_account_token_connection_owner_scope_and_disable() {
         .unwrap();
     assert_eq!(catalog.base_url, ORIGIN);
     assert!(catalog.requires_user_credential);
+    let spec = crate::services::catalog_spec_registry::spec_for_slug("api-aurinko").unwrap();
+    for (method, path, risk) in [
+        (
+            "POST",
+            "/v1/email/sync",
+            crate::models::service_endpoint::EndpointRisk::Write,
+        ),
+        (
+            "GET",
+            "/v1/email/sync/updated",
+            crate::models::service_endpoint::EndpointRisk::Read,
+        ),
+        (
+            "GET",
+            "/v1/email/sync/deleted",
+            crate::models::service_endpoint::EndpointRisk::Read,
+        ),
+    ] {
+        let endpoint = db.collection::<crate::models::service_endpoint::ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+            .find_one(doc! { "service_id": &catalog.id, "method": method, "path": path, "is_active": true })
+            .await.unwrap().expect("sync operation is seeded and discoverable");
+        assert_eq!(endpoint.risk, Some(risk));
+        assert!(!endpoint.supports_idempotency_key);
+        let marker = &spec["paths"][path][method.to_ascii_lowercase()]["x-aevatar-tool"];
+        assert_eq!(marker["readOnly"], method == "GET");
+        assert_eq!(marker["requiresApproval"], method == "POST");
+        assert_eq!(marker["destructive"], false);
+    }
     let owner = uuid::Uuid::new_v4().to_string();
     let other = uuid::Uuid::new_v4().to_string();
     let created = keys::create_key(
@@ -1140,7 +1168,19 @@ async fn aurinko_catalog_account_token_connection_owner_scope_and_disable() {
     .await
     .unwrap();
     assert_eq!(operations.services.len(), 1);
-    assert_eq!(operations.services[0].endpoints.len(), 12);
+    assert_eq!(operations.services[0].endpoints.len(), 15);
+    for (method, path) in [
+        ("POST", "/v1/email/sync"),
+        ("GET", "/v1/email/sync/updated"),
+        ("GET", "/v1/email/sync/deleted"),
+    ] {
+        assert!(
+            operations.services[0]
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.method == method && endpoint.path == path)
+        );
+    }
     assert!(!operations.services[0].is_generic_proxy);
     assert!(operations.services[0].executable);
     assert!(
