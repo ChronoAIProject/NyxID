@@ -475,24 +475,46 @@ async fn restricted_keys_filter_lists_and_gate_resolved_details() {
                 assert_eq!(ids(&body, field), [expected.clone()].into_iter().collect());
             }
         }
-        for service in [&other, &f.shared] {
-            for path in [
-                format!("/api/v1/keys/{}", service.id),
-                format!("/api/v1/keys/{}", service.slug),
-                format!("/api/v1/keys/{}/authorization", service.id),
-                format!("/api/v1/endpoints/{}/authorization", service.endpoint_id),
-                format!(
-                    "/api/v1/endpoints/{}/openapi-endpoints",
-                    service.endpoint_id
+        for (service_label, service) in [
+            ("other personal service", &other),
+            ("shared org service", &f.shared),
+        ] {
+            for (route_label, path) in [
+                ("key by id", format!("/api/v1/keys/{}", service.id)),
+                ("key by slug", format!("/api/v1/keys/{}", service.slug)),
+                (
+                    "key authorization",
+                    format!("/api/v1/keys/{}/authorization", service.id),
                 ),
-                format!(
-                    "/api/v1/api-keys/external/{}/authorization",
-                    service.api_key_id.as_deref().unwrap()
+                (
+                    "endpoint authorization",
+                    format!("/api/v1/endpoints/{}/authorization", service.endpoint_id),
+                ),
+                (
+                    "endpoint OpenAPI operations",
+                    format!(
+                        "/api/v1/endpoints/{}/openapi-endpoints",
+                        service.endpoint_id
+                    ),
+                ),
+                (
+                    "external credential authorization",
+                    format!(
+                        "/api/v1/api-keys/external/{}/authorization",
+                        service.api_key_id.as_deref().unwrap()
+                    ),
                 ),
             ] {
                 let (status, _, body) = f.request("GET", &path, Some(credential), None).await;
-                assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
-                assert_eq!(body["error_code"], 9000, "{path}: {body}");
+                assert_eq!(
+                    status,
+                    StatusCode::FORBIDDEN,
+                    "{service_label} {route_label}: {body}"
+                );
+                assert_eq!(
+                    body["error_code"], 9000,
+                    "{service_label} {route_label}: {body}"
+                );
             }
         }
         let missing = Uuid::new_v4();
@@ -582,23 +604,35 @@ async fn org_keys_and_endpoint_owner_selection_preserve_direct_and_admin_access(
             assert_eq!(body[field][0]["credential_source"]["type"], "personal");
         }
     }
-    for path in [
-        format!("/api/v1/keys/{}", f.shared.id),
-        format!("/api/v1/keys/{}/authorization", f.shared.slug),
-        format!("/api/v1/endpoints/{}/authorization", f.shared.endpoint_id),
-        format!(
-            "/api/v1/endpoints/{}/openapi-endpoints",
-            f.shared.endpoint_id
+    for (route_label, path) in [
+        ("key by id", format!("/api/v1/keys/{}", f.shared.id)),
+        (
+            "key authorization by slug",
+            format!("/api/v1/keys/{}/authorization", f.shared.slug),
         ),
-        format!(
-            "/api/v1/api-keys/external/{}/authorization",
-            f.shared.api_key_id.as_deref().unwrap()
+        (
+            "endpoint authorization",
+            format!("/api/v1/endpoints/{}/authorization", f.shared.endpoint_id),
+        ),
+        (
+            "endpoint OpenAPI operations",
+            format!(
+                "/api/v1/endpoints/{}/openapi-endpoints",
+                f.shared.endpoint_id
+            ),
+        ),
+        (
+            "external credential authorization",
+            format!(
+                "/api/v1/api-keys/external/{}/authorization",
+                f.shared.api_key_id.as_deref().unwrap()
+            ),
         ),
     ] {
         let (status, _, body) = f
             .request("GET", &path, Some(("x-api-key", &org_key.full_key)), None)
             .await;
-        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(status, StatusCode::OK, "{route_label}: {body}");
     }
     let other_org = Uuid::new_v4().to_string();
     f.state
@@ -948,21 +982,30 @@ async fn resource_reads_require_intersection_of_key_and_membership_scopes() {
         )
         .await
         .unwrap();
-    for path in [
-        format!("/api/v1/endpoints/{}/authorization", f.shared.endpoint_id),
-        format!(
-            "/api/v1/endpoints/{}/openapi-endpoints",
-            f.shared.endpoint_id
+    for (route_label, path) in [
+        (
+            "endpoint authorization",
+            format!("/api/v1/endpoints/{}/authorization", f.shared.endpoint_id),
         ),
-        format!(
-            "/api/v1/api-keys/external/{}/authorization",
-            f.shared.api_key_id.as_deref().unwrap()
+        (
+            "endpoint OpenAPI operations",
+            format!(
+                "/api/v1/endpoints/{}/openapi-endpoints",
+                f.shared.endpoint_id
+            ),
+        ),
+        (
+            "external credential authorization",
+            format!(
+                "/api/v1/api-keys/external/{}/authorization",
+                f.shared.api_key_id.as_deref().unwrap()
+            ),
         ),
     ] {
         let (status, _, body) = f
             .request("GET", &path, Some(("x-api-key", &key.full_key)), None)
             .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+        assert_eq!(status, StatusCode::FORBIDDEN, "{route_label}: {body}");
         assert_eq!(body["error_code"], 9000);
     }
     let (status, _, body) = f

@@ -421,21 +421,24 @@ async fn membership_acl_distinguishes_unrelated_missing_revoked_and_viewer() {
     let missing = Uuid::new_v4().to_string();
     for owner in [&f.member, &f.org.id] {
         let key = f.key(owner).await;
-        for (id, expected, code) in [
-            (&other.id, StatusCode::FORBIDDEN, 8102),
-            (&missing, StatusCode::NOT_FOUND, 8101),
+        for (target_label, id, expected, code) in [
+            ("unrelated org", &other.id, StatusCode::FORBIDDEN, 8102),
+            ("missing org", &missing, StatusCode::NOT_FOUND, 8101),
         ] {
-            for suffix in [
-                "".to_string(),
-                "/authorization".into(),
-                "/members".into(),
-                format!("/members/{}/authorization", f.member),
+            for (route_label, suffix) in [
+                ("org detail", "".to_string()),
+                ("org authorization", "/authorization".into()),
+                ("member list", "/members".into()),
+                (
+                    "member authorization",
+                    format!("/members/{}/authorization", f.member),
+                ),
             ] {
                 let path = format!("/api/v1/orgs/{id}{suffix}");
                 let (status, _, body) = f
                     .request("GET", &path, Some(("x-api-key", &key.full_key)))
                     .await;
-                assert_eq!(status, expected, "{path}: {body}");
+                assert_eq!(status, expected, "{target_label} {route_label}: {body}");
                 assert_eq!(body["error_code"], code);
             }
         }
