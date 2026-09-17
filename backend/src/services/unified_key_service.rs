@@ -2382,6 +2382,18 @@ pub async fn list_keys(
     list_keys_with_grants(db, encryption_keys, user_id, &grants, providers).await
 }
 
+/// List existing inventory without creating or reconciling auto-connected rows.
+/// API-key reads use this path; rendering shares the ordinary listing body.
+pub async fn list_keys_read_only(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    providers: &HashMap<String, ProviderConfig>,
+) -> AppResult<Vec<KeyView>> {
+    let grants = OwnerGrants::load_for_listing(db, user_id).await?;
+    list_keys_with_grants(db, encryption_keys, user_id, &grants, providers).await
+}
+
 async fn list_keys_with_grants(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,

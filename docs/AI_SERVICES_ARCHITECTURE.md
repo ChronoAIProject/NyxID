@@ -224,9 +224,38 @@ last route to the Enable control, so closing it made Disable a one-way door for
 five months. `get_key_resolves_disabled_service_by_uuid_but_not_by_slug` asserts
 both halves.
 
+### Authentication classes
+
+General API keys can GET `/keys`, `/keys/{id_or_slug}`, `/keys/{id_or_slug}/authorization`,
+`/user-services`, `/endpoints`, `/endpoints/{id}/authorization`,
+`/endpoints/{id}/openapi-endpoints`, `/api-keys/external`, and
+`/api-keys/external/{id}/authorization` under `/api/v1`, without an extra scope.
+API-key reads never auto-provision or reconcile services and never lazily reconcile
+pending OAuth placeholders. Sessions, access JWTs, and delegated `account:read`
+tokens retain their existing behavior, including provisioning and reconciliation.
+
+Restricted keys see only their effective `UserService` allowlist, including the
+existing auto-connected expansion. Endpoint and external-credential reads require
+a backing allowed service. Resolvable out-of-allowlist details return 403
+`ApiKeyScopeForbidden`; missing resources retain their normal 404 behavior.
+Personal keys list personal and org-shared services through active Member/Admin
+memberships and effective role scopes; Viewer-only org services are excluded for
+API keys. Org-owned keys act as the org and list its own rows with the existing
+`credential_source.type: "personal"` tag because the actor is the owner.
+`/endpoints?org_id=` still requires Direct or org-admin access.
+The endpoint and external-credential lists retain their existing owner selection:
+`/endpoints` defaults to the actor's own endpoints, and `/api-keys/external` lists
+the actor's own credentials. Org-shared service discovery uses `/keys` and
+`/user-services`; backing-resource detail reads enforce membership ACLs and key scope.
+
+All inventory writes and the entire NyxID `/api-keys` management router remain
+human-only for API keys. Service-account, relay, and scheduled-invocation tokens
+remain denied on inventory reads; delegated read parity is unchanged.
+
 ### API contract for consumers
 
-`GET /keys` returns disabled services. **Anything consuming it must read
+`GET /keys` returns disabled services, subject to API-key allowlist filtering.
+**Anything consuming it must read
 `is_active`** rather than assuming every row is usable — including when
 rendering status, since `status` is the *credential's* status and stays healthy
 (`active`) while the service is disabled. The CLI centralises this in
@@ -520,7 +549,7 @@ hardening; nodes inject their own credentials only.
 
 ### Org provisioning and reconciliation
 
-Key listing, Agent Key login delivery (login options), and device-code
+Human and delegated key listing, Agent Key login delivery (login options), and device-code
 approval/onboarding for the acting person's own account invoke shared provisioning,
 which may idempotently create org-owned auto-connected rows only through that
 person's own active Member/Admin memberships with `can_proxy()` and explicit
@@ -532,8 +561,9 @@ next owner reconciliation removes automatic rows and orphan endpoints. This side
 effect is limited to explicit platform configurations; inherited legacy no-auth
 provisioning remains personal-only. JWT/API-key authentication itself never provisions rows.
 
-Key listing shares one membership and active-owner grant snapshot across personal/org
-provisioning, stale-row reconciliation, org row loading, and availability rendering.
+Key listing shares one membership and active-owner grant snapshot across org row
+loading and availability rendering. Human and delegated callers also reuse it for
+personal/org provisioning and stale-row reconciliation; API-key reads skip both.
 Provider eligibility is batch-loaded once for the request. Catalog, MCP and LLM
 listings likewise reuse grants and provider rows rather than issuing ACL queries per
 service. These snapshots last for one request only; the next request rechecks live

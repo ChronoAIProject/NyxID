@@ -669,6 +669,22 @@ async fn create_api_key_with_security_class_and_id(
     })
 }
 
+/// Require at least one backing service in a restricted API key's effective
+/// allowlist. Call after owner/membership resolution to preserve its errors.
+pub fn ensure_api_key_service_scope(
+    scope: Option<&[String]>,
+    service_ids: &[String],
+) -> AppResult<()> {
+    if let Some(allowed) = scope
+        && !service_ids.iter().any(|id| allowed.contains(id))
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "API key does not have access to this service".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve the current service grant once when loading a key's authority.
 /// Only restricted keys with the durable platform grant need a database read.
 /// This deliberately does not provision services on the authentication path.

@@ -14,7 +14,7 @@ use crate::models::org_membership::OrgRole;
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
-use crate::mw::auth::AuthUser;
+use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::user_service_service::{CredentialSource, UserServiceWithSource};
 use crate::services::{
     node_service, oauth_resource_service, org_service, unified_key_service, user_service_service,
@@ -234,7 +234,9 @@ pub struct PatchSshAuthModeRequest {
 ///
 /// Returns the union of personal and org-inherited services. Each item is
 /// tagged with `credential_source` so the client can group personal vs.
-/// org credentials. Viewer-role services are returned with `allowed: false`.
+/// org credentials. API keys see personal and Member/Admin org rows within
+/// their effective service scope; an org-owned key sees its own rows as personal.
+/// Non-API-key callers retain Viewer rows with `allowed: false`. No provisioning.
 pub async fn list_user_services(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -242,8 +244,13 @@ pub async fn list_user_services(
     use futures::TryStreamExt as _;
 
     let user_id_str = auth_user.user_id.to_string();
-    let services =
+    let mut services =
         user_service_service::list_user_services_with_sources(&state.db, &user_id_str).await?;
+    let scope = auth_user.api_key_service_scope();
+    services.retain(|item| {
+        scope.is_none_or(|ids| ids.contains(&item.service.id))
+            && (auth_user.auth_method != AuthMethod::ApiKey || !item.source.is_viewer_org())
+    });
 
     // Batch-resolve display metadata: endpoint label (human name shown in
     // the UI instead of the raw slug, issue #1121) and catalog service name.
