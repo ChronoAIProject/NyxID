@@ -1089,6 +1089,7 @@ pub async fn create_service(
                     "basic" => "Authorization".to_string(),
                     "query" => "api_key".to_string(),
                     "path" => "bot".to_string(),
+                    "ifttt_webhook" => "key".to_string(),
                     "none" => String::new(),
                     _ => "X-API-Key".to_string(),
                 });
@@ -1107,6 +1108,7 @@ pub async fn create_service(
             "oidc",
             "none",
             "aws_sigv4",
+            "ifttt_webhook",
         ];
         if !valid_methods.contains(&auth_method.as_str()) {
             return Err(AppError::ValidationError(format!(
@@ -1153,6 +1155,19 @@ pub async fn create_service(
         };
 
         validate_base_url(base_url)?;
+        if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+            nyxid_service_adapters::ifttt::validate_destination(base_url)
+                .map_err(|error| AppError::ValidationError(error.to_string()))?;
+            if !credential.is_empty() {
+                nyxid_service_adapters::ifttt::validate_credential(&credential)
+                    .map_err(|error| AppError::ValidationError(error.to_string()))?;
+            }
+            if !body.ws_frame_injections.is_empty() {
+                return Err(AppError::ValidationError(
+                    "IFTTT Webhooks does not support WebSocket frame injection".into(),
+                ));
+            }
+        }
 
         let service_category =
             derive_http_service_category(&auth_method, body.service_category.as_deref())?;
@@ -1776,6 +1791,32 @@ pub async fn update_service(
     }
 
     // Build the $set document with only provided fields
+    if service.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+        nyxid_service_adapters::ifttt::validate_destination(
+            body.base_url.as_deref().unwrap_or(&service.base_url),
+        )
+        .map_err(|error| AppError::ValidationError(error.to_string()))?;
+        user_service_service::validate_ifttt_identity(
+            &service.auth_method,
+            body.identity_propagation_mode
+                .as_deref()
+                .unwrap_or(&service.identity_propagation_mode),
+            body.forward_access_token
+                .unwrap_or(service.forward_access_token),
+            body.inject_delegation_token
+                .unwrap_or(service.inject_delegation_token),
+        )?;
+        if !body
+            .ws_frame_injections
+            .as_deref()
+            .unwrap_or(&service.ws_frame_injections)
+            .is_empty()
+        {
+            return Err(AppError::ValidationError(
+                "IFTTT Webhooks does not support WebSocket frame injection".into(),
+            ));
+        }
+    }
     let mut set_doc = doc! {};
     if let Some(credential) = body
         .credential
@@ -1810,6 +1851,10 @@ pub async fn update_service(
                 credential,
                 &config.credential_fields,
             )?;
+        }
+        if service.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+            nyxid_service_adapters::ifttt::validate_credential(credential)
+                .map_err(|error| AppError::ValidationError(error.to_string()))?;
         }
         let encrypted = state.encryption_keys.encrypt(credential.as_bytes()).await?;
         set_doc.insert(
@@ -4475,6 +4520,115 @@ mod tests {
         let err = validate_token_exchange_config(&config).unwrap_err();
         assert!(err.to_string().contains("missing"));
     }
+    #[tokio::test]
+    async fn ifttt_catalog_update_preserves_blank_credentials_and_validates_replacements() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("ifttt_catalog_credential").await;
+        let admin = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let mut service = dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.created_by = admin.clone();
+        service.auth_method = nyxid_service_adapters::ifttt::AUTH_METHOD.into();
+        service.base_url = "https://maker.ifttt.com".into();
+        service.service_category = "internal".into();
+        service.credential_encrypted = state
+            .encryption_keys
+            .encrypt(b"original-fixture")
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let load = || async {
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(doc! { "_id": &service.id })
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        let original = load().await;
+        for credential in ["", "  \t\n"] {
+            let Json(response) = update_service(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Default::default(),
+                Path(service.id.clone()),
+                Json(
+                    serde_json::from_value(serde_json::json!({ "credential": credential }))
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let stored = load().await;
+            assert_eq!(stored.credential_encrypted, original.credential_encrypted);
+            assert_eq!(stored.updated_at, original.updated_at);
+            assert_eq!(response.credential_configured, Some(true));
+        }
+        for credential in [
+            "https://maker.ifttt.com/trigger/event/with/key/fixture",
+            " invalid-key ",
+        ] {
+            let result = update_service(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Default::default(),
+                Path(service.id.clone()),
+                Json(
+                    serde_json::from_value(serde_json::json!({ "credential": credential }))
+                        .unwrap(),
+                ),
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::ValidationError(_))));
+            let stored = load().await;
+            assert_eq!(stored.credential_encrypted, original.credential_encrypted);
+            assert_eq!(stored.updated_at, original.updated_at);
+        }
+        let _ = update_service(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Default::default(),
+            Path(service.id.clone()),
+            Json(
+                serde_json::from_value(
+                    serde_json::json!({ "name": "IFTTT renamed", "credential": "" }),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let renamed = load().await;
+        assert_eq!(renamed.name, "IFTTT renamed");
+        assert_eq!(renamed.credential_encrypted, original.credential_encrypted);
+        let _ = update_service(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Default::default(),
+            Path(service.id.clone()),
+            Json(
+                serde_json::from_value(serde_json::json!({ "credential": "replacement-fixture" }))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let rotated = load().await;
+        assert_ne!(rotated.credential_encrypted, original.credential_encrypted);
+        let decrypted = zeroize::Zeroizing::new(
+            state
+                .encryption_keys
+                .decrypt(&rotated.credential_encrypted)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(decrypted.as_slice(), b"replacement-fixture");
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn catalog_put_replaces_master_ciphertext_for_ui_and_cli_without_echo() {
         let db =
