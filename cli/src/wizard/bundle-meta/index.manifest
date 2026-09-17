@@ -2,6 +2,7 @@ frontend/src/app.css
 frontend/src/components/brand/nyxid-logo.tsx
 frontend/src/components/cli-wizard/access-scope-card.tsx
 frontend/src/components/cli-wizard/ai-key-confirm-panel.tsx
+frontend/src/components/cli-wizard/api-key-rotation-result.tsx
 frontend/src/components/cli-wizard/auth-flow-polling.ts
 frontend/src/components/cli-wizard/auth-flows.tsx
 frontend/src/components/cli-wizard/catalog-grid.tsx

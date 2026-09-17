@@ -468,6 +468,18 @@ pub enum CredentialSource {
     },
 }
 
+impl CredentialSource {
+    pub fn is_viewer_org(&self) -> bool {
+        matches!(
+            self,
+            Self::Org {
+                role: OrgRole::Viewer,
+                ..
+            }
+        )
+    }
+}
+
 /// A user service paired with the provenance of its credentials.
 #[derive(Debug, Clone)]
 pub struct UserServiceWithSource {
@@ -723,6 +735,47 @@ pub async fn find_by_catalog_service_id(
             })
             .await?,
     )
+}
+
+/// Translate a service allowlist into owner-bound endpoint and credential IDs
+/// in one query. Disabled services remain valid inventory references.
+#[derive(serde::Deserialize)]
+struct InventoryReference {
+    endpoint_id: String,
+    api_key_id: Option<String>,
+}
+
+pub struct InventoryReferences {
+    pub endpoint_ids: std::collections::HashSet<String>,
+    pub api_key_ids: std::collections::HashSet<String>,
+}
+
+pub async fn inventory_references_for_services(
+    db: &mongodb::Database,
+    owner_id: &str,
+    service_ids: &[String],
+) -> AppResult<InventoryReferences> {
+    let mut references = InventoryReferences {
+        endpoint_ids: Default::default(),
+        api_key_ids: Default::default(),
+    };
+    if service_ids.is_empty() {
+        return Ok(references);
+    }
+    let rows: Vec<InventoryReference> = db
+        .collection::<InventoryReference>(COLLECTION_NAME)
+        .find(doc! { "user_id": owner_id, "_id": { "$in": service_ids } })
+        .projection(doc! { "_id": 0, "endpoint_id": 1, "api_key_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    for row in rows {
+        references.endpoint_ids.insert(row.endpoint_id);
+        if let Some(id) = row.api_key_id {
+            references.api_key_ids.insert(id);
+        }
+    }
+    Ok(references)
 }
 
 /// Return the IDs of every active `UserService` for `user_id` that

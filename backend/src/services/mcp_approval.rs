@@ -24,6 +24,11 @@ pub(crate) async fn approval_target_for_tool(
     service: &mcp_service::McpToolService,
 ) -> AppResult<McpApprovalTarget> {
     let hint = match &service.source {
+        mcp_service::McpToolSource::Internal => {
+            return Err(AppError::Forbidden(
+                "Native tools require chat acknowledgement dispatch".into(),
+            ));
+        }
         mcp_service::McpToolSource::UserManaged {
             user_service_id, ..
         } => proxy_service::find_approval_resolution_hint_by_user_service_id(

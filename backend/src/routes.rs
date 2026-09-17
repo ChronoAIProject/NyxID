@@ -124,6 +124,33 @@ macro_rules! assistant_direct_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/nyxagent/turns",
+                "/api/v1/assistant/nyxagent/turns",
+                "handlers::assistant_nyxagent::turns",
+                post(handlers::assistant_nyxagent::turns),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/nyxagent/models",
+                "/api/v1/assistant/nyxagent/models",
+                "handlers::assistant_nyxagent::models",
+                get(handlers::assistant_nyxagent::models),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/nyxagent/conversations/{id}",
+                "/api/v1/assistant/nyxagent/conversations/{id}",
+                "handlers::assistant_nyxagent::delete",
+                delete(handlers::assistant_nyxagent::delete),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
                 "/direct/completions",
                 "/api/v1/assistant/direct/completions",
                 "handlers::assistant_direct::completions",
@@ -1201,6 +1228,38 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::node_agent::decline_pending_credential),
         );
 
+    // Metadata reads retain the existing service-account restriction. Writes
+    // remain in the human-only router; Axum merges methods on shared paths.
+    let service_inventory_read_routes = Router::new()
+        .route("/keys", get(handlers::keys::list_keys))
+        .route("/keys/{key_id}", get(handlers::keys::get_key))
+        .route(
+            "/keys/{key_id}/authorization",
+            get(handlers::keys::get_key_authorization),
+        )
+        .route(
+            "/user-services",
+            get(handlers::user_services_handler::list_user_services),
+        )
+        .route("/endpoints", get(handlers::user_endpoints::list_endpoints))
+        .route(
+            "/endpoints/{endpoint_id}/authorization",
+            get(handlers::user_endpoints::get_endpoint_authorization),
+        )
+        .route(
+            "/endpoints/{endpoint_id}/openapi-endpoints",
+            get(handlers::user_endpoints::list_openapi_endpoints),
+        )
+        .route(
+            "/api-keys/external",
+            get(handlers::user_api_keys_external::list_external_api_keys),
+        )
+        .route(
+            "/api-keys/external/{key_id}/authorization",
+            get(handlers::user_api_keys_external::get_external_api_key_authorization),
+        )
+        .layer(middleware::from_fn(reject_service_account_tokens));
+
     let unified_key_routes = Router::new()
         .route(
             "/history/archived",
@@ -1210,22 +1269,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/{service_id}/history",
             get(handlers::service_history::get_history),
         )
-        .route(
-            "/",
-            get(handlers::keys::list_keys).post(handlers::keys::create_key),
-        )
+        .route("/", post(handlers::keys::create_key))
         .route(
             "/{key_id}",
-            get(handlers::keys::get_key)
-                .put(handlers::keys::update_key)
-                .delete(handlers::keys::delete_key),
-        )
-        // Authorization-evidence projection of `/{key_id}`. Same ACL, strictly
-        // fewer properties: an evidence reader must not be handed the
-        // free-text carriers that its own secret-shape tripwire rejects.
-        .route(
-            "/{key_id}/authorization",
-            get(handlers::keys::get_key_authorization),
+            put(handlers::keys::update_key).delete(handlers::keys::delete_key),
         );
 
     let connect_link_routes = Router::new()
@@ -1270,27 +1317,13 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_service_account_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
-    let user_endpoint_routes = Router::new()
-        .route("/", get(handlers::user_endpoints::list_endpoints))
-        .route(
-            "/{endpoint_id}",
-            put(handlers::user_endpoints::update_endpoint)
-                .delete(handlers::user_endpoints::delete_endpoint),
-        )
-        .route(
-            "/{endpoint_id}/authorization",
-            get(handlers::user_endpoints::get_endpoint_authorization),
-        )
-        .route(
-            "/{endpoint_id}/openapi-endpoints",
-            get(handlers::user_endpoints::list_openapi_endpoints),
-        );
+    let user_endpoint_routes = Router::new().route(
+        "/{endpoint_id}",
+        put(handlers::user_endpoints::update_endpoint)
+            .delete(handlers::user_endpoints::delete_endpoint),
+    );
 
     let external_api_key_routes = Router::new()
-        .route(
-            "/",
-            get(handlers::user_api_keys_external::list_external_api_keys),
-        )
         .route(
             "/gcp-service-account",
             post(handlers::user_api_keys_external::create_gcp_service_account_key),
@@ -1299,17 +1332,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/{key_id}",
             put(handlers::user_api_keys_external::update_external_api_key)
                 .delete(handlers::user_api_keys_external::delete_external_api_key),
-        )
-        .route(
-            "/{key_id}/authorization",
-            get(handlers::user_api_keys_external::get_external_api_key_authorization),
         );
 
     let user_service_routes = Router::new()
-        .route(
-            "/",
-            get(handlers::user_services_handler::list_user_services),
-        )
         .route(
             "/{service_id}/ssh-auth-mode",
             patch(handlers::user_services_handler::patch_user_service_ssh_auth_mode),
@@ -1360,33 +1385,16 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::billing::download_invoice),
         );
 
-    // Org management routes (creation, members, invites). All routes
-    // authenticate as a regular session/user; admin-vs-member checks happen
-    // inside the handlers based on org_memberships rather than a global flag.
-    let org_routes = Router::new()
-        .route(
-            "/",
-            get(handlers::orgs::list_orgs).post(handlers::orgs::create_org),
-        )
-        .route("/join/{nonce}", post(handlers::orgs::redeem_invite))
-        .route(
-            "/{org_id}",
-            get(handlers::orgs::get_org)
-                .patch(handlers::orgs::update_org)
-                .delete(handlers::orgs::delete_org),
-        )
+    // Org metadata accepts general API keys. Handlers apply membership or
+    // Direct-owner read access; service accounts remain rejected as before.
+    let org_read_routes = Router::new()
+        .route("/", get(handlers::orgs::list_orgs))
+        .route("/{org_id}", get(handlers::orgs::get_org))
         .route(
             "/{org_id}/authorization",
             get(handlers::orgs::get_org_authorization),
         )
-        .route(
-            "/{org_id}/members",
-            get(handlers::orgs::list_members).post(handlers::orgs::add_member),
-        )
-        .route(
-            "/{org_id}/members/{member_id}",
-            patch(handlers::orgs::update_member).delete(handlers::orgs::remove_member),
-        )
+        .route("/{org_id}/members", get(handlers::orgs::list_members))
         .route(
             "/{org_id}/members/{member_id}/authorization",
             get(handlers::orgs::get_member_authorization),
@@ -1394,6 +1402,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/{org_id}/role-scopes",
             get(handlers::org_role_scopes::list_role_scopes),
+        )
+        .layer(middleware::from_fn(reject_service_account_tokens));
+
+    // Writes and invite reads stay human-only. Invites expose redeemable
+    // bearer nonces, so their GET must not move to the metadata router.
+    let org_routes = Router::new()
+        .route("/", post(handlers::orgs::create_org))
+        .route("/join/{nonce}", post(handlers::orgs::redeem_invite))
+        .route(
+            "/{org_id}",
+            patch(handlers::orgs::update_org).delete(handlers::orgs::delete_org),
+        )
+        .route("/{org_id}/members", post(handlers::orgs::add_member))
+        .route(
+            "/{org_id}/members/{member_id}",
+            patch(handlers::orgs::update_member).delete(handlers::orgs::remove_member),
         )
         .route(
             "/{org_id}/role-scopes/{role}",
@@ -1739,8 +1763,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     )
     .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
 
-    // Routes accessible by both users and service accounts (block delegated tokens)
+    // Shared management routes; individual groups retain service-account gates.
+    // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
+        .merge(service_inventory_read_routes)
         .route(
             "/auth/agent-key/self",
             get(handlers::auth_agent_key::get_self).delete(handlers::auth_agent_key::delete_self),
@@ -1751,6 +1777,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/oracle", oracle_consumer_routes)
         .nest("/connect-links", connect_link_routes)
         .nest("/triggers", trigger_routes)
+        .nest("/orgs", org_read_routes)
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
@@ -1785,6 +1812,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route(
+            "/nyxagent/conversations",
+            get(handlers::assistant_nyxagent::list),
+        )
+        .route(
+            "/nyxagent/conversations/{id}",
+            get(handlers::assistant_nyxagent::history).patch(handlers::assistant_nyxagent::rename),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/stop",
+            post(handlers::assistant_nyxagent::stop),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/access-mode",
+            patch(handlers::assistant_nyxagent::change_access_mode),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",
+            post(handlers::assistant_nyxagent::decide_acknowledgement),
+        )
         .route("/wire-logs/{id}", get(handlers::assistant::get_wire_log))
         .route(
             "/readiness",
@@ -2128,6 +2175,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )),
     )
 }
+
+#[cfg(test)]
+mod org_membership_tests;
+
+#[cfg(test)]
+mod service_inventory_tests;
 
 #[cfg(test)]
 mod retirement_tests {

@@ -257,6 +257,32 @@ describe("ApiKeyCreateConfirm", () => {
 // ── ApiKeyRotateConfirm ──────────────────────────────────────────────
 
 describe("ApiKeyRotateConfirm", () => {
+  it("retains the managed platform when rotation returns no browser-visible secret", async () => {
+    const user = userEvent.setup();
+    mockPost.mockResolvedValue({
+      id: "successor",
+      full_key: "",
+      platform: "nyxid-assistant",
+    });
+    const onSuccess = vi.fn();
+    render(
+      <ApiKeyRotateConfirm
+        pairingId={pairingId}
+        onSuccess={onSuccess}
+        prefill={{ resource_id: "assistant-key", display_name: "NyxID Assistant" }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await user.click(screen.getByRole("button", { name: /Rotate key/i }));
+    expect(onSuccess).toHaveBeenCalledWith({
+      kind: "api-key-rotate",
+      resource_id: "successor",
+      full_key: "",
+      platform: "nyxid-assistant",
+    });
+  });
+
   it("renders the resource name in the summary and POSTs the rotate endpoint, then fires onSuccess", async () => {
     const user = userEvent.setup();
     mockPost.mockResolvedValue({ id: "key-id-9", full_key: "nyxid_ag_new" });

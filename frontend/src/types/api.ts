@@ -98,6 +98,7 @@ export function canAdminWrite(
 }
 
 export interface ApiKey {
+  readonly assistant_conversation_id?: string | null;
   readonly id: string;
   readonly name: string;
   readonly description: string | null;

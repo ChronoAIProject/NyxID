@@ -314,7 +314,10 @@ export async function runChatStream({
       buildAssistantMessagePatch(accumulator, stopped ? "complete" : "error"),
     );
     updateEntry(activeKey, { projection: actorState, session: failed });
-    if (adopted) await refreshConversations().catch(() => undefined);
+    // The composer is usable as soon as the stopped/error state is published.
+    // Release this stream's send slot without waiting for the sidebar request;
+    // otherwise an immediate follow-up silently hits the old stream's guard.
+    if (adopted) void refreshConversations().catch(() => undefined);
     return authoritativeConversationId || undefined;
   } finally {
     clearTimeout(startDeadline);

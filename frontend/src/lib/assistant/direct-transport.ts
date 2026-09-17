@@ -53,7 +53,7 @@ interface DirectActiveTurn {
   readonly error: { readonly code: string; readonly message: string } | null;
 }
 
-interface DirectTurnState {
+export interface DirectTurnState {
   readonly messages: DirectAssistantMessage[];
   readonly activeTurn: DirectActiveTurn | null;
   readonly lastCursor: number;
@@ -64,6 +64,11 @@ interface DirectTurnEventBase {
 }
 
 export type DirectTurnEvent =
+  | (DirectTurnEventBase & {
+      readonly event: "turn.notice";
+      readonly code: "context_reset";
+      readonly message: string;
+    })
   | (DirectTurnEventBase & {
       readonly event: "turn.status";
       readonly turn_id: string;
@@ -127,7 +132,7 @@ function isDirectTurnActive(status: DirectTurnStatus | undefined): boolean {
   return status === "running" || status === "waiting";
 }
 
-function applyDirectTurnEvent(
+export function applyDirectTurnEvent(
   state: DirectTurnState,
   event: DirectTurnEvent,
   receivedAt = new Date().toISOString(),
@@ -136,6 +141,8 @@ function applyDirectTurnEvent(
   const nextBase = { ...state, lastCursor: event.cursor };
 
   switch (event.event) {
+    case "turn.notice":
+      return nextBase;
     case "turn.status":
       return {
         ...nextBase,
@@ -212,7 +219,7 @@ function applyDirectTurnEvent(
   }
 }
 
-function drainDirectSseBuffer(buffer: string): {
+export function drainDirectSseBuffer(buffer: string): {
   readonly payloads: string[];
   readonly rest: string;
 } {

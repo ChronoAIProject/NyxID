@@ -10,6 +10,8 @@ import type { Root } from "mdast";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import { AssistantLink } from "@/components/assistant/blocks/assistant-link";
+import { isHostedConnectLink } from "@/lib/assistant/hosted-connect-link";
 import { useSmoothReveal } from "@/hooks/use-smooth-reveal";
 import { splitStableMarkdown } from "@/lib/assistant/markdown-stream";
 
@@ -78,6 +80,8 @@ const SANITIZE_SCHEMA = {
     ...defaultSchema.protocols,
     href: [
       ...protocolCaseVariants("https"),
+      // The renderer below admits HTTP only for this origin's hosted connect links.
+      ...protocolCaseVariants("http"),
       ...protocolCaseVariants("mailto"),
     ],
   },
@@ -90,6 +94,7 @@ const BLOCK = "mt-2 first:mt-0";
 function allowedHref(href: string | undefined): string | null {
   if (!href) return null;
   const normalized = href.trim().toLowerCase();
+  if (typeof window !== "undefined" && isHostedConnectLink(href, window.location.origin)) return href;
   return normalized.startsWith("https:") ||
     normalized.startsWith("mailto:") ||
     normalized.startsWith("#")
@@ -320,14 +325,7 @@ const COMPONENTS: Components = {
       return <span className="text-muted-foreground">{children}</span>;
     }
     return (
-      <a
-        href={safeHref}
-        target={isHttpsHref(safeHref) ? "_blank" : undefined}
-        rel="noopener noreferrer"
-        className="text-nyx-secondary-400 underline decoration-nyx-secondary-400/40 underline-offset-2 hover:decoration-nyx-secondary-400"
-      >
-        {children}
-      </a>
+      <AssistantLink href={safeHref}>{children}</AssistantLink>
     );
   },
   // Remote model-provided images stay links to prevent tracking/exfiltration.

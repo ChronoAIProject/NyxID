@@ -53,8 +53,9 @@ fetch active memberships once and batch-check person/org activity, then intersec
 owner IDs in memory; query count is independent of allowlist size. Catalog and key
 listings, auto-provisioning and reconciliation, MCP discovery and callable-service
 loading, and LLM status/gateway checks share request-scoped `OwnerGrants` across all
-service/owner checks. Key listing shares that snapshot with its provisioning and org
-row traversal. Provider eligibility uses the already-loaded catalog/status provider
+service/owner checks. Key listing shares that snapshot with org row traversal and,
+for human/delegated callers, provisioning. API-key inventory reads never provision
+or reconcile rows. Provider eligibility uses the already-loaded catalog/status provider
 batch or one provider batch shared across the other listing/provisioning paths.
 `available_with_grants` performs no database calls. Owner validation uses a single
 `$in` query. No membership or provider eligibility data is cached across requests.
@@ -94,7 +95,7 @@ final credential classification; they do not bypass a revoked connection grant.
 
 Public platform services auto-provision through the existing idempotent lifecycle.
 Restricted services provision only eligible personal owners and granted org owners.
-Key listing, Agent Key login delivery (login options), and device-code
+Human and delegated key listing, Agent Key login delivery (login options), and device-code
 approval/onboarding for the acting person's own account invoke shared provisioning,
 which may idempotently create org-owned auto-connected rows only through that
 person's own active Member/Admin memberships with `can_proxy()` and explicit

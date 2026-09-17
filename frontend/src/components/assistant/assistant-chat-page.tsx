@@ -1,3 +1,6 @@
+import { Badge } from "@/components/ui/badge";
+import { NyxAgentModeSelector } from "./nyxagent-mode-selector";
+import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import {
   lazy,
   Suspense,
@@ -11,7 +14,16 @@ import {
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
-import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
+import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
+import { useNyxAgentAssistantChat } from "@/hooks/use-assistant-nyxagent";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { ChatComposer } from "@/components/assistant/chat-composer";
@@ -209,7 +221,7 @@ export function AssistantChatPage() {
     />
   );
   const sidebar = (
-    <AssistantSidebar
+    <AssistantEngineSidebar engine="actor"
       conversations={conversations}
       activeConversationId={chat.session?.conversationId}
       onNewChat={createNewChat}
@@ -385,7 +397,7 @@ export function DirectAssistantChatPage() {
     ? `conv:${chat.session.conversationId}`
     : "screen:direct:assistant";
   const sidebar = (
-    <AssistantSidebar
+    <AssistantEngineSidebar engine="direct"
       conversations={chat.conversations}
       activeConversationId={chat.session.conversationId}
       onNewChat={createNewChat}
@@ -426,6 +438,172 @@ export function DirectAssistantChatPage() {
             }
             onSend={send}
             onStop={chat.stop}
+          />
+        </div>
+      </div>
+    </AssistantShell>
+  );
+}
+
+export function NyxAgentAssistantChatPage() {
+  const navigate = useNavigate();
+  const user = useAuthStore((state) => state.user);
+  const search = useRouterState({
+    select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
+  });
+  const selectedId = search.draft ? undefined : search.c;
+  const composerRef = useRef<HTMLDivElement>(null);
+  const [composerHeight, setComposerHeight] = useState(0);
+  const [focusRequest, setFocusRequest] = useState(0);
+  // Identity adoption must not undo navigation performed while the POST waited.
+  const selection = useRef(selectedId);
+  useLayoutEffect(() => {
+    selection.current = selectedId;
+  }, [selectedId]);
+  const adopt = useCallback((id: string) => {
+    if (selection.current !== selectedId) return;
+    void navigate({
+      to: "/assistant" as never,
+      search: { c: id, ...(search.mock ? { mock: 1 } : {}) } as never,
+      replace: true,
+    });
+  }, [navigate, search.mock, selectedId]);
+  const chat = useNyxAgentAssistantChat({
+    selectedConversationId: selectedId,
+    onConversationAdopted: adopt,
+  });
+  useLayoutEffect(() => {
+    const element = composerRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      setComposerHeight(entries[0]?.contentRect.height ?? 0);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  function go(id?: string) {
+    setFocusRequest((value) => value + 1);
+    void navigate({
+      to: "/assistant" as never,
+      search: {
+        ...(id ? { c: id } : { draft: true }),
+        ...(search.mock ? { mock: 1 } : {}),
+      } as never,
+    });
+  }
+
+  return (
+    <AssistantShell
+      title={chat.session.title}
+      headerActions={chat.accessMode === "full" ? <Badge variant="warning">Full access</Badge> : null}
+      sidebar={
+        <AssistantEngineSidebar
+          engine="nyxagent"
+          conversations={chat.conversations}
+          activeConversationId={selectedId}
+          onNewChat={() => go()}
+          onSelect={go}
+          onDelete={chat.deleteConversation}
+          notice={chat.error}
+        />
+      }
+    >
+      <div className="relative flex h-full min-h-0 flex-col bg-background">
+        {chat.beforeSeq ? (
+          <Button variant="ghost" onClick={() => void chat.loadOlder()}>
+            Load earlier messages
+          </Button>
+        ) : null}
+        {chat.isLoading && !chat.session.messages.length ? (
+          <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
+            Loading conversation...
+          </div>
+        ) : (
+          <ChatMessageList
+            session={chat.session}
+            renderMessage={(message) => {
+              const acknowledgement = chat.acknowledgements.find((row) =>
+                message.id === `nyxagent-acknowledgement:${row.id}`,
+              );
+              if (!acknowledgement) return undefined;
+              return (
+                <NyxAgentAcknowledgementCard
+                  acknowledgement={acknowledgement}
+                  deciding={Boolean(chat.decidingAcknowledgement)}
+                  onDecision={async (choice) => {
+                    await chat.decideAcknowledgement({ id: acknowledgement.id, choice });
+                    setFocusRequest((value) => value + 1);
+                  }}
+                />
+              );
+            }}
+            projectionVersion={chat.acknowledgements.map((row) => `${row.id}:${row.status}`).join(",")}
+            bottomInset={composerHeight}
+            notice={chat.error}
+            emptyDescription={
+              "See your connected services, connect a new one, " +
+              "set up a channel bot, or check approvals."
+            }
+          />
+        )}
+        <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+          <ChatComposer
+            active={chat.isStreaming}
+            sending={chat.isStreaming}
+            disabled={Boolean(selectedId && chat.error)}
+            ownerUserId={user?.id ?? null}
+            draftKey={selectedId ? `conv:${selectedId}` : "screen:nyxagent:assistant"}
+            focusRequest={focusRequest}
+            onSend={async (text) => {
+              try {
+                await chat.send(text);
+              } catch (error) {
+                toast.error(
+                  error instanceof Error ? error.message : "The assistant is unavailable.",
+                );
+                throw error;
+              }
+            }}
+            onStop={async () => {
+              try {
+                await chat.stop();
+              } catch {
+                toast.error("Could not stop the assistant. Try again.");
+              }
+            }}
+            controls={
+              <div className="ml-[30px] flex max-w-[390px] gap-3 pb-1.5">
+                <div className="min-w-0 flex-1">
+                <label
+                  htmlFor="nyxagent-profile"
+                  className="mb-1 block text-[10px] font-medium text-text-tertiary"
+                >
+                  Profile
+                </label>
+                <Select
+                  value={chat.model}
+                  onValueChange={chat.setModel}
+                  disabled={Boolean(selectedId) || chat.isStreaming}
+                >
+                  <SelectTrigger id="nyxagent-profile" className="h-7 rounded-md px-2">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {chat.models.map((model) => (
+                      <SelectItem key={model.id} value={model.id}>{model.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                </div>
+                <NyxAgentModeSelector
+                  key={selectedId ?? "draft"}
+                  mode={chat.accessMode}
+                  disabled={chat.isStreaming || chat.changingAccessMode || chat.isLoading}
+                  onChange={chat.setAccessMode}
+                />
+              </div>
+            }
           />
         </div>
       </div>

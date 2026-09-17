@@ -399,6 +399,24 @@ pub(crate) fn build_effective_outbound_headers(
     outbound_headers
 }
 
+/// A server-owned Authorization header must survive caller bearer forwarding.
+/// Both HTTP paths use this seam; service credential injection stays separate.
+pub(crate) fn forwarded_caller_token<'a>(
+    target: &ProxyTarget,
+    caller_token: Option<&'a str>,
+    extra_outbound_headers: &[(String, String)],
+) -> Option<&'a str> {
+    if target.service.forward_access_token
+        && !extra_outbound_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+    {
+        caller_token
+    } else {
+        None
+    }
+}
+
 /// Caller headers that are safe to forward to downstream HTTP services.
 ///
 /// This is the single admission policy for both direct and node-routed HTTP
@@ -3899,9 +3917,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
 
     // Forward the caller's NyxID access token when the service is configured for it.
     // This is used by platform apps that trust NyxID JWTs directly.
-    if target.service.forward_access_token
-        && let Some(token) = caller_token
-    {
+    if let Some(token) = forwarded_caller_token(target, caller_token, &extra_outbound_headers) {
         request = request.bearer_auth(token);
     }
 
@@ -7886,6 +7902,55 @@ mod tests {
     fn credential_header_name_header_custom() {
         let t = make_proxy_target_with_auth("header", "X-Api-Key");
         assert_eq!(credential_header_name(&t), Some("X-Api-Key".into()));
+    }
+
+    #[test]
+    fn assistant_authorization_survives_cookie_and_jwt_on_direct_and_node_paths() {
+        let mut target = make_proxy_target_with_auth("none", "");
+        target.service.forward_access_token = true;
+        target.catalog_default_headers = vec![DefaultRequestHeader {
+            name: "Authorization".into(),
+            value: "Bearer catalog".into(),
+            overridable: false,
+            sensitive: true,
+        }];
+        let extra = vec![("aUtHoRiZaTiOn".into(), "Bearer assistant-key".into())];
+        for caller in [None, Some("human-jwt")] {
+            // Direct HTTP assembles shared headers, then applies bearer forwarding.
+            let headers = build_effective_outbound_headers(
+                &target,
+                vec![("AUTHORIZATION".into(), "Bearer caller".into())],
+                &[],
+                &[],
+                &extra,
+            );
+            let mut request = reqwest::Client::new().post("https://example.test/v1/responses");
+            for (name, value) in &headers {
+                request = request.header(name, value);
+            }
+            if let Some(token) = forwarded_caller_token(&target, caller, &extra) {
+                request = request.bearer_auth(token);
+            }
+            let request = request.build().unwrap();
+            assert_eq!(request.headers().get_all("authorization").iter().count(), 1);
+            assert_eq!(request.headers()["authorization"], "Bearer assistant-key");
+            // Node HTTP applies caller forwarding before the shared assembly.
+            let mut node_headers = vec![];
+            if let Some(token) = forwarded_caller_token(&target, caller, &extra) {
+                node_headers.push(("authorization".into(), format!("Bearer {token}")));
+            }
+            let headers = build_effective_outbound_headers(&target, node_headers, &[], &[], &extra);
+            let auth: Vec<_> = headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .collect();
+            assert_eq!(auth.len(), 1);
+            assert_eq!(auth[0].1, "Bearer assistant-key");
+        }
+        assert_eq!(
+            forwarded_caller_token(&target, Some("human-jwt"), &[]),
+            Some("human-jwt")
+        );
     }
 
     #[test]

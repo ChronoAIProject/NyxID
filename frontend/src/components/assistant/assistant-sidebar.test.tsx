@@ -366,3 +366,45 @@ describe("AssistantSidebar conversation rows", () => {
     expect(onDelete).not.toHaveBeenCalled();
   });
 });
+
+describe("NyxAgent row controls", () => {
+  const row: Conversation = { ...CONVERSATION, id: `nyxa-${"a".repeat(32)}` };
+  function nyxSidebar(conversation: Conversation, onRename = vi.fn()) {
+    render(
+      <TooltipProvider>
+        <AssistantSidebar
+          conversations={[conversation]}
+          activeConversationId={row.id}
+          onNewChat={vi.fn()}
+          onSelect={vi.fn()}
+          onDelete={vi.fn()}
+          onRename={onRename}
+        />
+      </TooltipProvider>,
+    );
+    return onRename;
+  }
+  it("renames through a dirty-gated validated form", async () => {
+    const user = userEvent.setup();
+    const rename = nyxSidebar(row);
+    await user.click(screen.getByRole("button", { name: `Options for ${row.title}` }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    const input = within(screen.getByRole("dialog")).getByRole("textbox");
+    await user.clear(input);
+    await user.type(input, "New title");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(rename).toHaveBeenCalledExactlyOnceWith(row.id, "New title"));
+  });
+  it("disables both mutations while a turn is active", async () => {
+    const user = userEvent.setup();
+    nyxSidebar({ ...row, active_turn: { turn_id: "running", started_at: row.created_at } });
+    await user.click(screen.getByRole("button", { name: `Options for ${row.title}` }));
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toHaveAttribute(
+      "aria-disabled", "true",
+    );
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toHaveAttribute(
+      "aria-disabled", "true",
+    );
+  });
+});

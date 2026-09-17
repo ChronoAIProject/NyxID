@@ -458,6 +458,7 @@ async fn resolve_rotation_owner(
 
 async fn rotate_reserved_key(
     db: &mongodb::Database,
+    encryption_keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     actor_user_id: &str,
     owner_user_id: &str,
     request: &KeyRotateActionRequest,
@@ -465,6 +466,7 @@ async fn rotate_reserved_key(
 ) -> AppResult<KeyRotateActionResult> {
     let outcome = key_service::rotate_api_key_with_scope_authorization_and_id(
         db,
+        encryption_keys,
         owner_user_id,
         Some(actor_user_id),
         &request.key_id,
@@ -486,6 +488,7 @@ async fn rotate_reserved_key(
 
 pub async fn rotate_key(
     db: &mongodb::Database,
+    encryption_keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     actor_user_id: &str,
     request: KeyRotateActionRequest,
 ) -> AppResult<KeyRotateActionResult> {
@@ -502,7 +505,15 @@ pub async fn rotate_key(
             ));
         }
         let owner_user_id = resolve_rotation_owner(db, actor_user_id, &request.key_id).await?;
-        return rotate_reserved_key(db, actor_user_id, &owner_user_id, &request, &receipt).await;
+        return rotate_reserved_key(
+            db,
+            encryption_keys,
+            actor_user_id,
+            &owner_user_id,
+            &request,
+            &receipt,
+        )
+        .await;
     }
 
     let owner_user_id = resolve_rotation_owner(db, actor_user_id, &request.key_id).await?;
@@ -512,7 +523,15 @@ pub async fn rotate_key(
             "actionRequestId was already used with a different rotation predecessor".to_string(),
         ));
     }
-    rotate_reserved_key(db, actor_user_id, &owner_user_id, &request, &receipt).await
+    rotate_reserved_key(
+        db,
+        encryption_keys,
+        actor_user_id,
+        &owner_user_id,
+        &request,
+        &receipt,
+    )
+    .await
 }
 
 #[cfg(test)]

@@ -104,6 +104,7 @@ pub mod user_tokens;
 pub mod users;
 pub mod webhooks;
 
+pub mod assistant_nyxagent;
 pub mod channel_platforms;
 pub mod options;
 

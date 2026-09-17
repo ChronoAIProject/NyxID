@@ -115,6 +115,7 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     crate::services::service_history::relay::ensure_indexes(db).await?;
+    crate::services::assistant_nyxagent::ensure_indexes(db).await?;
     crate::services::coordination_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──

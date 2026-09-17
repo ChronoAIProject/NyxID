@@ -116,8 +116,16 @@ const DIRECT_CHAT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
+const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: NYXAGENT_ENGINE_FLAG_KEY,
+    description: "Routes assistant chat through NyxAgent (catalog slug llm-nyx) instead of Aevatar.",
+    default_enabled: true,
+};
+
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    NYXAGENT_ENGINE_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -128,6 +136,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 /// can exercise multiple definitions alongside the production registry entry.
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    NYXAGENT_ENGINE_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -1326,6 +1335,7 @@ mod tests {
         assert_eq!(
             shipped,
             vec![
+                "assistant:nyxagent-engine",
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",

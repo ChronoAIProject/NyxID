@@ -92,7 +92,10 @@ pub async fn resolve_agent(
         })
         .await?;
 
-    let callback_url = match api_key.and_then(|k| k.callback_url) {
+    let callback_url = match api_key
+        .filter(|key| ensure_route_agent(key).is_ok())
+        .and_then(|k| k.callback_url)
+    {
         Some(url) if !url.is_empty() => url,
         _ => return Ok(None),
     };
@@ -102,6 +105,17 @@ pub async fn resolve_agent(
         conversation,
         callback_url,
     }))
+}
+
+pub fn ensure_route_agent(key: &ApiKey) -> AppResult<()> {
+    if key.platform.as_deref()
+        == Some(super::assistant_agent_credential_service::ASSISTANT_PLATFORM)
+    {
+        return Err(AppError::ValidationError(
+            "Assistant chat keys cannot be used as channel route agents".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Create a new conversation routing rule.
@@ -129,6 +143,7 @@ pub async fn create_conversation(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("API key not found: {agent_api_key_id}")))?;
 
+    ensure_route_agent(&api_key)?;
     if api_key.callback_url.is_none() {
         return Err(AppError::ValidationError(
             "API key must have a callback_url configured".to_string(),
@@ -218,6 +233,19 @@ pub async fn update_conversation(
     is_active: Option<bool>,
     allow_agent_initiated: Option<bool>,
 ) -> AppResult<ChannelConversation> {
+    let current = db
+        .collection::<ChannelConversation>(COLLECTION_NAME)
+        .find_one(doc! {"_id": conversation_id, "user_id": user_id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+    if agent_api_key_id.is_none()
+        && let Some(key) = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"_id": &current.agent_api_key_id, "user_id": user_id})
+            .await?
+    {
+        ensure_route_agent(&key)?;
+    }
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
@@ -230,6 +258,7 @@ pub async fn update_conversation(
             .await?
             .ok_or_else(|| AppError::NotFound(format!("API key not found: {key_id}")))?;
 
+        ensure_route_agent(&api_key)?;
         if api_key.callback_url.is_none() {
             return Err(AppError::ValidationError(
                 "API key must have a callback_url configured".to_string(),

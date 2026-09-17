@@ -1581,6 +1581,24 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
         "only personal services and the admin's org expose history summaries"
     );
 
+    let mut inventory_auth = crate::test_utils::test_auth_user(&person);
+    inventory_auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+    let response = profile_listing(
+        &db,
+        crate::handlers::keys::list_keys(State(state.clone()), inventory_auth),
+    )
+    .await;
+    assert_eq!(response.0.keys.len(), 12);
+    assert_eq!(
+        response
+            .0
+            .keys
+            .iter()
+            .filter(|key| key.authorship.is_some())
+            .count(),
+        6
+    );
+
     db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
         .update_many(
             doc! {},

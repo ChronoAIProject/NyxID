@@ -157,7 +157,16 @@ async fn service_history_mounted_acl_summary_node_redaction_and_api_key_attribut
     )
     .await
     .unwrap();
-    // Production management routes retain their existing human-only gate.
+    let (status, detail) = request(&router, &key.full_key, "GET", &detail_path, None).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert!(detail["authorship"].is_object());
+    let (status, inventory) = request(&router, &key.full_key, "GET", "/api/v1/keys", None).await;
+    assert_eq!(status, StatusCode::OK, "{inventory}");
+    let rows = inventory["keys"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], service.id);
+    assert!(rows[0]["authorship"].is_object());
+    // History routes retain their human-only gate; inventory reads admit scoped keys.
     assert_eq!(
         request(&router, &key.full_key, "GET", &history_path, None)
             .await

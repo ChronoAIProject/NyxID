@@ -399,6 +399,7 @@ pub async fn set_user_active(
             None,
         )
         .await?;
+        super::assistant_agent_credential_service::invalidate_for_owner(db, target_user_id).await?;
     }
 
     Ok(())
@@ -493,6 +494,10 @@ async fn delete_user_cascade_internal(
         SESSIONS,
         REFRESH_TOKENS,
         API_KEYS,
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+        crate::models::assistant_agent_credential::COLLECTION_NAME,
+        crate::models::assistant_conversation::COLLECTION_NAME,
+        crate::models::assistant_message::COLLECTION_NAME,
         USER_SERVICE_CONNECTIONS,
         USER_PROVIDER_TOKENS,
         MFA_FACTORS,

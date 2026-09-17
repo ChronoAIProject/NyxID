@@ -77,7 +77,7 @@ pub async fn scope<T>(context: HistoryContext, future: impl Future<Output = T>) 
         .await
 }
 
-/// Only the verified extractor calls this; nested extractors preserve the group.
+/// Verified REST and MCP authentication adapters bind attribution once per request.
 pub async fn authenticated(
     db: &mongodb::Database,
     auth: &AuthUser,
