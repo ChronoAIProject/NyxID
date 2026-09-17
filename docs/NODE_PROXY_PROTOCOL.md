@@ -604,7 +604,7 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | Type | When | Fields |
 |------|------|--------|
 | `register_ok` | After successful registration | `node_id`, `auth_token`, `signing_secret` |
-| `auth_ok` | After successful authentication | `node_id`, `capabilities.proxy_binary_chunks` (optional boolean) |
+| `auth_ok` | After authentication, owner-lease claim, and local connection registration | `node_id`, `capabilities.proxy_binary_chunks` (optional boolean) |
 | `auth_error` | On authentication failure (connection closes) | `message` |
 | `heartbeat_ping` | Periodic keepalive | `timestamp` |
 | `proxy_request` | HTTP request to route through the node | `request_id`, `service_id`, `service_slug`, `method`, `path`, `query`, `headers`, `body` (base64), `timestamp`, `nonce`, `signature` (when HMAC enabled) |
@@ -634,6 +634,9 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | Invalid/expired registration token | Send `auth_error`, close connection |
 | Invalid auth token | Send `auth_error`, close connection |
 | `node_id` does not match token | Send `auth_error`, close connection |
+| Live owner lease held by another backend generation | Close `4008` before `auth_ok`; retry with backoff until release/expiry |
+| Owner claim database failure | Close `4002` before `auth_ok`; retry with backoff |
+| Active connection loses ownership or is replaced | Close `4007`; retry with backoff |
 
 ### Proxy Errors
 
@@ -666,9 +669,16 @@ When a node disconnects (network failure, restart, etc.):
 The node can reconnect at any time by establishing a new WebSocket connection and sending an `auth` message with its stored `node_id` and `auth_token`. NyxID will:
 
 1. Validate the auth token
-2. Register the new connection in `NodeWsManager`
-3. Update the node status to `online` in the database
-4. Resume routing proxy requests through the node
+2. Claim the fenced MongoDB owner lease and mark the node `online`
+3. Register the connection in `NodeWsManager`
+4. Send `auth_ok` and resume routing proxy requests through the node
+
+An unexpired lease from another generation (even the same instance after a
+restart) rejects the handshake with Close `4008`. No `auth_ok` is sent on this
+path, allowing older agents to apply authentication-error backoff. The CLI
+retries every closure with jittered exponential delays (1–2s initially, capped
+at 30–60s), resetting only after 60s of authenticated service. Stale readers and
+writers cannot unregister or release the replacement's connection/lease.
 
 ### Graceful Fallback
 

@@ -298,6 +298,9 @@ pub struct AppConfig {
     /// Parsed from the comma-separated `TRUSTED_PROXY_IPS` env var.
     /// Empty (the default) means no peer can produce verified attribution.
     pub trusted_proxy_ips: Vec<TrustedProxyRange>,
+    /// Client IP/CIDR allowlist exempt from general per-IP and global limits only.
+    /// Always resolved through the strict trusted-proxy boundary.
+    pub rate_limit_exempt_ips: Vec<TrustedProxyRange>,
 
     /// Optional reverse-proxy-forwarded client certificate header used for
     /// RFC 8705 certificate-bound broker access tokens. Unset/empty disables
@@ -677,6 +680,7 @@ impl std::fmt::Debug for AppConfig {
                 &self.platform_service_rate_limit_burst,
             )
             .field("trusted_proxy_ips", &self.trusted_proxy_ips)
+            .field("rate_limit_exempt_ips", &self.rate_limit_exempt_ips)
             .field("mtls_client_cert_header", &self.mtls_client_cert_header)
             .field(
                 "broker_require_sender_constraint",
@@ -981,6 +985,10 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 /// still succeeds because direct-exposure deployments are the common
 /// case and don't need this set.
 fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<TrustedProxyRange> {
+    parse_ip_ranges("TRUSTED_PROXY_IPS", raw)
+}
+
+fn parse_ip_ranges(setting: &str, raw: Option<String>) -> Vec<TrustedProxyRange> {
     let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
@@ -989,9 +997,10 @@ fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<TrustedProxyRange> {
         match entry.parse::<TrustedProxyRange>() {
             Ok(ip) => ips.push(ip),
             Err(err) => tracing::warn!(
+                setting,
                 entry = %entry,
                 error = %err,
-                "TRUSTED_PROXY_IPS entry is not a valid IP address or CIDR range; dropping",
+                "IP allowlist entry is not a valid IP address or CIDR range; dropping",
             ),
         }
     }
@@ -1146,6 +1155,10 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10),
             trusted_proxy_ips: parse_trusted_proxy_ips(env::var("TRUSTED_PROXY_IPS").ok()),
+            rate_limit_exempt_ips: parse_ip_ranges(
+                "RATE_LIMIT_EXEMPT_IPS",
+                env::var("RATE_LIMIT_EXEMPT_IPS").ok(),
+            ),
             mtls_client_cert_header: env::var("MTLS_CLIENT_CERT_HEADER")
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -1928,6 +1941,7 @@ mod tests {
             platform_service_rate_limit_per_second: 2,
             platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
+            rate_limit_exempt_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
@@ -2215,6 +2229,25 @@ mod tests {
     fn validate_ssh_runtime_config_accepts_valid_values() {
         let cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
         cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    fn rate_limit_exempt_ips_parse_client_cidrs_and_fail_closed_on_invalid_entries() {
+        assert!(parse_ip_ranges("RATE_LIMIT_EXEMPT_IPS", None).is_empty());
+        assert!(parse_ip_ranges("RATE_LIMIT_EXEMPT_IPS", Some("  ".to_string())).is_empty());
+        assert_eq!(
+            parse_ip_ranges(
+                "RATE_LIMIT_EXEMPT_IPS",
+                Some(
+                    "192.0.2.0/24, ::ffff:198.51.100.7, 2001:db8::/32, bad, 0.0.0.0/33".to_string()
+                )
+            ),
+            vec![
+                "192.0.2.0/24".parse().unwrap(),
+                "198.51.100.7".parse().unwrap(),
+                "2001:db8::/32".parse().unwrap()
+            ]
+        );
     }
 
     #[test]
