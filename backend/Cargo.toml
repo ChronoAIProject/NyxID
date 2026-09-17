@@ -34,7 +34,7 @@ tracing-subscriber = { workspace = true }
 jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 argon2 = "0.5.3"
 aes-gcm = "0.10.3"
-aes = "0.8.4"
+aes = "0.9.0"
 cbc = "0.1.2"
 sha2 = "0.10.9"
 siphasher = "1"
