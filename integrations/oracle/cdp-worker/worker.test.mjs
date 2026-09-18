@@ -589,6 +589,26 @@ test("pill text verifies the selected level without cross-matching", () => {
   assert.equal(pillShowsLevel("", high), false);
 });
 
+test("a two-line pill verifies the level it already shows", () => {
+  // The composer pill renders family and level on separate lines ("6\nPro").
+  // pillShowsLevel used to read only the first line, leaving "6", so a pill
+  // already showing Pro reported false: the worker skipped already_selected,
+  // hunted for a Pro Extended entry the menu did not offer, and failed
+  // level_unavailable on every attempt. Observed on three workers 2026-09-18.
+  const pro = modelLevelTargets("chatgpt-6-pro");
+  assert.equal(detectPillLevel("6\nPro"), "Pro");
+  assert.equal(pillShowsLevel("6\nPro", pro), true);
+  assert.equal(pillShowsLevel("6 Pro", pro), true);
+  // A level the pill does not show stays false on two lines too.
+  assert.equal(pillShowsLevel("6\nInstant", pro), false);
+  // The Standard/Extended split must still discriminate across the newline.
+  const standard = modelLevelTargets("chatgpt-6-pro-standard");
+  assert.equal(pillShowsLevel("6\nPro Standard", pro), false);
+  assert.equal(pillShowsLevel("6\nPro Standard", standard), true);
+  assert.equal(pillShowsLevel("6\nPro Extended", pro), true);
+  assert.equal(pillShowsLevel("6\nPro Extended", standard), false);
+});
+
 test("pill level detection prefers the longest alias", () => {
   assert.equal(detectPillLevel("GPT-5.5 Extra High"), "Extra High");
   assert.equal(detectPillLevel("GPT-5.5 High"), "High");

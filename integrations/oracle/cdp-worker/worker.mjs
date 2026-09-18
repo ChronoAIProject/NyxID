@@ -1383,7 +1383,15 @@ export function effortSelectionMismatch({ observed, verified, recognizedLevels =
 }
 
 export function pillShowsLevel(pillText, targets) {
-  pillText = String(pillText || "").trim().split(/\r?\n/)[0];
+  // Keep the whole label. A composer pill renders its family and level on
+  // separate lines ("6\nPro"), and taking only the first line leaves "6",
+  // which classifies as null - so a pill already showing Pro reads as not
+  // showing it. detectPillLevel already handles both shapes; matching it here
+  // keeps the two in step. Without this the worker never takes the
+  // already_selected path, hunts for a Pro Extended entry the menu does not
+  // have, and fails level_unavailable on every attempt, while result.verified
+  // (which also calls this) can never become true.
+  pillText = String(pillText || "").trim();
   const canonical = (targets || [])[0];
   if (!canonical || !pillText) return false;
   if (MODEL_LEVELS.some((aliases) => aliases[0] === canonical)) {
