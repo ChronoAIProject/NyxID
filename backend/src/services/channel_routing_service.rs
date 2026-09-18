@@ -629,7 +629,7 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
         db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "discord", "is_active": true })
             .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
@@ -675,8 +675,11 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
         db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
-            .await.unwrap();
+            .insert_one(
+                doc! { "_id": &bot_id, "user_id": &user_id, "platform": "lark", "is_active": true },
+            )
+            .await
+            .unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
