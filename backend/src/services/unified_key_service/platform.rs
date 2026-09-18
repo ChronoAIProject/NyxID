@@ -132,7 +132,7 @@ pub async fn switch_credential_binding(
                     "Credential must not be empty".to_string(),
                 ));
             }
-            validate_token_exchange_catalog_credential(&catalog, value)?;
+            validate_catalog_credential(&catalog, value)?;
         } else {
             let provider = match catalog.provider_config_id.as_deref() {
                 Some(id) => {

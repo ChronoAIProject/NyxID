@@ -141,6 +141,7 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   bot_bearer: "Authorization",
   token_exchange: "",
   aws_sigv4: "",
+  ifttt_webhook: "",
   none: "",
 };
 
@@ -246,6 +247,9 @@ function getCredentialFieldMeta(
   if (authMethod === "basic") {
     return { label: "Username:Password", placeholder: "user:pass" };
   }
+  if (authMethod === "ifttt_webhook") {
+    return { label: "IFTTT Webhooks key", placeholder: "Raw key from Webhooks Documentation (not a URL)" };
+  }
   if (authMethod === "aws_sigv4") {
     return {
       label: "AWS Credentials",
@@ -313,7 +317,8 @@ function shouldShowAuthKeyName(authMethod: string): boolean {
     authMethod !== "oauth2" &&
     authMethod !== "bot_bearer" &&
     authMethod !== "token_exchange" &&
-    authMethod !== "aws_sigv4"
+    authMethod !== "aws_sigv4" &&
+    authMethod !== "ifttt_webhook"
   );
 }
 
@@ -1036,6 +1041,7 @@ function KeyForm({
                   <SelectItem value="header">Header</SelectItem>
                   <SelectItem value="query">Query Parameter</SelectItem>
                   <SelectItem value="path">Path Prefix</SelectItem>
+                  <SelectItem value="ifttt_webhook">IFTTT Webhooks</SelectItem>
                   <SelectItem value="basic">Basic Auth</SelectItem>
                   <SelectItem value="body">JSON Body Injection</SelectItem>
                   <SelectItem value="bot_bearer">
@@ -1297,6 +1303,7 @@ function NodeSetupStep({
                     <SelectItem value="header">Header</SelectItem>
                     <SelectItem value="query">Query Parameter</SelectItem>
                     <SelectItem value="path">Path Prefix</SelectItem>
+                    <SelectItem value="ifttt_webhook">IFTTT Webhooks</SelectItem>
                     <SelectItem value="basic">Basic Auth</SelectItem>
                     <SelectItem value="body">JSON Body Injection</SelectItem>
                     <SelectItem value="bot_bearer">

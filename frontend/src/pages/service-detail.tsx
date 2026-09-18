@@ -685,6 +685,7 @@ function injectionMethodForService(
   if (service.auth_method === "query" || service.auth_type === "query") {
     return "query-param";
   }
+  if (service.auth_method === "ifttt_webhook") return "ifttt-webhook";
   if (
     service.auth_method === "path" ||
     service.auth_method === "path-prefix" ||
@@ -699,6 +700,7 @@ function defaultFieldName(
   method: NodePendingCredentialInjectionMethod,
   authKeyName: string | null | undefined,
 ): string {
+  if (method === "ifttt-webhook") return "key";
   if (authKeyName?.trim()) return authKeyName;
   if (method === "query-param") return "api_key";
   if (method === "path-prefix") return "api";
@@ -781,6 +783,7 @@ function ServiceCredentialPushSection({
                       const currentFieldName = form.getValues("field_name");
                       field.onChange(method);
                       if (
+                        method === "ifttt-webhook" ||
                         currentFieldName.trim() === "" ||
                         currentFieldName === previousDefault
                       ) {
@@ -800,6 +803,7 @@ function ServiceCredentialPushSection({
                       <SelectItem value="header">Header</SelectItem>
                       <SelectItem value="query-param">Query param</SelectItem>
                       <SelectItem value="path-prefix">Path prefix</SelectItem>
+                      <SelectItem value="ifttt-webhook">IFTTT Webhooks</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -813,7 +817,7 @@ function ServiceCredentialPushSection({
                 <FormItem>
                   <FormLabel>Field name</FormLabel>
                   <FormControl>
-                    <Input {...field} />
+                    <Input readOnly={form.watch("injection_method") === "ifttt-webhook"} {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>

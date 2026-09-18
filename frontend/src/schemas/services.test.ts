@@ -19,6 +19,7 @@ describe("constants", () => {
       "basic",
       "bearer",
       "bot_bearer",
+      "ifttt_webhook",
       "body",
       "path",
       "oidc",

@@ -928,7 +928,7 @@ pub enum ServiceCommands {
         /// Label for this service
         #[arg(long)]
         label: Option<String>,
-        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, body (inject credential into JSON body), none (skips credential entry)
+        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, ifttt_webhook, body (inject credential into JSON body), none (skips credential entry)
         #[arg(long)]
         auth_method: Option<String>,
         /// Auth key name (e.g. Authorization, X-API-Key, or for body auth
@@ -2334,6 +2334,7 @@ pub enum PendingCredentialInjectionMethod {
     Header,
     QueryParam,
     PathPrefix,
+    IftttWebhook,
 }
 
 impl PendingCredentialInjectionMethod {
@@ -2342,6 +2343,7 @@ impl PendingCredentialInjectionMethod {
             Self::Header => "header",
             Self::QueryParam => "query-param",
             Self::PathPrefix => "path-prefix",
+            Self::IftttWebhook => "ifttt-webhook",
         }
     }
 }
@@ -2528,6 +2530,19 @@ pub enum NodeDaemonCommands {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn ifttt_generated_node_setup_command_parses() {
+        Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "credentials",
+            "setup",
+            "--service",
+            "api-ifttt",
+        ])
+        .expect("connection UI node command must match Clap");
+    }
 
     #[test]
     fn managed_channel_signup_rejects_all_credential_flags() {

@@ -580,6 +580,15 @@ fn build_credential_params_from_fields(
     target_url: Option<String>,
 ) -> CredentialUpdateParams {
     match auth_method {
+        "ifttt_webhook" => CredentialUpdateParams {
+            service_slug: service_slug.to_string(),
+            injection_method: "ifttt_webhook".to_string(),
+            header_name: None,
+            header_value: Some(credential.to_string()),
+            param_name: None,
+            param_value: None,
+            target_url,
+        },
         "bearer" => CredentialUpdateParams {
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
@@ -841,6 +850,22 @@ mod tests {
         assert!(params.param_name.is_none());
         assert!(params.param_value.is_none());
         assert!(params.target_url.is_none());
+    }
+
+    #[test]
+    fn ifttt_push_emits_dedicated_mode_for_unsupported_nodes_to_refuse() {
+        let params = build_credential_params_from_fields(
+            "api-ifttt",
+            "ifttt_webhook",
+            "key",
+            "test_key",
+            None,
+        );
+        assert_eq!(params.injection_method, "ifttt_webhook");
+        assert!(params.header_name.is_none());
+        assert_eq!(params.header_value.as_deref(), Some("test_key"));
+        assert!(params.param_name.is_none());
+        assert!(params.param_value.is_none());
     }
 
     #[test]

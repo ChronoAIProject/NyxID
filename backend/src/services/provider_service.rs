@@ -71,6 +71,53 @@ pub async fn seed_default_providers(
         ($slug:expr) => {{ collection.find_one(doc! { "slug": $slug }).await?.is_some() }};
     }
 
+    // IFTTT Webhooks (per-user raw key)
+    if !slug_exists!("ifttt") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "ifttt".to_string(),
+            name: "IFTTT Webhooks".to_string(),
+            description: Some("Run preconfigured IFTTT Webhooks Applets".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "IFTTT Pro or Pro+ is required. In Webhooks settings, open Documentation and copy only the raw Webhooks key, not the full URL. Create and enable an Applet using Receive a web request or Receive a web request with a JSON payload. Event names contain only letters, numbers, and underscores.".to_string(),
+            ),
+            api_key_url: Some("https://ifttt.com/maker_webhooks".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://ifttt.com/explore/what-are-webhooks".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "ifttt", "Seeded default provider: IFTTT Webhooks");
+        seeded_count += 1;
+    }
+
     // 1. OpenAI (API Key)
     if !slug_exists!("openai") {
         let provider = ProviderConfig {
@@ -2891,6 +2938,18 @@ struct SeededHeader {
 /// capability flags to clients.
 fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
     match slug {
+        "api-ifttt" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: false,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: false,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         "api-google-workspace"
         | "api-google-calendar"
         | "api-google-drive"
@@ -3057,6 +3116,29 @@ const OPENROUTER_DEFAULT_HEADERS: &[SeededHeader] = &[
 ];
 
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
+    DefaultServiceSeed {
+        provider_slug: "ifttt",
+        service_slug: "api-ifttt",
+        service_name: "IFTTT Webhooks",
+        base_url: nyxid_service_adapters::ifttt::BASE_URL,
+        injection_method: "ifttt_webhook",
+        injection_key: "",
+        service_auth_method: Some("ifttt_webhook"),
+        service_auth_key_name: Some("key"),
+        description: Some(
+            "Run preconfigured IFTTT Webhooks Applets with value1/value2/value3 or a JSON payload. POST /trigger/EVENT or /trigger/EVENT/json; EVENT uses letters, numbers, and underscores. A receipt confirms event acceptance, not Applet completion.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://ifttt.com/maker_webhooks"),
+        auth_notes: Some(
+            "Requires IFTTT Pro or Pro+. Enter only the raw Webhooks key from Documentation, never a full URL. The key can trigger all matching Applets in its IFTTT account. NyxID appends it at egress. Use the returned connection slug, including any suffix.",
+        ),
+        known_limitations: Some(
+            "Only preconfigured Webhooks Applets; no Applet creation, listing, history, or completion polling. POST only; JSON bodies only, no query parameters or WebSocket. Fixed maker.ifttt.com destination. No identity/access-token/delegation forwarding. No automatic verification, retry, redirect following, or idempotency guarantee. Check IFTTT Activity after an uncertain result. Node routing requires a node version supporting ifttt_webhook.",
+        ),
+    },
     DefaultServiceSeed {
         provider_slug: "xai",
         service_slug: "llm-xai",
