@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { formatRelativeTime } from "@/lib/utils";
+import { cn, formatRelativeTime } from "@/lib/utils";
 import {
   useServiceHistory,
   useArchivedServiceHistory,
@@ -70,13 +70,18 @@ function actorName(
 
 export function ServiceAuthorshipFooter({
   authorship,
+  className,
 }: {
   readonly authorship?: ServiceAuthorship | null;
+  readonly className?: string;
 }) {
   if (!authorship) return null;
   return (
     <div
-      className="mt-3 flex min-w-0 flex-col items-end gap-1 text-right text-[11px] text-muted-foreground"
+      className={cn(
+        "mt-3 flex min-w-0 flex-col items-end gap-1 text-right text-[11px] text-muted-foreground",
+        className,
+      )}
       aria-label="Service authorship"
     >
       <p className="max-w-full break-words">

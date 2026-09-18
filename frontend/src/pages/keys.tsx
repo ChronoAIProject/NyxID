@@ -270,23 +270,28 @@ function KeyCardContent({
           </Button>
         )}
 
-        <div className="mt-auto space-y-1.5 text-xs text-muted-foreground">
-          <div className="flex min-w-0 items-center gap-1.5">
-            {isSsh ? (
-              <Terminal className="h-3 w-3 shrink-0" />
-            ) : (
-              <Globe className="h-3 w-3 shrink-0" />
-            )}
-            <span className="truncate">{displayUrl}</span>
+        <div className="mt-auto flex min-w-0 items-end justify-between gap-3">
+          <div className="min-w-0 flex-1 space-y-1.5 text-xs text-muted-foreground">
+            <div className="flex min-w-0 items-center gap-1.5">
+              {isSsh ? (
+                <Terminal className="h-3 w-3 shrink-0" />
+              ) : (
+                <Globe className="h-3 w-3 shrink-0" />
+              )}
+              <span className="truncate">{displayUrl}</span>
+            </div>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Server className="h-3 w-3 shrink-0" />
+              <span className="truncate">
+                {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
+              </span>
+            </div>
           </div>
-          <div className="flex min-w-0 items-center gap-1.5">
-            <Server className="h-3 w-3 shrink-0" />
-            <span className="truncate">
-              {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
-            </span>
-          </div>
+          <ServiceAuthorshipFooter
+            authorship={keyInfo.authorship}
+            className="mt-0 max-w-[60%]"
+          />
         </div>
-        <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       </CardContent>
     </Card>
   );
