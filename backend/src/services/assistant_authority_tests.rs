@@ -1197,6 +1197,14 @@ async fn assert_assistant_key_boundaries(f: &Fixture) {
         matches!(result, Err(crate::errors::AppError::ValidationError(message)) if message.contains("Assistant chat keys"))
     );
     let normal = ordinary_key(f).await;
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(
+            doc! { "_id": "bot", "user_id": &f.owner, "platform": "telegram", "is_active": true },
+        )
+        .await
+        .unwrap();
     let route = super::channel_routing_service::create_conversation(
         &f.state.db,
         &f.owner,

@@ -84,6 +84,7 @@ export const ADMIN_NAV = [
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
   { to: "/admin/groups", icon: Layers, label: "Groups" },
   { to: "/admin/nodes", icon: HardDrive, label: "Node Registry" },
+  { to: "/admin/ownership", icon: Server, label: "Ownership transfers" },
   { to: "/services", icon: Server, label: "Services" },
   { to: "/providers", icon: Plug, label: "Providers" },
 ] as const;
@@ -107,7 +108,7 @@ function getVisibleAdminNav(
 ): readonly NavItemDef[] {
   return ADMIN_NAV.filter(
     (item) =>
-      !["/admin/platform-credentials"].includes(item.to) || canAdminWrite(user),
+      !["/admin/platform-credentials", "/admin/ownership"].includes(item.to) || canAdminWrite(user),
   );
 }
 

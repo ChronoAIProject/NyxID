@@ -457,7 +457,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             // built-in `require_admin_or_creator` cleanup gate fails
             // for everyone except a global admin. Force the admin to
             // call `DELETE /services/{id}` first.
-            doc! { "created_by": org_user_id, "is_active": true },
+            doc! { "$and": [super::ownership_transfer_service::catalog_owner_filter(org_user_id), { "is_active": true }] },
             "custom catalog services",
         ),
     ];
@@ -690,7 +690,10 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // `service_account_tokens` patterns above.
     let owned_service_ids: Vec<String> = db
         .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .distinct("_id", doc! { "created_by": org_user_id })
+        .distinct(
+            "_id",
+            super::ownership_transfer_service::catalog_owner_filter(org_user_id),
+        )
         .await?
         .into_iter()
         .filter_map(|value| match value {
@@ -699,7 +702,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         })
         .collect();
     db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .delete_many(doc! { "created_by": org_user_id, "is_active": false })
+        .delete_many(doc! { "$and": [super::ownership_transfer_service::catalog_owner_filter(org_user_id), { "is_active": false }] })
         .await?;
     if !owned_service_ids.is_empty() {
         let svc_id_array: Vec<bson::Bson> = owned_service_ids

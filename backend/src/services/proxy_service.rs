@@ -3550,6 +3550,7 @@ fn build_minimal_downstream_service(
         && user_service.catalog_service_id.is_some();
 
     DownstreamService {
+        owner_user_id: None,
         recommended_skill_refs: None,
         skills_revision: 0,
         id: user_service
@@ -5644,6 +5645,7 @@ mod tests {
             auth_key_name: "Authorization".to_string(),
             credential: String::new(),
             service: DownstreamService {
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -6843,6 +6845,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
             service: DownstreamService {
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -7179,6 +7182,7 @@ mod tests {
             auth_key_name: "app_secret".to_string(),
             credential: "super-secret".to_string(),
             service: DownstreamService {
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -7405,6 +7409,7 @@ mod tests {
             auth_key_name: String::new(),
             credential,
             service: DownstreamService {
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -7650,6 +7655,7 @@ mod tests {
 
     fn test_minimal_downstream() -> DownstreamService {
         DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: "ds-test".into(),
