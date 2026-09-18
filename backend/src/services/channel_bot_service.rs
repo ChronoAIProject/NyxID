@@ -352,19 +352,22 @@ pub async fn create_managed_bot(
     input: &super::channel_managed::ManagedOnboardingInput,
     progress: &super::channel_managed::ManagedProgress,
 ) -> AppResult<CreateBotResult> {
-    if adapter.platform_id() == "aurinko" {
-        return super::channel_retry_ingress::with_connection(
-            db,
-            input.get("connection_id")?,
-            create_managed_bot_inner(
-                db, config, keys, http, adapter, owner, label, input, progress,
-            ),
+    Box::pin(async move {
+        if adapter.platform_id() == "aurinko" {
+            return super::channel_retry_ingress::with_connection(
+                db,
+                input.get("connection_id")?,
+                create_managed_bot_inner(
+                    db, config, keys, http, adapter, owner, label, input, progress,
+                ),
+            )
+            .await;
+        }
+        create_managed_bot_inner(
+            db, config, keys, http, adapter, owner, label, input, progress,
         )
-        .await;
-    }
-    create_managed_bot_inner(
-        db, config, keys, http, adapter, owner, label, input, progress,
-    )
+        .await
+    })
     .await
 }
 
@@ -1128,6 +1131,7 @@ pub async fn delete_bot(
     bot_id: &str,
     user_id: &str,
 ) -> AppResult<Option<&'static str>> {
+    Box::pin(async move {
     let bot = get_bot_for_user(db, bot_id, user_id).await?;
     if bot.platform == "telegram-new" {
         return super::telegram_new_service::with_operation(db, &format!("telegram-child:{}", bot.platform_bot_id), async {
@@ -1141,6 +1145,8 @@ pub async fn delete_bot(
         }).await;
     }
     delete_bot_serialized(db, http_client, encryption_keys, adapter, bot_id, user_id).await
+    })
+    .await
 }
 
 async fn delete_bot_serialized(

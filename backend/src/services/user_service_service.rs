@@ -986,216 +986,221 @@ pub async fn create_user_service_with_id(
     admin_only: bool,
     reserved_id: Option<&str>,
 ) -> AppResult<UserService> {
-    validate_slug(slug)?;
-    validate_auth_method(auth_method)?;
-    let identity = normalize_identity_config(identity)?;
-    validate_ifttt_identity(
-        auth_method,
-        &identity.identity_propagation_mode,
-        identity.forward_access_token,
-        identity.inject_delegation_token,
-    )?;
-    if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
-        && ws_frame_injections.is_some_and(|rules| !rules.is_empty())
-    {
-        return Err(AppError::ValidationError(
-            "IFTTT Webhooks does not support WebSocket frame injection".into(),
-        ));
-    }
-    let node_id = node_id.filter(|nid| !nid.is_empty());
-    validate_ifttt_endpoint(db, auth_method, endpoint_id, None, node_id).await?;
-    if let Some(rules) = ws_frame_injections {
-        ws_frame_injector::validate_rules(rules)?;
-    }
-
-    if source.is_some() != source_id.is_some() {
-        return Err(AppError::ValidationError(
-            "source and source_id must be provided together".to_string(),
-        ));
-    }
-
-    if auth_key_name.len() > 200 || auth_key_name.contains('\r') || auth_key_name.contains('\n') {
-        return Err(AppError::ValidationError(
-            "Invalid auth_key_name".to_string(),
-        ));
-    }
-
-    if auth_method_requires_key_name(auth_method) && auth_key_name.trim().is_empty() {
-        return Err(AppError::ValidationError(auth_key_name_required_message(
+    Box::pin(async move {
+        validate_slug(slug)?;
+        validate_auth_method(auth_method)?;
+        let identity = normalize_identity_config(identity)?;
+        validate_ifttt_identity(
             auth_method,
-        )));
-    }
-
-    // `body` auth credential injection happens inside the backend proxy's
-    // `forward_request()`. Node-routed requests bypass that path, so body
-    // injection would silently not happen. Reject up front.
-    if auth_method == "body" && node_id.is_some() {
-        return Err(AppError::ValidationError(
-            "auth_method 'body' is not supported for node-routed services. \
-             Credential body injection only works for direct (non-node) routing."
-                .to_string(),
-        ));
-    }
-
-    // `token_exchange` performs server-side token exchange against the
-    // configured endpoint directly from the backend process. Node-routed
-    // requests would have to relay the exchange through the node agent,
-    // which is not implemented. Reject at bind time.
-    if auth_method == "token_exchange" && node_id.is_some() {
-        return Err(AppError::ValidationError(
-            "auth_method 'token_exchange' is not supported for node-routed services. \
-             The token exchange runs server-side and does not flow through nodes."
-                .to_string(),
-        ));
-    }
-
-    let platform_managed_catalog_service = api_key_id.is_none()
-        && auth_method != "none"
-        && catalog_service_id.is_some()
-        && matches!(source, Some(AUTO_PROVISION_SOURCE | "platform_key"));
-    if api_key_id.is_none() && auth_method != "none" && !platform_managed_catalog_service {
-        return Err(AppError::ValidationError(
-            "Services without an API key must use auth_method 'none'".to_string(),
-        ));
-    }
-
-    // Verify endpoint exists and belongs to user
-    let ep_count = db
-        .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
-        .count_documents(doc! { "_id": endpoint_id, "user_id": user_id })
-        .await?;
-    if ep_count == 0 {
-        return Err(AppError::NotFound(
-            "Endpoint not found or does not belong to user".to_string(),
-        ));
-    }
-
-    // Verify api_key exists and belongs to user (skip for no-auth services)
-    if let Some(ak_id) = api_key_id {
-        let ak_count = db
-            .collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .count_documents(doc! { "_id": ak_id, "user_id": user_id })
-            .await?;
-        if ak_count == 0 {
-            return Err(AppError::NotFound(
-                "API key not found or does not belong to user".to_string(),
+            &identity.identity_propagation_mode,
+            identity.forward_access_token,
+            identity.inject_delegation_token,
+        )?;
+        if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
+            && ws_frame_injections.is_some_and(|rules| !rules.is_empty())
+        {
+            return Err(AppError::ValidationError(
+                "IFTTT Webhooks does not support WebSocket frame injection".into(),
             ));
         }
-    }
+        let node_id = node_id.filter(|nid| !nid.is_empty());
+        validate_ifttt_endpoint(db, auth_method, endpoint_id, None, node_id).await?;
+        if let Some(rules) = ws_frame_injections {
+            ws_frame_injector::validate_rules(rules)?;
+        }
 
-    // Check slug uniqueness for active services
-    let existing = find_by_slug(db, user_id, slug).await?;
-    if existing.is_some() {
-        return Err(AppError::Conflict(format!(
-            "You already have an active service with slug '{slug}'"
-        )));
-    }
-    let existing_pool = db
-        .collection::<mongodb::bson::Document>(crate::models::service_pool::COLLECTION_NAME)
-        .find_one(doc! { "user_id": user_id, "slug": slug })
-        .await?;
-    if existing_pool.is_some() {
-        return Err(AppError::ServicePoolSlugTaken(slug.to_string()));
-    }
+        if source.is_some() != source_id.is_some() {
+            return Err(AppError::ValidationError(
+                "source and source_id must be provided together".to_string(),
+            ));
+        }
 
-    if let Some(node_id) = node_id {
-        // Actor-based check: the human (or API key) making the request must
-        // have write access to the node. This lets an admin route an
-        // org-owned service through their personal node, where they're the
-        // direct owner. The service's effective owner (user_id) does not
-        // need to match the node's owner.
-        node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
-    }
+        if auth_key_name.len() > 200 || auth_key_name.contains('\r') || auth_key_name.contains('\n')
+        {
+            return Err(AppError::ValidationError(
+                "Invalid auth_key_name".to_string(),
+            ));
+        }
 
-    let now = Utc::now();
-    let service = UserService {
-        id: reserved_id
-            .map(str::to_string)
-            .unwrap_or_else(|| Uuid::new_v4().to_string()),
-        user_id: user_id.to_string(),
-        slug: slug.to_string(),
-        endpoint_id: endpoint_id.to_string(),
-        api_key_id: api_key_id.map(|s| s.to_string()),
-        credential_binding: (source == Some("platform_key")).then(|| "platform".to_string()),
-        auth_method: auth_method.to_string(),
-        auth_key_name: auth_key_name.to_string(),
-        catalog_service_id: catalog_service_id.map(|s| s.to_string()),
-        node_id: node_id.map(|s| s.to_string()),
-        node_priority,
-        service_type: service_type.to_string(),
-        ssh_auth_mode,
-        admin_only,
-        ssh_node_keys_stale: false,
-        identity_propagation_mode: identity.identity_propagation_mode,
-        identity_include_user_id: identity.identity_include_user_id,
-        identity_include_email: identity.identity_include_email,
-        identity_include_name: identity.identity_include_name,
-        identity_jwt_audience: identity.identity_jwt_audience,
-        forward_access_token: identity.forward_access_token,
-        inject_delegation_token: identity.inject_delegation_token,
-        delegation_token_scope: identity.delegation_token_scope,
-        custom_user_agent: None,
-        default_request_headers: None,
-        ws_frame_injections: ws_frame_injections.unwrap_or_default().to_vec(),
-        is_active: true,
-        source: source.map(str::to_string),
-        source_id: source_id.map(str::to_string),
-        source_app_id: source_app_id.map(str::to_string),
-        created_at: now,
-        updated_at: now,
-        state_version: 1,
-        rotation_predecessor_id: None,
-    };
+        if auth_method_requires_key_name(auth_method) && auth_key_name.trim().is_empty() {
+            return Err(AppError::ValidationError(auth_key_name_required_message(
+                auth_method,
+            )));
+        }
 
-    let managed_key = if let Some(id) = api_key_id
-        && let Some(key) = super::user_api_key_service::find_api_key(db, user_id, id).await?
-        && super::aurinko_oauth_service::is_managed_key(db, &key).await?
-    {
-        Some(key)
-    } else {
-        None
-    };
-    if let Some(key) = managed_key {
-        super::channel_retry_ingress::with_connection(db, &key.id, async {
-            let live = super::user_api_key_service::find_api_key(db, user_id, &key.id)
-                .await?
-                .ok_or_else(|| AppError::NotFound("Mailbox connection not found".into()))?;
-            super::aurinko_oauth_service::validate_connection_route(db, &service, &live).await?;
-            if db
-                .collection::<UserService>(COLLECTION_NAME)
-                .find_one(doc! {"api_key_id": &key.id})
-                .await?
-                .is_some()
-            {
-                return Err(AppError::Conflict(
+        // `body` auth credential injection happens inside the backend proxy's
+        // `forward_request()`. Node-routed requests bypass that path, so body
+        // injection would silently not happen. Reject up front.
+        if auth_method == "body" && node_id.is_some() {
+            return Err(AppError::ValidationError(
+                "auth_method 'body' is not supported for node-routed services. \
+             Credential body injection only works for direct (non-node) routing."
+                    .to_string(),
+            ));
+        }
+
+        // `token_exchange` performs server-side token exchange against the
+        // configured endpoint directly from the backend process. Node-routed
+        // requests would have to relay the exchange through the node agent,
+        // which is not implemented. Reject at bind time.
+        if auth_method == "token_exchange" && node_id.is_some() {
+            return Err(AppError::ValidationError(
+                "auth_method 'token_exchange' is not supported for node-routed services. \
+             The token exchange runs server-side and does not flow through nodes."
+                    .to_string(),
+            ));
+        }
+
+        let platform_managed_catalog_service = api_key_id.is_none()
+            && auth_method != "none"
+            && catalog_service_id.is_some()
+            && matches!(source, Some(AUTO_PROVISION_SOURCE | "platform_key"));
+        if api_key_id.is_none() && auth_method != "none" && !platform_managed_catalog_service {
+            return Err(AppError::ValidationError(
+                "Services without an API key must use auth_method 'none'".to_string(),
+            ));
+        }
+
+        // Verify endpoint exists and belongs to user
+        let ep_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "_id": endpoint_id, "user_id": user_id })
+            .await?;
+        if ep_count == 0 {
+            return Err(AppError::NotFound(
+                "Endpoint not found or does not belong to user".to_string(),
+            ));
+        }
+
+        // Verify api_key exists and belongs to user (skip for no-auth services)
+        if let Some(ak_id) = api_key_id {
+            let ak_count = db
+                .collection::<mongodb::bson::Document>(USER_API_KEYS)
+                .count_documents(doc! { "_id": ak_id, "user_id": user_id })
+                .await?;
+            if ak_count == 0 {
+                return Err(AppError::NotFound(
+                    "API key not found or does not belong to user".to_string(),
+                ));
+            }
+        }
+
+        // Check slug uniqueness for active services
+        let existing = find_by_slug(db, user_id, slug).await?;
+        if existing.is_some() {
+            return Err(AppError::Conflict(format!(
+                "You already have an active service with slug '{slug}'"
+            )));
+        }
+        let existing_pool = db
+            .collection::<mongodb::bson::Document>(crate::models::service_pool::COLLECTION_NAME)
+            .find_one(doc! { "user_id": user_id, "slug": slug })
+            .await?;
+        if existing_pool.is_some() {
+            return Err(AppError::ServicePoolSlugTaken(slug.to_string()));
+        }
+
+        if let Some(node_id) = node_id {
+            // Actor-based check: the human (or API key) making the request must
+            // have write access to the node. This lets an admin route an
+            // org-owned service through their personal node, where they're the
+            // direct owner. The service's effective owner (user_id) does not
+            // need to match the node's owner.
+            node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
+        }
+
+        let now = Utc::now();
+        let service = UserService {
+            id: reserved_id
+                .map(str::to_string)
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            user_id: user_id.to_string(),
+            slug: slug.to_string(),
+            endpoint_id: endpoint_id.to_string(),
+            api_key_id: api_key_id.map(|s| s.to_string()),
+            credential_binding: (source == Some("platform_key")).then(|| "platform".to_string()),
+            auth_method: auth_method.to_string(),
+            auth_key_name: auth_key_name.to_string(),
+            catalog_service_id: catalog_service_id.map(|s| s.to_string()),
+            node_id: node_id.map(|s| s.to_string()),
+            node_priority,
+            service_type: service_type.to_string(),
+            ssh_auth_mode,
+            admin_only,
+            ssh_node_keys_stale: false,
+            identity_propagation_mode: identity.identity_propagation_mode,
+            identity_include_user_id: identity.identity_include_user_id,
+            identity_include_email: identity.identity_include_email,
+            identity_include_name: identity.identity_include_name,
+            identity_jwt_audience: identity.identity_jwt_audience,
+            forward_access_token: identity.forward_access_token,
+            inject_delegation_token: identity.inject_delegation_token,
+            delegation_token_scope: identity.delegation_token_scope,
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: ws_frame_injections.unwrap_or_default().to_vec(),
+            is_active: true,
+            source: source.map(str::to_string),
+            source_id: source_id.map(str::to_string),
+            source_app_id: source_app_id.map(str::to_string),
+            created_at: now,
+            updated_at: now,
+            state_version: 1,
+            rotation_predecessor_id: None,
+        };
+
+        let managed_key = if let Some(id) = api_key_id
+            && let Some(key) = super::user_api_key_service::find_api_key(db, user_id, id).await?
+            && super::aurinko_oauth_service::is_managed_key(db, &key).await?
+        {
+            Some(key)
+        } else {
+            None
+        };
+        if let Some(key) = managed_key {
+            super::channel_retry_ingress::with_connection(db, &key.id, async {
+                let live = super::user_api_key_service::find_api_key(db, user_id, &key.id)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("Mailbox connection not found".into()))?;
+                super::aurinko_oauth_service::validate_connection_route(db, &service, &live)
+                    .await?;
+                if db
+                    .collection::<UserService>(COLLECTION_NAME)
+                    .find_one(doc! {"api_key_id": &key.id})
+                    .await?
+                    .is_some()
+                {
+                    return Err(AppError::Conflict(
                     "Managed mailbox connections already have an AI Service; reuse that service"
                         .into(),
                 ));
-            }
+                }
+                db.collection::<UserService>(COLLECTION_NAME)
+                    .insert_one(&service)
+                    .await?;
+                Ok(())
+            })
+            .await?;
+        } else {
             db.collection::<UserService>(COLLECTION_NAME)
                 .insert_one(&service)
                 .await?;
-            Ok(())
-        })
-        .await?;
-    } else {
-        db.collection::<UserService>(COLLECTION_NAME)
-            .insert_one(&service)
+        }
+
+        if !service.admin_only {
+            crate::services::org_role_scope_service::add_service_to_configured_role_scope(
+                db,
+                user_id,
+                OrgRole::Member,
+                &service.id,
+                actor_user_id,
+            )
             .await?;
-    }
+        }
 
-    if !service.admin_only {
-        crate::services::org_role_scope_service::add_service_to_configured_role_scope(
-            db,
-            user_id,
-            OrgRole::Member,
-            &service.id,
-            actor_user_id,
-        )
-        .await?;
-    }
-
-    Ok(service)
+        Ok(service)
+    })
+    .await
 }
 
 /// Attach immutable developer-app provenance to a newly provisioned service.
@@ -1271,61 +1276,64 @@ pub async fn update_user_service(
     ws_frame_injections: Option<&[WsFrameInjection]>,
     admin_only: Option<bool>,
 ) -> AppResult<()> {
-    let current = get_user_service(db, user_id, service_id).await?;
-    if let Some(key_id) = &current.api_key_id
-        && let Some(key) =
-            crate::services::user_api_key_service::find_api_key(db, user_id, key_id).await?
-        && crate::services::aurinko_oauth_service::is_managed_key(db, &key).await?
-    {
-        if auth_method.is_some_and(|m| m != "bearer")
-            || auth_key_name.is_some_and(|n| n != "Authorization")
-            || node_id.is_some_and(|n| !n.is_empty())
+    Box::pin(async move {
+        let current = get_user_service(db, user_id, service_id).await?;
+        if let Some(key_id) = &current.api_key_id
+            && let Some(key) =
+                crate::services::user_api_key_service::find_api_key(db, user_id, key_id).await?
+            && crate::services::aurinko_oauth_service::is_managed_key(db, &key).await?
         {
-            return Err(AppError::ValidationError(
-                "Managed mailboxes require direct Aurinko bearer routing".into(),
-            ));
-        }
-        return crate::services::channel_retry_ingress::with_connection(db, key_id, async {
-            let live = get_user_service(db, user_id, service_id).await?;
-            if live.api_key_id != current.api_key_id {
-                return Err(AppError::Conflict("Mailbox binding changed; retry".into()));
+            if auth_method.is_some_and(|m| m != "bearer")
+                || auth_key_name.is_some_and(|n| n != "Authorization")
+                || node_id.is_some_and(|n| !n.is_empty())
+            {
+                return Err(AppError::ValidationError(
+                    "Managed mailboxes require direct Aurinko bearer routing".into(),
+                ));
             }
-            update_user_service_inner(
-                db,
-                user_id,
-                actor_user_id,
-                service_id,
-                auth_method,
-                auth_key_name,
-                node_id,
-                node_priority,
-                is_active,
-                identity,
-                custom_user_agent,
-                default_request_headers,
-                ws_frame_injections,
-                admin_only,
-            )
-            .await
-        })
-        .await;
-    }
-    update_user_service_inner(
-        db,
-        user_id,
-        actor_user_id,
-        service_id,
-        auth_method,
-        auth_key_name,
-        node_id,
-        node_priority,
-        is_active,
-        identity,
-        custom_user_agent,
-        default_request_headers,
-        ws_frame_injections,
-        admin_only,
-    )
+            return crate::services::channel_retry_ingress::with_connection(db, key_id, async {
+                let live = get_user_service(db, user_id, service_id).await?;
+                if live.api_key_id != current.api_key_id {
+                    return Err(AppError::Conflict("Mailbox binding changed; retry".into()));
+                }
+                update_user_service_inner(
+                    db,
+                    user_id,
+                    actor_user_id,
+                    service_id,
+                    auth_method,
+                    auth_key_name,
+                    node_id,
+                    node_priority,
+                    is_active,
+                    identity,
+                    custom_user_agent,
+                    default_request_headers,
+                    ws_frame_injections,
+                    admin_only,
+                )
+                .await
+            })
+            .await;
+        }
+        update_user_service_inner(
+            db,
+            user_id,
+            actor_user_id,
+            service_id,
+            auth_method,
+            auth_key_name,
+            node_id,
+            node_priority,
+            is_active,
+            identity,
+            custom_user_agent,
+            default_request_headers,
+            ws_frame_injections,
+            admin_only,
+        )
+        .await
+    })
     .await
 }
 
