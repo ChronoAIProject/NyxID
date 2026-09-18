@@ -107,6 +107,7 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
 /// the Drive, Calendar, and Gmail read/send scopes before offering it in production.
 pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
     match slug {
+        "ifttt-mcp" => Some(&["mcp"]),
         "google" => Some(super::google_workspace::MANAGED_SCOPES),
         // Curated-broad: common recoverable read + authoring capabilities are
         // one-click. Excluded (-> BYO): `write:org` (alters org membership /
@@ -155,6 +156,12 @@ pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
 /// UI then falls back to free-form entry only.
 pub fn for_provider(slug: &str) -> Option<Vec<ScopeCatalogEntry>> {
     let entries: &[(&str, &str, &str, bool)] = match slug {
+        "ifttt-mcp" => &[(
+            "mcp",
+            "IFTTT tools",
+            "Discover and use IFTTT tools, including Applet creation and actions.",
+            true,
+        )],
         "twitter" => TWITTER,
         "google" => GOOGLE,
         "google-cloud" => GOOGLE_CLOUD,
@@ -179,7 +186,7 @@ pub fn for_provider(slug: &str) -> Option<Vec<ScopeCatalogEntry>> {
                 label: (*label).to_string(),
                 description: (*description).to_string(),
                 sensitive: *sensitive,
-                required: false,
+                required: slug == "ifttt-mcp",
             })
             .collect(),
     )
