@@ -258,6 +258,7 @@ async fn persist_verified_bot(
 
     let now = Utc::now();
     let bot = ChannelBot {
+        ownership_version: 0,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
@@ -1129,10 +1130,10 @@ async fn delete_bot_inner(
 
     let now = bson::DateTime::from_chrono(Utc::now());
 
-    // Soft-delete the bot
-    db.collection::<ChannelBot>(COLLECTION_NAME)
+    // A handover or edit during webhook cleanup must not deactivate the new owner’s bot.
+    let deleted = db.collection::<ChannelBot>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": bot_id, "user_id": user_id },
+            doc! { "_id": bot_id, "user_id": user_id, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
             doc! { "$set": {
                 "is_active": false,
                 "status": "inactive",
@@ -1141,11 +1142,16 @@ async fn delete_bot_inner(
             }},
         )
         .await?;
+    if deleted.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "Channel bot changed during deletion; retry with its current state".into(),
+        ));
+    }
 
     // Deactivate all conversations tied to this bot
     db.collection::<mongodb::bson::Document>(CONVERSATIONS)
         .update_many(
-            doc! { "channel_bot_id": bot_id },
+            doc! { "channel_bot_id": bot_id, "user_id": user_id },
             doc! { "$set": {
                 "is_active": false,
                 "updated_at": now,
@@ -1415,6 +1421,7 @@ mod tests {
 
     async fn make_lark_bot(encryption_keys: &EncryptionKeys, bot_token: &str) -> ChannelBot {
         ChannelBot {
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),

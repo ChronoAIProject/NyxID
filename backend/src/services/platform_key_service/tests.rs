@@ -957,6 +957,7 @@ fn owner_grant_intersection_is_independent_of_allowlist_size() {
     let grants = OwnerGrants {
         actor_id: "person".into(),
         memberships: vec![],
+        readable_owner_ids: HashSet::new(),
         active_owner_ids: ["person", "org-1", "org-2", "org-3"]
             .into_iter()
             .map(str::to_string)

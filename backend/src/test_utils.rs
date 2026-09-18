@@ -2564,6 +2564,7 @@ pub(crate) fn test_auto_connected_catalog_service()
 -> crate::models::downstream_service::DownstreamService {
     use crate::models::downstream_service::DownstreamService;
     DownstreamService {
+        owner_user_id: None,
         id: uuid::Uuid::new_v4().to_string(),
         name: "Catalog".to_string(),
         slug: "autoplatform".to_string(),

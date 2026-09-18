@@ -273,6 +273,10 @@ pub struct DownstreamService {
 
     pub is_active: bool,
     pub created_by: String,
+    /// Current catalog owner after an administrative transfer. Legacy rows use
+    /// `created_by`; creator attribution is never rewritten by a transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
 
     // --- Identity propagation config ---
     /// "none" | "headers" | "jwt" | "both"
@@ -465,6 +469,7 @@ pub mod test_helpers {
     /// valid struct but don't care about specific field values.
     pub fn dummy_service() -> DownstreamService {
         DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: "test-id".to_string(),
@@ -568,6 +573,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
@@ -654,6 +660,7 @@ mod tests {
         // Serialize a full struct, then remove default fields from the doc,
         // and verify they get their defaults on deserialization.
         let svc = DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: "test-id".to_string(),
