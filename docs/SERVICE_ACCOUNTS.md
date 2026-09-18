@@ -499,7 +499,7 @@ class NyxIDClient:
 | `catalog:skills:write` | Granted Curation recommendation changes and restore |
 | `groups` | Accepted as custom input; service accounts have no group memberships, so userinfo groups are empty |
 
-The default suggestion menu includes `proxy`, `llm:proxy`, and `roles`. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
+The default suggestion menu includes `proxy`, `llm:proxy`, `roles`, `catalog:skills:read`, and `catalog:skills:write`. The catalog skill scopes also require a platform-admin-issued curation grant for the selected catalog services. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
 
 General account create/update continue storing free-form scope strings. Curation accounts restrict scopes to the grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation.
 
