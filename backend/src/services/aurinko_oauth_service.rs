@@ -150,8 +150,10 @@ pub enum MailProvider {
     Google,
     Office365,
     Zoho,
-    IMAP,
-    EWS,
+    #[serde(rename = "IMAP")]
+    Imap,
+    #[serde(rename = "EWS")]
+    Ews,
     #[serde(rename = "iCloud")]
     ICloud,
 }
@@ -161,8 +163,8 @@ impl MailProvider {
             Self::Google => "Google",
             Self::Office365 => "Office365",
             Self::Zoho => "Zoho",
-            Self::IMAP => "IMAP",
-            Self::EWS => "EWS",
+            Self::Imap => "IMAP",
+            Self::Ews => "EWS",
             Self::ICloud => "iCloud",
         }
     }
@@ -397,7 +399,7 @@ pub async fn start(
     session.start_transaction().and_run((db_txn, state_for_txn, key.clone()), |session, (db_txn, state_for_txn, key)| Box::pin(async move {
         let operation:AppResult<()> = async {
             let owner=state_for_txn.target_user_id.as_deref().ok_or_else(invalid)?;
-            fence_authority(&db_txn, session, &state_for_txn).await?;
+            fence_authority(db_txn, session, state_for_txn).await?;
             let result = db_txn.collection::<UserApiKey>(KEYS).update_one(doc! {"_id":&key.id,"user_id":owner,"credential_epoch":key.credential_epoch,"status":{"$ne":"revoked"}},
                 doc! {"$set":{"oauth_attempt_nonce":&state_for_txn.id}}).session(&mut *session).await?;
             if result.matched_count != 1 { return Err(changed()); }
@@ -680,8 +682,9 @@ async fn complete_with_client(
         authorize_owner(db,&state.user_id,owner,Some(&binding.key_id)).await?;
         let live = require_live_connection(db, owner, &binding.key_id, false).await?;
         if live.oauth_attempt_nonce.as_deref()!=Some(&state.id) || live.credential_epoch!=binding.credential_epoch || live.connection_id!=state.connection_id {return Err(changed());}
-        if let Some(link_id)=&state.connect_link_id {
-            if db.collection::<Document>("connect_links").find_one(doc! {"_id":link_id,"user_id":owner,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}}).await?.is_none() { return Err(changed()); }
+        if let Some(link_id)=&state.connect_link_id
+            && db.collection::<Document>("connect_links").find_one(doc! {"_id":link_id,"user_id":owner,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}}).await?.is_none() {
+            return Err(changed());
         }
         let (client_id, client_secret)=app_credentials(keys,&provider).await?;
         let (token,account_id)=client.exchange(code,&client_id,&client_secret).await?;
@@ -693,7 +696,7 @@ async fn complete_with_client(
         let mut session=db.client().start_session().await?;
         session.start_transaction().and_run((db.clone(), state, encrypted, account, scopes), |session, (db, state, encrypted, account, scopes)| Box::pin(async move {
             let operation:AppResult<()> = async {
-                fence_authority(&db,session,&state).await?;
+                fence_authority(db,session,state).await?;
                 let binding=state.aurinko.as_ref().ok_or_else(invalid)?;
                 let owner=state.target_user_id.as_deref().ok_or_else(invalid)?;
                 if state.expires_at<=Utc::now() {return Err(invalid());}

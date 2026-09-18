@@ -432,8 +432,7 @@ pub async fn commit_user_service_mutation(
     if let Some(id) = &current.api_key_id
         && let Some(key) = super::user_api_key_service::find_api_key(db, owner_id, id).await?
         && super::aurinko_oauth_service::is_managed_key(db, &key).await?
-    {
-        if extra_set.contains_key("api_key_id")
+        && (extra_set.contains_key("api_key_id")
             || extra_set.contains_key("endpoint_id")
             || extra_set
                 .get_str("auth_method")
@@ -443,12 +442,11 @@ pub async fn commit_user_service_mutation(
                 .is_ok_and(|s| s != "Authorization")
             || extra_set
                 .get("node_id")
-                .is_some_and(|v| !matches!(v, bson::Bson::Null))
-        {
-            return Err(AppError::ValidationError(
-                "Managed mailbox credentials and routing require mailbox reconnect".into(),
-            ));
-        }
+                .is_some_and(|v| !matches!(v, bson::Bson::Null)))
+    {
+        return Err(AppError::ValidationError(
+            "Managed mailbox credentials and routing require mailbox reconnect".into(),
+        ));
     }
     extra_set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
     db.collection::<UserService>(COLLECTION_NAME)

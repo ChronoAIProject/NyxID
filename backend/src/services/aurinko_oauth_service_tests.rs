@@ -514,7 +514,7 @@ async fn account_ping_is_provider_specific() {
 async fn callback_commits_one_encrypted_connection_and_literal_mailbox() {
     let f = Fixture::new().await;
     let server = upstream_mock("IMAP").await;
-    let attempt = f.start(MailProvider::IMAP, None).await;
+    let attempt = f.start(MailProvider::Imap, None).await;
     assert!(
         super::super::user_token_service::chat_attempt_nonce_from_state(&attempt.state_id)
             .is_some()
@@ -551,7 +551,7 @@ async fn callback_commits_one_encrypted_connection_and_literal_mailbox() {
             .await
             .unwrap();
     assert_eq!(&*token, "mailbox-bearer");
-    let reconnect = f.start(MailProvider::IMAP, None).await;
+    let reconnect = f.start(MailProvider::Imap, None).await;
     assert!(reconnect.authorization_url.contains("accountId=42"));
     f.finish(&reconnect, &server).await.unwrap();
     assert_eq!(f.key().await.id, key.id);
@@ -569,8 +569,8 @@ async fn callback_commits_one_encrypted_connection_and_literal_mailbox() {
 async fn cancellation_and_replaced_attempts_never_exchange() {
     let f = Fixture::new().await;
     let server = upstream_mock("IMAP").await;
-    let old = f.start(MailProvider::IMAP, None).await;
-    let replacement = f.start(MailProvider::IMAP, None).await;
+    let old = f.start(MailProvider::Imap, None).await;
+    let replacement = f.start(MailProvider::Imap, None).await;
     assert!(f.finish(&old, &server).await.is_err());
     cancel(
         &f.db,
@@ -590,7 +590,7 @@ async fn authority_and_epoch_drift_reject_before_exchange() {
     for drift in ["session", "owner", "epoch", "config"] {
         let f = Fixture::new().await;
         let server = upstream_mock("IMAP").await;
-        let attempt = f.start(MailProvider::IMAP, None).await;
+        let attempt = f.start(MailProvider::Imap, None).await;
         match drift {
             "session" => {
                 f.db.collection::<Document>("sessions")
@@ -630,7 +630,7 @@ async fn authority_and_epoch_drift_reject_before_exchange() {
 #[tokio::test]
 async fn wrong_browser_and_generic_callback_cannot_consume_aurinko_state() {
     let f = Fixture::new().await;
-    let attempt = f.start(MailProvider::IMAP, None).await;
+    let attempt = f.start(MailProvider::Imap, None).await;
     assert!(
         bound_connect_link(
             &f.db,
@@ -823,7 +823,7 @@ async fn reconnect_advances_bot_generation_even_when_wall_clock_is_behind() {
     let before = bson::DateTime::from_chrono(Utc::now() + Duration::hours(1));
     let bot = Uuid::new_v4().to_string();
     f.db.collection::<Document>("channel_bots").insert_one(doc! {"_id":&bot,"user_id":&f.owner,"platform":"aurinko","credential_source":"connection","connection_id":&f.key.id,"is_active":true,"updated_at":before}).await.unwrap();
-    let attempt = f.start(MailProvider::IMAP, None).await;
+    let attempt = f.start(MailProvider::Imap, None).await;
     f.finish(&attempt, &server).await.unwrap();
     let row =
         f.db.collection::<Document>("channel_bots")
@@ -835,7 +835,7 @@ async fn reconnect_advances_bot_generation_even_when_wall_clock_is_behind() {
         row.get_datetime("updated_at").unwrap().timestamp_millis(),
         before.timestamp_millis() + 1
     );
-    let attempt = f.start(MailProvider::IMAP, None).await;
+    let attempt = f.start(MailProvider::Imap, None).await;
     f.finish(&attempt, &server).await.unwrap();
     let row =
         f.db.collection::<Document>("channel_bots")
@@ -853,7 +853,7 @@ async fn reconnect_advances_bot_generation_even_when_wall_clock_is_behind() {
 async fn pending_cleanup_is_local_and_cannot_delete_completed_mailbox() {
     let f = Fixture::new().await;
     let server = upstream_mock("IMAP").await;
-    let attempt = f.start(MailProvider::IMAP, None).await;
+    let attempt = f.start(MailProvider::Imap, None).await;
     f.finish(&attempt, &server).await.unwrap();
     assert!(
         !unified::revoke_key_if_pending(&f.db, &f.owner, &f.owner, &f.service.id)
@@ -861,7 +861,7 @@ async fn pending_cleanup_is_local_and_cannot_delete_completed_mailbox() {
             .unwrap()
     );
     assert_eq!(f.key().await.status, "active");
-    let reconnect = f.start(MailProvider::IMAP, None).await;
+    let reconnect = f.start(MailProvider::Imap, None).await;
     cancel(
         &f.db,
         &f.owner,
@@ -874,7 +874,7 @@ async fn pending_cleanup_is_local_and_cannot_delete_completed_mailbox() {
     assert_eq!(f.key().await.status, "active");
     assert_eq!(f.key().await.credential_epoch, 2);
     let fresh = Fixture::new().await;
-    let attempt = fresh.start(MailProvider::IMAP, None).await;
+    let attempt = fresh.start(MailProvider::Imap, None).await;
     cancel(
         &fresh.db,
         &fresh.owner,
@@ -911,7 +911,7 @@ async fn existing_api_key_provider_provisions_managed_and_manual_connections() {
         &f.session,
         &f.owner,
         "Managed mailbox",
-        MailProvider::IMAP,
+        MailProvider::Imap,
         None,
         None,
         Some("enterprise-mail"),
@@ -985,7 +985,7 @@ async fn cancellation_during_paused_account_verification_fences_late_commit() {
     };
     use std::sync::Arc;
     let f = Fixture::new().await;
-    let attempt = f.start(MailProvider::IMAP, None).await;
+    let attempt = f.start(MailProvider::Imap, None).await;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let app = Router::new()
@@ -1095,7 +1095,7 @@ async fn org_admin_commit_revalidates_membership_and_inherited_scope_after_excha
                 .unwrap();
         }
         f.owner = org;
-        let attempt = f.start(MailProvider::IMAP, None).await;
+        let attempt = f.start(MailProvider::Imap, None).await;
         let scope =
             f.db.collection::<Document>("org_role_scopes")
                 .find_one(doc! {"org_user_id":&f.owner,"role":"admin"})
