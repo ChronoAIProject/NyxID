@@ -143,6 +143,7 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   // No suitable status endpoint / requires special auth we don't emulate
   "api-firecrawl": null, // no public status endpoint
   "api-tiktok": null, // /oauth/userinfo needs POST body
+  "api-ifttt-mcp": null, // OAuth completion establishes the connection; tools are discovered explicitly.
   "api-ifttt": null, // Every valid operation triggers an Applet; no automatic probe.
   "api-lark-bot": null, // OpenAPI probe path needs OAuth context
   "api-feishu-bot": null, // same as lark-bot

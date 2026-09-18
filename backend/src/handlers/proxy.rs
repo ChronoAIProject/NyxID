@@ -2039,6 +2039,7 @@ async fn execute_proxy_inner(
                 &user_id_str,
                 ak_id,
                 us_id,
+                &pre.target,
                 Some(&state.connection_expiry_notifier),
             )
             .await?
@@ -2757,6 +2758,11 @@ async fn execute_proxy_inner(
     // If this is a WS upgrade request, branch into the WS path now that
     // target, credentials, and identity headers are fully resolved.
     if let Some(ws_request) = ws_request {
+        if target.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+            return Err(AppError::BadRequest(
+                "IFTTT OAuth does not support WebSocket upgrades".into(),
+            ));
+        }
         if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
             return Err(AppError::BadRequest(
                 nyxid_service_adapters::ifttt::Error::Method.to_string(),

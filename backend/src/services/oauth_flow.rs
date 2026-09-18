@@ -75,7 +75,7 @@ pub fn encode_oauth_request(
                 .map(|(key, value)| (key, value))
                 .collect::<std::collections::BTreeMap<_, _>>(),
         )),
-        "form" => Ok(request.form(params)),
+        "form" => Ok(request.form(&params)),
         _ => Err(AppError::ValidationError(
             "OAuth request encoding must be one of: form, json".to_string(),
         )),
@@ -87,12 +87,24 @@ pub fn token_request(
     token_url: &str,
     params: &[(String, String)],
 ) -> AppResult<reqwest::RequestBuilder> {
+    let mut params = params.to_vec();
+    apply_token_resource(provider, &mut params);
     encode_oauth_request(
         expect_json_response(token_exchange_client().post(token_url)),
         provider,
         token_request_encoding(provider),
-        params,
+        &params,
     )
+}
+
+fn apply_token_resource(provider: &ProviderConfig, params: &mut Vec<(String, String)>) {
+    if provider.slug == super::ifttt_oauth_service::PROVIDER_SLUG {
+        params.retain(|(name, _)| name != "resource");
+        params.push((
+            "resource".into(),
+            nyxid_service_adapters::ifttt_mcp::BASE_URL.into(),
+        ));
+    }
 }
 
 pub fn client_id_param_name(provider: &ProviderConfig) -> &str {
@@ -208,6 +220,7 @@ pub async fn refresh_oauth_token(
 
     // This store always refreshed with form encoding before the explicit field
     // existed, including Lark-like providers. Only an operator opt-in changes it.
+    apply_token_resource(&provider, &mut params);
     let mut request = encode_oauth_request(
         expect_json_response(token_exchange_client().post(token_url)),
         &provider,
@@ -363,6 +376,49 @@ mod tests {
             revocation_seed_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn ifttt_resource_is_pinned_for_tokens_but_not_revocation() {
+        let mut provider = test_provider();
+        provider.slug = "ifttt-mcp".into();
+        for encoding in ["form", "json"] {
+            provider.token_request_encoding = Some(encoding.into());
+            let request = token_request(
+                &provider,
+                "https://ifttt.com/oauth/token",
+                &[
+                    ("grant_type".into(), "authorization_code".into()),
+                    ("resource".into(), "https://wrong.example".into()),
+                ],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            let bytes = request.body().unwrap().as_bytes().unwrap();
+            let fields: std::collections::HashMap<String, String> = if encoding == "json" {
+                serde_json::from_slice(bytes).unwrap()
+            } else {
+                url::form_urlencoded::parse(bytes).into_owned().collect()
+            };
+            assert_eq!(
+                fields["resource"],
+                nyxid_service_adapters::ifttt_mcp::BASE_URL
+            );
+            let revoke = encode_oauth_request(
+                reqwest::Client::new().post("https://ifttt.com/oauth/revoke"),
+                &provider,
+                encoding,
+                &[("token".into(), "fixture".into())],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            assert!(
+                !String::from_utf8_lossy(revoke.body().unwrap().as_bytes().unwrap())
+                    .contains("resource")
+            );
         }
     }
 

@@ -31,6 +31,7 @@ export const AUTH_TYPES = [
   "bearer",
   "bot_bearer",
   "ifttt_webhook",
+  "ifttt_mcp",
   "body",
   "path",
   "oidc",

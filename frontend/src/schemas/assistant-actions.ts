@@ -81,6 +81,7 @@ const FORBIDDEN_ACTION_KEY =
 export const customServiceAuthMethodSchema = z.enum([
   "bearer",
   "ifttt_webhook",
+  "ifttt_mcp",
   "header",
   "query",
   "path",

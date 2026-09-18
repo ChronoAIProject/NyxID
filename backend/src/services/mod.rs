@@ -78,6 +78,7 @@ pub mod gcp_sa_service;
 pub mod google_workspace;
 pub mod group_service;
 pub mod identity_service;
+pub mod ifttt_oauth_service;
 pub mod internal_auth;
 pub mod invite_code_service;
 pub mod key_service;
