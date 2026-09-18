@@ -62,8 +62,9 @@ handlers/ -> services/ -> models/ discipline):
 - `GET /api/v1/assistant/direct/skills`, `GET .../models` — flag check →
   serve the const tables.
 - Flag check helper: resolve caller's effective features (reuse the same
-  service the `/users/me` `enabled_features` path uses; grant-union incl.
-  org grants) → off = `AppError::NotFound` (no existence leak).
+  service the `/users/me` `enabled_features` path uses; default → global →
+  org → role → user precedence) → off = `AppError::NotFound` (no existence
+  leak).
 Mount all three inside `assistant_proxy_routes` (`routes.rs` ~1313) so the
 human-only rejection layers apply.
 
