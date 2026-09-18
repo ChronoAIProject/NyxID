@@ -93,27 +93,49 @@ final credential classification; they do not bypass a revoked connection grant.
 
 ### Personal and org provisioning
 
-Public platform services auto-provision through the existing idempotent lifecycle.
-Restricted services provision only eligible personal owners and granted org owners.
-Human and delegated key listing, Agent Key login delivery (login options), and device-code
-approval/onboarding for the acting person's own account invoke shared provisioning,
-which may idempotently create org-owned auto-connected rows only through that
-person's own active Member/Admin memberships with `can_proxy()` and explicit
-platform-key grants. The 0.19.0 guarantee remains: org-targeted device
+Public platform services auto-provision one personal row per active person when
+no active or user-disabled connection to that catalog service already exists.
+They never create org-owned auto-connected rows, even when the person is an active
+Member/Admin with `can_proxy()`. Restricted services provision a personal row only
+when the person is in `allowed_owner_ids`, and an org row only when that org is in
+`allowed_owner_ids` and is reached through an active `can_proxy()` membership.
+Human and delegated key listing, Agent Key login delivery (login options), and
+device-code approval/onboarding for the acting person's own account invoke this
+shared provisioning. The 0.19.0 guarantee remains: org-targeted device
 approval/onboarding resolves existing org services and never provisions rows for
-the target org as a side effect of targeting. This limited reconciliation side
-effect requires no org-admin action.
-Org views badge these rows `auto_connected=true`. Removing the org grant removes
-the automatic org rows and orphan endpoints on the next owner reconciliation; live
-execution is refused immediately, before that cleanup. This new org
-walk provisions explicit platform configurations only; legacy no-auth provisioning
-remains personal unless an existing caller explicitly provisions an org owner. Stale automatic
-rows are removed with orphan endpoint cleanup, allowing re-provisioning after a
-grant returns. User-selected bindings retain their connection and any inactive
-personal credential when access is revoked, so management can switch back to BYOK.
-JWT/API-key authentication itself never provisions rows.
-Authentication's `allow_auto_connected_services` union includes active same-owner
-platform-bound rows as well as historical automatic rows.
+the target org as a side effect of targeting. Legacy no-auth provisioning remains
+personal-only during the org walk. Org views badge eligible rows
+`auto_connected=true`; removing an org grant removes the automatic org rows and
+orphan endpoints on the next owner reconciliation. Stale automatic rows are
+removed with orphan endpoint cleanup, allowing re-provisioning after a grant
+returns. JWT/API-key authentication itself never provisions rows.
+
+Active connections and inactive non-auto `UserService` rows whose endpoint still
+exists block provisioning for both personal and org owners. These disabled rows
+retain the user's choice and can be enabled on their original slug. Deleted
+tombstones (inactive non-auto rows whose endpoint is gone) do not block a
+replacement, and the partial active slug index lets the new auto-connected row
+reuse the catalog slug instead of receiving a `-2` suffix. Inactive automatic rows
+are reconciled away before provisioning.
+
+The startup sweep `cleanup_public_org_auto_provisions` removes pre-fix public
+platform rows owned by organizations, along with orphan endpoints. It deletes
+unshared credentials first, unshared endpoints next, and the service row last,
+without transactions, so it also works on standalone MongoDB. Interrupted runs
+retain the service's resource references for retry; rows whose endpoint is already
+gone are hidden by `/keys` and removed on the next sweep. Failures log deletion
+counts without failing startup. The sweep is idempotent and leaves personal rows,
+restricted org rows, and explicit (`source != auto_provision`) org platform
+bindings untouched. Those explicit
+public bindings continue to resolve under the existing execution ACL: public
+audience permits any active authenticated owner. The personal-only automatic
+provisioning rule does not narrow explicit public execution access. Authentication's
+`allow_auto_connected_services` union includes active same-owner automatic rows
+and explicit platform bindings; it does not require public org automatic rows.
+As with listing reconciliation, saved API-key allowlists and agent bindings are
+not rewritten: deleted service UUIDs cannot resolve or grant access to a replacement.
+Automatic rows never create credentials; startup defensively deletes any orphan
+credential attached to a malformed legacy row.
 
 ## Connection and administration surfaces
 

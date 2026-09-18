@@ -281,6 +281,16 @@ Because a disabled row keeps its slug while a new active service may reuse it,
 this listing can contain two rows with the same slug. Consumers that resolve by
 slug should prefer the active row.
 
+Automatic catalog provisioning checks active rows and user-disabled rows whose
+endpoint still exists, for both personal and org owners. Disabled connections
+continue to block provisioning, preserving the user's choice and allowing Enable
+on the original slug. A deleted tombstone (inactive non-auto row with its endpoint
+gone) does not block a fresh automatic connection; the active-only slug lookup and
+partial `(user_id, slug)` index let it reuse the catalog slug. We retain non-auto
+tombstones rather than reviving deleted endpoints or changing a user's binding.
+Inactive automatic rows are reconciled away to release their unique
+`(source, source_id)` before recreation.
+
 ### Known gaps
 
 1. Creating a service on a disabled row's slug is accepted, then re-enabling the
@@ -508,9 +518,12 @@ legacy resolution: no `api_key_id` plus `source=auto_provision` selects the hist
 platform path; other rows use the user path. Catalog `platform_key` grants are live,
 owner-scoped, and independent of catalog provider linkage. Person UUIDs grant that
 person; org UUIDs grant proxy-capable active members and org-owned connections.
-Public grants auto-connect everyone. Restricted grants auto-connect eligible people
-and granted org owners; reconciliation removes stale automatic rows and orphan
-endpoints. Explicit connections remain manageable after revocation but cannot execute.
+Public grants auto-connect active people in their personal section only. Restricted
+grants auto-connect directly allowlisted people and org owners reached through active
+`can_proxy()` memberships. Reconciliation and the idempotent startup sweep remove
+public-audience org automatic rows and orphan endpoints. Explicit org platform
+bindings retain public execution access. Explicit connections remain manageable
+after revocation but cannot execute.
 
 `POST /keys {service_slug, label, use_platform_key:true}` creates a server-held
 connection without credential, OAuth, destination override or node inputs.
