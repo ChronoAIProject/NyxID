@@ -32,6 +32,34 @@ function nestedResponse(url: string) {
 }
 
 describe("editable async options selection", () => {
+  it("selects both catalog skill scopes from options without submitting navigation prefixes", async () => {
+    fetchMock.mockImplementation(async (url) => {
+      const data = optionsResponse(String(url));
+      const search = new URL(String(url), "http://localhost").searchParams.get("search") ?? "";
+      data.items = ["catalog:skills:read", "catalog:skills:write"].map((value) => ({
+        ...data.items[0]!, value, label: value.endsWith("read") ? "Read catalog skills" : "Manage catalog skills",
+      })).filter((item) => item.value.includes(search));
+      data.total = data.items.length;
+      return new Response(JSON.stringify(data));
+    });
+    function Editor() {
+      const [scopes, setScopes] = useState("");
+      return <><ServiceAccountScopePicker ownerId="owner" value={scopes} onChange={setScopes} /><output aria-label="Stored scopes">{scopes}</output></>;
+    }
+    const user = userEvent.setup();
+    render(<Editor />, { wrapper: optionsWrapper() });
+    await user.click(screen.getByRole("combobox", { name: "Allowed scopes" }));
+    for (const action of ["read", "write"]) {
+      await user.click(await screen.findByRole("option", { name: "Explore catalog:" }));
+      await user.click(await screen.findByRole("option", { name: "Explore catalog:skills:" }));
+      expect(screen.getByRole("status", { name: "Stored scopes" })).toHaveTextContent(action === "read" ? /^$/ : /^catalog:skills:read$/);
+      await user.click(await screen.findByRole("option", { name: `catalog:skills:${action}` }));
+    }
+    expect(screen.getByRole("status", { name: "Stored scopes" })).toHaveTextContent(/^catalog:skills:read catalog:skills:write$/);
+    await user.click(screen.getByRole("button", { name: "Remove catalog:skills:read" }));
+    expect(screen.getByRole("status", { name: "Stored scopes" })).toHaveTextContent(/^catalog:skills:write$/);
+  });
+
   it("selects multiple suggestions and retains raw chips during remote search", async () => {
     const user = userEvent.setup();
     render(<Picker />, { wrapper: optionsWrapper() });
