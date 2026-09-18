@@ -2525,6 +2525,7 @@ mod tests {
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, SshServiceConfig,
     };
+    use crate::models::user_api_key::UserApiKey;
     use crate::models::ws_frame_injection::{
         WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
     };
@@ -2995,10 +2996,7 @@ mod tests {
             .insert_one(doc! { "_id": &endpoint_id, "user_id": &user_id })
             .await
             .unwrap();
-        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .insert_one(doc! { "_id": &api_key_id, "user_id": &user_id })
-            .await
-            .unwrap();
+        insert_rebind_key(&db, &user_id, &api_key_id, "active").await;
 
         let service = create_user_service(
             &db,
@@ -3752,8 +3750,35 @@ mod tests {
     }
 
     async fn insert_rebind_key(db: &mongodb::Database, user_id: &str, key_id: &str, status: &str) {
-        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .insert_one(doc! { "_id": key_id, "user_id": user_id, "status": status })
+        let now = Utc::now();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: key_id.to_string(),
+                user_id: user_id.to_string(),
+                label: "Test key".to_string(),
+                credential_type: "api_key".to_string(),
+                aurinko_account: None,
+                credential_encrypted: None,
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_attempt_nonce: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                credential_source: None,
+                status: status.to_string(),
+                last_used_at: None,
+                last_authorized_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                credential_epoch: 1,
+                created_at: now,
+                updated_at: now,
+            })
             .await
             .unwrap();
     }
