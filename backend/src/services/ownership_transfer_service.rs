@@ -59,7 +59,7 @@ pub async fn require_current_bot(db: &Database, bot: &ChannelBot) -> AppResult<(
         .collection::<Document>(BOTS)
         .find_one(doc! {
             "_id": &bot.id, "user_id": &bot.user_id, "is_active": true,
-            "updated_at": bson::DateTime::from_chrono(bot.updated_at),
+            "$expr": { "$eq": [ { "$ifNull": ["$ownership_version", 0_i64] }, bot.ownership_version ] },
         })
         .await?
         .is_none()
@@ -342,8 +342,12 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
             };
             let mut set = doc! { "updated_at": now };
             set.insert(owner_field, &destination);
+            let mut update = doc! { "$set": set };
+            if kind == ResourceKind::ChannelBot {
+                update.insert("$inc", doc! { "ownership_version": 1_i64 });
+            }
             db.collection::<Document>(kind.collection()).update_one(
-                doc! { "_id": &resource_id, "is_active": true }, doc! { "$set": set },
+                doc! { "_id": &resource_id, "is_active": true }, update,
             ).session(&mut *session).await?;
             let receipt = OwnershipTransfer {
                 id: request_id.clone(), actor_user_id: actor.clone(), resource_kind: kind.name().into(),

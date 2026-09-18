@@ -258,6 +258,7 @@ async fn persist_verified_bot(
 
     let now = Utc::now();
     let bot = ChannelBot {
+        ownership_version: 0,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
@@ -1420,6 +1421,7 @@ mod tests {
 
     async fn make_lark_bot(encryption_keys: &EncryptionKeys, bot_token: &str) -> ChannelBot {
         ChannelBot {
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),

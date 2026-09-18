@@ -78,6 +78,8 @@ the original owner. Reply authorization rejects inactive/retired conversations.
 The destination creates fresh routes with destination-owned agent keys. Inbound
 resolution matches both bot and owner and checks the live bot before callbacks;
 outbound delivery checks the current bot before provider work.
+An ownership generation detects transfers away and back without treating routine
+webhook status or polling updates as ownership changes.
 Route creation and ownership transfer serialize on the bot document in MongoDB
 transactions, so a concurrent request cannot leave a new previous-owner route
 active after the move.

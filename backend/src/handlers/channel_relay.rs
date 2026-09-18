@@ -3106,6 +3106,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            ownership_version: 0,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             platform: "telegram".to_string(),
@@ -3610,6 +3611,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            ownership_version: 0,
             id: Uuid::new_v4().to_string(),
             user_id: fixture.bot.user_id.clone(),
             platform: "lark".to_string(),

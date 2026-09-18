@@ -373,6 +373,10 @@ async fn stale_preview_and_inactive_destination_leave_every_record_unchanged() {
 async fn bot_transfer_retires_routes_without_moving_history_or_agent_keys() {
     let f = fixture("ownership_bot").await;
     let bot = insert_bot(&f).await;
+    f.db.collection::<Document>(BOTS).update_one(doc! { "_id": &bot.id },
+        doc! { "$set": { "updated_at": bson::DateTime::from_millis(bot.updated_at.timestamp_millis() + 1), "status": "active" } })
+        .await.unwrap();
+    assert!(require_current_bot(&f.db, &bot).await.is_ok());
     let conversation = Uuid::new_v4().to_string();
     let agent = Uuid::new_v4().to_string();
     let now = bson::DateTime::now();
@@ -413,6 +417,7 @@ async fn bot_transfer_retires_routes_without_moving_history_or_agent_keys() {
             .unwrap()
             .unwrap();
     assert_eq!(saved.user_id, f.destination);
+    assert_eq!(saved.ownership_version, 1);
     assert_eq!(saved.bot_token_encrypted, bot.bot_token_encrypted);
     assert_eq!(saved.webhook_secret_hash, bot.webhook_secret_hash);
     assert!(require_current_bot(&f.db, &bot).await.is_err());
@@ -509,6 +514,8 @@ async fn bot_transfer_retires_routes_without_moving_history_or_agent_keys() {
     )
     .await
     .unwrap();
+    assert!(require_current_bot(&f.db, &bot).await.is_err());
+    assert!(require_current_bot(&f.db, &saved).await.is_err());
     assert!(
         channel_routing_service::update_conversation(
             &f.db,

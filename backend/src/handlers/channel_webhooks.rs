@@ -945,6 +945,7 @@ mod tests {
         let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
 
         let bot = crate::models::channel_bot::ChannelBot {
+            ownership_version: 0,
             id: bot_id.clone(),
             user_id: user_id.clone(),
             platform: "lark".to_string(),
