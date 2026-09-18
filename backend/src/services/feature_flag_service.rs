@@ -10,11 +10,10 @@
 //! authority over; reintroduce an org surface only for genuinely org-scoped
 //! features).
 //!
-//! Precedence, most-specific first (org context):
-//! `user override` → `role override` → `org override` → `global` → `code default`.
+//! Precedence, least-specific first: `code default` → `global` → `org` → `user`.
 //! Role- and user-scoped org rows are legacy (the removed self-serve surface
-//! wrote them); startup migration drops them, but resolution still honors the
-//! ordering for defense in depth.
+//! wrote them); startup migration drops them, but resolution still applies
+//! them after org overrides and before platform user overrides.
 //!
 //! Personal (non-org) surfaces resolve the same specificity chain as org
 //! surfaces. The platform baseline (`global` → default) is followed by the
@@ -254,11 +253,10 @@ fn pick_override(
 /// Compute the enabled-flag keys for a member in an org context.
 ///
 /// Pure and DB-free so precedence is unit-testable. Per flag, most-specific
-/// wins: `default → global → org → role(matching `role`) → user(matching
-/// `member_user_id`)`. `global` rows come from the platform-level set; the org,
-/// role, and user rows from the org's set.
+/// wins: `default → global → org → legacy role → legacy org user → platform user`.
+/// Both user scopes match `member_user_id`; legacy role rows match `role`.
 pub fn resolve_from_overrides(
-    global: &[FeatureFlagOverride],
+    platform: &[FeatureFlagOverride],
     org: &[FeatureFlagOverride],
     member_user_id: &str,
     role: OrgRole,
@@ -266,7 +264,7 @@ pub fn resolve_from_overrides(
     let mut enabled_keys = Vec::new();
     for def in FEATURE_FLAGS {
         let mut enabled = def.default_enabled;
-        if let Some(v) = pick_override(global, def.key, FlagTargetKind::Global, None) {
+        if let Some(v) = pick_override(platform, def.key, FlagTargetKind::Global, None) {
             enabled = v;
         }
         if let Some(v) = pick_override(org, def.key, FlagTargetKind::Org, None) {
@@ -276,6 +274,14 @@ pub fn resolve_from_overrides(
             enabled = v;
         }
         if let Some(v) = pick_override(org, def.key, FlagTargetKind::User, Some(member_user_id)) {
+            enabled = v;
+        }
+        if let Some(v) = pick_override(
+            platform,
+            def.key,
+            FlagTargetKind::User,
+            Some(member_user_id),
+        ) {
             enabled = v;
         }
         if enabled {
@@ -386,7 +392,7 @@ pub fn resolve_personal_from_overrides(
 }
 
 /// Resolve enabled-flag keys for a member of an org (org context). Applies the
-/// platform-global baseline plus the org's own overrides.
+/// platform-global baseline, the org's own overrides, and platform user overrides.
 pub async fn resolve_enabled_features(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -441,10 +447,9 @@ pub async fn resolve_personal_features(
 
 /// Whether the billing rollout flag is enabled for a billing owner.
 ///
-/// The owner is a person for personal wallets (the person's effective
-/// `default -> global -> org -> role -> user` resolution) or an org user id
-/// for org wallets (that org's own `user -> role -> org` chain with the acting
-/// member, on top of the platform baseline).
+/// Personal wallets use the person's active org memberships; org wallets use
+/// that org's overrides. Both apply `default -> global -> org -> user`, including
+/// the acting person's platform user override as the final value.
 pub async fn billing_rollout_enabled(
     db: &mongodb::Database,
     billing_owner_id: &str,
@@ -1111,6 +1116,63 @@ mod tests {
     }
 
     #[test]
+    fn precedence_matrix_matches_in_personal_and_org_contexts() {
+        // Exercise absent, disabled, and enabled overrides over both defaults.
+        for flag in ["example_ui", BILLING_FLAG_KEY] {
+            for global in [None, Some(false), Some(true)] {
+                for org in [None, Some(false), Some(true)] {
+                    for user in [None, Some(false), Some(true)] {
+                        let mut platform = Vec::new();
+                        if let Some(value) = global {
+                            platform.push(override_row(
+                                None,
+                                flag,
+                                FlagTargetKind::Global,
+                                None,
+                                value,
+                            ));
+                        }
+                        if let Some(value) = user {
+                            platform.push(override_row(
+                                None,
+                                flag,
+                                FlagTargetKind::User,
+                                Some("user-1"),
+                                value,
+                            ));
+                        }
+                        let org_rows: Vec<_> = org
+                            .map(|value| {
+                                override_row(Some("org"), flag, FlagTargetKind::Org, None, value)
+                            })
+                            .into_iter()
+                            .collect();
+                        let expected = user
+                            .or(org)
+                            .or(global)
+                            .unwrap_or(find_flag(flag).unwrap().default_enabled);
+                        let personal = resolve_personal_from_overrides(
+                            &platform,
+                            &org_rows,
+                            &[member("org", OrgRole::Member)],
+                            "user-1",
+                        );
+                        let explicit_org =
+                            resolve_from_overrides(&platform, &org_rows, "user-1", OrgRole::Member);
+                        for resolved in [personal, explicit_org] {
+                            assert_eq!(
+                                resolved.iter().any(|key| key == flag),
+                                expected,
+                                "{flag}: global={global:?}, org={org:?}, user={user:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn personal_default_off() {
         assert!(!personal_enabled(&[], &[], &[], "user-1"));
     }
@@ -1199,6 +1261,31 @@ mod tests {
             ],
             "user-1"
         ));
+        assert!(!personal_enabled(
+            &global_on,
+            &mixed.iter().rev().cloned().collect::<Vec<_>>(),
+            &[
+                member("org-b", OrgRole::Member),
+                member("org-a", OrgRole::Member)
+            ],
+            "user-1"
+        ));
+        let user_on = [override_row(
+            None,
+            "example_ui",
+            FlagTargetKind::User,
+            Some("user-1"),
+            true,
+        )];
+        assert!(personal_enabled(
+            &user_on,
+            &mixed,
+            &[
+                member("org-a", OrgRole::Member),
+                member("org-b", OrgRole::Member)
+            ],
+            "user-1"
+        ));
         // With only the disabling org, the flag remains off.
         assert!(!personal_enabled(
             &[],
@@ -1280,6 +1367,18 @@ mod tests {
             &memberships,
             "user-1"
         ));
+        // Platform user overrides also win over legacy org user rows in org context.
+        let personal_on = [override_row(
+            None,
+            "example_ui",
+            FlagTargetKind::User,
+            Some("user-1"),
+            true,
+        )];
+        assert!(
+            resolve_from_overrides(&personal_on, &org_rows, "user-1", OrgRole::Member)
+                .contains(&"example_ui".to_string())
+        );
     }
 
     #[test]
