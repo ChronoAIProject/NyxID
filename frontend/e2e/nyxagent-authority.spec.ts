@@ -7,7 +7,7 @@ async function settled(page: import("@playwright/test").Page) {
   await expect(composerInput(page)).toBeEnabled();
 }
 
-test("service card Allow is durable, focuses the composer, and only an explicit retry calls the tool", async ({
+test("service card Allow is durable and resumes the assistant with a visible turn", async ({
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
@@ -17,15 +17,15 @@ test("service card Allow is durable, focuses the composer, and only an explicit 
   await settled(page);
   await card.getByRole("button", { name: "Allow", exact: true }).click();
   await expect(card).toHaveCount(0);
-  await expect(composerInput(page)).toBeFocused();
-  await expect(page.getByText("GitHub access granted. Repository lookup succeeded.")).toHaveCount(
-    0,
-  );
+  // The decision itself sends the continuation; no typing is needed.
+  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toBeVisible();
+  await expect(page.getByText("GitHub access granted. Repository lookup succeeded.")).toBeVisible();
+  await settled(page);
   await page.reload();
   await expect(
     page.getByRole("status").filter({ hasText: "Allowed · Allow this chat to use GitHub?" }),
   ).toBeVisible();
-  await sendMessage(page, "Continue");
+  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toBeVisible();
   await expect(page.getByText("GitHub access granted. Repository lookup succeeded.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
 });
@@ -52,15 +52,22 @@ test("account permission and single action confirmation are separate cards", asy
   await expect(account).toBeVisible();
   await settled(page);
   await account.getByRole("button", { name: "Allow", exact: true }).click();
-  await expect(composerInput(page)).toBeFocused();
+  await expect(
+    page.getByText("Approved: account management for this chat. Continue."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Account access granted. Your agent keys are ready to manage."),
+  ).toBeVisible();
+  await settled(page);
   await sendMessage(page, "Delete agent key ci-bot");
   const action = page.getByRole("region", { name: /Confirm: Delete agent key 'ci-bot'/ });
   await expect(action).toBeVisible();
   await settled(page);
   await action.getByRole("button", { name: "Allow", exact: true }).click();
-  await expect(composerInput(page)).toBeFocused();
-  await expect(page.getByText("Deleted agent key ci-bot.")).toHaveCount(0);
-  await sendMessage(page, "Continue");
+  // The single-use confirmation is retried with its acknowledgement ID.
+  await expect(
+    page.getByText(/^Confirmed: Delete agent key 'ci-bot' \(nyxid_ag_12345678\) \(acknowledgement_id [0-9a-f-]{36}\)\. Retry it now\.$/),
+  ).toBeVisible();
   await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: /Used · Confirm:/ })).toBeVisible();
 });

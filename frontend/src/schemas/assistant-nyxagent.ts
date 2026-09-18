@@ -5,6 +5,16 @@ export type NyxAgentAccessMode = z.infer<typeof nyxAgentAccessModeSchema>;
 
 export const nyxAgentTitleSchema = z.object({ title: z.string().trim().min(1).max(200) });
 
+/// A tool call the assistant made during a turn: identifier and status only.
+export const nyxAgentTurnActivitySchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  status: z.enum(["running", "completed", "error"]),
+  started_at: z.string(),
+  ended_at: z.string().nullable().default(null),
+});
+export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
+
 export const nyxAgentConversationSchema = z.object({
   id: z.string().regex(/^nyxa-[a-f0-9]{32}$/),
   title: z.string(),
@@ -14,7 +24,13 @@ export const nyxAgentConversationSchema = z.object({
   last_message_at: z.string(),
   message_count: z.number().int().nonnegative(),
   pending_acknowledgements: z.number().int().nonnegative().default(0),
-  active_turn: z.object({ turn_id: z.string(), started_at: z.string() }).nullable(),
+  active_turn: z
+    .object({
+      turn_id: z.string(),
+      started_at: z.string(),
+      activities: z.array(nyxAgentTurnActivitySchema).default([]),
+    })
+    .nullable(),
   context_reset_at: z.string().nullable(),
 });
 export const nyxAgentMessageSchema = z.object({
@@ -26,6 +42,7 @@ export const nyxAgentMessageSchema = z.object({
   status: z.enum(["completed", "failed"]),
   error_code: z.string().nullable(),
   created_at: z.string(),
+  activities: z.array(nyxAgentTurnActivitySchema).default([]),
 });
 export const nyxAgentAcknowledgementSchema = z.object({
   id: z.string().uuid(),

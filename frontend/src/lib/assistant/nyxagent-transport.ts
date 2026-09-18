@@ -8,6 +8,7 @@ import {
 import { getAssistantIdentityUserId, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
 import type { ChatSessionState, ChatMessage } from "@/lib/assistant/chat-types";
+import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import {
   nyxAgentAcknowledgementSchema,
   nyxAgentConversationSchema,
@@ -18,6 +19,7 @@ import {
   type NyxAgentAccessMode,
   type NyxAgentConversation,
   type NyxAgentHistory,
+  type NyxAgentTurnActivity,
 } from "@/schemas/assistant-nyxagent";
 
 const ROOT = "/assistant/nyxagent";
@@ -29,6 +31,22 @@ interface LiveTurn {
   conversation: NyxAgentConversation;
   controller: AbortController;
   resetBeforeMessageId?: string;
+}
+
+function toolCalls(
+  activities: readonly NyxAgentTurnActivity[] | undefined,
+): { toolCalls?: RuntimeToolCallInfo[] } {
+  if (!activities?.length) return {};
+  return {
+    toolCalls: activities.map((activity) => ({
+      id: activity.id,
+      name: activity.label,
+      status:
+        activity.status === "running" ? "running" : activity.status === "error" ? "error" : "done",
+      startedAt: Date.parse(activity.started_at),
+      finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
+    })),
+  };
 }
 
 function path(id: string): string {
@@ -320,19 +338,30 @@ export class NyxAgentTransport {
         turnId: message.turn_id,
         status: failed ? "error" : "complete",
         error: failed ? storedError(message.error_code) : undefined,
+        ...toolCalls(message.activities),
       };
     });
+    // The live turn's tool activity arrives through the polled history metadata,
+    // which the server records at the MCP boundary; the upstream stream is text only.
+    const liveTurnId = live?.state.activeTurn?.turnId ?? conversation?.active_turn?.turn_id;
+    const polledTurn = history?.conversation.active_turn;
+    const liveActivity =
+      polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
+        ? toolCalls(polledTurn.activities)
+        : {};
     if (live) {
-      messages = live.state.messages.map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.blocks.map((block) => block.text).join("\n\n"),
-        timestamp: Date.parse(message.created_at),
-        status:
-          message.role === "assistant" && message === live.state.messages.at(-1)
-            ? "streaming"
-            : "complete",
-      }));
+      messages = live.state.messages.map((message) => {
+        const streaming =
+          message.role === "assistant" && message === live.state.messages.at(-1);
+        return {
+          id: message.id,
+          role: message.role,
+          content: message.blocks.map((block) => block.text).join("\n\n"),
+          timestamp: Date.parse(message.created_at),
+          status: streaming ? "streaming" : "complete",
+          ...(streaming ? liveActivity : {}),
+        };
+      });
     }
     const running = Boolean(live || conversation?.active_turn);
     if (running && messages.at(-1)?.role !== "assistant") {
@@ -342,6 +371,7 @@ export class NyxAgentTransport {
         content: "",
         timestamp: Date.now(),
         status: "streaming",
+        ...liveActivity,
       });
     }
     const resetAt = conversation?.context_reset_at;
@@ -488,7 +518,7 @@ export class NyxAgentTransport {
               }
               turn.conversation = {
                 ...turn.conversation,
-                active_turn: { turn_id: event.turn_id, started_at: now },
+                active_turn: { turn_id: event.turn_id, started_at: now, activities: [] },
               };
               this.index.set(key, turn.conversation);
             }

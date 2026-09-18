@@ -229,6 +229,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             status: "completed".into(),
             error_code: None,
             created_at: Utc::now(),
+            activities: Vec::new(),
         })
         .collect();
     let prompt = instructions(&messages);
@@ -443,6 +444,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            activities: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
             started_at: now - chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS),
             stop_requested: false,
@@ -627,4 +629,154 @@ async fn catalog_contract_reports_decrypted_credential_presence() {
     let contract = catalog_contract(&db, &state.encryption_keys).await.unwrap();
     assert_eq!(contract.master_credential_configured, Some(true));
     assert!(contract.valid(), "auth none never injects it");
+}
+
+#[tokio::test]
+async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
+    let db = connect_transaction_test_database("nyxa_activity").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4();
+    db.collection(USERS)
+        .insert_one(test_user(&user.to_string(), UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let owner = user.to_string();
+    // No live turn: nothing is recorded.
+    assert_eq!(
+        activity_started(&db, &owner, "nyxa-00000000000000000000000000000000", "x")
+            .await
+            .unwrap(),
+        None
+    );
+    let row = begin_turn(
+        &db,
+        &owner,
+        &request(None, "List issues"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let credential =
+        credentials::load_for_conversation(&db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    let long_label = "l".repeat(500);
+    let first = activity_started(&db, &owner, &row.id, &long_label)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        activity_started(&db, "other", &row.id, "x").await.unwrap(),
+        None
+    );
+    activity_finished(&db, &owner, &row.id, &first, true)
+        .await
+        .unwrap();
+    for i in 0..MAX_TURN_ACTIVITIES {
+        activity_started(&db, &owner, &row.id, &format!("github__tool_{i}"))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let live = get(&db, &owner, &row.id).await.unwrap();
+    let activities = &live.active_turn.as_ref().unwrap().activities;
+    assert_eq!(
+        activities.len() as i64,
+        MAX_TURN_ACTIVITIES,
+        "oldest entries are evicted"
+    );
+    assert!(
+        activities.iter().all(|a| a.id != first),
+        "the settled first entry was evicted"
+    );
+    assert_eq!(activities[0].label, "github__tool_0");
+    assert!(
+        activities
+            .iter()
+            .all(|a| a.status == "running" && a.ended_at.is_none())
+    );
+    let last = activities.last().unwrap().id.clone();
+    activity_finished(&db, &owner, &row.id, &last, false)
+        .await
+        .unwrap();
+    // Unknown IDs and wrong owners are no-ops.
+    activity_finished(&db, "other", &row.id, &last, true)
+        .await
+        .unwrap();
+    activity_finished(&db, &owner, &row.id, "missing", true)
+        .await
+        .unwrap();
+    let live = get(&db, &owner, &row.id).await.unwrap();
+    let settled = live
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .activities
+        .last()
+        .unwrap();
+    assert_eq!(settled.status, "error");
+    assert!(settled.ended_at.is_some());
+    let message_id = Uuid::new_v4().to_string();
+    finish_turn(
+        &db,
+        &row,
+        &credential.api_key_id,
+        &message_id,
+        &TurnResult {
+            text: "Done".into(),
+            session_id: Some("s".into()),
+            response_id: Some("r".into()),
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let reply = messages(&db, &owner, &row.id, 100, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == message_id)
+        .unwrap();
+    assert_eq!(reply.activities.len() as i64, MAX_TURN_ACTIVITIES);
+    assert_eq!(
+        reply.activities[0].label.chars().count(),
+        "github__tool_0".len()
+    );
+    assert!(
+        reply.activities[..MAX_TURN_ACTIVITIES as usize - 1]
+            .iter()
+            .all(|a| a.status == "completed" && a.ended_at.is_some()),
+        "in-flight calls share the settled turn's outcome"
+    );
+    assert_eq!(reply.activities.last().unwrap().status, "error");
+    let user_row = messages(&db, &owner, &row.id, 100, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.role == "user")
+        .unwrap();
+    assert!(user_row.activities.is_empty());
+    // Label bound applies at insert.
+    let row = begin_turn(
+        &db,
+        &owner,
+        &request(Some(&row.id), "again"),
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    activity_started(&db, &owner, &row.id, &long_label)
+        .await
+        .unwrap()
+        .unwrap();
+    let live = get(&db, &owner, &row.id).await.unwrap();
+    assert_eq!(
+        live.active_turn.unwrap().activities[0]
+            .label
+            .chars()
+            .count(),
+        MAX_ACTIVITY_LABEL_CHARS
+    );
 }

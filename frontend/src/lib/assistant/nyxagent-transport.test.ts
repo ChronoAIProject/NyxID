@@ -38,6 +38,7 @@ function history(): NyxAgentHistory {
         status: "completed",
         error_code: null,
         created_at: start,
+        activities: [],
       },
       {
         id: "a",
@@ -48,6 +49,7 @@ function history(): NyxAgentHistory {
         status: "completed",
         error_code: null,
         created_at: afterReset,
+        activities: [],
       },
     ],
     before_seq: null,
@@ -249,13 +251,26 @@ describe("NyxAgent server-backed transport", () => {
       if (endpoint.endsWith("/stop")) return new Response(null, { status: 204 });
       const page = history();
       page.messages.pop();
-      page.conversation.active_turn = { turn_id: "running", started_at: start };
+      page.conversation.active_turn = {
+        turn_id: "running",
+        started_at: start,
+        activities: [
+          { id: "t1", label: "nyx__search_tools", status: "completed", started_at: start, ended_at: reset },
+          { id: "t2", label: "github__list_issues", status: "running", started_at: reset, ended_at: null },
+        ],
+      };
       return json(page);
     };
     const transport = new NyxAgentTransport();
     await transport.history(id);
     expect(transport.isRunning(id)).toBe(true);
-    expect(transport.session(id).status).toBe("streaming");
+    const session = transport.session(id);
+    expect(session.status).toBe("streaming");
+    // Tool activity recorded on the live turn is shown on the streaming placeholder.
+    expect(session.messages.at(-1)?.toolCalls).toEqual([
+      { id: "t1", name: "nyx__search_tools", status: "done", startedAt: Date.parse(start), finishedAt: Date.parse(reset) },
+      { id: "t2", name: "github__list_issues", status: "running", startedAt: Date.parse(reset), finishedAt: undefined },
+    ]);
     await transport.stop(id);
     expect(requests).toHaveLength(2);
     expect(requests[1]).toBe(`POST /assistant/nyxagent/conversations/${id}/stop`);
@@ -328,7 +343,7 @@ describe("NyxAgent server-backed transport", () => {
         );
       }
       const page = history();
-      page.conversation.active_turn = { turn_id: "turn", started_at: start };
+      page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [] };
       return endpoint.includes(`/conversations/${id}`)
         ? json(page)
         : json({ conversations: [page.conversation], next_cursor: null });
@@ -526,4 +541,24 @@ it("remembers the draft mode, sends it only at creation, and requires PATCH for 
     conversation_id: id,
     text: "Continue",
   });
+});
+
+it("retains a settled reply's tool activity as done tool calls", async () => {
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    page.messages[1] = {
+      ...page.messages[1]!,
+      activities: [
+        { id: "t1", label: "nyxid__list_agent_keys", status: "error", started_at: start, ended_at: reset },
+      ],
+    };
+    return json(page);
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const session = transport.session(id);
+  expect(session.messages[0]?.toolCalls).toBeUndefined();
+  expect(session.messages[1]?.toolCalls).toEqual([
+    { id: "t1", name: "nyxid__list_agent_keys", status: "error", startedAt: Date.parse(start), finishedAt: Date.parse(reset) },
+  ]);
 });

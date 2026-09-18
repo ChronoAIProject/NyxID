@@ -86,6 +86,25 @@ describe("canonical chat presentation", () => {
     expect(container.querySelector("[data-streaming-caret]")).not.toBeNull();
   });
 
+  it("names the running tool beside the streaming dots until text arrives", () => {
+    const running = {
+      ...BASE,
+      content: "",
+      status: "streaming",
+      toolCalls: [
+        { id: "t1", name: "nyx__search_tools", status: "done" as const, startedAt: 1, finishedAt: 2 },
+        { id: "t2", name: "github__list_issues", status: "running" as const, startedAt: 2 },
+      ],
+    };
+    const { container, rerender } = render(<ChatMessageBubble message={running} />);
+    expect(container.querySelector("[data-running-tool]")).toHaveTextContent("github__list_issues");
+    expect(screen.getByRole("button", { name: /2 actions/i })).toBeVisible();
+    rerender(<ChatMessageBubble message={{ ...running, content: "Found 3 issues" }} />);
+    expect(container.querySelector("[data-running-tool]")).toBeNull();
+    rerender(<ChatMessageBubble message={{ ...running, status: "complete" }} />);
+    expect(container.querySelector("[data-running-tool]")).toBeNull();
+  });
+
   it("does not render accumulator approval or workflow intervention cards", () => {
     render(
       <ChatMessageBubble

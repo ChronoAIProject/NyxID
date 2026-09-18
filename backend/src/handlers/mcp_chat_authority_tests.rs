@@ -683,3 +683,46 @@ async fn ask_service_consent_allows_its_node_route_without_a_second_grant() {
     assert_eq!(history[0].kind, "service");
     assert_eq!(history[0].status, "allowed");
 }
+
+#[tokio::test]
+async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
+    let f = fixture("mcp_activity").await;
+    let auth = authenticate(&f).await;
+    // One entry per tools/call: the effective tool name, never arguments.
+    call(
+        &f,
+        &auth,
+        "nyxid__list_agent_keys",
+        json!({"secret_argument": "nyxid_ag_do_not_record"}),
+    )
+    .await;
+    direct_call(&f, &auth, "nyx__search_tools", json!({"query": "issues"})).await;
+    direct_call(&f, &auth, "nyxid__list_agent_keys", json!({})).await;
+    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    let activities = row.active_turn.as_ref().unwrap().activities.clone();
+    let labels: Vec<_> = activities.iter().map(|a| a.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "nyxid__list_agent_keys",
+            "nyx__search_tools",
+            "nyxid__list_agent_keys"
+        ]
+    );
+    assert!(
+        activities
+            .iter()
+            .all(|a| a.status != "running" && a.ended_at.is_some())
+    );
+    let encoded = serde_json::to_string(&activities).unwrap();
+    assert!(!encoded.contains("do_not_record") && !encoded.contains("issues"));
+    // Callers outside a chat record nothing.
+    let plain = McpAuthContext::user(f.owner.clone(), AuthMethod::Session);
+    direct_call(&f, &plain, "nyx__search_tools", json!({"query": "x"})).await;
+    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(row.active_turn.unwrap().activities.len(), 3);
+}
