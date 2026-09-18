@@ -196,7 +196,35 @@ pub struct HistoryResponse {
     conversation: ConversationResponse,
     messages: Vec<MessageResponse>,
     acknowledgements: Vec<AcknowledgementResponse>,
+    /// Pending proxy approvals raised by this chat's key; decided through
+    /// `POST /approvals/requests/{id}/decide`.
+    approvals: Vec<ChatApprovalResponse>,
     before_seq: Option<i64>,
+}
+#[derive(Serialize)]
+pub struct ChatApprovalResponse {
+    id: String,
+    service_slug: String,
+    service_name: String,
+    summary: String,
+    approval_mode: crate::models::service_approval_config::ApprovalMode,
+    agent_key_prefix: String,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+impl From<engine::ChatApproval> for ChatApprovalResponse {
+    fn from(row: engine::ChatApproval) -> Self {
+        Self {
+            id: row.id,
+            service_slug: row.service_slug,
+            service_name: row.service_name,
+            summary: row.summary,
+            approval_mode: row.approval_mode,
+            agent_key_prefix: row.agent_key_prefix,
+            created_at: row.created_at,
+            expires_at: row.expires_at,
+        }
+    }
 }
 pub async fn history(
     State(state): State<AppState>,
@@ -218,6 +246,8 @@ pub async fn history(
     }
     let before_seq = more.then(|| rows[0].seq);
     let acknowledgements = acknowledgements::history(&state.db, &user_id, &id).await?;
+    let approvals =
+        engine::pending_approvals(&state.db, &user_id, &conversation.credential_api_key_id).await?;
     let mut conversation = ConversationResponse::from(conversation);
     conversation.pending_acknowledgements = acknowledgements
         .iter()
@@ -226,6 +256,7 @@ pub async fn history(
     Ok(Json(HistoryResponse {
         conversation,
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
+        approvals: approvals.into_iter().map(Into::into).collect(),
         messages: rows.into_iter().map(Into::into).collect(),
         before_seq,
     }))

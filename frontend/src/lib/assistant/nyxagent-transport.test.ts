@@ -54,6 +54,7 @@ function history(): NyxAgentHistory {
     ],
     before_seq: null,
     acknowledgements: [],
+    approvals: [],
   };
 }
 
@@ -561,4 +562,32 @@ it("retains a settled reply's tool activity as done tool calls", async () => {
   expect(session.messages[1]?.toolCalls).toEqual([
     { id: "t1", name: "nyxid__list_agent_keys", status: "error", startedAt: Date.parse(start), finishedAt: Date.parse(reset) },
   ]);
+});
+
+it("shows pending proxy approvals raised by the chat key as cards at the tail", async () => {
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    page.conversation.active_turn = { turn_id: "running", started_at: start, activities: [] };
+    page.approvals = [
+      {
+        id: "req-1",
+        service_slug: "api-github",
+        service_name: "GitHub",
+        summary: "GET /user",
+        approval_mode: "per_request",
+        agent_key_prefix: "nyxid_ag_1234",
+        created_at: afterReset,
+        expires_at: "2026-09-17T00:05:00Z",
+      },
+    ];
+    return json(page);
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const session = transport.session(id);
+  const card = session.messages.at(-1);
+  expect(card?.id).toBe("nyxagent-approval:req-1");
+  expect(card?.role).toBe("system");
+  expect(card?.content).toBe("GET /user");
+  expect(transport.getHistory(id)?.approvals[0]?.approval_mode).toBe("per_request");
 });

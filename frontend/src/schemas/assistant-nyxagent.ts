@@ -58,10 +58,25 @@ export const nyxAgentAcknowledgementSchema = z.object({
 });
 export type NyxAgentAcknowledgement = z.infer<typeof nyxAgentAcknowledgementSchema>;
 
+/// A pending proxy approval raised by the chat's key; decided through the
+/// ordinary approvals API.
+export const nyxAgentApprovalSchema = z.object({
+  id: z.string(),
+  service_slug: z.string(),
+  service_name: z.string(),
+  summary: z.string(),
+  approval_mode: z.enum(["per_request", "grant"]),
+  agent_key_prefix: z.string().default(""),
+  created_at: z.string(),
+  expires_at: z.string(),
+});
+export type NyxAgentApproval = z.infer<typeof nyxAgentApprovalSchema>;
+
 export const nyxAgentHistorySchema = z.object({
   conversation: nyxAgentConversationSchema,
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
+  approvals: z.array(nyxAgentApprovalSchema).default([]),
   before_seq: z.number().int().positive().nullable(),
 });
 export const nyxAgentIndexSchema = z.object({
