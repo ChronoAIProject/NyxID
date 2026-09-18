@@ -10,6 +10,8 @@ const definitions = [
   ["proxy", "All services", "Proxy access to services available to this account, including the LLM gateway."],
   ["llm:proxy", "LLM gateway", "Use the LLM gateway with this account's configured providers."],
   ["roles", "Role claims", "Include assigned roles and permissions in userinfo."],
+  ["catalog:skills:read", "Read catalog skills", "Read recommendations and history for services permitted by a curation grant."],
+  ["catalog:skills:write", "Manage catalog skills", "Manage recommendations for services permitted by a curation grant."],
 ];
 const configured = [
   "reports:read", "reports:export", "reports:finance:read", "reports:finance:export",

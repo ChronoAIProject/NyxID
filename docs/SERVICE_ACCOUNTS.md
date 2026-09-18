@@ -499,7 +499,7 @@ class NyxIDClient:
 | `catalog:skills:write` | Granted Curation recommendation changes and restore |
 | `groups` | Accepted as custom input; service accounts have no group memberships, so userinfo groups are empty |
 
-The default suggestion menu includes `proxy`, `llm:proxy`, and `roles`. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
+The default suggestion menu includes `proxy`, `llm:proxy`, `roles`, `catalog:skills:read`, and `catalog:skills:write`. The catalog skill scopes also require a platform-admin-issued curation grant for the selected catalog services. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
 
 General account create/update continue storing free-form scope strings. Curation accounts restrict scopes to the grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation.
 
@@ -660,7 +660,7 @@ Before rolling back to a backend without these checks, disable the Curation acco
 
 ### Platform administration
 
-Create the account with `catalog:skills:read catalog:skills:write`. If it also needs Ornn content authoring, include `proxy` and configure exactly one Ornn catalog UUID when issuing the grant. The grant endpoint rejects other scopes and org-owned accounts. For an existing protected account with a live grant, scope updates must stay within this set. After revocation, metadata updates and disable remain available to platform admins.
+Create the account with `catalog:skills:read catalog:skills:write`. In Allowed Scopes, choose **catalog: → skills: → read/write**, or paste the complete scopes. These suggestions come from `/options/service-scope` and do not require previously configured accounts. After creation, issue the separate grant from **Catalog skill curation** on the account detail page; selecting scopes alone does not grant access. If it also needs Ornn content authoring, include `proxy` and configure exactly one Ornn catalog UUID when issuing the grant. The grant endpoint rejects other scopes and org-owned accounts. For an existing protected account with a live grant, scope updates must stay within this set. After revocation, metadata updates and disable remain available to platform admins.
 
 Use the existing Admin → Service Accounts detail page, or:
 
