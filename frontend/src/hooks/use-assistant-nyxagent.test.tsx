@@ -58,6 +58,7 @@ beforeEach(() => {
     }],
     before_seq: null,
     acknowledgements: [],
+    approvals: [],
   };
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
     requests.push(`${init.method} ${endpoint}`);
