@@ -1133,6 +1133,7 @@ fn automatic_platform_grants_require_active_direct_owners() {
     let grants = OwnerGrants {
         actor_id: "person".into(),
         active_owner_ids: ["person".into(), "org".into()].into(),
+        readable_owner_ids: ["person".into(), "org".into()].into(),
         org_owner_ids: ["org".into()].into(),
         memberships: vec![],
     };
