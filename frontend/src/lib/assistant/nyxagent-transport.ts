@@ -402,6 +402,17 @@ export class NyxAgentTransport {
         status: "complete",
       });
     }
+    // Proxy approvals block the running tool call until decided; show them
+    // at the tail while the turn waits.
+    for (const approval of history?.approvals ?? []) {
+      messages.push({
+        id: `nyxagent-approval:${approval.id}`,
+        role: "system",
+        content: approval.summary,
+        timestamp: Date.parse(approval.created_at),
+        status: "complete",
+      });
+    }
     const tail = history?.messages.at(-1);
     return {
       clientId: id ?? "nyxagent-draft",

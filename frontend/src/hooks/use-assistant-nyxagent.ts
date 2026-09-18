@@ -7,6 +7,7 @@ import type {
   NyxAgentHistory,
 } from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
+import { useDecideApproval } from "@/hooks/use-approvals";
 
 /** The user-visible turn that resumes the assistant after an allowed card. */
 export function continuationText(acknowledgement: NyxAgentAcknowledgement): string {
@@ -66,7 +67,8 @@ export function useNyxAgentAssistantChat({
     refetchInterval: (query) =>
       streaming ||
       query.state.data?.conversation.active_turn ||
-      query.state.data?.acknowledgements.some((row) => row.status === "pending")
+      query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
+      (query.state.data?.approvals.length ?? 0) > 0
         ? 2000
         : false,
   });
@@ -128,7 +130,19 @@ export function useNyxAgentAssistantChat({
     },
   });
 
+  const approvalDecision = useDecideApproval();
+  const decideApproval = useCallback(
+    async (requestId: string, approved: boolean) => {
+      await approvalDecision.mutateAsync({ requestId, approved });
+      await queryClient.invalidateQueries({ queryKey: historyKey });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [approvalDecision.mutateAsync, queryClient, selectedConversationId, userId],
+  );
+
   return {
+    approvals: nyxAgentTransport.getHistory(selectedConversationId)?.approvals ?? [],
+    decideApproval,
     conversations: enabled ? nyxAgentTransport.getConversations() : [],
     session: nyxAgentTransport.session(selectedConversationId),
     isStreaming: nyxAgentTransport.isRunning(selectedConversationId),

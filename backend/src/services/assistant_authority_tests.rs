@@ -137,8 +137,8 @@ async fn acknowledgement_service_allow_is_atomic_scoped_and_versions_the_key() {
     let db = &f.state.db;
     let service = connected(db, &f.owner, "github", "https://api.github.com").await;
     let (a, b) = tokio::join!(
-        acks::service_gate(db, &f.chat, &service, "github", "GitHub"),
-        acks::service_gate(db, &f.chat, &service, "github", "GitHub"),
+        acks::service_gate(db, &f.chat, &service, "github", "GitHub", false),
+        acks::service_gate(db, &f.chat, &service, "github", "GitHub", false),
     );
     let a = a.unwrap().unwrap();
     assert_eq!(a, b.unwrap().unwrap());
@@ -172,7 +172,7 @@ async fn acknowledgement_service_allow_is_atomic_scoped_and_versions_the_key() {
     assert_eq!(key.allowed_service_ids, vec![service.clone()]);
     assert!(key.state_version > before.state_version);
     assert!(
-        acks::service_gate(db, &f.chat, &service, "github", "GitHub")
+        acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
             .await
             .unwrap()
             .is_none()
@@ -219,6 +219,7 @@ async fn service_decisions_reject_platform_missing_disabled_and_other_owner_ids(
                 tool: None,
                 arguments: None,
                 summary: "Allow Example?",
+                platform: false,
             },
         )
         .await
@@ -249,7 +250,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     let f = fixture("ack_deny_expire").await;
     let db = &f.state.db;
     let service = connected(db, &f.owner, "github", "https://api.github.com").await;
-    let request = acks::service_gate(db, &f.chat, &service, "github", "GitHub")
+    let request = acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
         .unwrap();
@@ -265,7 +266,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         )
         .await
         .unwrap();
-    let denial = acks::service_gate(db, &f.chat, &service, "github", "GitHub")
+    let denial = acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
         .unwrap();
@@ -286,7 +287,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     .await
     .unwrap();
     assert_eq!(
-        acks::service_gate(db, &f.chat, &service, "github", "GitHub")
+        acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
             .await
             .unwrap()
             .unwrap()["error"],
@@ -305,7 +306,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     )
     .await
     .unwrap();
-    let again = acks::service_gate(db, &f.chat, &service, "github", "GitHub")
+    let again = acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
         .unwrap();
@@ -344,6 +345,7 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
             tool: Some(tool),
             arguments: Some(&args),
             summary: "Delete agent key 'ci-bot'",
+            platform: false,
         },
     )
     .await
@@ -422,6 +424,7 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
             tool: Some(tool),
             arguments: Some(&args),
             summary: "Delete agent key",
+            platform: false,
         },
     )
     .await
@@ -462,6 +465,7 @@ async fn rotation_invalidates_account_and_action_acknowledgements() {
             tool: Some("nyxid__delete_node"),
             arguments: Some(&json!({"node_id": "node"})),
             summary: "Delete node",
+            platform: false,
         },
     )
     .await
@@ -1260,7 +1264,7 @@ async fn access_mode_switch_is_owner_scoped_fenced_and_preserves_acknowledged_se
         Err(crate::errors::AppError::NotFound(_))
     ));
     let service = connected(db, &f.owner, "approved", "https://service.example.com").await;
-    let refusal = acks::service_gate(db, &f.chat, &service, "approved", "Approved")
+    let refusal = acks::service_gate(db, &f.chat, &service, "approved", "Approved", false)
         .await
         .unwrap()
         .unwrap();
@@ -1283,6 +1287,7 @@ async fn access_mode_switch_is_owner_scoped_fenced_and_preserves_acknowledged_se
             service: None,
             arguments: Some(&json!({"node_id": "example"})),
             summary: "Delete node example",
+            platform: false,
         },
     )
     .await
@@ -1378,7 +1383,7 @@ async fn full_draft_provisions_full_authority_and_rotation_and_replacement_prese
             .is_none()
     );
     assert!(
-        acks::service_gate(&f.state.db, &chat, "service", "example", "Example")
+        acks::service_gate(&f.state.db, &chat, "service", "example", "Example", false)
             .await
             .unwrap()
             .is_none()
@@ -1423,6 +1428,7 @@ async fn acknowledgement_history_keeps_pending_and_only_twenty_decided_without_a
             tool: None,
             arguments: None,
             summary: "Account",
+            platform: false,
         },
     )
     .await

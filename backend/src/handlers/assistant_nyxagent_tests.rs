@@ -919,3 +919,90 @@ async fn mode_switch_response_and_audit_expose_only_owner_metadata() {
         .unwrap();
     assert_eq!(count, 2);
 }
+
+#[tokio::test]
+async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
+    use crate::models::{
+        approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS},
+        service_approval_config::ApprovalMode,
+    };
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let row = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            conversation_id: None,
+            text: "read my github profile".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let key =
+        crate::services::key_service::get_api_key(&state.db, OWNER, &row.credential_api_key_id)
+            .await
+            .unwrap();
+    let request = |label: &str, status: &str, minutes: i64| ApprovalRequest {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: OWNER.to_string(),
+        service_id: uuid::Uuid::new_v4().to_string(),
+        service_name: "GitHub".to_string(),
+        service_slug: "api-github".to_string(),
+        requester_type: "user".to_string(),
+        requester_id: OWNER.to_string(),
+        requester_label: Some(label.to_string()),
+        operation_summary: "proxy:GET /user".to_string(),
+        action_description: Some("GET /user".to_string()),
+        http_method: Some("GET".to_string()),
+        resource: Some("/user".to_string()),
+        verb: Some("read".to_string()),
+        grant_scope: None,
+        tool_name: None,
+        tool_call_id: None,
+        tool_arguments: None,
+        is_destructive: None,
+        approval_mode: ApprovalMode::PerRequest,
+        status: status.to_string(),
+        idempotency_key: uuid::Uuid::new_v4().to_string(),
+        notification_channel: None,
+        telegram_message_id: None,
+        telegram_chat_id: None,
+        expires_at: Utc::now() + chrono::Duration::minutes(minutes),
+        decided_at: None,
+        decision_channel: None,
+        decision_idempotency_key: None,
+        notify_user_ids: vec![],
+        from_org_policy: false,
+        exact_service: None,
+        created_at: Utc::now(),
+    };
+    let mine = request(&key.name, "pending", 5);
+    state
+        .db
+        .collection::<ApprovalRequest>(APPROVALS)
+        .insert_many([
+            mine.clone(),
+            request(&key.name, "approved", 5),
+            request(&key.name, "pending", -1),
+            request("Some other agent", "pending", 5),
+        ])
+        .await
+        .unwrap();
+    let Json(page) = history(
+        State(state),
+        test_auth_user(OWNER),
+        Path(row.id),
+        Query(HistoryQuery::default()),
+    )
+    .await
+    .unwrap();
+    let approvals = serde_json::to_value(&page.approvals).unwrap();
+    assert_eq!(approvals.as_array().unwrap().len(), 1, "{approvals}");
+    assert_eq!(approvals[0]["id"], mine.id);
+    assert_eq!(approvals[0]["summary"], "GET /user");
+    assert_eq!(approvals[0]["approval_mode"], "per_request");
+    assert_eq!(approvals[0]["agent_key_prefix"], key.key_prefix);
+    server.abort();
+}

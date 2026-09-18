@@ -170,7 +170,7 @@ Full-mode tests also hide another owner's existing key and reject self-widening.
 auto-connected access, native tool metadata, JSON-RPC success envelopes containing
 `isError` refusals, Allow followed by real upstream execution, Deny, and Full mode
 execution/audit without cards, including request audits for execution/mutation and suppression for read-only discovery.
-Platform-source tests verify Ask-mode `full_access_required` without cards and real
+Platform-source tests verify the Ask-mode consent card, execution after Allow, and real
 Full-mode execution through both call paths. Node-route tests prove service consent
 alone permits dispatch. Defensive service decisions reject catalog, missing, disabled
 and other-owner IDs; assistant-key deletion is refused in both modes.
