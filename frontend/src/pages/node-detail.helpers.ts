@@ -54,6 +54,8 @@ export function injectionMethodLabel(
   method: NodePendingCredentialInjectionMethod,
 ): string {
   switch (method) {
+    case "ifttt-webhook":
+      return "IFTTT Webhooks";
     case "query-param":
       return "Query param";
     case "path-prefix":
@@ -69,6 +71,8 @@ export function defaultFieldNameForMethod(
   switch (method) {
     case "query-param":
       return "api_key";
+    case "ifttt-webhook":
+      return "key";
     case "path-prefix":
       return "api";
     case "header":

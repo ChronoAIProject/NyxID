@@ -2301,6 +2301,19 @@ async fn execute_proxy_inner(
         (bytes, None)
     };
 
+    proxy_service::validate_ifttt_request(
+        &target,
+        &method,
+        path,
+        query.as_deref(),
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(body_bytes.as_ref())
+        },
+        node_route.is_some(),
+    )?;
+
     let operation = operation_descriptor::build_http_descriptor(
         &method_str,
         path,
@@ -2476,6 +2489,8 @@ async fn execute_proxy_inner(
             }
         }
     };
+
+    proxy_service::validate_ifttt_delegation(&target, &delegated)?;
 
     // Build identity headers before the node/direct split so both proxy paths
     // preserve the same downstream identity and delegation context.
@@ -2741,6 +2756,11 @@ async fn execute_proxy_inner(
     // If this is a WS upgrade request, branch into the WS path now that
     // target, credentials, and identity headers are fully resolved.
     if let Some(ws_request) = ws_request {
+        if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+            return Err(AppError::BadRequest(
+                nyxid_service_adapters::ifttt::Error::Method.to_string(),
+            ));
+        }
         // WS connections are not compatible with per-request approval.
         if enforce_approval {
             return Err(AppError::BadRequest(

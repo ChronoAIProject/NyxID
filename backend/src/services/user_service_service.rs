@@ -53,6 +53,7 @@ const VALID_AUTH_METHODS: &[&str] = &[
     // `nyxid_cloud_auth::aws_sigv4::AwsCredentials`); signing happens
     // at the proxy boundary. `auth_key_name` is unused. NyxID#716.
     "aws_sigv4",
+    "ifttt_webhook",
     "none",
 ];
 
@@ -206,6 +207,49 @@ impl IdentityConfig {
             delegation_token_scope: "llm:proxy".to_string(),
         }
     }
+}
+
+pub(crate) fn validate_ifttt_identity(
+    auth_method: &str,
+    mode: &str,
+    forward_access_token: bool,
+    inject_delegation_token: bool,
+) -> AppResult<()> {
+    if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
+        && (mode != "none" || forward_access_token || inject_delegation_token)
+    {
+        return Err(AppError::ValidationError("IFTTT Webhooks does not support identity, access-token, or delegation-token forwarding".into()));
+    }
+    Ok(())
+}
+
+async fn validate_ifttt_endpoint(
+    db: &Database,
+    auth_method: &str,
+    endpoint_id: &str,
+    replacement_url: Option<&str>,
+    node_id: Option<&str>,
+) -> AppResult<()> {
+    if auth_method != nyxid_service_adapters::ifttt::AUTH_METHOD {
+        return Ok(());
+    }
+    let existing;
+    let url = match replacement_url {
+        Some(url) => url,
+        None => {
+            existing = db
+                .collection::<crate::models::user_endpoint::UserEndpoint>(USER_ENDPOINTS)
+                .find_one(doc! { "_id": endpoint_id })
+                .await?
+                .ok_or_else(|| AppError::NotFound("Endpoint not found".into()))?;
+            &existing.url
+        }
+    };
+    if url.is_empty() && node_id.is_some_and(|id| !id.is_empty()) {
+        return Ok(());
+    }
+    nyxid_service_adapters::ifttt::validate_destination(url)
+        .map_err(|error| AppError::ValidationError(error.to_string()))
 }
 
 fn validate_identity_config(config: &IdentityConfig) -> AppResult<()> {
@@ -912,7 +956,21 @@ pub async fn create_user_service_with_id(
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
     let identity = normalize_identity_config(identity)?;
+    validate_ifttt_identity(
+        auth_method,
+        &identity.identity_propagation_mode,
+        identity.forward_access_token,
+        identity.inject_delegation_token,
+    )?;
+    if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
+        && ws_frame_injections.is_some_and(|rules| !rules.is_empty())
+    {
+        return Err(AppError::ValidationError(
+            "IFTTT Webhooks does not support WebSocket frame injection".into(),
+        ));
+    }
     let node_id = node_id.filter(|nid| !nid.is_empty());
+    validate_ifttt_endpoint(db, auth_method, endpoint_id, None, node_id).await?;
     if let Some(rules) = ws_frame_injections {
         ws_frame_injector::validate_rules(rules)?;
     }
@@ -1173,6 +1231,25 @@ pub async fn update_user_service(
             .ok_or_else(|| AppError::NotFound("Service is no longer available".into()))?;
         crate::services::platform_key_service::require(db, &catalog, user_id).await?;
     }
+    validate_ifttt_identity(
+        auth_method.unwrap_or(&current.auth_method),
+        identity.map_or(current.identity_propagation_mode.as_str(), |cfg| {
+            cfg.identity_propagation_mode.as_str()
+        }),
+        identity.map_or(current.forward_access_token, |cfg| cfg.forward_access_token),
+        identity.map_or(current.inject_delegation_token, |cfg| {
+            cfg.inject_delegation_token
+        }),
+    )?;
+    if auth_method.unwrap_or(&current.auth_method) == nyxid_service_adapters::ifttt::AUTH_METHOD
+        && !ws_frame_injections
+            .unwrap_or(&current.ws_frame_injections)
+            .is_empty()
+    {
+        return Err(AppError::ValidationError(
+            "IFTTT Webhooks does not support WebSocket frame injection".into(),
+        ));
+    }
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
@@ -1204,6 +1281,14 @@ pub async fn update_user_service(
     // Cross-field validation for credential injection methods. We check the
     // effective post-update state: incoming values override current values.
     let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
+    validate_ifttt_endpoint(
+        db,
+        effective_auth_method,
+        &current.endpoint_id,
+        None,
+        node_id.or(current.node_id.as_deref()),
+    )
+    .await?;
     if auth_method_requires_key_name(effective_auth_method) {
         let effective_auth_key_name = auth_key_name.unwrap_or(&current.auth_key_name);
         if effective_auth_key_name.trim().is_empty() {
@@ -1458,6 +1543,30 @@ pub async fn validate_update_inputs(
     }
 
     let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
+    if effective_auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+        if let Some(key) = credential {
+            nyxid_service_adapters::ifttt::validate_credential(key)
+                .map_err(|error| AppError::ValidationError(error.to_string()))?;
+        }
+        validate_ifttt_endpoint(
+            db,
+            effective_auth_method,
+            &current.endpoint_id,
+            new_endpoint_url,
+            node_id.or(current.node_id.as_deref()),
+        )
+        .await?;
+        validate_ifttt_identity(
+            effective_auth_method,
+            identity.map_or(current.identity_propagation_mode.as_str(), |cfg| {
+                cfg.identity_propagation_mode.as_str()
+            }),
+            identity.map_or(current.forward_access_token, |cfg| cfg.forward_access_token),
+            identity.map_or(current.inject_delegation_token, |cfg| {
+                cfg.inject_delegation_token
+            }),
+        )?;
+    }
     let effective_auth_key_name = auth_key_name.unwrap_or(&current.auth_key_name);
     // Treat legacy `current.node_id == Some("")` as unset. Some rows
     // in the wild still carry the empty string instead of `None`; every
@@ -1533,13 +1642,13 @@ pub async fn validate_update_inputs(
 
         // If the caller is supplying a credential in the same PUT, run
         // the same JSON-object shape check `create_key` performs via
-        // `validate_token_exchange_catalog_credential`. An empty/omitted
+        // `validate_catalog_credential`. An empty/omitted
         // credential is fine — it just means the caller isn't rotating
         // the existing stored value.
         if let Some(cred) = credential
             && !cred.is_empty()
         {
-            crate::services::unified_key_service::validate_token_exchange_catalog_credential(
+            crate::services::unified_key_service::validate_catalog_credential(
                 &catalog_entry,
                 cred,
             )?;
@@ -3163,6 +3272,7 @@ mod tests {
             "basic",
             "token_exchange",
             "aws_sigv4",
+            "ifttt_webhook",
             "none",
         ];
         for method in expected_true {

@@ -25,6 +25,7 @@ export const AUTH_TYPES = [
   "basic",
   "bearer",
   "bot_bearer",
+  "ifttt_webhook",
   "body",
   "path",
   "oidc",

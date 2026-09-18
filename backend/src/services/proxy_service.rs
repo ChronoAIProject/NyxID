@@ -839,6 +839,55 @@ pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Enforce the IFTTT contract before either direct or node dispatch. A node may
+/// resolve an empty destination from its local credential configuration.
+pub(crate) fn validate_ifttt_request(
+    target: &ProxyTarget,
+    method: &reqwest::Method,
+    path: &str,
+    query: Option<&str>,
+    body: Option<&[u8]>,
+    node_routed: bool,
+) -> AppResult<()> {
+    use nyxid_service_adapters::ifttt;
+    if target.auth_method == ifttt::AUTH_METHOD {
+        validate_ifttt_configuration(target)?;
+        let base_url = if node_routed && target.base_url.is_empty() {
+            ifttt::BASE_URL
+        } else {
+            &target.base_url
+        };
+        ifttt::validate_request(base_url, method, path, query, body)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn validate_ifttt_configuration(target: &ProxyTarget) -> AppResult<()> {
+    if target.service.identity_propagation_mode != "none"
+        || target.service.forward_access_token
+        || target.service.inject_delegation_token
+        || !target.ws_frame_injections.is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "IFTTT Webhooks does not support identity, access-token, delegation-token, or WebSocket frame injection".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_ifttt_delegation(
+    target: &ProxyTarget,
+    delegated: &[DelegatedCredential],
+) -> AppResult<()> {
+    if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD && !delegated.is_empty() {
+        return Err(AppError::BadRequest(
+            "IFTTT Webhooks does not support delegated provider credentials".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// When `target.auth_method` is `"path"`, synthesize a `DelegatedCredential`
 /// so `build_forward_path` / `prepare_delegated_request` inject the path
 /// prefix (e.g. `/bot<token>/`).  Appends in-place and returns the
@@ -3721,6 +3770,10 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     extra_outbound_headers: Vec<(String, String)>,
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+        validate_ifttt_configuration(target)?;
+    }
+    validate_ifttt_delegation(target, &delegated_credentials)?;
     let mut all_delegated = delegated_credentials;
     extend_with_path_credential(&mut all_delegated, target);
     let prepared = prepare_delegated_request(path, query, &all_delegated)?;
@@ -3778,6 +3831,26 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         &extra_outbound_headers,
     );
 
+    if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+        let ProxyBody::Buffered(body) = body;
+        return nyxid_service_adapters::ifttt::client()
+            .forward(
+                &target.base_url,
+                &method,
+                path,
+                query,
+                &target.credential,
+                body.as_deref(),
+                &outbound_headers,
+            )
+            .await
+            .map_err(|error| match error {
+                nyxid_service_adapters::ifttt::Error::Transport(error) => {
+                    ForwardRequestError::Transport(error)
+                }
+                _ => ForwardRequestError::Application(AppError::BadRequest(error.to_string())),
+            });
+    }
     for (name, value) in &outbound_headers {
         request = request.header(name, value);
     }
@@ -5629,6 +5702,175 @@ mod tests {
             ws_frame_injections: Vec::new(),
             connection_id: None,
         }
+    }
+
+    #[test]
+    fn ifttt_preflight_refuses_unsafe_direct_and_node_calls_and_delegation() {
+        use nyxid_service_adapters::ifttt;
+        let mut target = make_proxy_target(ifttt::BASE_URL.into());
+        target.auth_method = ifttt::AUTH_METHOD.into();
+        for node_routed in [false, true] {
+            assert!(
+                validate_ifttt_request(
+                    &target,
+                    &reqwest::Method::POST,
+                    "trigger/valid_1",
+                    None,
+                    None,
+                    node_routed
+                )
+                .is_ok()
+            );
+            for method in [
+                reqwest::Method::GET,
+                reqwest::Method::HEAD,
+                reqwest::Method::CONNECT,
+            ] {
+                assert!(
+                    validate_ifttt_request(
+                        &target,
+                        &method,
+                        "trigger/valid_1",
+                        None,
+                        None,
+                        node_routed
+                    )
+                    .is_err()
+                );
+            }
+            for path in [
+                "trigger/e/with/key/caller_key",
+                "trigger/e%2F",
+                "trigger/a-b",
+                "other",
+            ] {
+                assert!(
+                    validate_ifttt_request(
+                        &target,
+                        &reqwest::Method::POST,
+                        path,
+                        None,
+                        None,
+                        node_routed
+                    )
+                    .is_err()
+                );
+            }
+        }
+        let delegated = vec![DelegatedCredential {
+            provider_slug: "other".into(),
+            injection_method: "header".into(),
+            injection_key: "X-Other-Provider-Key".into(),
+            credential: "private-provider-key".into(),
+        }];
+        let error = validate_ifttt_delegation(&target, &delegated).unwrap_err();
+        assert!(!error.to_string().contains("private-provider-key"));
+        assert!(validate_ifttt_delegation(&target, &[]).is_ok());
+        target.base_url.clear();
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                false
+            )
+            .is_err()
+        );
+        target.base_url = "https://other.invalid".into();
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.base_url = ifttt::BASE_URL.into();
+        target.service.forward_access_token = true;
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.service.forward_access_token = false;
+        target.service.inject_delegation_token = true;
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                false
+            )
+            .is_err()
+        );
+        target.service.inject_delegation_token = false;
+        target.service.identity_propagation_mode = "headers".into();
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.service.identity_propagation_mode = "none".into();
+        target.ws_frame_injections.push(
+            serde_json::from_value(serde_json::json!({
+                "trigger": "first_frame_from_downstream", "template": "secret frame",
+            }))
+            .unwrap(),
+        );
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.auth_method = "header".into();
+        assert!(validate_ifttt_delegation(&target, &delegated).is_ok());
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::GET,
+                "ordinary",
+                None,
+                None,
+                false
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]

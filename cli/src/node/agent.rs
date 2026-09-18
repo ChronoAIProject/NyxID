@@ -1444,6 +1444,12 @@ fn store_pending_credential_locally(
     secret: &str,
 ) -> Result<()> {
     match pending.injection_method.as_str() {
+        "ifttt-webhook" | "ifttt_webhook" => node_config.add_ifttt_credential_via(
+            &pending.service_slug,
+            secret,
+            pending.target_url.as_deref(),
+            backend,
+        ),
         "header" => node_config.add_header_credential_via(
             &pending.service_slug,
             &pending.field_name,
@@ -1721,7 +1727,7 @@ fn migrate_config(
                 // switch from file → keychain (or vice versa) on a node
                 // with a path-prefix or cloud-billing credential would
                 // silently drop the encrypted-payload pointer.
-                "header" | "path_prefix" | "aws_sigv4" => {
+                "header" | "path_prefix" | "aws_sigv4" | "ifttt_webhook" => {
                     cred_config.header_value_encrypted = encrypted;
                 }
                 "query_param" => cred_config.param_value_encrypted = encrypted,
@@ -2381,7 +2387,14 @@ async fn cmd_credentials_setup(
             let backend = SecretBackend::from_config(&node_config, config_dir)?;
 
             // Store credential using the injection method matching the auth method
-            if auth_method == "path" {
+            if auth_method == "ifttt_webhook" {
+                node_config.add_ifttt_credential_via(
+                    service,
+                    &secret,
+                    target_url.as_deref(),
+                    &backend,
+                )?;
+            } else if auth_method == "path" {
                 node_config.add_path_prefix_credential_via(
                     service,
                     auth_key_name,

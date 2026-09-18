@@ -3225,6 +3225,22 @@ fn process_credential_update(
     let injection_method = parsed["injection_method"].as_str().unwrap_or("header");
 
     let result = match injection_method {
+        "ifttt_webhook" => (|| {
+            let key = parsed["header_value"]
+                .as_str()
+                .ok_or_else(|| super::error::Error::Validation("IFTTT key missing".into()))?;
+            let mut config = NodeConfig::load(config_path)?;
+            config.add_ifttt_credential_via(
+                service_slug,
+                key,
+                parsed["target_url"].as_str(),
+                backend,
+            )?;
+            config.save(config_path)?;
+            let credentials = CredentialStore::from_config_with_backend(&config, backend)?;
+            credential_sender.update(credentials);
+            Ok(())
+        })(),
         "header" => {
             let header_name = parsed["header_name"].as_str().unwrap_or("Authorization");
             let header_value = match parsed["header_value"].as_str() {
@@ -3687,6 +3703,15 @@ async fn handle_ws_proxy_open(
             return;
         }
     };
+    if cred.ifttt_key().is_some() {
+        let _ = send_ws_proxy_error(
+            &tx,
+            &session_id,
+            "IFTTT Webhooks does not support WebSocket",
+        )
+        .await;
+        return;
+    }
     let raw_credential = cred.raw_credential().map(str::to_string);
 
     // Resolve effective base URL.
@@ -5221,6 +5246,68 @@ mod tests {
                 assert_eq!(value.as_str(), "Bearer sk-rci");
             }
             _ => panic!("expected header credential"),
+        }
+    }
+
+    #[test]
+    fn ifttt_server_push_stores_mode_and_failed_replacements_leave_key_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let cfg = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        cfg.save(&config_path).unwrap();
+        let store = CredentialStore::from_config_with_backend(&cfg, &backend).unwrap();
+        let (sender, credentials) = SharedCredentials::new(store);
+        let sender = Arc::new(sender);
+        let key = "ifttt_push_test-NOT_REAL";
+        let mut frame = serde_json::json!({
+            "service_slug": "api-ifttt", "request_id": "request",
+            "injection_method": "ifttt_webhook", "header_value": key,
+            "target_url": "https://maker.ifttt.com",
+        });
+        let ack = process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+            "ok"
+        );
+        assert!(!ack.contains(key));
+        assert_eq!(
+            credentials.snapshot().get("api-ifttt").unwrap().ifttt_key(),
+            Some(key)
+        );
+        let saved = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!saved.contains(key));
+        for (method, replacement, destination) in [
+            (
+                "ifttt_webhook",
+                "https://maker.ifttt.com/with/key/secret",
+                "https://maker.ifttt.com",
+            ),
+            (
+                "ifttt_webhook",
+                "valid_replacement",
+                "https://other.invalid",
+            ),
+            (
+                "future_adapter",
+                "valid_replacement",
+                "https://maker.ifttt.com",
+            ),
+        ] {
+            frame["injection_method"] = method.into();
+            frame["header_value"] = replacement.into();
+            frame["target_url"] = destination.into();
+            let ack = process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+                "error"
+            );
+            assert!(!ack.contains(replacement));
+            assert_eq!(std::fs::read_to_string(&config_path).unwrap(), saved);
+            assert_eq!(
+                credentials.snapshot().get("api-ifttt").unwrap().ifttt_key(),
+                Some(key)
+            );
         }
     }
 

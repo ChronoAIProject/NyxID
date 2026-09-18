@@ -88,7 +88,8 @@ export interface TransferNodeResponse {
 export type NodePendingCredentialInjectionMethod =
   | "header"
   | "query-param"
-  | "path-prefix";
+  | "path-prefix"
+  | "ifttt-webhook";
 
 export type NodePendingCredentialRemoteState =
   | "pubkey_posted"
