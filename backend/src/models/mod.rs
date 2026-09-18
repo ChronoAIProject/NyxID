@@ -70,6 +70,7 @@ pub mod oracle_worker_command;
 pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;
+pub mod ownership_transfer;
 pub mod platform_credential;
 pub mod platform_settings;
 pub mod provider_config;

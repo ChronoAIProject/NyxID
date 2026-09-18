@@ -86,6 +86,7 @@ pub fn binding(service: &UserService) -> &str {
 pub struct OwnerGrants {
     actor_id: String,
     active_owner_ids: HashSet<String>,
+    readable_owner_ids: HashSet<String>,
     memberships: Vec<OrgMembership>,
 }
 
@@ -102,6 +103,10 @@ impl OwnerGrants {
         Self::from_memberships(db, owner_id, &memberships).await
     }
 
+    pub fn readable_owner_ids(&self) -> &HashSet<String> {
+        &self.readable_owner_ids
+    }
+
     pub fn memberships(&self) -> &[OrgMembership] {
         &self.memberships
     }
@@ -116,9 +121,7 @@ impl OwnerGrants {
         ids.extend(
             memberships
                 .iter()
-                .filter(|m| {
-                    m.revoked_at.is_none() && m.role.can_proxy() && m.member_user_id == owner_id
-                })
+                .filter(|m| m.revoked_at.is_none() && m.member_user_id == owner_id)
                 .map(|m| m.org_user_id.clone()),
         );
         let owners: Vec<User> = db
@@ -128,14 +131,28 @@ impl OwnerGrants {
             .try_collect()
             .await?;
         let actor_active = owners.iter().any(|u| u.id == owner_id);
-        let active_owner_ids = owners
+        let readable_owner_ids: HashSet<String> = owners
             .into_iter()
             .filter(|u| actor_active && (u.id == owner_id || u.user_type.is_org()))
             .map(|u| u.id)
             .collect();
+        let active_owner_ids = readable_owner_ids
+            .iter()
+            .filter(|id| {
+                id.as_str() == owner_id
+                    || memberships.iter().any(|m| {
+                        m.org_user_id == **id
+                            && m.member_user_id == owner_id
+                            && m.revoked_at.is_none()
+                            && m.role.can_proxy()
+                    })
+            })
+            .cloned()
+            .collect();
         Ok(Self {
             actor_id: owner_id.to_string(),
             active_owner_ids,
+            readable_owner_ids,
             memberships: memberships.to_vec(),
         })
     }

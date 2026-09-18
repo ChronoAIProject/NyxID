@@ -201,6 +201,7 @@ const SIDEBAR_ITEMS: Record<string, string> = {
   "/admin/feature-flags": "Feature Flags",
   "/admin/platform-credentials": "Platform Credentials",
   "/admin/nodes": "Nodes",
+  "/admin/ownership": "Ownership transfers",
   "/admin/services": "Services",
   "/admin/providers": "Providers",
   "/design-system": "Design System",

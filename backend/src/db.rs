@@ -308,6 +308,18 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 
     // ── downstream_services ──
     let services = db.collection::<mongodb::bson::Document>("downstream_services");
+    services
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_user_id": 1, "is_active": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! { "owner_user_id": { "$type": "string" } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     // Migration: drop legacy non-partial unique index on slug so the new partial index can be created
     let _ = services.drop_index("slug_1").await;
     services
@@ -4650,6 +4662,7 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: "svc-1".to_string(),

@@ -84,6 +84,7 @@ pub(crate) async fn process_inbound_messages(
         let route = match channel_routing_service::resolve_agent(
             state.db,
             &bot.id,
+            &bot.user_id,
             &inbound.conversation_id,
             Some(&inbound.sender_platform_id),
         )
@@ -108,6 +109,12 @@ pub(crate) async fn process_inbound_messages(
                 continue;
             }
         };
+
+        if route.conversation.user_id != bot.user_id {
+            complete = false;
+            continue;
+        }
+        super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
 
         // Store the inbound message
         let stored_message = match channel_relay_service::store_inbound_message(
@@ -156,7 +163,7 @@ pub(crate) async fn process_inbound_messages(
         let api_key = match state
             .db
             .collection::<ApiKey>(API_KEYS)
-            .find_one(doc! { "_id": &route.api_key_id })
+            .find_one(doc! { "_id": &route.api_key_id, "user_id": &bot.user_id, "is_active": true })
             .await
         {
             Ok(Some(k)) => k,
@@ -243,6 +250,7 @@ pub(crate) async fn process_inbound_messages(
         );
 
         // Forward to the agent's callback URL
+        super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
         let delivery = channel_relay_service::forward_to_agent(
             state.http_client,
             state.config,

@@ -32,6 +32,7 @@ pub struct AgentRoute {
 pub async fn resolve_agent(
     db: &mongodb::Database,
     channel_bot_id: &str,
+    owner_user_id: &str,
     platform_conversation_id: &str,
     platform_sender_id: Option<&str>,
 ) -> AppResult<Option<AgentRoute>> {
@@ -42,9 +43,11 @@ pub async fn resolve_agent(
         Some(sender_id) if !sender_id.is_empty() => {
             col.find_one(doc! {
                 "channel_bot_id": channel_bot_id,
+                "user_id": owner_user_id,
                 "platform_conversation_id": platform_conversation_id,
                 "platform_sender_id": sender_id,
                 "is_active": true,
+                "retired_by_transfer": { "$ne": true },
             })
             .await?
         }
@@ -57,9 +60,11 @@ pub async fn resolve_agent(
         None => {
             col.find_one(doc! {
                 "channel_bot_id": channel_bot_id,
+                "user_id": owner_user_id,
                 "platform_conversation_id": platform_conversation_id,
                 "platform_sender_id": null,
                 "is_active": true,
+                "retired_by_transfer": { "$ne": true },
             })
             .await?
         }
@@ -71,8 +76,10 @@ pub async fn resolve_agent(
         None => {
             col.find_one(doc! {
                 "channel_bot_id": channel_bot_id,
+                "user_id": owner_user_id,
                 "default_agent": true,
                 "is_active": true,
+                "retired_by_transfer": { "$ne": true },
             })
             .await?
         }
@@ -88,6 +95,7 @@ pub async fn resolve_agent(
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! {
             "_id": &conversation.agent_api_key_id,
+            "user_id": owner_user_id,
             "is_active": true,
         })
         .await?;
@@ -150,32 +158,6 @@ pub async fn create_conversation(
         ));
     }
 
-    // If setting as default, deactivate any existing default route for this
-    // bot. We deactivate (not just clear default_agent) because the old route
-    // with platform_conversation_id="*" would otherwise clash with the unique
-    // partial index on active routes.
-    //
-    // Only applies to bot-backed conversations: device channels have no
-    // default-agent concept (there's no webhook fan-out to disambiguate).
-    if default_agent && let Some(bot_id) = channel_bot_id {
-        let now = bson::DateTime::from_chrono(Utc::now());
-        db.collection::<ChannelConversation>(COLLECTION_NAME)
-            .update_many(
-                doc! {
-                    "channel_bot_id": bot_id,
-                    "user_id": user_id,
-                    "default_agent": true,
-                    "is_active": true,
-                },
-                doc! { "$set": {
-                    "default_agent": false,
-                    "is_active": false,
-                    "updated_at": now,
-                }},
-            )
-            .await?;
-    }
-
     let now = Utc::now();
     let conversation = ChannelConversation {
         id: uuid::Uuid::new_v4().to_string(),
@@ -194,11 +176,65 @@ pub async fn create_conversation(
         updated_at: now,
     };
 
-    db.collection::<ChannelConversation>(COLLECTION_NAME)
-        .insert_one(&conversation)
-        .await?;
+    if channel_bot_id.is_some() {
+        insert_bot_conversation(db, &conversation).await?;
+    } else {
+        db.collection::<ChannelConversation>(COLLECTION_NAME)
+            .insert_one(&conversation)
+            .await?;
+    }
 
     Ok(conversation)
+}
+
+async fn insert_bot_conversation(
+    db: &mongodb::Database,
+    conversation: &ChannelConversation,
+) -> AppResult<()> {
+    use super::api_key_mutation_service::{map_transaction_error, transaction_result};
+    let db = db.clone();
+    let conversation = conversation.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> =
+                async {
+                    let bot_id = conversation.channel_bot_id.as_deref().expect("bot route");
+                    // Serialize route creation against ownership transfer on the bot row.
+                    let bot = db
+                        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                        .update_one(
+                            doc! { "_id": bot_id, "user_id": &conversation.user_id,
+                            "platform": &conversation.platform, "is_active": true },
+                            doc! { "$inc": { "route_revision": 1_i64 } },
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    if bot.matched_count != 1 {
+                        return Err(AppError::Conflict(
+                            "Channel bot changed owner or is no longer active".into(),
+                        ));
+                    }
+                    if conversation.default_agent {
+                        db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
+                    doc! { "channel_bot_id": bot_id, "user_id": &conversation.user_id,
+                        "default_agent": true, "is_active": true },
+                    doc! { "$set": { "default_agent": false, "is_active": false,
+                        "updated_at": bson::DateTime::from_chrono(conversation.updated_at) } },
+                ).session(&mut *session).await?;
+                    }
+                    db.collection::<ChannelConversation>(COLLECTION_NAME)
+                        .insert_one(&conversation)
+                        .session(&mut *session)
+                        .await?;
+                    Ok(())
+                }
+                .await;
+            transaction_result(result)
+        })
+        .await
+        .map_err(map_transaction_error)
 }
 
 /// List active conversations for a user, optionally filtered by bot.
@@ -235,7 +271,7 @@ pub async fn update_conversation(
 ) -> AppResult<ChannelConversation> {
     let current = db
         .collection::<ChannelConversation>(COLLECTION_NAME)
-        .find_one(doc! {"_id": conversation_id, "user_id": user_id})
+        .find_one(doc! {"_id": conversation_id, "user_id": user_id, "retired_by_transfer": { "$ne": true }})
         .await?
         .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
     if agent_api_key_id.is_none()
@@ -318,7 +354,7 @@ pub async fn update_conversation(
     let updated = db
         .collection::<ChannelConversation>(COLLECTION_NAME)
         .find_one_and_update(
-            doc! { "_id": conversation_id, "user_id": user_id },
+            doc! { "_id": conversation_id, "user_id": user_id, "retired_by_transfer": { "$ne": true } },
             doc! { "$set": set_doc },
         )
         .return_document(mongodb::options::ReturnDocument::After)
@@ -412,6 +448,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -453,6 +492,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -484,6 +526,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -510,7 +555,9 @@ mod tests {
         .await
         .unwrap();
 
-        let route = resolve_agent(&db, &bot_id, "chat_789", None).await.unwrap();
+        let route = resolve_agent(&db, &bot_id, &user_id, "chat_789", None)
+            .await
+            .unwrap();
         assert!(route.is_some());
         let route = route.unwrap();
         assert_eq!(route.conversation.id, conv.id);
@@ -525,6 +572,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -551,7 +601,7 @@ mod tests {
         .await
         .unwrap();
 
-        let route = resolve_agent(&db, &bot_id, "unknown_chat", None)
+        let route = resolve_agent(&db, &bot_id, &user_id, "unknown_chat", None)
             .await
             .unwrap();
         assert!(route.is_some());
@@ -565,7 +615,7 @@ mod tests {
         };
         let bot_id = uuid::Uuid::new_v4().to_string();
 
-        let route = resolve_agent(&db, &bot_id, "nonexistent", None)
+        let route = resolve_agent(&db, &bot_id, "nobody", "nonexistent", None)
             .await
             .unwrap();
         assert!(route.is_none());
@@ -578,6 +628,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -621,6 +674,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)

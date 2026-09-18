@@ -92,6 +92,7 @@ pub async fn deliver(
     let route = channel_routing_service::resolve_agent(
         db,
         &bot.id,
+        &bot.user_id,
         &inbound.conversation_id,
         Some(&inbound.sender_platform_id),
     )

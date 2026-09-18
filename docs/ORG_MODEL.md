@@ -905,7 +905,7 @@ The following are intentionally **not** in this feature and are tracked separate
 - **Credential rotation notifications** — when a shared OAuth token expires or is rotated, members are not notified.
 - **Org usage dashboard** — aggregate request counts, latency, error rates per org.
 - **Org billing / quota** — per-org rate limits and spend caps.
-- **Cross-org transfer of resources** — there is no "move my personal OpenAI into the org" path. New shared services should be created with `--org` from the start.
+- **Cross-org transfer of resources** — there is no "move my personal OpenAI into the org" path. New shared services should be created with `--org` from the start. NyxID platform admins can separately transfer custom catalog definitions and supported channel bots through [Administrative ownership transfers](ADMIN_OWNERSHIP_TRANSFERS.md); this does not move connected-service bundles.
 - **Nested orgs / sub-orgs** — flat membership only.
 - **SSO for orgs (SAML / OIDC auto-membership)** — future RFC.
 - **Optional org-owned nodes** — see below.
