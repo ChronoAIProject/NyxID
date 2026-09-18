@@ -70,6 +70,7 @@ pub mod oracle_worker_command;
 pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;
+pub mod ownership_transfer;
 pub mod platform_credential;
 pub mod platform_settings;
 pub mod provider_config;
@@ -109,10 +110,9 @@ pub mod assistant_agent_credential;
 pub mod assistant_conversation;
 pub mod assistant_message;
 pub mod catalog_skill_revision;
-pub mod channel_email;
-
 pub mod channel_delivery;
-
+pub mod channel_email;
+pub mod service_change_event;
 pub mod usage_rollup_daily;
 pub mod usage_rollup_hourly;
 pub mod usage_rollup_state;

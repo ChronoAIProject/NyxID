@@ -1365,6 +1365,7 @@ mod tests {
     fn make_test_bot(platform: &str) -> ChannelBot {
         ChannelBot {
             last_verification: None,
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: platform.to_string(),

@@ -2,6 +2,9 @@
 #[openapi(
     modifiers(&SecurityAddon),
     paths(
+        crate::handlers::admin_ownership::list_resources,
+        crate::handlers::admin_ownership::preview,
+        crate::handlers::admin_ownership::transfer,
         crate::handlers::admin_usage::get_usage,
         crate::handlers::options::get_options,
         crate::handlers::docs::docs_ui,

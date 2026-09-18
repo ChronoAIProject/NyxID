@@ -7096,6 +7096,7 @@ mod tests {
     fn llm_usage_capture_preserves_slug_allowlist_and_adds_token_metrics() {
         assert!(super::should_capture_llm_usage(
             &crate::models::downstream_service::DownstreamService {
+                owner_user_id: None,
                 slug: "llm-admin-override".into(),
                 ..crate::models::downstream_service::test_helpers::dummy_service()
             },
@@ -7103,6 +7104,7 @@ mod tests {
         ));
         assert!(super::should_capture_llm_usage(
             &crate::models::downstream_service::DownstreamService {
+                owner_user_id: None,
                 slug: "chrono-llm-public".into(),
                 ..crate::models::downstream_service::test_helpers::dummy_service()
             },

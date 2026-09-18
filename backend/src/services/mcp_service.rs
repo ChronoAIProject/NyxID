@@ -9817,6 +9817,7 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: Uuid::new_v4().to_string(),

@@ -223,6 +223,7 @@ pub struct ServiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_app_ids: Option<Vec<String>>,
     pub created_by: String,
+    pub owner_user_id: String,
     pub created_at: String,
     pub updated_at: String,
 
@@ -873,7 +874,7 @@ pub async fn list_services(
         "$or": [
             { "visibility": { "$ne": "private" } },
             { "visibility": { "$exists": false } },
-            { "visibility": "private", "created_by": &user_id_str },
+            { "$and": [{ "visibility": "private" }, crate::services::ownership_transfer_service::catalog_owner_filter(&user_id_str)] },
         ],
     };
     if let Some(ref category) = query.category {
@@ -1406,6 +1407,7 @@ pub async fn create_service(
     validate_service_billing(body.billing.as_ref())?;
 
     let new_service = DownstreamService {
+        owner_user_id: None,
         recommended_skill_refs: None,
         skills_revision: 0,
         id: id.clone(),
@@ -1574,7 +1576,7 @@ pub async fn delete_service(
 ) -> AppResult<Json<DeleteServiceResponse>> {
     // CR-4: Use shared require_admin_or_creator helper instead of inline check
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     let now = Utc::now();
     state
@@ -1675,6 +1677,8 @@ pub async fn get_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     let viewer_id = auth_user.user_id.to_string();
+    crate::services::catalog_service::enforce_catalog_read_access(&state.db, &viewer_id, &service)
+        .await?;
     // Issue #416: surface the viewer's own routing for this catalog row
     // so /services/$id can render the editable Routing section.
     let mut viewer_routing =
@@ -1719,7 +1723,7 @@ pub async fn update_service(
     let skill_fingerprint_input = serde_json::to_value(&body)
         .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
     let skill_update = crate::services::catalog_skill_service::SkillUpdate {
         recommended_skills: body.recommended_skills.clone(),
         recommended_skill_refs: body.recommended_skill_refs.clone(),
@@ -2866,7 +2870,7 @@ pub async fn get_oidc_credentials(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<OidcCredentialsResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(
@@ -2949,7 +2953,7 @@ pub async fn update_redirect_uris(
     Json(body): Json<UpdateRedirectUrisRequest>,
 ) -> AppResult<Json<RedirectUrisResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(
@@ -3047,7 +3051,7 @@ pub async fn regenerate_oidc_secret(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<RegenerateSecretResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(

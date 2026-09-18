@@ -1432,6 +1432,7 @@ async fn create_key_inner(
         let empty_credential = encryption_keys.encrypt(b"").await?;
         let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: ds_id.clone(),
@@ -4789,6 +4790,7 @@ mod tests {
 
     fn sample_catalog_service() -> DownstreamService {
         DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: "cat-1".to_string(),

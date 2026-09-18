@@ -849,6 +849,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let admin_routes = Router::new()
         .route(
+            "/ownership/{kind}",
+            get(handlers::admin_ownership::list_resources),
+        )
+        .route(
+            "/ownership/{kind}/{id}/preview",
+            post(handlers::admin_ownership::preview),
+        )
+        .route(
+            "/ownership/{kind}/{id}/transfer",
+            post(handlers::admin_ownership::transfer),
+        )
+        .route(
             "/feature-flags",
             get(handlers::admin_feature_flags::list_feature_flags),
         )

@@ -219,7 +219,7 @@ pub async fn create_endpoint(
 ) -> AppResult<Json<EndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     validate_endpoint_name(&body.name)?;
     validate_method(&body.method)?;
@@ -271,7 +271,7 @@ pub async fn update_endpoint(
 ) -> AppResult<Json<serde_json::Value>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     if let Some(ref name) = body.name {
         validate_endpoint_name(name)?;
@@ -328,7 +328,7 @@ pub async fn delete_endpoint(
 ) -> AppResult<Json<DeleteEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     service_endpoint_service::delete_endpoint(&state.db, &service_id, &endpoint_id).await?;
 
@@ -355,7 +355,7 @@ pub async fn discover_endpoints(
 ) -> AppResult<Json<DiscoverEndpointsResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     let api_spec_url = service.openapi_spec_url.ok_or_else(|| {
         AppError::BadRequest("Service has no openapi_spec_url configured".to_string())

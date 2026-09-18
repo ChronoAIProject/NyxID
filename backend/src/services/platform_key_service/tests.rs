@@ -1133,6 +1133,7 @@ fn automatic_platform_grants_require_active_direct_owners() {
     let grants = OwnerGrants {
         actor_id: "person".into(),
         active_owner_ids: ["person".into(), "org".into()].into(),
+        readable_owner_ids: ["person".into(), "org".into()].into(),
         org_owner_ids: ["org".into()].into(),
         memberships: vec![],
     };
@@ -1503,6 +1504,7 @@ fn owner_grant_intersection_is_independent_of_allowlist_size() {
         org_owner_ids: HashSet::new(),
         actor_id: "person".into(),
         memberships: vec![],
+        readable_owner_ids: HashSet::new(),
         active_owner_ids: ["person", "org-1", "org-2", "org-3"]
             .into_iter()
             .map(str::to_string)

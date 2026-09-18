@@ -1238,6 +1238,7 @@ mod tests {
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
             last_verification: None,
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),
@@ -1312,6 +1313,7 @@ mod tests {
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
             last_verification: None,
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),
