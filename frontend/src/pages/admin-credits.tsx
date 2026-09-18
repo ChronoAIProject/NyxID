@@ -1,4 +1,8 @@
 import {
+  billingTargetLabel,
+  normalizedBillingTargets,
+} from "@/lib/billing-targets";
+import {
   changedFields,
   describeChanges,
   hasFieldConflicts,
@@ -73,6 +77,8 @@ const GRANT_DEFAULTS: IssueGrantForm = {
   amount_credits: 100,
   target_kind: "all_users",
   target_user_ids: [],
+  target_org_ids: [],
+  target_group_ids: [],
   all_services: true,
   service_refs: [],
   expires_at: "",
@@ -85,6 +91,8 @@ const ALLOWANCE_DEFAULTS: AllowanceForm = {
   recurrence: "monthly",
   target_kind: "all_users",
   target_user_ids: [],
+  target_org_ids: [],
+  target_group_ids: [],
 };
 
 const SCHEDULE_DEFAULTS: ScheduleForm = {
@@ -93,6 +101,8 @@ const SCHEDULE_DEFAULTS: ScheduleForm = {
   expiry: { kind: "end_of_period" },
   target_kind: "all_users",
   target_user_ids: [],
+  target_org_ids: [],
+  target_group_ids: [],
   all_services: true,
   service_refs: [],
   reason: "",
@@ -152,7 +162,7 @@ export function AdminCreditsPage() {
             quantity: allowance.quantity,
             recurrence: allowance.recurrence,
             target_kind: allowance.target_kind,
-            target_user_ids: allowance.target_user_ids,
+            ...normalizedBillingTargets(allowance),
           }
         : ALLOWANCE_DEFAULTS,
     );
@@ -168,7 +178,7 @@ export function AdminCreditsPage() {
             recurrence: schedule.recurrence,
             expiry: schedule.expiry,
             target_kind: schedule.target_kind,
-            target_user_ids: schedule.target_user_ids,
+            ...normalizedBillingTargets(schedule),
             all_services: schedule.scope.all_services,
             service_refs: schedule.scope.service_ids,
             reason: schedule.reason ?? "",
@@ -203,10 +213,7 @@ export function AdminCreditsPage() {
       quantity: row.quantity,
       recurrence: row.recurrence,
       target_kind: row.target_kind,
-      target_user_ids:
-        row.target_kind === "all_users"
-          ? []
-          : normalizedSet(row.target_user_ids),
+      ...normalizedBillingTargets(row),
       is_active: row.is_active,
     };
   }
@@ -215,10 +222,7 @@ export function AdminCreditsPage() {
       amount_credits: row.amount_credits,
       expiry: row.expiry,
       target_kind: row.target_kind,
-      target_user_ids:
-        row.target_kind === "all_users"
-          ? []
-          : normalizedSet(row.target_user_ids),
+      ...normalizedBillingTargets(row),
       all_services: row.scope.all_services,
       service_refs: row.scope.all_services
         ? []
@@ -280,19 +284,13 @@ export function AdminCreditsPage() {
     try {
       const normalized = {
         ...value,
-        target_user_ids:
-          value.target_kind === "all_users"
-            ? []
-            : normalizedSet(value.target_user_ids),
+        ...normalizedBillingTargets(value),
       };
       if (editingAllowance) {
         const defaults = allowanceForm.formState.defaultValues as AllowanceForm;
         const before = {
           ...defaults,
-          target_user_ids:
-            defaults.target_kind === "all_users"
-              ? []
-              : normalizedSet(defaults.target_user_ids),
+          ...normalizedBillingTargets(defaults),
         };
         const body = changedFields(before, normalized);
         allowanceReview.review(
@@ -312,18 +310,13 @@ export function AdminCreditsPage() {
 
   async function submitSchedule(value: ScheduleForm) {
     try {
-      const targetUserIds =
-        value.target_kind === "all_users" ? [] : value.target_user_ids;
       const serviceRefs = value.all_services ? [] : value.service_refs;
       if (editingSchedule) {
         const normalize = (data: ScheduleForm) => ({
           amount_credits: data.amount_credits,
           expiry: data.expiry,
           target_kind: data.target_kind,
-          target_user_ids:
-            data.target_kind === "all_users"
-              ? []
-              : normalizedSet(data.target_user_ids),
+          ...normalizedBillingTargets(data),
           all_services: data.all_services,
           service_refs: data.all_services
             ? []
@@ -342,7 +335,7 @@ export function AdminCreditsPage() {
       } else {
         await createSchedule.mutateAsync({
           ...value,
-          target_user_ids: targetUserIds,
+          ...normalizedBillingTargets(value),
           service_refs: serviceRefs,
         });
         toast.success("Credit schedule created");
@@ -544,11 +537,7 @@ export function AdminCreditsPage() {
                       <TableCell className="capitalize">
                         {allowance.recurrence.replace("_", " ")}
                       </TableCell>
-                      <TableCell>
-                        {allowance.target_kind === "all_users"
-                          ? "All owners"
-                          : `${String(allowance.target_user_ids.length)} selected`}
-                      </TableCell>
+                      <TableCell>{billingTargetLabel(allowance)}</TableCell>
                       <TableCell>
                         <Badge
                           variant={
