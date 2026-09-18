@@ -149,6 +149,12 @@ JSON-RPC errors (which NyxAgent would flatten to opaque 502s):
 }
 ```
 
+Chat-key `nyx__search_tools` and `nyx__list_connected_services` results also carry
+a top-level `chat_access_hint` that spells out the three values, and the server
+prompt tells the model that `acknowledgement_required` tools are callable and that
+the card, not settings, is how access is granted. Without this the model read the
+flag as "no permission" and never made the call that creates the card.
+
 Platform-source services have a DownstreamService ID and no owner-visible
 UserService row to grant. In Ask mode, listing/search marks them
 `full_access_required`; both direct `tools/call` and `nyx__call_tool` return this

@@ -1844,6 +1844,14 @@ async fn authorize_mcp_operation(
 // Meta-tool dispatch helpers
 // ---------------------------------------------------------------------------
 
+/// Tells the assistant what each `chat_access` value means so it calls gated
+/// tools instead of telling the user it lacks permission.
+const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = call freely. \
+    acknowledgement_required = call the tool now; NyxID shows the user an Allow card \
+    in the chat and returns instructions to retry after approval. Never say you lack \
+    permission or send the user to settings. full_access_required = available only \
+    after the user switches this chat's Mode to Full access.";
+
 fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> &'static str {
     let granted = if auth.chat.as_ref().is_some_and(|chat| {
         chat.access_mode == crate::models::assistant_conversation::AccessMode::Full
@@ -2206,12 +2214,15 @@ async fn handle_meta_search(
         })
         .collect();
 
-    let response_json = serde_json::json!({
+    let mut response_json = serde_json::json!({
         "matches": results,
         "count": results.len(),
         "hint": "Use nyx__call_tool to invoke any of these tools by name. \
             Pass the tool name and arguments as shown in the match results.",
     });
+    if auth.chat.is_some() {
+        response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
+    }
 
     let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
     tool_result(request_id, &text, false)
@@ -2276,6 +2287,7 @@ async fn handle_meta_list_connected(
                 row["chat_access"] = serde_json::json!(chat_access(auth, service));
             }
         }
+        result["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
     }
     let text = serde_json::to_string_pretty(&result).unwrap_or_default();
     tool_result(request_id, &text, false)

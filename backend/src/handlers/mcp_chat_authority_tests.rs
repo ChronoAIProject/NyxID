@@ -121,6 +121,13 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     .await;
     let tool = &search["matches"][0];
     assert_eq!(tool["chat_access"], "acknowledgement_required");
+    for body in [&listing, &search] {
+        let hint = body["chat_access_hint"].as_str().unwrap();
+        assert!(
+            hint.contains("acknowledgement_required = call the tool now"),
+            "{hint}"
+        );
+    }
     let name = tool["name"].as_str().unwrap();
     let args = json!({"method": "GET", "path": "/ok"});
     let refusal = result(call(&f, &auth, name, args.clone()).await, true).await;

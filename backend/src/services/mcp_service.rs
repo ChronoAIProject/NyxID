@@ -792,9 +792,10 @@ pub async fn load_operation_catalog(
             .endpoints
             .sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
     }
-    validate_catalog_identities(&visible)?;
-
-    let mut invalid_contract_services = visible
+    // One producer's ambiguous spec must not take every other service offline
+    // for the user: omit only the service whose identities are ambiguous.
+    let mut invalid_contract_services = retain_unambiguous_identities(&mut visible);
+    invalid_contract_services += visible
         .iter()
         .filter(|service| service.invalid_openapi_contract)
         .count();
@@ -894,37 +895,31 @@ fn parameter_descriptor_is_publishable(parameter: &serde_json::Value) -> bool {
             .is_none_or(|schema| schema.is_object() || schema.is_boolean())
 }
 
-fn validate_catalog_identities(services: &[McpToolService]) -> AppResult<()> {
-    let mut service_ids = HashSet::new();
-    for service in services {
-        if service.service_id.trim().is_empty() || !service_ids.insert(service.service_id.as_str())
-        {
+/// Drop services whose identities are missing or ambiguous (empty or repeated
+/// service id, empty or repeated endpoint id) and return how many were dropped.
+/// The first occurrence of a repeated service id is kept. Failing closed per
+/// service keeps a single bad producer from disabling the whole catalog.
+fn retain_unambiguous_identities(services: &mut Vec<McpToolService>) -> usize {
+    let mut service_ids: HashSet<String> = HashSet::new();
+    let before = services.len();
+    services.retain(|service| {
+        let service_ok =
+            !service.service_id.trim().is_empty() && service_ids.insert(service.service_id.clone());
+        let mut endpoint_ids = HashSet::new();
+        let endpoints_ok = service.endpoints.iter().all(|endpoint| {
+            !endpoint.endpoint_id.trim().is_empty()
+                && endpoint_ids.insert(endpoint.endpoint_id.as_str())
+        });
+        if !service_ok || !endpoints_ok {
             tracing::error!(
                 service_id = %service.service_id,
-                "MCP operation catalog contains a missing or duplicate service identity"
+                service_slug = %service.service_slug,
+                "Omitting service with missing or duplicate MCP operation identities"
             );
-            return Err(AppError::Internal(
-                "MCP operation catalog contains ambiguous identities".to_string(),
-            ));
         }
-
-        let mut endpoint_ids = HashSet::new();
-        for endpoint in &service.endpoints {
-            if endpoint.endpoint_id.trim().is_empty()
-                || !endpoint_ids.insert(endpoint.endpoint_id.as_str())
-            {
-                tracing::error!(
-                    service_id = %service.service_id,
-                    endpoint_id = %endpoint.endpoint_id,
-                    "MCP operation catalog contains a missing or duplicate endpoint identity"
-                );
-                return Err(AppError::Internal(
-                    "MCP operation catalog contains ambiguous identities".to_string(),
-                ));
-            }
-        }
-    }
-    Ok(())
+        service_ok && endpoints_ok
+    });
+    before - services.len()
 }
 
 impl<'a> NodeScope<'a> {
@@ -1517,14 +1512,53 @@ async fn fetch_and_parse_user_spec(
 ) -> AppResult<ParsedMcpEndpoints> {
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, owner_id).await?;
     let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
-    let mut endpoints = Vec::with_capacity(parsed.len());
+    Ok(parsed_endpoints_to_mcp(parsed))
+}
+
+/// Convert parsed operations into MCP endpoints with unique identities.
+///
+/// Producers do publish specs whose `operationId` repeats (api.jina.ai did),
+/// and a repeated identity would otherwise make the whole operation catalog
+/// ambiguous. Operations sharing an `operationId` fall back to their
+/// method/path identity, tool names are disambiguated with a numeric suffix,
+/// and any operation whose identity still collides is dropped.
+fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> ParsedMcpEndpoints {
+    let mut operation_id_counts: HashMap<String, usize> = HashMap::new();
+    for parsed_endpoint in &parsed {
+        if let Some(operation_id) = parsed_endpoint.source_operation_id.as_deref() {
+            *operation_id_counts
+                .entry(operation_id.trim().to_owned())
+                .or_default() += 1;
+        }
+    }
+    let mut endpoints: Vec<McpToolEndpoint> = Vec::with_capacity(parsed.len());
     let mut durable_metadata = HashMap::with_capacity(parsed.len());
-    for parsed_endpoint in parsed {
+    let mut names: HashSet<String> = HashSet::with_capacity(parsed.len());
+    for mut parsed_endpoint in parsed {
+        let source_operation_id = parsed_endpoint
+            .source_operation_id
+            .as_deref()
+            .filter(|operation_id| operation_id_counts.get(operation_id.trim()) == Some(&1));
         let endpoint_id = opaque_operation_id(
-            parsed_endpoint.source_operation_id.as_deref(),
+            source_operation_id,
             &parsed_endpoint.method,
             &parsed_endpoint.path,
         );
+        if durable_metadata.contains_key(&endpoint_id) {
+            tracing::warn!(
+                method = %parsed_endpoint.method,
+                "Dropping OpenAPI operation with a duplicate identity"
+            );
+            continue;
+        }
+        if !names.insert(parsed_endpoint.name.clone()) {
+            let base = parsed_endpoint.name.clone();
+            let mut suffix = 2usize;
+            while !names.insert(format!("{base}_{suffix}")) {
+                suffix += 1;
+            }
+            parsed_endpoint.name = format!("{base}_{suffix}");
+        }
         durable_metadata.insert(
             endpoint_id.clone(),
             McpDurableEndpointMetadata {
@@ -1553,10 +1587,10 @@ async fn fetch_and_parse_user_spec(
             response: parsed_endpoint.response,
         });
     }
-    Ok(ParsedMcpEndpoints {
+    ParsedMcpEndpoints {
         endpoints,
         durable_metadata,
-    })
+    }
 }
 
 /// Fetch and parse a user-mounted OpenAPI spec, returning `Some(endpoints)`
@@ -4463,10 +4497,25 @@ pub struct SearchResult {
 /// Search ALL user tools (regardless of activation state) and return matches
 /// plus the service IDs they belong to.
 pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResult {
-    let q_lower = query.to_lowercase();
-    let mut matches = Vec::new();
-    let mut matched_ids: HashSet<String> = HashSet::new();
-
+    // Models phrase queries freely ("skill search", "light state"), so match
+    // each query word independently against the qualified tool name, the
+    // service identity and the description, then rank tools that contain
+    // every word above partial matches. Words are substrings so concatenated
+    // operation names such as `getentitystate` still match "entity state".
+    let tokens: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut candidates: Vec<(
+        usize,
+        usize,
+        &McpToolService,
+        &McpToolEndpoint,
+        String,
+        String,
+    )> = Vec::new();
     for service in services {
         for endpoint in &service.endpoints {
             let name = format!("{}__{}", service.service_slug, endpoint.name);
@@ -4475,29 +4524,34 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name),
             );
-
-            if name.to_lowercase().contains(&q_lower)
-                || description.to_lowercase().contains(&q_lower)
-            {
-                matched_ids.insert(service.service_id.clone());
-                let input_schema = if service.is_generic_proxy {
-                    build_generic_proxy_input_schema()
-                } else {
-                    build_input_schema(endpoint)
-                };
-                matches.push(McpToolDefinition {
-                    name,
-                    description,
-                    input_schema,
-                });
-                if matches.len() >= MAX_SEARCH_RESULTS {
-                    break;
-                }
+            let haystack = format!("{name}\n{description}").to_lowercase();
+            let matched = tokens
+                .iter()
+                .filter(|token| haystack.contains(token.as_str()))
+                .count();
+            if tokens.is_empty() || matched > 0 {
+                let order = candidates.len();
+                candidates.push((matched, order, service, endpoint, name, description));
             }
         }
-        if matches.len() >= MAX_SEARCH_RESULTS {
-            break;
-        }
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    candidates.truncate(MAX_SEARCH_RESULTS);
+
+    let mut matches = Vec::with_capacity(candidates.len());
+    let mut matched_ids: HashSet<String> = HashSet::new();
+    for (_, _, service, endpoint, name, description) in candidates {
+        matched_ids.insert(service.service_id.clone());
+        let input_schema = if service.is_generic_proxy {
+            build_generic_proxy_input_schema()
+        } else {
+            build_input_schema(endpoint)
+        };
+        matches.push(McpToolDefinition {
+            name,
+            description,
+            input_schema,
+        });
     }
 
     SearchResult {
@@ -5548,25 +5602,23 @@ mod tests {
     }
 
     #[test]
-    fn catalog_identity_validation_fails_closed_on_missing_or_duplicate_ids() {
-        let mut missing_service = make_service(
+    fn catalog_identity_validation_omits_only_ambiguous_services() {
+        let missing_service = make_service(
             "",
             "Missing",
             "missing",
             vec![make_endpoint("read", "Read")],
         );
-        assert!(validate_catalog_identities(&[missing_service]).is_err());
-
-        let duplicate_endpoint = make_endpoint("read", "Read");
-        let service = make_service(
-            "service-1",
+        let duplicate_endpoints = make_service(
+            "service-dup-endpoints",
             "Duplicate",
             "duplicate",
-            vec![duplicate_endpoint, make_endpoint("read", "Read again")],
+            vec![
+                make_endpoint("read", "Read"),
+                make_endpoint("read", "Read again"),
+            ],
         );
-        assert!(validate_catalog_identities(&[service]).is_err());
-
-        missing_service = make_service(
+        let first = make_service(
             "service-1",
             "First",
             "first",
@@ -5578,7 +5630,93 @@ mod tests {
             "second",
             vec![make_endpoint("two", "Two")],
         );
-        assert!(validate_catalog_identities(&[missing_service, duplicate_service]).is_err());
+        let healthy = make_service(
+            "service-2",
+            "Healthy",
+            "healthy",
+            vec![make_endpoint("a", "A"), make_endpoint("b", "B")],
+        );
+        let mut services = vec![
+            missing_service,
+            duplicate_endpoints,
+            first,
+            duplicate_service,
+            healthy,
+        ];
+        assert_eq!(retain_unambiguous_identities(&mut services), 3);
+        let kept: Vec<_> = services
+            .iter()
+            .map(|service| service.service_slug.as_str())
+            .collect();
+        assert_eq!(kept, ["first", "healthy"]);
+        assert_eq!(retain_unambiguous_identities(&mut services), 0);
+    }
+
+    #[test]
+    fn duplicate_operation_ids_in_a_producer_spec_keep_every_operation_distinct() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "Producer", "version": "1"},
+            "paths": {
+                "/v1/classifiers": {
+                    "get": {"operationId": "list_classifiers", "responses": {"200": {"description": "ok"}}},
+                    "post": {"operationId": "create_classifier", "responses": {"200": {"description": "ok"}}}
+                },
+                "/v1/classifiers/all": {
+                    "get": {"operationId": "list_classifiers", "responses": {"200": {"description": "ok"}}}
+                },
+                "/v1/classifiers/legacy": {
+                    "get": {"operationId": "list_classifiers", "responses": {"200": {"description": "ok"}}}
+                }
+            }
+        });
+        let parsed = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+        assert_eq!(parsed.len(), 4);
+        let converted = parsed_endpoints_to_mcp(parsed);
+        assert_eq!(converted.endpoints.len(), 4);
+        let ids: HashSet<_> = converted
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.endpoint_id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 4, "every operation keeps a distinct identity");
+        assert_eq!(converted.durable_metadata.len(), 4);
+        let names: Vec<_> = converted
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.name.as_str())
+            .collect();
+        let unique: HashSet<_> = names.iter().copied().collect();
+        assert_eq!(unique.len(), 4, "tool names stay callable: {names:?}");
+        assert!(names.contains(&"list_classifiers"));
+        assert!(names.contains(&"list_classifiers_2"));
+        assert!(names.contains(&"list_classifiers_3"));
+        // Repeated operationIds use the method/path identity, which is stable
+        // and does not depend on the position of the operation in the spec.
+        let legacy = converted
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.path == "/v1/classifiers/legacy")
+            .unwrap();
+        assert_eq!(
+            legacy.endpoint_id,
+            opaque_operation_id(None, "GET", "/v1/classifiers/legacy")
+        );
+        // A unique operationId keeps its operationId-derived identity.
+        let create = converted
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.method.eq_ignore_ascii_case("post"))
+            .unwrap();
+        assert_eq!(
+            create.endpoint_id,
+            opaque_operation_id(Some("create_classifier"), "POST", "/v1/classifiers")
+        );
+        let mut services = vec![McpToolService {
+            endpoints: converted.endpoints,
+            ..make_service("service-1", "Producer", "producer", Vec::new())
+        }];
+        assert_eq!(retain_unambiguous_identities(&mut services), 0);
     }
 
     #[test]
@@ -5765,6 +5903,64 @@ mod tests {
         assert_eq!(result.matched_service_ids.len(), 2);
         assert!(result.matched_service_ids.contains(&"svc-1".to_string()));
         assert!(result.matched_service_ids.contains(&"svc-2".to_string()));
+    }
+
+    #[test]
+    fn search_all_tools_matches_words_in_any_order_and_ranks_full_matches_first() {
+        let services = vec![
+            make_service(
+                "ornn",
+                "Ornn",
+                "ornn-api",
+                vec![
+                    make_endpoint("searchskills", "Search published skills"),
+                    make_endpoint("getformatrules", "Skill format rules"),
+                ],
+            ),
+            make_service(
+                "ha",
+                "Home Assistant at office",
+                "home-assistant",
+                vec![
+                    make_endpoint("getentitystate", "Read an entity"),
+                    make_endpoint("lightturnon", "Turn a light on"),
+                    make_endpoint("switchturnoff", "Turn a switch off"),
+                ],
+            ),
+        ];
+        // Word order does not matter and every word need not be adjacent.
+        for query in ["skill search", "search skills", "SKILL-SEARCH"] {
+            let result = search_all_tools(&services, query);
+            assert_eq!(result.matches[0].name, "ornn-api__searchskills", "{query}");
+        }
+        // Concatenated operation names match by substring; tools that contain
+        // every word rank above partial matches, which are still returned.
+        let result = search_all_tools(&services, "entity state");
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].name, "home-assistant__getentitystate");
+        let result = search_all_tools(&services, "state entity light");
+        let names: Vec<_> = result.matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "home-assistant__getentitystate",
+                "home-assistant__lightturnon"
+            ]
+        );
+        let result = search_all_tools(&services, "light state");
+        assert_eq!(result.matches.len(), 2);
+        let names: Vec<_> = result.matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "home-assistant__getentitystate",
+                "home-assistant__lightturnon"
+            ]
+        );
+        // The service name is searchable too.
+        let result = search_all_tools(&services, "home assistant office");
+        assert_eq!(result.matches.len(), 3);
+        assert_eq!(result.matched_service_ids, vec!["ha".to_string()]);
     }
 
     #[test]
