@@ -1869,19 +1869,14 @@ async fn auto_provision_owner_services(
         if explicit_platform_only && candidate.platform_key.is_none() {
             continue;
         }
-        if let Some(config) = &candidate.platform_key {
-            // An org grant auto-connects the org; personal use through membership
-            // remains an explicit choice so joining an org does not retarget BYOK.
-            if config.audience == crate::models::downstream_service::PlatformKeyAudience::Restricted
-                && !config.allowed_owner_ids.iter().any(|id| id == user_id)
-            {
-                continue;
-            }
+        if candidate.platform_key.is_some() {
             let provider = candidate
                 .provider_config_id
                 .as_ref()
                 .and_then(|id| providers.get(id));
-            if !platform_key_service::available_with_grants(&candidate, provider, user_id, grants) {
+            if !platform_key_service::auto_provisionable_with_grants(
+                &candidate, provider, user_id, grants,
+            ) {
                 continue;
             }
         }
@@ -1955,7 +1950,9 @@ async fn auto_provision_owner_services(
         return Ok(());
     }
 
-    // Find which catalog_service_ids this user already has (active or inactive)
+    // Active connections and user-disabled connections block auto-provisioning.
+    // Delete leaves an inactive tombstone without an endpoint; only those
+    // non-auto rows may be replaced. Keep disabled rows enableable on their slug.
     let catalog_ids: Vec<&str> = eligible.iter().map(|(s, _)| s.id.as_str()).collect();
     let existing: Vec<crate::models::user_service::UserService> = db
         .collection::<crate::models::user_service::UserService>(
@@ -1969,8 +1966,29 @@ async fn auto_provision_owner_services(
         .try_collect()
         .await?;
 
+    let inactive_endpoint_ids: Vec<&str> = existing
+        .iter()
+        .filter(|s| !s.is_active && s.source.as_deref() != Some(AUTO_PROVISION_SOURCE))
+        .map(|s| s.endpoint_id.as_str())
+        .collect();
+    let retained_endpoint_ids: HashSet<String> = if inactive_endpoint_ids.is_empty() {
+        HashSet::new()
+    } else {
+        db.collection::<UserEndpoint>(crate::models::user_endpoint::COLLECTION_NAME)
+            .distinct("_id", doc! { "_id": { "$in": inactive_endpoint_ids } })
+            .await?
+            .into_iter()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect()
+    };
+
     let existing_catalog_ids: std::collections::HashSet<&str> = existing
         .iter()
+        .filter(|s| {
+            s.is_active
+                || (s.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
+                    && retained_endpoint_ids.contains(&s.endpoint_id))
+        })
         .filter_map(|s| s.catalog_service_id.as_deref())
         .collect();
 
@@ -2030,8 +2048,8 @@ async fn auto_provision_owner_services(
             .as_ref()
             .map(|(method, key)| (method.as_str(), key.as_str()))
             .unwrap_or_else(|| auto_provision_auth_snapshot(svc));
-        // Auto-provision is always personal (node_id = None), so the actor
-        // and the effective owner are the same.
+        // Auto-provision uses server transport (node_id = None) and creates
+        // the service directly under its eligible personal or org owner.
         match user_service_service::create_user_service(
             db,
             user_id,
@@ -2135,7 +2153,7 @@ pub async fn load_valid_app_consents(
 }
 
 /// Delete stale auto-provisioned UserServices that the user is no longer
-/// eligible for. Fully self-contained: loads the user's active
+/// eligible for. Fully self-contained: loads the user's
 /// auto-provisioned services, their catalog entries, SPRs, and consents,
 /// then applies the complete auto-provision eligibility predicate.
 ///
@@ -2156,7 +2174,7 @@ async fn reconcile_stale_auto_provisions(
         COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
     };
 
-    // Load all active auto-provisioned services for this user
+    // Include inactive automatic rows so reconciliation releases their source IDs.
     let auto_services: Vec<crate::models::user_service::UserService> = match db
         .collection::<crate::models::user_service::UserService>(
             crate::models::user_service::COLLECTION_NAME,
@@ -2164,7 +2182,6 @@ async fn reconcile_stale_auto_provisions(
         .find(doc! {
             "user_id": user_id,
             "source": AUTO_PROVISION_SOURCE,
-            "is_active": true,
         })
         .await
     {
@@ -2258,7 +2275,7 @@ async fn reconcile_stale_auto_provisions(
     let platform_valid: HashSet<&str> = catalog_map
         .values()
         .filter(|catalog| {
-            platform_key_service::available_with_grants(
+            platform_key_service::auto_provisionable_with_grants(
                 catalog,
                 catalog
                     .provider_config_id
@@ -2277,6 +2294,11 @@ async fn reconcile_stale_auto_provisions(
     let stale: Vec<&crate::models::user_service::UserService> = auto_services
         .iter()
         .filter(|us| {
+            // Inactive automatic rows must release the unique source identity
+            // before a replacement can be created, even if the grant is valid.
+            if !us.is_active {
+                return true;
+            }
             let catalog = us
                 .catalog_service_id
                 .as_deref()
@@ -2326,8 +2348,7 @@ async fn reconcile_stale_auto_provisions(
     // Delete stale UserService rows (not deactivate). Deletion lets the
     // provisioning path re-create the service when the user becomes
     // eligible again (e.g., re-consents to a developer app). Deactivation
-    // would leave an inactive row that the provisioning path treats as
-    // "already provisioned" and skips.
+    // would retain the unique (source, source_id) and block recreation.
     //
     // Note: users cannot deactivate auto-connected services themselves --
     // DELETE /keys/:id and PUT /keys/:id both reject auto-connected rows.
