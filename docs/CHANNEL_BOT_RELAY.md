@@ -608,6 +608,8 @@ classDiagram
 
 Existing Lark/Feishu bots must grant `im:resource` in the developer console before attachment downloads work; until then downloads return `channel_media_fetch_failed`.
 
+Lark/Feishu registration requires `app_id`, `app_secret`, and `verification_token`, with optional `encrypt_key`. The form and CLI do not require `bot_token`; the API accepts omission and continues accepting the ignored placeholder from older clients. The adapter constructs its stored credential from App ID and App Secret and exchanges it for a tenant access token.
+
 For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Configure the webhook URL and subscribe to both `im.message.receive_v1` and `card.action.trigger` only in the Lark/Feishu Developer Console. The console inputs map to NyxID fields as follows:
 
 - **App ID** -> `ChannelBot.app_id`
