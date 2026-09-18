@@ -142,6 +142,7 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   token_exchange: "",
   aws_sigv4: "",
   ifttt_webhook: "",
+  ifttt_mcp: "Authorization",
   none: "",
 };
 
@@ -567,6 +568,7 @@ function RoutingStep({
             </button>
             <button
               type="button"
+              disabled={catalogEntry?.auth_method === "ifttt_mcp"}
               onClick={() => setRoutingChoice("node")}
               className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 routingChoice === "node"
@@ -577,7 +579,9 @@ function RoutingStep({
               <Server className="h-5 w-5" />
               <span className="text-xs font-medium">Via Node</span>
               <span className="text-[10px] text-muted-foreground">
-                Route through credential node
+                {catalogEntry?.auth_method === "ifttt_mcp"
+                  ? "IFTTT OAuth uses direct routing"
+                  : "Route through credential node"}
               </span>
             </button>
           </div>
@@ -2980,34 +2984,41 @@ export function AddKeyDialog({
     onOpenChange(next);
   }
 
-  const handleSelectCatalog = useCallback((
-    entry: CatalogEntry,
-    routing: {
-      readonly nodeId?: string;
-      readonly targetOrgId?: string;
-    } = {},
-  ) => {
-    setSelectedEntry(entry);
-    setAuthKey(null);
-    // Fresh entry → default back to the managed one-click choice so a prior
-    // "your own app" selection can't leak into a different provider's flow.
-    setClientSource("managed");
-    setByoOAuthClientId(null);
-    setByoOAuthClientSecret(null);
-    setForm({
-      ...INITIAL_FORM,
-      label: entry.name,
-      endpointUrl: entry.base_url,
-      authMethod: entry.auth_method ?? "bearer",
-      authKeyName: entry.auth_key_name ?? "Authorization",
-      nodeId: routing.nodeId ?? "",
-    });
-    if (routing.targetOrgId !== undefined) {
-      setTargetOrgId(routing.targetOrgId || null);
-    }
-    setUsePlatformKey(prefillUsePlatformKey ?? true);
-    setStep(entry.platform_key?.available && !routing.nodeId ? "binding" : "routing");
-  }, [prefillUsePlatformKey]);
+  const handleSelectCatalog = useCallback(
+    (
+      entry: CatalogEntry,
+      routing: {
+        readonly nodeId?: string;
+        readonly targetOrgId?: string;
+      } = {},
+    ) => {
+      setSelectedEntry(entry);
+      setAuthKey(null);
+      // Fresh entry → default back to the managed one-click choice so a prior
+      // "your own app" selection can't leak into a different provider's flow.
+      setClientSource("managed");
+      setByoOAuthClientId(null);
+      setByoOAuthClientSecret(null);
+      setForm({
+        ...INITIAL_FORM,
+        label: entry.name,
+        endpointUrl: entry.base_url,
+        authMethod: entry.auth_method ?? "bearer",
+        authKeyName: entry.auth_key_name ?? "Authorization",
+        nodeId: entry.auth_method === "ifttt_mcp" ? "" : (routing.nodeId ?? ""),
+      });
+      if (routing.targetOrgId !== undefined) {
+        setTargetOrgId(routing.targetOrgId || null);
+      }
+      setUsePlatformKey(prefillUsePlatformKey ?? true);
+      setStep(
+        entry.platform_key?.available && !routing.nodeId
+          ? "binding"
+          : "routing",
+      );
+    },
+    [prefillUsePlatformKey],
+  );
 
   // Auto-select from `prefillSlug` once the catalog resolves. Only
   // fires on initial open (tracked via `appliedPrefillRef`) so a

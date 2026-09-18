@@ -68,6 +68,14 @@ pub fn encode_oauth_request(
     for (name, value) in &provider.oauth_request_headers {
         request = request.header(name, value);
     }
+    let mut params = params.to_vec();
+    if provider.slug == super::ifttt_oauth_service::PROVIDER_SLUG {
+        params.retain(|(name, _)| name != "resource");
+        params.push((
+            "resource".into(),
+            nyxid_service_adapters::ifttt_mcp::BASE_URL.into(),
+        ));
+    }
     match encoding {
         "json" => Ok(request.json(
             &params
@@ -75,7 +83,7 @@ pub fn encode_oauth_request(
                 .map(|(key, value)| (key, value))
                 .collect::<std::collections::BTreeMap<_, _>>(),
         )),
-        "form" => Ok(request.form(params)),
+        "form" => Ok(request.form(&params)),
         _ => Err(AppError::ValidationError(
             "OAuth request encoding must be one of: form, json".to_string(),
         )),

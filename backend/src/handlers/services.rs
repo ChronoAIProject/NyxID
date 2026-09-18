@@ -1090,6 +1090,7 @@ pub async fn create_service(
                     "query" => "api_key".to_string(),
                     "path" => "bot".to_string(),
                     "ifttt_webhook" => "key".to_string(),
+                    "ifttt_mcp" => "Authorization".to_string(),
                     "none" => String::new(),
                     _ => "X-API-Key".to_string(),
                 });
@@ -1109,6 +1110,7 @@ pub async fn create_service(
             "none",
             "aws_sigv4",
             "ifttt_webhook",
+            "ifttt_mcp",
         ];
         if !valid_methods.contains(&auth_method.as_str()) {
             return Err(AppError::ValidationError(format!(
@@ -1155,16 +1157,31 @@ pub async fn create_service(
         };
 
         validate_base_url(base_url)?;
-        if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
-            nyxid_service_adapters::ifttt::validate_destination(base_url)
-                .map_err(|error| AppError::ValidationError(error.to_string()))?;
-            if !credential.is_empty() {
+        if matches!(
+            auth_method.as_str(),
+            nyxid_service_adapters::ifttt::AUTH_METHOD
+                | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+        ) {
+            if auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+                nyxid_service_adapters::ifttt_mcp::validate_destination(base_url)
+                    .map_err(|error| AppError::ValidationError(error.to_string()))?;
+            } else {
+                nyxid_service_adapters::ifttt::validate_destination(base_url)
+                    .map_err(|error| AppError::ValidationError(error.to_string()))?;
+            }
+            user_service_service::validate_ifttt_identity(
+                &auth_method,
+                "none",
+                body.forward_access_token,
+                false,
+            )?;
+            if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD && !credential.is_empty() {
                 nyxid_service_adapters::ifttt::validate_credential(&credential)
                     .map_err(|error| AppError::ValidationError(error.to_string()))?;
             }
             if !body.ws_frame_injections.is_empty() {
                 return Err(AppError::ValidationError(
-                    "IFTTT Webhooks does not support WebSocket frame injection".into(),
+                    "IFTTT does not support WebSocket frame injection".into(),
                 ));
             }
         }
@@ -1791,11 +1808,18 @@ pub async fn update_service(
     }
 
     // Build the $set document with only provided fields
-    if service.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
-        nyxid_service_adapters::ifttt::validate_destination(
-            body.base_url.as_deref().unwrap_or(&service.base_url),
-        )
-        .map_err(|error| AppError::ValidationError(error.to_string()))?;
+    if matches!(
+        service.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
+        let base_url = body.base_url.as_deref().unwrap_or(&service.base_url);
+        if service.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+            nyxid_service_adapters::ifttt_mcp::validate_destination(base_url)
+                .map_err(|error| AppError::ValidationError(error.to_string()))?;
+        } else {
+            nyxid_service_adapters::ifttt::validate_destination(base_url)
+                .map_err(|error| AppError::ValidationError(error.to_string()))?;
+        }
         user_service_service::validate_ifttt_identity(
             &service.auth_method,
             body.identity_propagation_mode
@@ -1813,7 +1837,7 @@ pub async fn update_service(
             .is_empty()
         {
             return Err(AppError::ValidationError(
-                "IFTTT Webhooks does not support WebSocket frame injection".into(),
+                "IFTTT does not support WebSocket frame injection".into(),
             ));
         }
     }

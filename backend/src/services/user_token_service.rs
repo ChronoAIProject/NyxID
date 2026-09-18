@@ -682,6 +682,9 @@ pub async fn initiate_oauth_connect(
         ));
     }
 
+    let provider =
+        super::ifttt_oauth_service::ensure_registered(db, encryption_keys, base_url, provider)
+            .await?;
     ensure_oauth_provider_configured(&provider)?;
     ensure_additional_scopes_supported(&provider, additional_scopes)?;
     // A non-empty override is still subject to the same provider-type guard
@@ -754,6 +757,13 @@ pub async fn initiate_oauth_connect(
         .flatten();
     if let Some(product) = google_product {
         product.validate_scopes(scope_param.as_deref())?;
+    }
+    if provider.slug == super::ifttt_oauth_service::PROVIDER_SLUG
+        && scope_param.as_deref() != Some("mcp")
+    {
+        return Err(AppError::ValidationError(
+            "IFTTT OAuth requires the mcp scope".into(),
+        ));
     }
 
     // Platform-client scope allowlist (spec D5/B4): a request riding NyxID's

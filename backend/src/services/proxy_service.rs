@@ -702,7 +702,7 @@ pub(crate) fn credential_header_name(target: &ProxyTarget) -> Option<String> {
                 Some(trimmed.to_string())
             }
         }
-        "bearer" | "bot_bearer" | "basic" => Some("authorization".to_string()),
+        "bearer" | "bot_bearer" | "basic" | "ifttt_mcp" => Some("authorization".to_string()),
         // SigV4 sets Authorization plus several `X-Amz-*` headers; the only
         // one a caller-supplied or catalog default header could collide with
         // is `Authorization`, so we strip just that. The `X-Amz-*` headers
@@ -849,7 +849,17 @@ pub(crate) fn validate_ifttt_request(
     body: Option<&[u8]>,
     node_routed: bool,
 ) -> AppResult<()> {
-    use nyxid_service_adapters::ifttt;
+    use nyxid_service_adapters::{ifttt, ifttt_mcp};
+    if target.auth_method == ifttt_mcp::AUTH_METHOD {
+        validate_ifttt_configuration(target)?;
+        if node_routed {
+            return Err(AppError::BadRequest(
+                "IFTTT OAuth connections use server routing".into(),
+            ));
+        }
+        ifttt_mcp::validate_request(&target.base_url, method, path, query, body)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    }
     if target.auth_method == ifttt::AUTH_METHOD {
         validate_ifttt_configuration(target)?;
         let base_url = if node_routed && target.base_url.is_empty() {
@@ -870,7 +880,7 @@ fn validate_ifttt_configuration(target: &ProxyTarget) -> AppResult<()> {
         || !target.ws_frame_injections.is_empty()
     {
         return Err(AppError::BadRequest(
-            "IFTTT Webhooks does not support identity, access-token, delegation-token, or WebSocket frame injection".into(),
+            "IFTTT does not support identity, access-token, delegation-token, or WebSocket frame injection".into(),
         ));
     }
     Ok(())
@@ -880,9 +890,13 @@ pub(crate) fn validate_ifttt_delegation(
     target: &ProxyTarget,
     delegated: &[DelegatedCredential],
 ) -> AppResult<()> {
-    if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD && !delegated.is_empty() {
+    if matches!(
+        target.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && !delegated.is_empty()
+    {
         return Err(AppError::BadRequest(
-            "IFTTT Webhooks does not support delegated provider credentials".into(),
+            "IFTTT does not support delegated provider credentials".into(),
         ));
     }
     Ok(())
@@ -3770,7 +3784,10 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     extra_outbound_headers: Vec<(String, String)>,
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<reqwest::Response, ForwardRequestError> {
-    if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+    if matches!(
+        target.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
         validate_ifttt_configuration(target)?;
     }
     validate_ifttt_delegation(target, &delegated_credentials)?;
@@ -3849,6 +3866,29 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
                     ForwardRequestError::Transport(error)
                 }
                 _ => ForwardRequestError::Application(AppError::BadRequest(error.to_string())),
+            });
+    }
+    if target.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+        let ProxyBody::Buffered(body) = body;
+        return nyxid_service_adapters::ifttt_mcp::client()
+            .forward(
+                &target.base_url,
+                &method,
+                path,
+                query,
+                &target.credential,
+                body.as_deref(),
+            )
+            .await
+            .map_err(|error| match error {
+                nyxid_service_adapters::ifttt_mcp::Error::Transport(error) => {
+                    ForwardRequestError::Transport(error)
+                }
+                nyxid_service_adapters::ifttt_mcp::Error::Request
+                | nyxid_service_adapters::ifttt_mcp::Error::Destination => {
+                    ForwardRequestError::Application(AppError::BadRequest(error.to_string()))
+                }
+                _ => ForwardRequestError::Application(AppError::Internal(error.to_string())),
             });
     }
     for (name, value) in &outbound_headers {
@@ -5703,6 +5743,56 @@ mod tests {
             ws_frame_injections: Vec::new(),
             connection_id: None,
         }
+    }
+
+    #[test]
+    fn ifttt_mcp_preflight_enforces_destination_routing_and_identity() {
+        use nyxid_service_adapters::ifttt_mcp;
+        let mut target = make_proxy_target(ifttt_mcp::BASE_URL.into());
+        target.auth_method = ifttt_mcp::AUTH_METHOD.into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_ok()
+        );
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, true)
+                .is_err()
+        );
+        target.service.forward_access_token = true;
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.forward_access_token = false;
+        target.service.inject_delegation_token = true;
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.inject_delegation_token = false;
+        target.service.identity_propagation_mode = "headers".into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.identity_propagation_mode = "none".into();
+        target.base_url = "https://other.invalid".into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        assert!(
+            validate_ifttt_delegation(
+                &target,
+                &[DelegatedCredential {
+                    provider_slug: "another".into(),
+                    injection_method: "header".into(),
+                    injection_key: "x-key".into(),
+                    credential: "fixture".into(),
+                }]
+            )
+            .is_err()
+        );
     }
 
     #[test]
