@@ -199,6 +199,8 @@ pub struct McpToolService {
     /// service: the instance's `UserEndpoint.recommended_skills` when set,
     /// else the catalog template's `DownstreamService.recommended_skills`.
     pub recommended_skills: Vec<String>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: Option<i64>,
     /// Catalog operation policy copied into the immutable execution catalog.
     pub proxy_operation_policy: Option<ProxyOperationPolicy>,
 }
@@ -1285,6 +1287,16 @@ async fn load_user_tools_with_grants(
         })
         .collect();
 
+    let catalog_refs_by_id: HashMap<_, _> = valid_platform_services
+        .iter()
+        .map(|(svc, _)| {
+            (
+                svc.id.as_str(),
+                (svc.recommended_skill_refs.clone(), svc.skills_revision),
+            )
+        })
+        .collect();
+
     // 4a. User-managed services
     for r in &all_user_services {
         let us = &r.service;
@@ -1362,7 +1374,20 @@ async fn load_user_tools_with_grants(
             })
             .unwrap_or_default();
 
+        let (recommended_skill_refs, skills_revision) =
+            if user_endpoint.is_some_and(|ep| ep.recommended_skills.is_some()) {
+                (None, None)
+            } else {
+                us.catalog_service_id
+                    .as_deref()
+                    .and_then(|id| catalog_refs_by_id.get(id))
+                    .map(|(refs, revision)| (refs.clone(), Some(*revision)))
+                    .unwrap_or_default()
+            };
+
         result.push(McpToolService {
+            recommended_skill_refs,
+            skills_revision,
             service_id: us.id.clone(),
             service_name: endpoint_label.to_string(),
             service_slug: us.slug.clone(),
@@ -1401,6 +1426,8 @@ async fn load_user_tools_with_grants(
         let durable_endpoint_metadata = service_endpoint_durable_metadata(&endpoint_rows);
 
         result.push(McpToolService {
+            recommended_skill_refs: svc.recommended_skill_refs.clone(),
+            skills_revision: Some(svc.skills_revision),
             service_id: svc.id.clone(),
             service_name: svc.name.clone(),
             service_slug: svc.slug.clone(),
@@ -2457,6 +2484,8 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
         }
 
         public_services.push(McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: svc.id.clone(),
             service_name: svc.name.clone(),
             service_slug: format!("public__{}", sanitize_tool_segment(&svc.slug)),
@@ -3931,6 +3960,15 @@ pub async fn execute_tool_resolved(
         is_generic_proxy_endpoint,
     } = prepared;
 
+    proxy_service::validate_ifttt_request(
+        &target,
+        &method,
+        &path,
+        query.as_deref(),
+        body.as_deref(),
+        node_route.is_some(),
+    )?;
+
     // Build identity headers if configured on the service (CR-8)
     let mut identity_headers = Vec::new();
     if target.service.identity_propagation_mode != "none" {
@@ -4054,6 +4092,8 @@ pub async fn execute_tool_resolved(
             }
         }
     };
+
+    proxy_service::validate_ifttt_delegation(&target, &delegated)?;
 
     // Content-Type header
     let req_headers = if is_generic_proxy_endpoint {
@@ -4825,6 +4865,29 @@ pub async fn connect_service(
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Separate from the stable operation catalog digest used by existing clients.
+pub fn skills_manifest_digest(services: &[McpToolService]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut entries: Vec<_> = services
+        .iter()
+        .map(|s| {
+            (
+                &s.service_id,
+                &s.recommended_skills,
+                &s.recommended_skill_refs,
+            )
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    format!(
+        "v1:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&("nyxid.mcp-skills-manifest.v1", entries))
+                .expect("skill manifest serializes")
+        ))
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -4906,6 +4969,8 @@ mod tests {
             })
             .collect();
         McpToolService {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: id.to_string(),
             service_name: name.to_string(),
             service_slug: slug.to_string(),
@@ -4921,6 +4986,138 @@ mod tests {
             is_generic_proxy: false,
             invalid_openapi_contract: false,
             proxy_operation_policy: None,
+        }
+    }
+
+    #[test]
+    fn curation_refs_change_only_separate_digest_while_names_keep_legacy_digest() {
+        let mut service = make_service(
+            "svc",
+            "Service",
+            "service",
+            vec![make_endpoint("list", "List")],
+        );
+        service.recommended_skills = vec!["manual".into()];
+        let original = operation_catalog_digest(std::slice::from_ref(&service));
+        service.recommended_skill_refs = Some(vec![
+            crate::models::catalog_skill_revision::SkillReference {
+                source: "ornn".into(),
+                skill_id: "immutable-id".into(),
+                name: "manual".into(),
+                version: "1.0".into(),
+                sha256: "a".repeat(64),
+                dependencies: vec![],
+            },
+        ]);
+        service.skills_revision = Some(3);
+        assert_eq!(
+            operation_catalog_digest(std::slice::from_ref(&service)),
+            original
+        );
+        let manifest = skills_manifest_digest(std::slice::from_ref(&service));
+        service.recommended_skill_refs.as_mut().unwrap()[0].version = "1.1".into();
+        service.skills_revision = Some(4);
+        assert_eq!(
+            operation_catalog_digest(std::slice::from_ref(&service)),
+            original
+        );
+        assert_ne!(
+            skills_manifest_digest(std::slice::from_ref(&service)),
+            manifest
+        );
+        service.recommended_skills = vec!["replacement".into()];
+        assert_ne!(operation_catalog_digest(&[service]), original);
+    }
+
+    #[tokio::test]
+    async fn curation_instance_name_override_suppresses_inherited_refs() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("curation_mcp_override").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut catalog = dummy_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = "pinned-service".into();
+        catalog.recommended_skills = Some(vec!["manual".into()]);
+        catalog.skills_revision = 4;
+        catalog.recommended_skill_refs = Some(vec![
+            crate::models::catalog_skill_revision::SkillReference {
+                source: "ornn".into(),
+                skill_id: "immutable".into(),
+                name: "manual".into(),
+                version: "1.0".into(),
+                sha256: "b".repeat(64),
+                dependencies: vec![],
+            },
+        ]);
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: owner.clone(),
+                service_id: catalog.id.clone(),
+                credential_encrypted: None,
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: true,
+                state_version: 0,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let endpoint = test_user_endpoint(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            "Instance",
+            "https://instance.test",
+            None,
+            Some(&catalog.id),
+        );
+        let instance = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            &catalog.slug,
+            &endpoint.id,
+            Some(&catalog.id),
+            None,
+        );
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(&endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&instance)
+            .await
+            .unwrap();
+        let manager = NodeWsManager::new(30, 100);
+        let load = || load_user_tools_all_scoped(&db, &manager, &owner, NodeScope::Unrestricted);
+        let inherited = load().await.unwrap();
+        let inherited = inherited
+            .iter()
+            .find(|s| s.service_id == instance.id)
+            .unwrap();
+        assert_eq!(
+            inherited.recommended_skill_refs,
+            catalog.recommended_skill_refs
+        );
+        assert_eq!(inherited.skills_revision, Some(4));
+        for names in [vec!["local"], vec![]] {
+            db.collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+                .update_one(
+                    doc! {"_id":&endpoint.id},
+                    doc! {"$set":{"recommended_skills":&names}},
+                )
+                .await
+                .unwrap();
+            let loaded = load().await.unwrap();
+            let actual = loaded.iter().find(|s| s.service_id == instance.id).unwrap();
+            assert_eq!(actual.recommended_skills, names);
+            assert!(actual.recommended_skill_refs.is_none());
+            assert!(actual.skills_revision.is_none());
         }
     }
 
@@ -6646,6 +6843,271 @@ mod tests {
 
         assert_eq!(tool.input_schema["required"], serde_json::json!([]));
         assert!(tool.input_schema["properties"]["query"].is_object());
+    }
+
+    #[tokio::test]
+    async fn ifttt_catalog_connection_and_mcp_calls_reach_local_tls_egress() {
+        use crate::models::downstream_service::{COLLECTION_NAME as CATALOG, DownstreamService};
+        use crate::models::user_api_key::{COLLECTION_NAME as KEYS, UserApiKey};
+        use crate::services::{catalog_spec_sync, provider_service, unified_key_service};
+        use nyxid_service_adapters::{ifttt, test_support};
+        let db = connect_test_database("ifttt_catalog_mcp")
+            .await
+            .expect("MongoDB required");
+        let encryption = test_encryption_keys();
+        provider_service::seed_default_providers(&db, &encryption)
+            .await
+            .unwrap();
+        provider_service::seed_default_services(&db, &encryption)
+            .await
+            .unwrap();
+        catalog_spec_sync::sync_seeded_service_endpoints(&db)
+            .await
+            .unwrap();
+        let catalog = db
+            .collection::<DownstreamService>(CATALOG)
+            .find_one(doc! {"slug":"api-ifttt"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(catalog.auth_method, ifttt::AUTH_METHOD);
+        assert_eq!(catalog.service_category, "connection");
+        assert!(catalog.requires_user_credential);
+        assert!(
+            catalog
+                .openapi_spec_url
+                .as_deref()
+                .unwrap()
+                .ends_with("/catalog-specs/ifttt/openapi.json")
+        );
+        let key = "IFTTT_test_key-NOT_REAL";
+        let owner = uuid::Uuid::new_v4().to_string();
+        let entry = crate::services::catalog_service::get_catalog_entry(
+            &db,
+            &encryption,
+            &owner,
+            "api-ifttt",
+        )
+        .await
+        .unwrap();
+        assert_eq!(entry.auth_method, ifttt::AUTH_METHOD);
+        assert_eq!(entry.auth_key_name, "key");
+        let connected = unified_key_service::create_key(
+            &db,
+            &encryption,
+            &owner,
+            &owner,
+            Some("api-ifttt"),
+            None,
+            key,
+            "My IFTTT",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            unified_key_service::OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+            unified_key_service::OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(connected.service.auth_method, ifttt::AUTH_METHOD);
+        assert_eq!(connected.service.auth_key_name, entry.auth_key_name);
+        let stored = db
+            .collection::<UserApiKey>(KEYS)
+            .find_one(doc! {"_id": connected.service.api_key_id.as_ref().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        let encrypted = stored.credential_encrypted.as_ref().unwrap();
+        assert!(!encrypted.windows(key.len()).any(|b| b == key.as_bytes()));
+        assert_eq!(
+            encryption.decrypt(encrypted).await.unwrap().as_slice(),
+            key.as_bytes()
+        );
+        for invalid in [
+            "https://maker.ifttt.com/trigger/e/with/key/secret",
+            "bad/key",
+            "",
+        ] {
+            let error = unified_key_service::ensure_user_api_key_for_update(
+                &db,
+                &encryption,
+                &owner,
+                &connected.service.id,
+                None,
+                Some(invalid),
+                None,
+                "My IFTTT",
+                unified_key_service::OauthClientCredentialsInput::None,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, AppError::ValidationError(_)));
+            let after = db
+                .collection::<UserApiKey>(KEYS)
+                .find_one(doc! { "_id": &stored.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.credential_encrypted, stored.credential_encrypted);
+            assert_eq!(after.credential_epoch, stored.credential_epoch);
+        }
+        let invalid_destination = crate::services::user_service_service::validate_update_inputs(
+            &db,
+            &owner,
+            &connected.service,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("https://other.invalid"),
+            None,
+        )
+        .await;
+        assert!(invalid_destination.is_err());
+        let key_count = db
+            .collection::<UserApiKey>(KEYS)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        let invalid_custom = unified_key_service::create_key(
+            &db,
+            &encryption,
+            &owner,
+            &owner,
+            None,
+            Some("https://other.invalid"),
+            key,
+            "Invalid IFTTT",
+            None,
+            Some(ifttt::AUTH_METHOD),
+            Some("key"),
+            None,
+            None,
+            None,
+            unified_key_service::OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+            unified_key_service::OauthClientCredentialsInput::None,
+            false,
+        )
+        .await;
+        assert!(invalid_custom.is_err());
+        assert_eq!(
+            db.collection::<UserApiKey>(KEYS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            key_count
+        );
+        let rows: Vec<ServiceEndpoint> = db
+            .collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+            .find(doc! {"service_id": &catalog.id, "is_active": true})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.operation_generation > 0
+            && row.risk.is_some()
+            && !row.supports_idempotency_key));
+        let tools = service_endpoints_to_mcp(&rows.iter().collect::<Vec<_>>());
+        for (name, args, payload) in [
+            (
+                "trigger_event",
+                serde_json::json!({"event":"no_values"}),
+                serde_json::json!({}),
+            ),
+            (
+                "trigger_event",
+                serde_json::json!({"event":"values", "body":{"value1":"one","value2":"two","value3":"three"}}),
+                serde_json::json!({"value1":"one","value2":"two","value3":"three"}),
+            ),
+            (
+                "trigger_json_event",
+                serde_json::json!({"event":"json_event", "body":{"event":"inside","body":{"hello":[1,true]},"authorization":"payload"}}),
+                serde_json::json!({"event":"inside","body":{"hello":[1,true]},"authorization":"payload"}),
+            ),
+            (
+                "trigger_json_event",
+                serde_json::json!({"event":"array", "body":[1,true,null]}),
+                serde_json::json!([1, true, null]),
+            ),
+            (
+                "trigger_json_event",
+                serde_json::json!({"event":"null_payload", "body":null}),
+                serde_json::Value::Null,
+            ),
+            (
+                "trigger_json_event",
+                serde_json::json!({"event":"scalar", "body":"payload"}),
+                serde_json::json!("payload"),
+            ),
+        ] {
+            let endpoint = tools.iter().find(|tool| tool.name == name).unwrap();
+            let schema = build_input_schema(endpoint);
+            assert!(schema["properties"].get("body").is_some());
+            assert!(schema["properties"].get("key").is_none());
+            let (method, path, query, _headers, body) = build_proxy_args(endpoint, &args).unwrap();
+            let mut server = test_support::fixture(
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+            let response = server
+                .client
+                .forward(
+                    ifttt::BASE_URL,
+                    &method,
+                    &path,
+                    query.as_deref(),
+                    key,
+                    body.as_deref(),
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let request = server.requests.recv().await.unwrap();
+            let split = request.windows(4).position(|b| b == b"\r\n\r\n").unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..split])
+                    .starts_with(&format!("POST /{path}/with/key/{key} HTTP/1.1"))
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request[split + 4..]).unwrap(),
+                payload
+            );
+        }
+        let endpoint = tools
+            .iter()
+            .find(|tool| tool.name == "trigger_json_event")
+            .unwrap();
+        assert!(
+            build_proxy_args(endpoint, &serde_json::json!({"event":"missing_payload"})).is_err()
+        );
+        for event in ["../escape", "e/with/key/other", "e%2f", "a-b"] {
+            let (method, path, query, _, body) =
+                build_proxy_args(endpoint, &serde_json::json!({"event":event,"body":{}})).unwrap();
+            assert!(
+                ifttt::validate_request(
+                    ifttt::BASE_URL,
+                    &method,
+                    &path,
+                    query.as_deref(),
+                    body.as_deref()
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -8906,6 +9368,8 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 name: format!("Service {slug}"),
                 slug: slug.to_string(),

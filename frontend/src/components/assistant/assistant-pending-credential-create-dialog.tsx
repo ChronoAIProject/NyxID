@@ -35,7 +35,7 @@ import {
 export interface AssistantPendingCredentialCreateParams {
   readonly nodeId: string;
   readonly serviceSlug: string;
-  readonly injectionMethod: "header" | "query-param" | "path-prefix";
+  readonly injectionMethod: "header" | "query-param" | "path-prefix" | "ifttt-webhook";
   readonly fieldName: string;
   readonly targetUrl?: string;
   readonly label?: string;
@@ -61,7 +61,7 @@ export function AssistantPendingCredentialCreateDialog({
   const [injectionMethod, setInjectionMethod] = useState(
     params.injectionMethod,
   );
-  const [fieldName, setFieldName] = useState(params.fieldName);
+  const [fieldName, setFieldName] = useState(params.injectionMethod === "ifttt-webhook" ? "key" : params.fieldName);
   const [targetUrl, setTargetUrl] = useState(params.targetUrl ?? "");
   const [label, setLabel] = useState(params.label ?? "");
   const [submitting, setSubmitting] = useState(false);
@@ -193,9 +193,10 @@ export function AssistantPendingCredentialCreateDialog({
                 </Label>
                 <Select
                   value={injectionMethod}
-                  onValueChange={(value) =>
-                    setInjectionMethod(value as typeof injectionMethod)
-                  }
+                  onValueChange={(value) => {
+                    setInjectionMethod(value as typeof injectionMethod);
+                    if (value === "ifttt-webhook") setFieldName("key");
+                  }}
                 >
                   <SelectTrigger id={`${mode}-injection-method`}>
                     <SelectValue />
@@ -204,6 +205,7 @@ export function AssistantPendingCredentialCreateDialog({
                     <SelectItem value="header">Header</SelectItem>
                     <SelectItem value="query-param">Query parameter</SelectItem>
                     <SelectItem value="path-prefix">Path prefix</SelectItem>
+                    <SelectItem value="ifttt-webhook">IFTTT Webhooks</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -213,6 +215,7 @@ export function AssistantPendingCredentialCreateDialog({
               <Input
                 id={`${mode}-field-name`}
                 value={fieldName}
+                readOnly={injectionMethod === "ifttt-webhook"}
                 onChange={(event) => setFieldName(event.target.value)}
               />
             </div>

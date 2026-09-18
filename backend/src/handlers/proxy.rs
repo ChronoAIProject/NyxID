@@ -556,6 +556,9 @@ struct PreResolved {
     /// lookups so the failover list reflects the org's bindings, not
     /// just the calling member's personal bindings.
     effective_owner_id: String,
+    /// Dedicated curation credentials belong to the SA, while its effective
+    /// owner pays. This override applies only to billing, never resolution.
+    billing_owner_id: Option<String>,
     /// Whether the resolved UserService is platform-managed and
     /// auto-connected. This suppresses only the implicit global approval
     /// fallback; explicit per-service policies remain in force.
@@ -961,6 +964,57 @@ async fn proxy_request_inner(
     validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
 
+    if auth_user.auth_method == AuthMethod::ServiceAccount {
+        let sa = crate::services::service_account_service::get_service_account(
+            &state.db,
+            &auth_user.user_id.to_string(),
+        )
+        .await?;
+        if sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation {
+            let grant = crate::services::curation_grant_service::live_grant(&sa)?;
+            crate::services::curation_grant_service::require_scope(&sa, &auth_user.scope, "proxy")?;
+            if grant.ornn_proxy_service_id.as_deref() != Some(service_id)
+                || extract_via_service(&request).is_some()
+            {
+                return Err(AppError::Forbidden(
+                    "Curation proxy requires its exact catalog target without instance selection"
+                        .into(),
+                ));
+            }
+            let target = proxy_service::resolve_curation_proxy_target(
+                &state.db,
+                &state.encryption_keys,
+                &sa.id,
+                service_id,
+            )
+            .await?;
+            let slug = target.service.slug.clone();
+            return execute_proxy_inner(
+                state,
+                auth_user,
+                service_id,
+                path,
+                request,
+                Some(PreResolved {
+                    target,
+                    catalog_service_slug: Some(slug),
+                    node_id: None,
+                    user_service_id: None,
+                    has_server_credential: true,
+                    master_credential: false,
+                    credential_source: Some("user".into()),
+                    effective_owner_id: sa.id,
+                    billing_owner_id: Some(auth_user.proxy_resolution_user_id()),
+                    is_auto_connected: true,
+                }),
+                TargetMode::CallerAddressed,
+                Vec::new(),
+                resolved_slug,
+            )
+            .await;
+        }
+    }
+
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
     preflight_proxy_deny_before_resolution(
@@ -1030,6 +1084,7 @@ async fn proxy_request_inner(
                         .as_ref()
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
+                    billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
                 TargetMode::CallerAddressed,
@@ -1096,6 +1151,7 @@ async fn proxy_request_inner(
                     .as_ref()
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
+                billing_owner_id: None,
                 is_auto_connected: resolved.is_auto_connected,
             }),
             TargetMode::CallerAddressed,
@@ -1269,6 +1325,7 @@ async fn proxy_request_by_slug_inner(
                         .as_ref()
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
+                    billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
                 TargetMode::CallerAddressed,
@@ -1335,6 +1392,7 @@ async fn proxy_request_by_slug_inner(
                     .as_ref()
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
+                billing_owner_id: None,
                 is_auto_connected: resolved.is_auto_connected,
             }),
             TargetMode::CallerAddressed,
@@ -1838,6 +1896,7 @@ async fn execute_proxy_inner(
     // Captured outside the resolution match so the downstream approval
     // block can apply the org-aware cascade.
     let mut effective_owner_for_approval: Option<String> = None;
+    let mut effective_billing_owner_id: Option<String> = None;
     let mut is_auto_connected_for_approval = false;
 
     // Resolve target and node routing.
@@ -1858,6 +1917,7 @@ async fn execute_proxy_inner(
         credential_source,
     ) = if let Some(mut pre) = pre_resolved {
         effective_owner_for_approval = Some(pre.effective_owner_id.clone());
+        effective_billing_owner_id = pre.billing_owner_id;
         is_auto_connected_for_approval = pre.is_auto_connected;
         // New UserService path: target already resolved.
         // Use the resolved service's effective owner (the org's user_id
@@ -2103,8 +2163,9 @@ async fn execute_proxy_inner(
     // here would make `resolve_owner_access` deny a service account billing
     // its own owner and abort an otherwise-authorized proxy request.
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
-    let billing_resource_owner_id = effective_owner_for_approval
+    let billing_resource_owner_id = effective_billing_owner_id
         .as_deref()
+        .or(effective_owner_for_approval.as_deref())
         .unwrap_or(&billing_resolution_user_id);
     let credential_class = final_credential_class(
         resolved_user_service_id.as_deref(),
@@ -2239,6 +2300,19 @@ async fn execute_proxy_inner(
         let bytes = read_proxy_request_body(request, state.config.proxy_max_body_size).await?;
         (bytes, None)
     };
+
+    proxy_service::validate_ifttt_request(
+        &target,
+        &method,
+        path,
+        query.as_deref(),
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(body_bytes.as_ref())
+        },
+        node_route.is_some(),
+    )?;
 
     let operation = operation_descriptor::build_http_descriptor(
         &method_str,
@@ -2415,6 +2489,8 @@ async fn execute_proxy_inner(
             }
         }
     };
+
+    proxy_service::validate_ifttt_delegation(&target, &delegated)?;
 
     // Build identity headers before the node/direct split so both proxy paths
     // preserve the same downstream identity and delegation context.
@@ -2680,6 +2756,11 @@ async fn execute_proxy_inner(
     // If this is a WS upgrade request, branch into the WS path now that
     // target, credentials, and identity headers are fully resolved.
     if let Some(ws_request) = ws_request {
+        if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+            return Err(AppError::BadRequest(
+                nyxid_service_adapters::ifttt::Error::Method.to_string(),
+            ));
+        }
         // WS connections are not compatible with per-request approval.
         if enforce_approval {
             return Err(AppError::BadRequest(
@@ -4170,7 +4251,7 @@ fn final_credential_class(
     if agent_override_applied {
         return CredentialClass::AgentOverrideUserOwned;
     }
-    if resolved_user_service_id.is_some() {
+    if resolved_user_service_id.is_some() || credential_source == Some("user") {
         // Auto-provisioned UserServices with no user key inject the
         // catalog master credential; classify by whose key was used,
         // not by which resolution path matched.
@@ -7069,6 +7150,22 @@ mod tests {
     }
 
     #[test]
+    fn curation_connection_credential_keeps_byok_class_for_master_capable_catalog() {
+        let mut target = make_target("http://localhost:8080");
+        target.auth_method = "bearer".into();
+        target.credential = "dedicated-sa-key".into();
+        target.service.requires_user_credential = false;
+        assert_eq!(
+            final_credential_class(None, false, false, true, false, Some("user"), &target),
+            CredentialClass::UserOwned
+        );
+        assert_eq!(
+            final_credential_class(None, false, false, true, false, None, &target),
+            CredentialClass::NyxidManagedMaster
+        );
+    }
+
+    #[test]
     fn ws_url_converts_http_to_ws() {
         let target = make_target("http://localhost:8080");
         let url = build_downstream_ws_url(&target, "socket", None, &[]).unwrap();
@@ -9746,7 +9843,18 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let owner_id = Uuid::new_v4().to_string();
-        let sa_id = Uuid::new_v4().to_string();
+        let (sa, _) = crate::services::service_account_service::create_service_account(
+            &db,
+            "General service account",
+            None,
+            "proxy",
+            &[],
+            None,
+            &owner_id,
+        )
+        .await
+        .expect("create general service account for live purpose check");
+        let sa_id = sa.id;
         let catalog_service_id = Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&owner_id, UserType::Person))

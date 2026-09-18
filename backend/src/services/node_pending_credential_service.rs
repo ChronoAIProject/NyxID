@@ -456,6 +456,12 @@ pub async fn create_pending_credential_with_id(
     validate_service_slug(&input.service_slug)?;
     validate_field_name(&input.field_name, &input.injection_method)?;
     let target_url = clean_optional_string(input.target_url);
+    if input.injection_method == InjectionMethod::IftttWebhook
+        && let Some(url) = target_url.as_deref()
+    {
+        nyxid_service_adapters::ifttt::validate_destination(url)
+            .map_err(|error| AppError::ValidationError(error.to_string()))?;
+    }
     if let Some(url) = target_url.as_deref() {
         url_validation::validate_advisory_http_url(url, "target_url", url_validation::MAX_URL_LEN)?;
     }
@@ -566,6 +572,12 @@ pub async fn create_fan_out_pending_credential(
     validate_service_slug(&input.service_slug)?;
     validate_field_name(&input.field_name, &input.injection_method)?;
     let target_url = clean_optional_string(input.target_url);
+    if input.injection_method == InjectionMethod::IftttWebhook
+        && let Some(url) = target_url.as_deref()
+    {
+        nyxid_service_adapters::ifttt::validate_destination(url)
+            .map_err(|error| AppError::ValidationError(error.to_string()))?;
+    }
     if let Some(url) = target_url.as_deref() {
         url_validation::validate_advisory_http_url(url, "target_url", url_validation::MAX_URL_LEN)?;
     }
@@ -2431,6 +2443,13 @@ fn validate_field_name(field_name: &str, injection_method: &InjectionMethod) -> 
     }
 
     match injection_method {
+        InjectionMethod::IftttWebhook => {
+            if field_name != "key" {
+                return Err(AppError::ValidationError(
+                    "IFTTT field_name must be key".into(),
+                ));
+            }
+        }
         InjectionMethod::Header => {
             for ch in field_name.chars() {
                 if !is_http_token_char(ch) {
@@ -3234,6 +3253,45 @@ mod tests {
             .await
             .expect("internal URL is node-local advisory metadata");
         assert_eq!(pending.target_url.as_deref(), Some("http://127.0.0.1:8080"));
+    }
+
+    #[tokio::test]
+    async fn ifttt_pending_metadata_requires_key_and_fixed_or_local_destination() {
+        let db = test_db("ifttt_pending_metadata").await;
+        let actor = Uuid::new_v4().to_string();
+        insert_users(&db, vec![test_user(&actor, UserType::Person)]).await;
+        let node = test_node(&actor, "ifttt-node");
+        insert_node(&db, &node).await;
+        for (index, url) in [
+            None,
+            Some(""),
+            Some("https://maker.ifttt.com"),
+            Some("https://other.invalid"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut input = credential_input(&format!("api-ifttt-{index}"));
+            input.injection_method = InjectionMethod::IftttWebhook;
+            input.field_name = "key".into();
+            input.target_url = url.map(str::to_string);
+            let result = create_pending_credential(&db, &actor, &node.id, input).await;
+            if url == Some("https://other.invalid") {
+                assert!(matches!(result, Err(AppError::ValidationError(_))));
+            } else {
+                let pending = result.unwrap();
+                assert_eq!(pending.injection_method, InjectionMethod::IftttWebhook);
+                assert_eq!(pending.field_name, "key");
+            }
+        }
+        let mut input = credential_input("api-ifttt-field");
+        input.injection_method = InjectionMethod::IftttWebhook;
+        input.field_name = "Authorization".into();
+        assert!(
+            create_pending_credential(&db, &actor, &node.id, input)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

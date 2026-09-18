@@ -75,6 +75,7 @@ ssh-key = { version = "0.6.7", features = ["ed25519", "getrandom"] }
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
 deunicode = "1.6"
 nyxid-cloud-auth = { path = "../cloud-auth" }
+nyxid-service-adapters = { path = "../service-adapters" }
 http = "1.4"
 http-body-util = "0.1"
 # Direct rustls dep so we can install a default CryptoProvider at startup.
@@ -96,6 +97,7 @@ axum-extra = { version = "0.12.6", features = ["form", "query"] }
 [dev-dependencies]
 # Virtual time for WebSocket lifecycle deadline regressions.
 tokio = { workspace = true, features = ["test-util"] }
+nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }
 wiremock = "0.6"
 # Used only by `test_utils` (compiled under `#[cfg(test)]`) to register an
 # `atexit` hook that drops the per-test databases at process exit. Already in

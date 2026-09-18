@@ -565,6 +565,9 @@ pub struct KeyResponse {
     /// `recommended_skills` when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: Option<i64>,
+    pub skills_manifest_digest: Option<String>,
     /// Provenance: personal credentials, or inherited from an org membership.
     /// Mirrors the same field on the `/user-services` response so the
     /// frontend can group AI Services by personal vs each org section.
@@ -2579,6 +2582,9 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
     .to_string();
 
     KeyResponse {
+        recommended_skill_refs: None,
+        skills_revision: None,
+        skills_manifest_digest: None,
         id: result.service.id.clone(),
         name: label.clone(),
         label,
@@ -2713,6 +2719,9 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
     let endpoint_url = (!view.auto_connected).then_some(view.endpoint_url);
 
     KeyResponse {
+        recommended_skill_refs: None,
+        skills_revision: None,
+        skills_manifest_digest: None,
         id: view.id,
         name: view
             .catalog_service_name
@@ -2968,6 +2977,26 @@ async fn enrich_key_discovery_metadata(
         let Some(service) = service_by_id.get(key.id.as_str()) else {
             continue;
         };
+
+        let inherited_catalog = key
+            .catalog_service_id
+            .as_deref()
+            .and_then(|id| catalog_by_id.get(id));
+        let effective_skills = if key.recommended_skills.is_some() {
+            crate::models::catalog_skill_revision::SkillState {
+                recommended_skills: key.recommended_skills.clone(),
+                recommended_skill_refs: None,
+            }
+        } else if let Some(catalog) = inherited_catalog {
+            key.recommended_skill_refs = catalog.recommended_skill_refs.clone();
+            key.skills_revision = Some(catalog.skills_revision);
+            crate::services::catalog_skill_service::state(catalog)
+        } else {
+            Default::default()
+        };
+        key.skills_manifest_digest = Some(crate::services::catalog_skill_service::manifest_digest(
+            &effective_skills,
+        ));
 
         let projection = if let Some(catalog_id) = key.catalog_service_id.as_deref() {
             catalog_by_id.get(catalog_id).map(|catalog| {

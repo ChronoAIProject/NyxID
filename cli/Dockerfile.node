@@ -31,6 +31,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
 COPY cli/ cli/
 COPY cloud-auth/ cloud-auth/
+COPY service-adapters/ service-adapters/
 COPY mcp-demo/ mcp-demo/
 COPY nyxid-crypto/ nyxid-crypto/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md

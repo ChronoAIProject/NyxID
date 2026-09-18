@@ -21,6 +21,7 @@ frontend/src/components/platform-icon.tsx
 frontend/src/components/service-accounts/service-account-scope-picker.tsx
 frontend/src/components/service-icon.tsx
 frontend/src/components/service-icons/_shared.tsx
+frontend/src/components/service-icons/api-aurinko.tsx
 frontend/src/components/service-icons/api-discord-bot.tsx
 frontend/src/components/service-icons/api-discord.tsx
 frontend/src/components/service-icons/api-elevenlabs.tsx
@@ -36,6 +37,7 @@ frontend/src/components/service-icons/api-google-drive.tsx
 frontend/src/components/service-icons/api-google-gmail.tsx
 frontend/src/components/service-icons/api-google-workspace.tsx
 frontend/src/components/service-icons/api-google.tsx
+frontend/src/components/service-icons/api-ifttt.tsx
 frontend/src/components/service-icons/api-lark-bot.tsx
 frontend/src/components/service-icons/api-lark.tsx
 frontend/src/components/service-icons/api-microsoft.tsx

@@ -397,6 +397,52 @@ impl PlatformAdapter for AurinkoAdapter {
     fn serializes_lifecycle(&self) -> bool {
         true
     }
+    fn platform_credentials(
+        &self,
+    ) -> Option<crate::services::channel_managed::PlatformCredentialDescriptor> {
+        use crate::services::channel_managed::{
+            PlatformCredentialBacking, PlatformCredentialDescriptor, PlatformCredentialField,
+        };
+        Some(PlatformCredentialDescriptor {
+            provider: "aurinko",
+            label: "Aurinko Email",
+            backing: PlatformCredentialBacking::ProviderOAuth {
+                provider_slug: "aurinko",
+            },
+            fields: &[
+                PlatformCredentialField {
+                    name: "client_id",
+                    label: "Application Client ID",
+                    secret: true,
+                    required: true,
+                    numeric: false,
+                    help: "Aurinko application Client ID. Shared with the Aurinko provider configuration.",
+                },
+                PlatformCredentialField {
+                    name: "client_secret",
+                    label: "Application Client Secret",
+                    secret: true,
+                    required: true,
+                    numeric: false,
+                    help: "Aurinko application Client Secret. Shared with the Aurinko provider configuration; never a mailbox account token.",
+                },
+                PlatformCredentialField {
+                    name: "signing_secret",
+                    label: "Application webhook signing secret",
+                    secret: true,
+                    required: true,
+                    numeric: false,
+                    help: "Separate signing secret from the Aurinko application webhook settings. Required for managed channel bots.",
+                },
+            ],
+            webhook_secret_field: None,
+            setup_checklist: &[
+                "Use one Aurinko application for NyxID. The application owns upstream billing; each mailbox still requires its owner's authorization.",
+                "The Client Secret and webhook signing secret are different credentials. Never enter a mailbox account token in these fields.",
+                "Saving application credentials does not enable managed OAuth onboarding. Existing manual mailbox connections continue to use their own tokens and signing secrets.",
+            ],
+        })
+    }
     fn persists_reply_attempt(&self) -> bool {
         true
     }

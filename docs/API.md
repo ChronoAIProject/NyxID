@@ -47,6 +47,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Admin Roles](#admin-roles)
   - [Admin Groups](#admin-groups)
   - [Admin Service Accounts](#admin-service-accounts)
+  - [Catalog Skill Curation](#catalog-skill-curation)
   - [Notification Settings](#notification-settings)
   - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
@@ -8041,3 +8042,23 @@ Content-Type: application/json
 Default limits:
 - **Per-IP:** 30 requests per 1-second window
 - **Global:** 10 requests/second sustained with burst capacity of 30
+
+
+### Catalog Skill Curation
+
+Dedicated Curation service accounts use the `/catalog-curation` runtime routes below. Those runtime requests require the verified SA token, the live unexpired embedded grant, and the exact token/live account scope; human credentials, API keys, delegated tokens, and relay tokens are denied. Runtime reads reveal only grant-listed catalog services. The separate `/admin/service-accounts/{id}/curation-grant` management routes require a human platform admin.
+
+| Method | Path | Scope or authority |
+| --- | --- | --- |
+| POST / DELETE | `/api/v1/admin/service-accounts/{id}/curation-grant` | Human platform admin; sticky Curation purpose/protection |
+| GET | `/api/v1/catalog-curation/services` | `catalog:skills:read` |
+| GET | `/api/v1/catalog-curation/services/{id}/skills` | `catalog:skills:read` |
+| PUT | `/api/v1/catalog-curation/services/{id}/skills` | `catalog:skills:write` |
+| GET | `/api/v1/catalog-curation/services/{id}/skills/history` | `catalog:skills:read` |
+| POST | `/api/v1/catalog-curation/services/{id}/skills/restore` | `catalog:skills:write` |
+
+PUT accepts a complete `recommended_skills` and/or `recommended_skill_refs` list, optional `clear_refs`, and required `base_revision` plus UUID `request_id`. Restore accepts `revision`, `base_revision`, and `request_id`. Both reject unknown fields. Revision and budget changes, service state, history, and actor/request receipts commit atomically. Conflicting revisions or reuse of a committed ID with changed input return 409; exhausted budget returns 429. Pure no-ops write no receipt/history/revision and spend no budget.
+
+Human `POST/PUT /api/v1/services` use the same skill validation/history path; updates accept `skills_revision`, `skills_request_id`, optional refs, and `clear_skill_refs`. Omitted update revision means expected zero. Mixed metadata effects retain full request idempotency even when skills are unchanged.
+
+Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.

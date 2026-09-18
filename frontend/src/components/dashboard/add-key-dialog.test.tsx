@@ -1771,6 +1771,81 @@ function minCatalogEntry(slug: string, name = slug): CatalogEntry {
 }
 
 describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", () => {
+  it.each(["api-ifttt", "api-ifttt-2"])(
+    "connects IFTTT with a raw key and never probes %s",
+    async (createdSlug) => {
+      catalog.entries = [
+        {
+          ...minCatalogEntry("api-ifttt", "IFTTT Webhooks"),
+          base_url: "https://maker.ifttt.com",
+          auth_method: "ifttt_webhook",
+          auth_key_name: "",
+          provider_type: "api_key",
+        },
+      ];
+      createKeyMutate.mockImplementation((_params, opts) => {
+        opts?.onSuccess?.({ id: "ifttt-connection", slug: createdSlug });
+      });
+      createApiKeyMutate.mockImplementation((_params, opts) => {
+        opts?.onSuccess?.({
+          id: "ifttt-agent",
+          full_key: "nyxid_ag_ifttt_test",
+          key_prefix: "nyxid_ag_",
+          scopes: ["proxy"],
+          allow_all_services: false,
+          allowed_service_ids: ["ifttt-connection"],
+        });
+      });
+      const fetchSpy = vi.spyOn(window, "fetch").mockRejectedValue(
+        new Error("IFTTT setup must not make a downstream request"),
+      );
+      const onSuccess = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <AddKeyDialog open onOpenChange={vi.fn()} onSuccess={onSuccess} />,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /IFTTT Webhooks/i }),
+      );
+      await user.click(
+        screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+      );
+      expect(screen.getByLabelText(/IFTTT Webhooks key/)).toHaveAttribute(
+        "type", "password",
+      );
+      expect(
+        screen.getByPlaceholderText(/Raw key.*not a URL/i),
+      ).toBeInTheDocument();
+      await typeInto(user, "add-key-credential", "test_IFTTT_key");
+      await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+      expect(createKeyMutate).toHaveBeenCalledWith(
+        {
+          credential: "test_IFTTT_key",
+          label: "IFTTT Webhooks",
+          service_slug: "api-ifttt",
+          endpoint_url: "https://maker.ifttt.com",
+        },
+        expect.anything(),
+      );
+      await user.click(
+        await screen.findByRole("button", { name: "Create Agent Key" }),
+      );
+      expect(
+        await screen.findByText(/Automatic testing isn't supported/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /Test Agent Key/i }),
+      ).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Done" }));
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(onSuccess).toHaveBeenCalledWith({
+        userServiceId: "ifttt-connection",
+      });
+    },
+  );
+
   it("reports the created UserService id only when the success step is finished", async () => {
     createKeyMutate.mockImplementation((_params, opts) => {
       opts?.onSuccess?.({

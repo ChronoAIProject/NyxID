@@ -928,7 +928,7 @@ pub enum ServiceCommands {
         /// Label for this service
         #[arg(long)]
         label: Option<String>,
-        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, body (inject credential into JSON body), none (skips credential entry)
+        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, ifttt_webhook, body (inject credential into JSON body), none (skips credential entry)
         #[arg(long)]
         auth_method: Option<String>,
         /// Auth key name (e.g. Authorization, X-API-Key, or for body auth
@@ -2334,6 +2334,7 @@ pub enum PendingCredentialInjectionMethod {
     Header,
     QueryParam,
     PathPrefix,
+    IftttWebhook,
 }
 
 impl PendingCredentialInjectionMethod {
@@ -2342,6 +2343,7 @@ impl PendingCredentialInjectionMethod {
             Self::Header => "header",
             Self::QueryParam => "query-param",
             Self::PathPrefix => "path-prefix",
+            Self::IftttWebhook => "ifttt-webhook",
         }
     }
 }
@@ -2528,6 +2530,19 @@ pub enum NodeDaemonCommands {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn ifttt_generated_node_setup_command_parses() {
+        Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "credentials",
+            "setup",
+            "--service",
+            "api-ifttt",
+        ])
+        .expect("connection UI node command must match Clap");
+    }
 
     #[test]
     fn managed_channel_signup_rejects_all_credential_flags() {
@@ -4439,6 +4454,11 @@ pub enum ExternalKeyCommands {
 
 #[derive(Subcommand)]
 pub enum ServiceAccountCommands {
+    /// Manage the exact catalog curation grant (platform admin only)
+    CurationGrant {
+        #[command(subcommand)]
+        command: CurationGrantCommands,
+    },
     /// Create a service account (machine identity for `grant_type=client_credentials`)
     Create {
         /// Human-readable name for this service account
@@ -4555,6 +4575,42 @@ pub enum ServiceAccountCommands {
     /// Revoke all active tokens for a service account
     RevokeTokens {
         /// Service account ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CurationGrantCommands {
+    /// Issue or replace a grant; permanently protects the account
+    Issue {
+        /// Service account UUID
+        id: String,
+        /// Permitted catalog UUID; repeat for multiple services
+        #[arg(long = "service-id", required = true)]
+        service_ids: Vec<String>,
+        /// Exact Ornn HTTP catalog target (requires the proxy scope)
+        #[arg(long)]
+        ornn_proxy_service_id: Option<String>,
+        /// Optional expiry in RFC 3339 format
+        #[arg(long)]
+        expires_at: Option<String>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10000))]
+        max_writes: u32,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(60..=86400))]
+        window_seconds: u32,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show the grant and protected account state
+    Show {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Revoke the grant; purpose and platform protection remain
+    Revoke {
         id: String,
         #[command(flatten)]
         auth: AuthArgs,

@@ -60,6 +60,7 @@ export function serviceFormValues(
     required_permissions: service.required_permissions?.join(", ") ?? "",
     examples_url: service.examples_url ?? "",
     recommended_skills: service.recommended_skills?.join(", ") ?? "",
+    clear_skill_refs: false,
     developer_app_ids: normalizedSet(service.developer_app_ids ?? []),
     supports_proxy_read: service.capabilities?.supports_proxy_read ?? false,
     supports_proxy_write: service.capabilities?.supports_proxy_write ?? false,

@@ -26,6 +26,8 @@ If you're unsure, **[start with Web UI](web-ui.md)**. The other paths are equiva
 
 ## Did it work?
 
+For **IFTTT Webhooks**, follow the [IFTTT setup guide](ifttt.md). It has no harmless automatic credential probe: testing a trigger can run real Applet actions, and event acceptance does not confirm completion.
+
 After any path completes, you should be able to make a real downstream call through NyxID's proxy and get a real response back, not an auth error.
 
 For the Web UI and CLI paths, the path itself runs the verification call. If you're using AI-driven or Direct API, the verification is the explicit final step in those guides.

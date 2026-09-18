@@ -54,63 +54,125 @@ pub async fn link(
     let service_id = service_id.to_string();
     let new_service = new_service.cloned();
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
-        let result: AppResult<()> = async {
-            let provider = db.collection::<ProviderConfig>(PROVIDERS)
-                .find_one(doc! { "_id": &provider_id, "is_active": true }).session(&mut *session).await?
-                .ok_or_else(|| AppError::NotFound("Provider not found or inactive".into()))?;
-            if !matches!(provider.provider_type.as_str(), "api_key" | "oauth2" | "device_code") {
-                return Err(AppError::ValidationError("This provider does not supply service credentials".into()));
-            }
-            let services = db.collection::<DownstreamService>(SERVICES);
-            if let Some(service) = new_service.as_ref() {
-                services.insert_one(service).session(&mut *session).await?;
-            }
-            let service = services.find_one(doc! { "_id": &service_id }).session(&mut *session).await?
-                .ok_or_else(|| AppError::NotFound("Service not found".into()))?;
-            retired_service_service::require_available(&service)?;
-            if service.service_type != "http" || service.auth_method == "oidc" {
-                return Err(AppError::ValidationError("Only downstream HTTP services can be linked".into()));
-            }
-            if service.provider_config_id.as_deref().is_some_and(|id| id != provider_id.as_str()) {
-                return Err(AppError::Conflict("Service is already linked to another provider".into()));
-            }
-            if provider.requires_gateway_url && service.platform_key.as_ref().is_some_and(|c| c.enabled) {
-                return Err(AppError::ValidationError("Gateway providers cannot use a platform key".into()));
-            }
-            if new_service.is_none() && service.provider_config_id.as_deref() == Some(provider_id.as_str()) {
-                return Ok(());
-            }
-            if service.platform_key.is_none() && !service.credential_encrypted.is_empty() {
-                return Err(AppError::ValidationError("Configure an explicit platform key policy before linking a service with a shared credential".into()));
-            }
-            let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
-            let mut cursor = requirements.find(doc! { "service_id": &service_id }).session(&mut *session).await?;
-            let mut existing = None;
-            while let Some(requirement) = cursor.next(&mut *session).await.transpose()? {
-                if requirement.provider_config_id != provider_id.as_str() || existing.is_some() {
-                    return Err(AppError::Conflict("Service has other provider requirements; reconcile them explicitly before linking".into()));
-                }
-                existing = Some(requirement);
-            }
-            if service.auth_method == "none" {
-                let requirement = existing.as_ref().ok_or_else(|| AppError::ValidationError(
-                    "Provider-backed auth requires an existing provider requirement; choose a direct injection method or configure the requirement first".into()))?;
-                if !requirement.required || !matches!(requirement.injection_method.as_str(), "bearer" | "header" | "query" | "path") {
-                    return Err(AppError::ValidationError("The primary provider requirement must be required and use a supported injection method".into()));
-                }
-            } else if existing.is_some() {
-                return Err(AppError::Conflict("Direct-auth services cannot have provider requirements".into()));
-            }
-            services.update_one(doc! { "_id": &service_id }, doc! { "$set": {
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            transactions::transaction_result(
+                link_in_session(
+                    &db,
+                    &provider_id,
+                    &service_id,
+                    new_service.as_ref(),
+                    session,
+                )
+                .await,
+            )
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+/// Join a catalog creation transaction so provider validation, the catalog row,
+/// and its initial skill history either all commit or all roll back.
+pub(super) async fn link_in_session(
+    db: &mongodb::Database,
+    provider_id: &str,
+    service_id: &str,
+    new_service: Option<&DownstreamService>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .find_one(doc! { "_id": &provider_id, "is_active": true })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Provider not found or inactive".into()))?;
+    if !matches!(
+        provider.provider_type.as_str(),
+        "api_key" | "oauth2" | "device_code"
+    ) {
+        return Err(AppError::ValidationError(
+            "This provider does not supply service credentials".into(),
+        ));
+    }
+    let services = db.collection::<DownstreamService>(SERVICES);
+    if let Some(service) = new_service {
+        services.insert_one(service).session(&mut *session).await?;
+    }
+    let service = services
+        .find_one(doc! { "_id": &service_id })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".into()))?;
+    retired_service_service::require_available(&service)?;
+    if service.service_type != "http" || service.auth_method == "oidc" {
+        return Err(AppError::ValidationError(
+            "Only downstream HTTP services can be linked".into(),
+        ));
+    }
+    if service
+        .provider_config_id
+        .as_deref()
+        .is_some_and(|id| id != provider_id)
+    {
+        return Err(AppError::Conflict(
+            "Service is already linked to another provider".into(),
+        ));
+    }
+    if provider.requires_gateway_url && service.platform_key.as_ref().is_some_and(|c| c.enabled) {
+        return Err(AppError::ValidationError(
+            "Gateway providers cannot use a platform key".into(),
+        ));
+    }
+    if new_service.is_none() && service.provider_config_id.as_deref() == Some(provider_id) {
+        return Ok(());
+    }
+    if service.platform_key.is_none() && !service.credential_encrypted.is_empty() {
+        return Err(AppError::ValidationError("Configure an explicit platform key policy before linking a service with a shared credential".into()));
+    }
+    let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+    let mut cursor = requirements
+        .find(doc! { "service_id": &service_id })
+        .session(&mut *session)
+        .await?;
+    let mut existing = None;
+    while let Some(requirement) = cursor.next(&mut *session).await.transpose()? {
+        if requirement.provider_config_id != provider_id || existing.is_some() {
+            return Err(AppError::Conflict(
+                "Service has other provider requirements; reconcile them explicitly before linking"
+                    .into(),
+            ));
+        }
+        existing = Some(requirement);
+    }
+    if service.auth_method == "none" {
+        let requirement = existing.as_ref().ok_or_else(|| AppError::ValidationError(
+            "Provider-backed auth requires an existing provider requirement; choose a direct injection method or configure the requirement first".into()))?;
+        if !requirement.required
+            || !matches!(
+                requirement.injection_method.as_str(),
+                "bearer" | "header" | "query" | "path"
+            )
+        {
+            return Err(AppError::ValidationError("The primary provider requirement must be required and use a supported injection method".into()));
+        }
+    } else if existing.is_some() {
+        return Err(AppError::Conflict(
+            "Direct-auth services cannot have provider requirements".into(),
+        ));
+    }
+    services
+        .update_one(
+            doc! { "_id": &service_id },
+            doc! { "$set": {
                 "provider_config_id": &provider_id,
                 "requires_user_credential": true,
                 "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
-            }}).session(&mut *session).await?;
-            Ok(())
-        }.await;
-        transactions::transaction_result(result)
-    }).await.map_err(transactions::map_transaction_error)
+            }},
+        )
+        .session(&mut *session)
+        .await?;
+    Ok(())
 }
 
 pub async fn add_requirement(

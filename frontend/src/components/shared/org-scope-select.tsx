@@ -10,6 +10,8 @@ import {
 const PERSONAL_VALUE = "__personal__";
 
 interface OrgScopeSelectProps {
+  readonly id?: string;
+  readonly "aria-describedby"?: string;
   /** Current scope: `null` means personal; a string is an org id. */
   readonly value: string | null;
   readonly onChange: (value: string | null) => void;
@@ -34,6 +36,8 @@ interface OrgScopeSelectProps {
  * create-admin paths).
  */
 export function OrgScopeSelect({
+  id,
+  "aria-describedby": ariaDescribedBy,
   value,
   onChange,
   disabled,
@@ -54,7 +58,7 @@ export function OrgScopeSelect({
       }
       disabled={disabled || isLoading}
     >
-      <SelectTrigger aria-label={label}>
+      <SelectTrigger id={id} aria-label={label} aria-describedby={ariaDescribedBy}>
         <SelectValue placeholder="Personal" />
       </SelectTrigger>
       <SelectContent>

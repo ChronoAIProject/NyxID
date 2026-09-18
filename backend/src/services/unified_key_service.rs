@@ -649,26 +649,17 @@ pub struct KeyView {
     pub credential_source: user_service_service::CredentialSource,
 }
 
-/// Validate that a catalog `token_exchange` service gets a properly
-/// shaped credential from the caller. Older CLIs (pre-#220) and raw
-/// HTTP clients that haven't learned the new credential format will
-/// POST `{"credential": "<single_secret_string>"}` to `/api/v1/keys`.
-/// Under the new `token_exchange` auth method, that single string can't
-/// be parsed into the declared `{app_id, app_secret}` fields and every
-/// subsequent proxy call would fail at request time with a misleading
-/// error.
-///
-/// Fail loudly at registration time instead. The error message tells
-/// the caller exactly how to fix it -- run `nyxid update` for a newer
-/// CLI, or send the credential as a JSON object matching the declared
-/// fields.
-///
-/// Returns `Ok(())` for auth methods other than `token_exchange` (the
-/// helper short-circuits so it's cheap to call unconditionally).
-pub(crate) fn validate_token_exchange_catalog_credential(
+/// Reject malformed adapter credentials before storing a catalog connection.
+/// IFTTT requires a raw key; token-exchange services require the declared
+/// credential fields. Other auth methods retain their existing validation.
+pub(crate) fn validate_catalog_credential(
     svc: &DownstreamService,
     credential: &str,
 ) -> AppResult<()> {
+    if svc.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+        nyxid_service_adapters::ifttt::validate_credential(credential)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    }
     if svc.auth_method != "token_exchange" {
         return Ok(());
     }
@@ -919,6 +910,32 @@ async fn create_key_inner(
         ws_frame_injector::validate_rules(rules)?;
     }
 
+    if auth_method == Some(nyxid_service_adapters::ifttt::AUTH_METHOD) && service_slug.is_none() {
+        if ws_frame_injections.is_some_and(|rules| !rules.is_empty()) {
+            return Err(AppError::BadRequest(
+                "IFTTT Webhooks does not support WebSocket frame injection".into(),
+            ));
+        }
+        if !credential.is_empty() {
+            nyxid_service_adapters::ifttt::validate_credential(credential)
+                .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        }
+        if let Some(url) = endpoint_url
+            && !url.is_empty()
+        {
+            nyxid_service_adapters::ifttt::validate_destination(url)
+                .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        }
+        if let Some(cfg) = identity.as_ref() {
+            user_service_service::validate_ifttt_identity(
+                nyxid_service_adapters::ifttt::AUTH_METHOD,
+                &cfg.identity_propagation_mode,
+                cfg.forward_access_token,
+                cfg.inject_delegation_token,
+            )?;
+        }
+    }
+
     if let Some(node_id) = node_id {
         node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id)
             .await
@@ -968,6 +985,23 @@ async fn create_key_inner(
             )));
         }
 
+        if svc.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+            let cfg = identity
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| identity_config_from_downstream_service(&svc));
+            user_service_service::validate_ifttt_identity(
+                &svc.auth_method,
+                &cfg.identity_propagation_mode,
+                cfg.forward_access_token,
+                cfg.inject_delegation_token,
+            )?;
+            if ws_frame_injections.is_some_and(|rules| !rules.is_empty()) {
+                return Err(AppError::BadRequest(
+                    "IFTTT Webhooks does not support WebSocket frame injection".into(),
+                ));
+            }
+        }
         let is_ssh = svc.service_type == "ssh";
         let provider = if let Some(ref pid) = svc.provider_config_id {
             db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -1044,6 +1078,11 @@ async fn create_key_inner(
             svc.base_url.clone()
         };
 
+        if svc.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD && !ep_url.is_empty() {
+            nyxid_service_adapters::ifttt::validate_destination(&ep_url)
+                .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        }
+
         if endpoint_url.is_some() && node_id.is_none() {
             crate::services::url_validation::validate_user_endpoint_url(
                 &ep_url,
@@ -1079,10 +1118,10 @@ async fn create_key_inner(
 
         // Validate: `token_exchange` services require the credential to be
         // a JSON object matching the catalog's declared credential fields.
-        // See `validate_token_exchange_catalog_credential` for the full
+        // See `validate_catalog_credential` for the full
         // rationale and the upgrade message old clients get.
         if !credential.is_empty() && !node_managed_credential {
-            validate_token_exchange_catalog_credential(&svc, credential)?;
+            validate_catalog_credential(&svc, credential)?;
         }
 
         let requested_slug = match slug_override {
@@ -1393,6 +1432,8 @@ async fn create_key_inner(
         let empty_credential = encryption_keys.encrypt(b"").await?;
         let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: ds_id.clone(),
             name: label.to_string(),
             // New SSH rows keep an internal UUID-derived backing slug so the
@@ -2898,6 +2939,13 @@ pub async fn ensure_user_api_key_for_update(
         .as_ref()
         .map(|(_, secret)| secret.as_str());
     let service = user_service_service::get_user_service(db, user_id, service_id).await?;
+
+    if new_auth_method.unwrap_or(&service.auth_method) == nyxid_service_adapters::ifttt::AUTH_METHOD
+        && let Some(key) = new_credential
+    {
+        nyxid_service_adapters::ifttt::validate_credential(key)
+            .map_err(|error| AppError::ValidationError(error.to_string()))?;
+    }
 
     // Load credential_type for the classifier when an api_key is already
     // linked — the classifier needs it to distinguish node_managed from
@@ -4467,8 +4515,7 @@ mod tests {
         identity_config_from_downstream_service, is_duplicate_reserved_service_id_app_error,
         is_duplicate_slug_app_error, list_keys, oauth_connection_status, random_slug_suffix,
         reconcile_provider_key_for_service_routing, resolve_openapi_spec_url, resolve_unique_slug,
-        revoke_key_if_pending, slug_candidate_with_suffix,
-        validate_token_exchange_catalog_credential,
+        revoke_key_if_pending, slug_candidate_with_suffix, validate_catalog_credential,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::downstream_service::{
@@ -4721,6 +4768,8 @@ mod tests {
 
     fn sample_catalog_service() -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "cat-1".to_string(),
             name: "Catalog".to_string(),
             slug: "catalog".to_string(),
@@ -6233,7 +6282,7 @@ mod tests {
         assert!(!identity.identity_include_name);
     }
 
-    // ─── validate_token_exchange_catalog_credential ──────────────────
+    // ─── validate_catalog_credential ──────────────────
 
     fn lark_bot_catalog_service() -> DownstreamService {
         let mut svc = sample_catalog_service();
@@ -6274,11 +6323,8 @@ mod tests {
     #[test]
     fn validate_token_exchange_credential_accepts_well_formed_json() {
         let svc = lark_bot_catalog_service();
-        validate_token_exchange_catalog_credential(
-            &svc,
-            r#"{"app_id":"cli_xxx","app_secret":"yyy"}"#,
-        )
-        .expect("well-formed credential must be accepted");
+        validate_catalog_credential(&svc, r#"{"app_id":"cli_xxx","app_secret":"yyy"}"#)
+            .expect("well-formed credential must be accepted");
     }
 
     #[test]
@@ -6291,7 +6337,7 @@ mod tests {
         // registration time with a message that tells the caller how
         // to recover instead of silently creating a broken binding.
         let svc = lark_bot_catalog_service();
-        let err = validate_token_exchange_catalog_credential(&svc, "just-the-app-secret")
+        let err = validate_catalog_credential(&svc, "just-the-app-secret")
             .expect_err("raw-string credential must be rejected");
         let msg = err.to_string();
         assert!(
@@ -6309,7 +6355,7 @@ mod tests {
     #[test]
     fn validate_token_exchange_credential_rejects_missing_field() {
         let svc = lark_bot_catalog_service();
-        let err = validate_token_exchange_catalog_credential(&svc, r#"{"app_id":"cli_xxx"}"#)
+        let err = validate_catalog_credential(&svc, r#"{"app_id":"cli_xxx"}"#)
             .expect_err("credential missing app_secret must be rejected");
         assert!(matches!(err, AppError::BadRequest(_)));
     }
@@ -6323,7 +6369,7 @@ mod tests {
         let mut svc = lark_bot_catalog_service();
         svc.auth_method = "body".to_string();
         svc.auth_key_name = "app_secret".to_string();
-        validate_token_exchange_catalog_credential(&svc, "raw-app-secret")
+        validate_catalog_credential(&svc, "raw-app-secret")
             .expect("body auth credentials must pass through without validation");
     }
 
@@ -6335,9 +6381,8 @@ mod tests {
         // so admins know where to look.
         let mut svc = lark_bot_catalog_service();
         svc.token_exchange_config = None;
-        let err =
-            validate_token_exchange_catalog_credential(&svc, r#"{"app_id":"x","app_secret":"y"}"#)
-                .expect_err("missing config must fail with an Internal error");
+        let err = validate_catalog_credential(&svc, r#"{"app_id":"x","app_secret":"y"}"#)
+            .expect_err("missing config must fail with an Internal error");
         assert!(matches!(err, AppError::Internal(_)));
         assert!(err.to_string().contains("api-lark-bot"));
     }

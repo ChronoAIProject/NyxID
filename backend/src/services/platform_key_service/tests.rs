@@ -610,6 +610,8 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
         is_generic_proxy: false,
         invalid_openapi_contract: false,
         recommended_skills: vec![],
+        recommended_skill_refs: None,
+        skills_revision: None,
         proxy_operation_policy: None,
     };
     let prepared = mcp_service::prepare_proxy_tool_call(

@@ -104,6 +104,10 @@ pub mod user_tokens;
 pub mod users;
 pub mod webhooks;
 
+pub mod catalog_curation;
+
 pub mod assistant_nyxagent;
 pub mod channel_platforms;
+#[cfg(test)]
+mod curation_tests;
 pub mod options;

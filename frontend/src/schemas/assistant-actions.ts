@@ -80,6 +80,7 @@ const FORBIDDEN_ACTION_KEY =
 
 export const customServiceAuthMethodSchema = z.enum([
   "bearer",
+  "ifttt_webhook",
   "header",
   "query",
   "path",
@@ -305,7 +306,7 @@ export const nodeCredentialActionParamsSchema = z
   .object({
     nodeId: requiredActionIdentitySchema,
     serviceSlug: z.string().trim().min(1).max(64),
-    injectionMethod: z.enum(["header", "query-param", "path-prefix"]),
+    injectionMethod: z.enum(["header", "query-param", "path-prefix", "ifttt-webhook"]),
     fieldName: z.string().trim().min(1).max(128),
     targetUrl: optionalActionTextSchema,
     label: optionalActionTextSchema,
@@ -704,7 +705,7 @@ export type ActionCardParams =
       readonly variant: "node_inject_credential";
       readonly node_id: string;
       readonly service_slug: string;
-      readonly injection_method: "header" | "query-param" | "path-prefix";
+      readonly injection_method: "header" | "query-param" | "path-prefix" | "ifttt-webhook";
       readonly field_name: string;
       readonly target_url?: string;
       readonly label?: string;
@@ -713,7 +714,7 @@ export type ActionCardParams =
       readonly variant: "pending_credential_push";
       readonly node_id: string;
       readonly service_slug: string;
-      readonly injection_method: "header" | "query-param" | "path-prefix";
+      readonly injection_method: "header" | "query-param" | "path-prefix" | "ifttt-webhook";
       readonly field_name: string;
       readonly target_url?: string;
       readonly label?: string;
