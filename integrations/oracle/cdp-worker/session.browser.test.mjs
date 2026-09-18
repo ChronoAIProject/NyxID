@@ -1291,11 +1291,7 @@ for (const change of ['label', 'node', 'ambiguous']) {
 }
 
 const compactMenuItems = ['6\nPro', '能力', '最新', 'GPT-5.6 Sol', 'GPT-5.5\n将于10月14日下线'];
-const compactSwitcherQuarantine = {
-  ...options,
-  skip: '0.25.1 release exception; restore with https://github.com/ChronoAIProject/NyxID/issues/1608',
-};
-test('compact model switcher: strict worker delivery reads the five-button composer without inferring Extended', compactSwitcherQuarantine, async t => {
+test('compact model switcher: strict worker delivery reads the five-button composer without inferring Extended', options, async t => {
   const fixture = await reasoningFixture(t, { compactSwitcher: true, strict: true, noPill: true, headerItems: compactMenuItems });
   await waitUntil(() => fixture.results.length, 12000);
   assert.equal(fixture.results[0].response, 'Synthetic reasoning response', fixture.process.output());
@@ -1319,7 +1315,7 @@ test('compact model switcher: a different family fails strict worker delivery be
   assert.equal(events.some(e => e.startsWith('header:')), false);
 });
 
-test('compact model switcher: strict worker delivery selects Pro from Thinking without inferring effort', compactSwitcherQuarantine, async t => {
+test('compact model switcher: strict worker delivery selects Pro from Thinking without inferring effort', options, async t => {
   const fixture = await reasoningFixture(t, { compactSwitcher: true, headerLabel: '6\nThinking', headerFamily: '6',
     strict: true, noPill: true, headerItems: ['Auto', 'Instant', 'Thinking', 'Pro'] });
   await waitUntil(() => fixture.results.length, 12000);
@@ -1341,7 +1337,7 @@ test('compact model switcher: strict worker delivery selects Pro from Thinking w
 });
 
 for (const fallback of [false, true]) {
-  test(`compact model switcher: selects Pro from Thinking and verifies a real ${fallback ? 'fallback' : 'structural'} effort pill`, fallback ? compactSwitcherQuarantine : options, async t => {
+  test(`compact model switcher: selects Pro from Thinking and verifies a real ${fallback ? 'fallback' : 'structural'} effort pill`, options, async t => {
     const fixture = await reasoningFixture(t, { compactSwitcher: true, headerLabel: '6\nThinking', headerFamily: '6',
       strict: true, proTiers: true, fallback, initial: 'High', headerItems: ['Auto', 'Instant', 'Thinking', 'Pro'] });
     await waitUntil(() => fixture.results.length, 12000);
@@ -1374,7 +1370,7 @@ test('compact model switcher: Thinking with no recognized model entry fails stri
 });
 
 for (const compactDrift of ['family', 'absent']) {
-  test(`compact model switcher: pre-send ${compactDrift} change fails before the durable Send fence`, compactSwitcherQuarantine, async t => {
+  test(`compact model switcher: pre-send ${compactDrift} change fails before the durable Send fence`, options, async t => {
     const fixture = await reasoningFixture(t, { compactSwitcher: true, strict: true, noPill: true, headerItems: compactMenuItems, compactDrift });
     await waitUntil(() => fixture.results.length, 12000);
     assert.equal(fixture.results[0].response, 'ERROR: model_unavailable', fixture.process.output());
