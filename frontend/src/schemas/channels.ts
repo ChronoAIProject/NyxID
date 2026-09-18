@@ -36,7 +36,8 @@ export const createChannelBotSchema = z
     platform: channelPlatformSchema,
     bot_token: z
       .string()
-      .max(512, "Bot token is too long"),
+      .max(512, "Bot token is too long")
+      .optional(),
     label: z
       .string()
       .min(1, "Label is required")

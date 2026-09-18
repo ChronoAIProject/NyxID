@@ -15,7 +15,7 @@ export function platformFixture(platform: ChannelPlatformDescriptor["platform"],
 export const platformFixtures: ChannelPlatformDescriptor[] = [
   platformFixture("telegram"), platformFixture("telegram-new", []),
   platformFixture("discord", [field("bot_token", true), field("public_key")]),
-  ...(["lark", "feishu"] as const).map((p) => platformFixture(p, [field("bot_token", true), field("app_id", false, true, true), field("app_secret", true, true, true), field("verification_token", true, true, true), field("encrypt_key", true, false, true)])),
+  ...(["lark", "feishu"] as const).map((p) => platformFixture(p, [field("app_id", false, true, true), field("app_secret", true, true, true), field("verification_token", true, true, true), field("encrypt_key", true, false, true)])),
   platformFixture("slack", [field("bot_token", true), field("app_secret", true, true, true)]),
   { ...platformFixture("whatsapp", [field("bot_token", true, true, true), field("phone_number_id"), field("app_secret", true, true, true), field("waba_id", false, false)]),
     managed_onboarding: { flow: "meta_embedded_signup", provider: "meta", bootstrap_fields: [], completion_fields: [] } },

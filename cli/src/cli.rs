@@ -4856,7 +4856,7 @@ pub enum ChannelBotCommands {
         /// Slack: pass the `xoxb-` bot user OAuth token.
         #[arg(long, hide = true)]
         bot_token: Option<String>,
-        /// Read bot token from this environment variable
+        /// Read bot token from this environment variable (not needed for Lark/Feishu)
         #[arg(long)]
         token_env: Option<String>,
         /// Label for this bot

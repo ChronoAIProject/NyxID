@@ -21,6 +21,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 #[derive(Deserialize)]
 pub struct CreateChannelBotRequest {
     pub platform: String,
+    #[serde(default)]
     pub bot_token: String,
     pub label: String,
     #[serde(default)]
@@ -1252,6 +1253,51 @@ mod tests {
         assert_eq!(item.platform, "telegram");
         assert_eq!(item.label, "TG Bot");
         assert!(!item.webhook_registered);
+    }
+
+    #[test]
+    fn create_channel_bot_request_allows_omitting_bot_token() {
+        for platform in ["lark", "feishu"] {
+            let request: CreateChannelBotRequest = serde_json::from_value(serde_json::json!({
+                "platform": platform,
+                "label": "Support",
+                "app_id": "cli_test",
+                "app_secret": "app-secret",
+                "verification_token": "verification-token"
+            }))
+            .unwrap();
+            assert!(request.bot_token.is_empty());
+        }
+    }
+
+    #[test]
+    fn token_platforms_still_require_bot_token() {
+        let cache = std::sync::Arc::new(
+            crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+        );
+        for (platform, expected) in [
+            ("telegram", "Bot token is required"),
+            ("discord", "Bot token is required"),
+            ("slack", "Bot token is required"),
+            ("whatsapp", "Access token is required"),
+        ] {
+            let request: CreateChannelBotRequest = serde_json::from_value(serde_json::json!({
+                "platform": platform, "label": "Support"
+            }))
+            .unwrap();
+            let fields = RegistrationValues(
+                normalize_optional_field(Some(&request.bot_token))
+                    .map(|token| ("bot_token", token))
+                    .into_iter()
+                    .collect(),
+            );
+            let error = resolve_adapter(platform, &cache)
+                .unwrap()
+                .registration()
+                .validate(&fields, false)
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{platform}: {error}");
+        }
     }
 
     #[test]

@@ -405,14 +405,8 @@ mod tests {
         for (platform, required) in [
             ("telegram", vec!["bot_token"]),
             ("discord", vec!["bot_token", "public_key"]),
-            (
-                "lark",
-                vec!["bot_token", "app_id", "app_secret", "verification_token"],
-            ),
-            (
-                "feishu",
-                vec!["bot_token", "app_id", "app_secret", "verification_token"],
-            ),
+            ("lark", vec!["app_id", "app_secret", "verification_token"]),
+            ("feishu", vec!["app_id", "app_secret", "verification_token"]),
             ("slack", vec!["bot_token", "app_secret"]),
             (
                 "whatsapp",
