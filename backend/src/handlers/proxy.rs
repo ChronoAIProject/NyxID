@@ -2039,6 +2039,7 @@ async fn execute_proxy_inner(
                 &user_id_str,
                 ak_id,
                 us_id,
+                &pre.target,
                 Some(&state.connection_expiry_notifier),
             )
             .await?

@@ -2851,6 +2851,10 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
+    super::ifttt_oauth_service::validate_credential_route(
+        db, api_key.provider_config_id.as_deref(), &user_service.auth_method,
+        &endpoint.url, user_service.node_id.as_deref(),
+    ).await?;
     let api_key = if materialize_credentials {
         maybe_refresh_provider_backed_api_key(
             db,
@@ -3161,6 +3165,7 @@ pub async fn resolve_agent_credential_override(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<String>> {
     Ok(resolve_agent_credential_override_identity(
@@ -3169,6 +3174,7 @@ pub async fn resolve_agent_credential_override(
         user_id,
         api_key_id,
         user_service_id,
+        target,
         connection_expiry_notifier,
     )
     .await?
@@ -3193,6 +3199,7 @@ pub async fn read_agent_credential_override_identity(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
 ) -> AppResult<Option<AgentCredentialOverrideIdentity>> {
     let Some(override_key_id) = agent_binding_service::resolve_credential_override(
         db,
@@ -3209,6 +3216,14 @@ pub async fn read_agent_credential_override_identity(
         .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::Internal("Bound credential not found".to_string()))?;
+    super::ifttt_oauth_service::validate_credential_route(
+        db,
+        api_key.provider_config_id.as_deref(),
+        &target.auth_method,
+        &target.base_url,
+        None,
+    )
+    .await?;
     if api_key.status != "active" || !credential_is_materializable(db, &api_key).await? {
         return Err(AppError::BadRequest(
             "Bound credential is not executable".to_string(),
@@ -3226,6 +3241,7 @@ pub async fn resolve_agent_credential_override_identity(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<AgentCredentialOverride>> {
     let override_key_id = agent_binding_service::resolve_credential_override(
@@ -3252,6 +3268,14 @@ pub async fn resolve_agent_credential_override_identity(
             AppError::Internal("Bound credential not found".to_string())
         })?;
 
+    super::ifttt_oauth_service::validate_credential_route(
+        db,
+        api_key.provider_config_id.as_deref(),
+        &target.auth_method,
+        &target.base_url,
+        None,
+    )
+    .await?;
     let api_key = maybe_refresh_provider_backed_api_key(
         db,
         encryption_keys,
@@ -3734,12 +3758,16 @@ pub async fn forward_request(
 pub(crate) enum ForwardRequestError {
     Application(AppError),
     Transport(reqwest::Error),
+    OutcomeUnknown,
 }
 
 impl ForwardRequestError {
     pub(crate) fn into_app_error(self) -> AppError {
         match self {
             Self::Application(error) => error,
+            Self::OutcomeUnknown => AppError::Conflict(
+                "Provider outcome is unknown; check the provider before retrying".into(),
+            ),
             Self::Transport(error) => {
                 tracing::error!(
                     timeout = error.is_timeout(),
@@ -3883,6 +3911,9 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             .map_err(|error| match error {
                 nyxid_service_adapters::ifttt_mcp::Error::Transport(error) => {
                     ForwardRequestError::Transport(error)
+                }
+                nyxid_service_adapters::ifttt_mcp::Error::OutcomeUnknown => {
+                    ForwardRequestError::OutcomeUnknown
                 }
                 nyxid_service_adapters::ifttt_mcp::Error::Request
                 | nyxid_service_adapters::ifttt_mcp::Error::Destination => {
@@ -5531,6 +5562,7 @@ mod tests {
             &user_id,
             &api_key_id,
             &user_service_id,
+            &make_proxy_target("https://example.com".into()),
             None,
         )
         .await
@@ -5558,6 +5590,7 @@ mod tests {
             &user_id,
             &api_key_id,
             &user_service_id,
+            &make_proxy_target("https://example.com".into()),
             None,
         )
         .await
@@ -5585,11 +5618,16 @@ mod tests {
             .await
             .unwrap();
 
-        let read_only_identity =
-            read_agent_credential_override_identity(&db, &user_id, &api_key_id, &user_service_id)
-                .await
-                .expect("read-only override authority resolves from durable refresh material")
-                .expect("bound refresh-only override identity");
+        let read_only_identity = read_agent_credential_override_identity(
+            &db,
+            &user_id,
+            &api_key_id,
+            &user_service_id,
+            &make_proxy_target("https://example.com".into()),
+        )
+        .await
+        .expect("read-only override authority resolves from durable refresh material")
+        .expect("bound refresh-only override identity");
         assert_eq!(read_only_identity.api_key_id, override_credential_id);
         assert_eq!(read_only_identity.credential_epoch, 1);
     }

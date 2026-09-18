@@ -974,6 +974,15 @@ pub async fn create_user_service_with_id(
 ) -> AppResult<UserService> {
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
+    super::ifttt_oauth_service::validate_key_route(
+        db,
+        api_key_id,
+        auth_method,
+        endpoint_id,
+        None,
+        node_id,
+    )
+    .await?;
     let identity = normalize_identity_config(identity)?;
     validate_ifttt_identity(
         auth_method,
@@ -1227,6 +1236,15 @@ pub async fn update_user_service(
     admin_only: Option<bool>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
+    super::ifttt_oauth_service::validate_key_route(
+        db,
+        current.api_key_id.as_deref(),
+        auth_method.unwrap_or(&current.auth_method),
+        &current.endpoint_id,
+        None,
+        node_id.or(current.node_id.as_deref()),
+    )
+    .await?;
     ensure_service_fields_editable(
         &current,
         &[
@@ -1560,6 +1578,16 @@ pub async fn validate_update_inputs(
     new_openapi_spec_url: Option<&str>,
 ) -> AppResult<()> {
     ensure_user_managed_service(current)?;
+
+    super::ifttt_oauth_service::validate_key_route(
+        db,
+        current.api_key_id.as_deref(),
+        auth_method.unwrap_or(&current.auth_method),
+        &current.endpoint_id,
+        new_endpoint_url,
+        node_id.or(current.node_id.as_deref()),
+    )
+    .await?;
 
     if let Some(am) = auth_method {
         validate_auth_method(am)?;

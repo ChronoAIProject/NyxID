@@ -938,6 +938,9 @@ pub async fn initiate_oauth_connect(
             "nonce",
         ];
         for (key, value) in extra {
+            if provider.slug == super::ifttt_oauth_service::PROVIDER_SLUG && key == "resource" {
+                continue;
+            }
             if !BLOCKLIST.contains(&key.as_str()) && key != cid_param {
                 auth_url.push_str(&format!(
                     "&{}={}",
@@ -946,6 +949,13 @@ pub async fn initiate_oauth_connect(
                 ));
             }
         }
+    }
+
+    if provider.slug == super::ifttt_oauth_service::PROVIDER_SLUG {
+        auth_url.push_str(&format!(
+            "&resource={}",
+            urlencoding::encode(nyxid_service_adapters::ifttt_mcp::BASE_URL)
+        ));
     }
 
     tracing::info!(

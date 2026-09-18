@@ -18,6 +18,84 @@ pub const AUTHORIZE_URL: &str = "https://ifttt.com/oauth/authorize";
 pub const TOKEN_URL: &str = "https://ifttt.com/oauth/token";
 const REGISTRATION_URL: &str = "https://ifttt.com/oauth/register";
 
+pub async fn validate_credential_route(
+    db: &Database,
+    provider_id: Option<&str>,
+    auth_method: &str,
+    base_url: &str,
+    node_id: Option<&str>,
+) -> AppResult<()> {
+    let Some(provider_id) = provider_id else {
+        return Ok(());
+    };
+    let is_ifttt = db
+        .collection::<ProviderConfig>(COLLECTION_NAME)
+        .count_documents(doc! {"_id": provider_id, "slug": PROVIDER_SLUG})
+        .await?
+        != 0;
+    if is_ifttt {
+        validate_ifttt_route(auth_method, base_url, node_id)?;
+    }
+    Ok(())
+}
+
+fn validate_ifttt_route(auth_method: &str, base_url: &str, node_id: Option<&str>) -> AppResult<()> {
+    if auth_method != nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+        || base_url != nyxid_service_adapters::ifttt_mcp::BASE_URL
+        || node_id.is_some_and(|id| !id.is_empty())
+    {
+        return Err(AppError::ValidationError(
+            "IFTTT OAuth credentials require the fixed IFTTT MCP destination and server routing"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn validate_key_route(
+    db: &Database,
+    key_id: Option<&str>,
+    auth_method: &str,
+    endpoint_id: &str,
+    replacement_url: Option<&str>,
+    node_id: Option<&str>,
+) -> AppResult<()> {
+    use crate::models::{user_api_key, user_endpoint};
+    let Some(key_id) = key_id else {
+        return Ok(());
+    };
+    let Some(key) = db
+        .collection::<user_api_key::UserApiKey>(user_api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id": key_id})
+        .await?
+    else {
+        return Ok(());
+    };
+    let Some(provider_id) = key.provider_config_id.as_deref() else {
+        return Ok(());
+    };
+    if db
+        .collection::<ProviderConfig>(COLLECTION_NAME)
+        .count_documents(doc! {"_id": provider_id, "slug": PROVIDER_SLUG})
+        .await?
+        == 0
+    {
+        return Ok(());
+    }
+    let endpoint;
+    let url = if let Some(url) = replacement_url {
+        url
+    } else {
+        endpoint = db
+            .collection::<user_endpoint::UserEndpoint>(user_endpoint::COLLECTION_NAME)
+            .find_one(doc! {"_id": endpoint_id})
+            .await?
+            .ok_or_else(|| AppError::NotFound("Endpoint not found".into()))?;
+        &endpoint.url
+    };
+    validate_ifttt_route(auth_method, url, node_id)
+}
+
 pub fn is_managed_provider(provider: &ProviderConfig) -> bool {
     provider.slug == PROVIDER_SLUG
         && provider.provider_type == "oauth2"
@@ -89,7 +167,7 @@ async fn ensure_registered_with_client(
             return Ok(latest);
         }
         return Err(AppError::Conflict(
-            "IFTTT connection setup is in progress. Try connecting again shortly.".into(),
+            "IFTTT connection setup is busy or temporarily unavailable. Try connecting again shortly.".into(),
         ));
     }
     let result = register(client, &callback).await;
@@ -117,13 +195,15 @@ async fn ensure_registered_with_client(
         }.await,
         Err(error) => Err(error),
     };
-    // The lease fences concurrent installations; credentials remain in the normal encrypted store.
-    let _ = collection
-        .update_one(
-            doc! {"_id": &provider.id, "oauth_registration_lease": &lease},
-            doc! {"$unset": {"oauth_registration_lease": "", "oauth_registration_until": ""}},
-        )
-        .await;
+    // Keep the failed attempt's lease until expiry to bound registration retries.
+    if result.is_ok() {
+        let _ = collection
+            .update_one(
+                doc! {"_id": &provider.id, "oauth_registration_lease": &lease},
+                doc! {"$unset": {"oauth_registration_lease": "", "oauth_registration_until": ""}},
+            )
+            .await;
+    }
     result
 }
 
@@ -273,6 +353,44 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(again.client_secret_encrypted, saved.client_secret_encrypted);
+        fixture.requests.recv().await.unwrap();
+        assert!(fixture.requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn ifttt_failed_registration_retains_a_cooldown() {
+        use crate::test_utils::{connect_test_database, test_encryption_keys};
+        let db = connect_test_database("ifttt_registration_cooldown")
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        super::super::provider_service::seed_default_providers(&db, &keys)
+            .await
+            .unwrap();
+        let provider = db
+            .collection::<ProviderConfig>(COLLECTION_NAME)
+            .find_one(doc! {"slug":PROVIDER_SLUG})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut fixture = scripted_fixture("ifttt.com", vec!["HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()]).await;
+        let client = registration_client(fixture.builder.take().unwrap()).unwrap();
+        assert!(
+            ensure_registered_with_client(
+                &db,
+                &keys,
+                "https://nyxid.example",
+                provider.clone(),
+                &client
+            )
+            .await
+            .is_err()
+        );
+        assert!(matches!(
+            ensure_registered_with_client(&db, &keys, "https://nyxid.example", provider, &client)
+                .await,
+            Err(AppError::Conflict(_))
+        ));
         fixture.requests.recv().await.unwrap();
         assert!(fixture.requests.try_recv().is_err());
     }

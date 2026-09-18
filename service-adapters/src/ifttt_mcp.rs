@@ -20,6 +20,8 @@ pub enum Error {
     Request,
     #[error("IFTTT returned an invalid or oversized MCP response")]
     Protocol,
+    #[error("IFTTT tool outcome is unknown; check IFTTT before retrying")]
+    OutcomeUnknown,
     #[error("IFTTT rejected the MCP request (code {0})")]
     Rpc(i64),
     #[error("IFTTT request outcome is unknown; check IFTTT before retrying")]
@@ -89,6 +91,31 @@ fn operation(
 }
 
 pub struct Client(reqwest::Client);
+
+struct SessionCleanup(Option<reqwest::RequestBuilder>);
+
+impl SessionCleanup {
+    fn spawn(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.0.take().map(|request| {
+            tokio::spawn(async move {
+                let _ = request.send().await;
+            })
+        })
+    }
+
+    async fn close(mut self) {
+        if let Some(task) = self.spawn() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for SessionCleanup {
+    fn drop(&mut self) {
+        // Dropping a cancelled request must still terminate its upstream session.
+        self.spawn();
+    }
+}
 
 impl Client {
     pub fn new(builder: reqwest::ClientBuilder) -> Result<Self, reqwest::Error> {
@@ -160,6 +187,14 @@ impl Client {
             return Err(Error::Protocol);
         }
         let mut version = PROTOCOL_VERSION.to_string();
+        let mut cleanup = SessionCleanup(session.as_deref().map(|session| {
+            self.0
+                .delete(BASE_URL)
+                .bearer_auth(token)
+                .header("Mcp-Session-Id", session)
+                .timeout(Duration::from_secs(2))
+        }));
+        let mut operation_dispatched = false;
         let result = async {
             let initialized = rpc_result(response, 1).await?;
             let negotiated = initialized["protocolVersion"]
@@ -171,6 +206,9 @@ impl Client {
                 return Err(Error::Protocol);
             }
             version = negotiated.to_owned();
+            if let Some(request) = cleanup.0.take() {
+                cleanup.0 = Some(request.header("MCP-Protocol-Version", &version));
+            }
             let notification = self
                 .request(
                     token,
@@ -186,6 +224,7 @@ impl Client {
             if !notification.status().is_success() {
                 return Ok(rejection(notification.status()));
             }
+            operation_dispatched = true;
             let response = self
                 .request(
                     token,
@@ -197,32 +236,54 @@ impl Client {
                 )
                 .send()
                 .await
-                .map_err(transport_error)?;
-            if response.status().is_success() {
-                rpc_result(response, 2).await.map(|result| {
-                    let status = if result["isError"] == true {
-                        StatusCode::UNPROCESSABLE_ENTITY
+                .map_err(|error| {
+                    if rpc_method == "tools/call" && !error.is_connect() && !error.is_builder() {
+                        Error::OutcomeUnknown
                     } else {
-                        StatusCode::OK
-                    };
-                    json_response(status, result)
-                })
+                        transport_error(error)
+                    }
+                })?;
+            if response.status().is_success() {
+                rpc_result(response, 2)
+                    .await
+                    .map_err(|error| {
+                        if matches!(error, Error::Protocol | Error::Transport(_))
+                            && rpc_method == "tools/call"
+                        {
+                            Error::OutcomeUnknown
+                        } else {
+                            error
+                        }
+                    })
+                    .map(|result| {
+                        let status = if result["isError"] == true {
+                            StatusCode::UNPROCESSABLE_ENTITY
+                        } else {
+                            StatusCode::OK
+                        };
+                        json_response(status, result)
+                    })
             } else {
                 Ok(rejection(response.status()))
             }
         }
         .await;
-        // Each invocation owns its session; no credentials or session IDs are cached.
-        if let Some(session) = session {
-            let _ = self
-                .0
-                .delete(BASE_URL)
-                .bearer_auth(token)
-                .header("Mcp-Session-Id", session)
-                .header("MCP-Protocol-Version", version)
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await;
+        cleanup.close().await;
+        if let Err(Error::Rpc(code)) = result {
+            return Ok(json_response(
+                if operation_dispatched && rpc_method == "tools/call" && code == -32602 {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                json!({"error": "IFTTT rejected the MCP request", "upstream_rpc_code": code}),
+            ));
+        }
+        if matches!(result, Err(Error::Protocol)) {
+            return Ok(json_response(
+                StatusCode::BAD_GATEWAY,
+                json!({"error":"IFTTT returned an invalid MCP response"}),
+            ));
         }
         result
     }
@@ -569,13 +630,181 @@ mod tests {
             )
             .await;
             let client = Client::new(server.builder.take().unwrap()).unwrap();
-            assert!(matches!(
+            assert_eq!(
                 client
                     .forward(BASE_URL, &Method::GET, "tools", None, "token", None)
-                    .await,
-                Err(Error::Protocol)
-            ));
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::BAD_GATEWAY
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn post_dispatch_invalid_responses_preserve_unknown_outcome_without_retry() {
+        for body in [
+            "x".repeat(MAX_RESPONSE_BYTES + 1),
+            json!({"jsonrpc":"2.0","id":99,"result":{}}).to_string(),
+            "not json".into(),
+        ] {
+            let mut server = scripted_fixture(
+                "ifttt.com",
+                vec![
+                    initialized(),
+                    accepted(),
+                    response("200 OK", "Content-Type: application/json\r\n", &body),
+                    accepted(),
+                ],
+            )
+            .await;
+            let client = Client::new(server.builder.take().unwrap()).unwrap();
+            assert!(matches!(
+                client
+                    .forward(
+                        BASE_URL,
+                        &Method::POST,
+                        "tools/create_applet",
+                        None,
+                        "token",
+                        Some(b"{}")
+                    )
+                    .await,
+                Err(Error::OutcomeUnknown)
+            ));
+            server.requests.recv().await.unwrap();
+            server.requests.recv().await.unwrap();
+            assert_eq!(
+                request_json(&server.requests.recv().await.unwrap())["method"],
+                "tools/call"
+            );
+            assert!(
+                String::from_utf8_lossy(&server.requests.recv().await.unwrap())
+                    .starts_with("DELETE /mcp ")
+            );
+            assert!(server.requests.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_rejections_are_sanitized_and_classified() {
+        for (code, expected) in [(-32602, 400), (-32601, 502), (-32603, 502)] {
+            let mut server = scripted_fixture("ifttt.com", vec![
+                initialized(), accepted(), response("200 OK", "Content-Type: application/json\r\n", &json!({"jsonrpc":"2.0", "id":2, "error":{"code":code,"message":"secret","data":"secret"}}).to_string()), accepted(),
+            ]).await;
+            let client = Client::new(server.builder.take().unwrap()).unwrap();
+            let result = client
+                .forward(
+                    BASE_URL,
+                    &Method::POST,
+                    "tools/unknown",
+                    None,
+                    "token",
+                    Some(b"{}"),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.status().as_u16(), expected);
+            let body = result.text().await.unwrap();
+            assert!(!body.contains("secret"));
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).unwrap()["upstream_rpc_code"],
+                code
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn handshake_rpc_rejection_is_an_upstream_failure() {
+        let mut server = scripted_fixture(
+            "ifttt.com",
+            vec![response(
+                "200 OK",
+                "Content-Type: application/json\r\n",
+                &json!({"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"secret"}})
+                    .to_string(),
+            )],
+        )
+        .await;
+        let client = Client::new(server.builder.take().unwrap()).unwrap();
+        assert_eq!(
+            client
+                .forward(
+                    BASE_URL,
+                    &Method::POST,
+                    "tools/create_applet",
+                    None,
+                    "token",
+                    Some(b"{}")
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_GATEWAY
+        );
+        server.requests.recv().await.unwrap();
+        assert!(server.requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn truncated_tool_response_is_an_unknown_outcome() {
+        let mut server = scripted_fixture("ifttt.com", vec![initialized(), accepted(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{".into(), accepted(),
+        ]).await;
+        let client = Client::new(server.builder.take().unwrap()).unwrap();
+        assert!(matches!(
+            client
+                .forward(
+                    BASE_URL,
+                    &Method::POST,
+                    "tools/create_applet",
+                    None,
+                    "token",
+                    Some(b"{}")
+                )
+                .await,
+            Err(Error::OutcomeUnknown)
+        ));
+        server.requests.recv().await.unwrap();
+        server.requests.recv().await.unwrap();
+        assert_eq!(
+            request_json(&server.requests.recv().await.unwrap())["method"],
+            "tools/call"
+        );
+        assert!(
+            String::from_utf8_lossy(&server.requests.recv().await.unwrap())
+                .starts_with("DELETE /mcp ")
+        );
+        assert!(server.requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancellation_terminates_an_acquired_session() {
+        let mut server =
+            scripted_fixture("ifttt.com", vec![initialized(), accepted(), accepted()]).await;
+        let client = Client::new(server.builder.take().unwrap()).unwrap();
+        let mut call = Box::pin(client.forward(
+            BASE_URL,
+            &Method::POST,
+            "tools/create_applet",
+            None,
+            "token",
+            Some(b"{}"),
+        ));
+        loop {
+            tokio::select! {
+                _ = &mut call => panic!("request completed before cancellation"),
+                request = server.requests.recv() => {
+                    if request_json(&request.unwrap())["method"] == "notifications/initialized" { break; }
+                }
+            }
+        }
+        drop(call);
+        let request = tokio::time::timeout(Duration::from_secs(3), server.requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&request).starts_with("DELETE /mcp "));
     }
 
     #[tokio::test]
@@ -594,7 +823,7 @@ mod tests {
                     Some(b"{}")
                 )
                 .await,
-            Err(Error::Transport(_))
+            Err(Error::OutcomeUnknown)
         ));
         for _ in 0..3 {
             server.requests.recv().await.unwrap();

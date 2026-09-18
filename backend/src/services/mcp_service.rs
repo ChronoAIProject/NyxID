@@ -3701,6 +3701,7 @@ pub async fn execute_tool(
                     user_id,
                     ak_id,
                     user_service_id,
+                    &resolution.target,
                     Some(connection_expiry_notifier),
                 )
                 .await?
@@ -4322,6 +4323,11 @@ pub async fn execute_tool_resolved(
     {
         Ok(response) => response,
         Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
+        Err(error @ proxy_service::ForwardRequestError::OutcomeUnknown) => {
+            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                error.into_app_error(),
+            ));
+        }
         Err(proxy_service::ForwardRequestError::Transport(error))
             if direct_transport_failure_is_pre_dispatch(&error) =>
         {
@@ -7079,6 +7085,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let token_server = MockServer::start().await;
+        provider.extra_auth_params = Some(std::collections::HashMap::from([(
+            "resource".into(),
+            "https://wrong.example".into(),
+        )]));
         provider.token_url = Some(format!("{}/token", token_server.uri()));
         provider.client_id_encrypted = Some(encryption.encrypt(b"fixture-client").await.unwrap());
         provider.client_secret_encrypted =
@@ -7224,7 +7234,7 @@ mod tests {
                 assert_eq!(fields["refresh_token"], "ifttt-refresh");
             }
         }
-        let resolved = proxy_service::resolve_proxy_target_by_user_service_id(
+        let mut resolved = proxy_service::resolve_proxy_target_by_user_service_id(
             &db,
             &encryption,
             &owner,
@@ -7242,6 +7252,96 @@ mod tests {
         assert_eq!(resolved.target.credential, "rotated-access");
         assert_eq!(resolved.target.base_url, ifttt_mcp::BASE_URL);
         assert_eq!(resolved.target.auth_method, ifttt_mcp::AUTH_METHOD);
+        for (auth_method, endpoint_url) in [
+            (Some("bearer"), Some("https://editor.example")),
+            (Some("bearer"), None),
+            (None, Some("https://editor.example")),
+        ] {
+            assert!(matches!(
+                crate::services::user_service_service::validate_update_inputs(
+                    &db,
+                    &owner,
+                    &connected.service,
+                    auth_method,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    endpoint_url,
+                    None,
+                )
+                .await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        // Even a row changed outside the validated update path cannot redirect the token.
+        db.collection::<mongodb::bson::Document>(USER_SERVICES)
+            .update_one(
+                doc! {"_id": &connected.service.id},
+                doc! {"$set":{"auth_method":"bearer"}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            proxy_service::resolve_proxy_target_by_user_service_id(
+                &db,
+                &encryption,
+                &owner,
+                &connected.service.id,
+                None,
+                None,
+                proxy_service::ProxyExecutionContext::new(
+                    None,
+                    crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled()
+                ),
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        db.collection::<mongodb::bson::Document>(USER_SERVICES)
+            .update_one(
+                doc! {"_id": &connected.service.id},
+                doc! {"$set":{"auth_method":ifttt_mcp::AUTH_METHOD}},
+            )
+            .await
+            .unwrap();
+        let agent = uuid::Uuid::new_v4().to_string();
+        db.collection::<mongodb::bson::Document>(crate::models::agent_service_binding::COLLECTION_NAME)
+            .insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(), "api_key_id":&agent,
+                "user_id":&owner, "user_service_id":&connected.service.id, "user_api_key_id":&saved.id,
+                "created_at":mongodb::bson::DateTime::now(),"updated_at":mongodb::bson::DateTime::now()})
+            .await.unwrap();
+        let foreign_target = &mut resolved.target;
+        foreign_target.auth_method = "bearer".into();
+        foreign_target.base_url = "https://editor.example".into();
+        assert!(matches!(
+            proxy_service::resolve_agent_credential_override(
+                &db,
+                &encryption,
+                &owner,
+                &agent,
+                &connected.service.id,
+                foreign_target,
+                None,
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        assert!(matches!(
+            proxy_service::read_agent_credential_override_identity(
+                &db,
+                &owner,
+                &agent,
+                &connected.service.id,
+                foreign_target,
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        resolved.target.auth_method = ifttt_mcp::AUTH_METHOD.into();
+        resolved.target.base_url = ifttt_mcp::BASE_URL.into();
         let rows: Vec<ServiceEndpoint> = db
             .collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
             .find(doc! {"service_id": &catalog.id, "is_active": true})
