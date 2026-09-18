@@ -2843,7 +2843,15 @@ mod tests {
             .await
             .unwrap();
         db.collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .insert_one(doc! { "_id": &api_key_id, "user_id": &user_id })
+            .insert_one(doc! {
+                "_id": &api_key_id,
+                "user_id": &user_id,
+                "label": "Bearer test key",
+                "credential_type": "bearer",
+                "status": "active",
+                "created_at": mongodb::bson::DateTime::now(),
+                "updated_at": mongodb::bson::DateTime::now(),
+            })
             .await
             .unwrap();
 
