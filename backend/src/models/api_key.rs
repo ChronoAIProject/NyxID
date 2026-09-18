@@ -57,6 +57,12 @@ pub struct ApiKey {
     #[serde(default)]
     pub allowed_service_ids: Vec<String>,
 
+    /// Platform-provided catalog services (DownstreamService IDs) an assistant
+    /// chat key may call after the owner allowed them from a chat card. Only
+    /// assistant chat keys hold entries; ignored when `allow_all_services`.
+    #[serde(default)]
+    pub allowed_platform_service_ids: Vec<String>,
+
     /// List of Node IDs this key can route through.
     /// Only checked when `allow_all_nodes` is false.
     #[serde(default)]
@@ -135,6 +141,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: vec![],
             allow_all_services: true,
             allow_auto_connected_services: false,

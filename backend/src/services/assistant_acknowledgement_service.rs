@@ -195,6 +195,8 @@ pub struct Request<'a> {
     pub tool: Option<&'a str>,
     pub arguments: Option<&'a Value>,
     pub summary: &'a str,
+    /// `service` requests only: the target is a platform-provided catalog entry.
+    pub platform: bool,
 }
 impl std::fmt::Debug for Request<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -218,6 +220,7 @@ pub async fn request(
         service_id: request.service.map(|s| s.0.into()),
         service_slug: request.service.map(|s| s.1.into()),
         service_name: request.service.map(|s| s.2.into()),
+        platform: request.platform,
         tool_name: request.tool.map(str::to_owned),
         arguments_digest: request.arguments.map(arguments_digest),
         summary: request.summary.into(),
@@ -302,24 +305,39 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         "service_name": row.service_name, "summary": row.summary, "instructions": instructions})
 }
 
+/// Gate a service call in Ask mode. `platform` targets are catalog entries the
+/// user reaches through NyxID's platform credential rather than a connection of
+/// their own; they are granted on the key's `allowed_platform_service_ids`.
 pub async fn service_gate(
     db: &Database,
     chat: &ChatAuthority,
     id: &str,
     slug: &str,
     name: &str,
+    platform: bool,
 ) -> AppResult<Option<Value>> {
     if chat.access_mode == crate::models::assistant_conversation::AccessMode::Full {
         return Ok(None);
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
-    if key_service::effective_allowed_service_ids(db, &key)
-        .await?
-        .iter()
-        .any(|allowed| allowed == id)
-    {
+    let granted = if platform {
+        key.allowed_platform_service_ids
+            .iter()
+            .any(|allowed| allowed == id)
+    } else {
+        key_service::effective_allowed_service_ids(db, &key)
+            .await?
+            .iter()
+            .any(|allowed| allowed == id)
+    };
+    if granted {
         return Ok(None);
     }
+    let summary = if platform {
+        format!("Allow this chat to use {name} (NyxID platform credential)?")
+    } else {
+        format!("Allow this chat to use {name}?")
+    };
     let row = request(
         db,
         chat,
@@ -328,7 +346,8 @@ pub async fn service_gate(
             service: Some((id, slug, name)),
             tool: None,
             arguments: None,
-            summary: &format!("Allow this chat to use {name}?"),
+            summary: &summary,
+            platform,
         },
     )
     .await?;
@@ -357,6 +376,7 @@ pub async fn account_gate(db: &Database, chat: &ChatAuthority) -> AppResult<Opti
             arguments: None,
             summary: "Allow this chat to manage your NyxID account (keys, channel bots, \
                 services, nodes, approval settings)?",
+            platform: false,
         },
     )
     .await?;
@@ -403,26 +423,46 @@ pub async fn decide(
                 let now = Utc::now();
                 if row.kind == "service" {
                     let service_id = row.service_id.as_deref().ok_or_else(not_found)?;
-                    // Only owner-visible UserService rows can receive chat grants.
-                    // Reject legacy platform IDs and inaccessible rows before any decision.
-                    super::api_key_scope_service::validate_service_ids(
-                        &db,
-                        &user,
-                        &[service_id.into()],
-                        super::api_key_scope_service::ScopeAuthorization::for_actor(Some(&user)),
-                    )
-                    .await
-                    .map_err(|error| match error {
-                        AppError::ValidationError(_) => not_found(),
-                        error => error,
-                    })?;
+                    if row.platform {
+                        // A platform grant names an active catalog entry. Visibility
+                        // through platform grants is re-checked on every execution,
+                        // so a stale entry on the key can never execute by itself.
+                        db.collection::<bson::Document>(
+                            crate::models::downstream_service::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"_id": service_id, "is_active": true})
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(not_found)?;
+                    } else {
+                        // Only owner-visible UserService rows can receive chat grants.
+                        // Reject inaccessible rows before any decision.
+                        super::api_key_scope_service::validate_service_ids(
+                            &db,
+                            &user,
+                            &[service_id.into()],
+                            super::api_key_scope_service::ScopeAuthorization::for_actor(Some(
+                                &user,
+                            )),
+                        )
+                        .await
+                        .map_err(|error| match error {
+                            AppError::ValidationError(_) => not_found(),
+                            error => error,
+                        })?;
+                    }
                 }
                 if allow && row.kind == "service" {
                     let service_id = row.service_id.as_deref().ok_or_else(not_found)?;
+                    let field = if row.platform {
+                        "allowed_platform_service_ids"
+                    } else {
+                        "allowed_service_ids"
+                    };
                     mutations::update_one(
                         &db,
                         doc! {"_id": &key.id, "user_id": &user},
-                        doc! {"$addToSet": {"allowed_service_ids": service_id}},
+                        doc! {"$addToSet": {field: service_id}},
                         Some(&mut *session),
                     )
                     .await?;

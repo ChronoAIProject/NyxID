@@ -262,6 +262,9 @@ struct McpAuthContext {
     /// If false, `allowed_node_ids` constrains which nodes this request may route through.
     allow_all_nodes: bool,
     allowed_service_ids: Vec<String>,
+    /// Platform-provided catalog services an assistant chat key was allowed
+    /// to use from a chat card. Empty for every other caller.
+    allowed_platform_service_ids: Vec<String>,
     allowed_node_ids: Vec<String>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -284,6 +287,7 @@ impl McpAuthContext {
             allow_all_services: true,
             allow_all_nodes: true,
             allowed_service_ids: Vec::new(),
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -416,6 +420,12 @@ async fn authenticate_mcp(
                 )
                 .await
                 .map_err(|_| mcp_401(&state.config.base_url))?;
+                // Platform grants are meaningful only for assistant chat keys.
+                let platform_grants = if chat.is_some() {
+                    api_key.allowed_platform_service_ids.clone()
+                } else {
+                    Vec::new()
+                };
                 return Ok(McpAuthContext {
                     chat,
                     account_acknowledged: api_key
@@ -437,6 +447,7 @@ async fn authenticate_mcp(
                         )
                         .await
                         .map_err(axum::response::IntoResponse::into_response)?,
+                    allowed_platform_service_ids: platform_grants,
                     allowed_node_ids: api_key.allowed_node_ids.clone(),
                     rate_limit_per_second: api_key.rate_limit_per_second,
                     rate_limit_burst: api_key.rate_limit_burst,
@@ -720,6 +731,16 @@ fn ensure_service_in_scope(
     match &service.source {
         mcp_service::McpToolSource::UserManaged { .. }
             if auth.allowed_service_ids.contains(&service.service_id) =>
+        {
+            Ok(())
+        }
+        // An assistant chat key may hold platform grants the owner allowed
+        // from a chat card; visibility was checked when the service resolved.
+        mcp_service::McpToolSource::Platform { .. }
+            if auth.chat.is_some()
+                && auth
+                    .allowed_platform_service_ids
+                    .contains(&service.service_id) =>
         {
             Ok(())
         }
@@ -1849,8 +1870,11 @@ async fn authorize_mcp_operation(
 const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = call freely. \
     acknowledgement_required = call the tool now; NyxID shows the user an Allow card \
     in the chat and returns instructions to retry after approval. Never say you lack \
-    permission or send the user to settings. full_access_required = available only \
-    after the user switches this chat's Mode to Full access.";
+    permission or send the user to settings, and never ask for Full access. \
+    source meanings: user_service = the user's own connection; platform = NyxID's \
+    shared platform credential, not the user's account. To connect the user's own \
+    account, use nyx__discover_services then nyx__connect_service and give the user \
+    the link; that works in Ask mode.";
 
 fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> &'static str {
     let granted = if auth.chat.as_ref().is_some_and(|chat| {
@@ -1858,7 +1882,8 @@ fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> 
     }) {
         true
     } else if matches!(service.source, mcp_service::McpToolSource::Platform { .. }) {
-        return "full_access_required";
+        auth.allowed_platform_service_ids
+            .contains(&service.service_id)
     } else if matches!(service.source, mcp_service::McpToolSource::Internal) {
         auth.account_acknowledged
     } else {
@@ -1878,23 +1903,13 @@ async fn chat_service_gate(
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
     let chat = auth.chat.as_ref()?;
-    if chat_access(auth, service) == "full_access_required" {
-        let refusal = serde_json::json!({
-            "error": "full_access_required",
-            "service_slug": service.service_slug,
-            "service_name": service.service_name,
-            "instructions": "This platform service is available to this chat only in Full access \
-                mode. Ask the user to switch the chat's Mode to Full access, or use a connected \
-                service instead.",
-        });
-        return Some(tool_result(request_id, &refusal.to_string(), true));
-    }
     let result = crate::services::assistant_acknowledgement_service::service_gate(
         &state.db,
         chat,
         &service.service_id,
         &service.service_slug,
         &service.service_name,
+        matches!(service.source, mcp_service::McpToolSource::Platform { .. }),
     )
     .await;
     match result {
@@ -2340,7 +2355,13 @@ async fn handle_meta_connect(
     };
 
     // Scoped API keys can only connect services already in their allow-list.
-    if !auth.allow_all_services && !auth.allowed_service_ids.contains(&service_id.to_string()) {
+    // An assistant chat key acts for its owner and only mints a hosted link the
+    // owner completes in the UI, so it may connect any catalog service; the new
+    // connection still needs its own card before the chat can use it.
+    if auth.chat.is_none()
+        && !auth.allow_all_services
+        && !auth.allowed_service_ids.contains(&service_id.to_string())
+    {
         return tool_result(
             request_id,
             "API key does not have access to this service",
@@ -3603,6 +3624,7 @@ mod tests {
             allow_all_services: false,
             allow_all_nodes: false,
             allowed_service_ids,
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,

@@ -227,6 +227,7 @@ export class NyxAgentHttpFixtures {
             },
             messages: [],
             acknowledgements: [],
+    approvals: [],
             before_seq: null,
           },
         };
