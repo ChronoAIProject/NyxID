@@ -4,6 +4,7 @@ use crate::services::{
     assistant_authority_tests::{Fixture, connected, fixture, ordinary_key},
 };
 use axum::{Json, Router, routing::any};
+use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde_json::{Value, json};
 use std::sync::{
@@ -244,7 +245,7 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     assert_eq!(success["ok"], true);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     let second = connected(&f.state.db, &f.owner, "denied", &address).await;
-    let refused = acks::service_gate(&f.state.db, &f.chat, &second, "denied", "Denied")
+    let refused = acks::service_gate(&f.state.db, &f.chat, &second, "denied", "Denied", false)
         .await
         .unwrap()
         .unwrap();
@@ -514,7 +515,7 @@ async fn chat_discovery_does_not_write_request_audits_but_execution_refusals_do(
 }
 
 #[tokio::test]
-async fn platform_services_require_full_mode_without_creating_service_cards() {
+async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allow() {
     use crate::models::{
         assistant_acknowledgement::COLLECTION_NAME as ACKS,
         assistant_conversation::{AccessMode, COLLECTION_NAME as CONVERSATIONS},
@@ -611,7 +612,7 @@ async fn platform_services_require_full_mode_without_creating_service_cards() {
         }
         let auth = authenticate(&f).await;
         let expected = if mode == AccessMode::Ask {
-            "full_access_required"
+            "acknowledgement_required"
         } else {
             "granted"
         };
@@ -642,27 +643,95 @@ async fn platform_services_require_full_mode_without_creating_service_cards() {
         let tool = &search["matches"][0];
         assert_eq!(tool["chat_access"], expected);
         let name = tool["name"].as_str().unwrap();
-        for direct in [true, false] {
-            let response = if direct {
-                direct_call(&f, &auth, name, json!({})).await
-            } else {
-                call(&f, &auth, name, json!({})).await
-            };
-            let value = result(response, mode == AccessMode::Ask).await;
-            if mode == AccessMode::Ask {
-                assert_eq!(
-                    value,
-                    json!({
-                        "error": "full_access_required",
-                        "service_slug": service.slug,
-                        "service_name": service.name,
-                        "instructions": "This platform service is available to this chat only in \
-                            Full access mode. Ask the user to switch the chat's Mode to Full access, \
-                            or use a connected service instead.",
-                    })
+        if mode == AccessMode::Ask {
+            // Both call shapes ask for the same card; nothing executes yet.
+            let mut ids = Vec::new();
+            for direct in [true, false] {
+                let response = if direct {
+                    direct_call(&f, &auth, name, json!({})).await
+                } else {
+                    call(&f, &auth, name, json!({})).await
+                };
+                let refusal = result(response, true).await;
+                assert_eq!(refusal["error"], "acknowledgement_required");
+                assert_eq!(refusal["kind"], "service");
+                assert_eq!(refusal["service_slug"], service.slug);
+                assert!(
+                    refusal["summary"]
+                        .as_str()
+                        .unwrap()
+                        .contains("platform credential"),
+                    "{refusal}"
                 );
-                assert_eq!(hits.load(Ordering::SeqCst), 0);
-            } else {
+                ids.push(refusal["acknowledgement_id"].as_str().unwrap().to_owned());
+            }
+            assert_eq!(ids[0], ids[1], "pending requests deduplicate");
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            let rows: Vec<crate::models::assistant_acknowledgement::AssistantAcknowledgement> = f
+                .state
+                .db
+                .collection(ACKS)
+                .find(doc! {})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].platform);
+            assert_eq!(rows[0].service_id.as_deref(), Some(service.id.as_str()));
+            // The chat may also mint a hosted connect link in Ask mode.
+            let connect = handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_id": service.id}),
+                None,
+                false,
+            )
+            .await;
+            let bytes = axum::body::to_bytes(connect.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("does not have access"),
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            acks::decide(&f.state.db, &f.owner, &f.row.id, &ids[0], true)
+                .await
+                .unwrap();
+            let auth = authenticate(&f).await;
+            assert_eq!(
+                chat_access(&auth, &{
+                    let services = load_all_services_for_meta_tools(&f.state, &auth)
+                        .await
+                        .unwrap();
+                    services
+                        .into_iter()
+                        .find(|s| s.service_id == service.id)
+                        .unwrap()
+                }),
+                "granted"
+            );
+            for direct in [true, false] {
+                let response = if direct {
+                    direct_call(&f, &auth, name, json!({})).await
+                } else {
+                    call(&f, &auth, name, json!({})).await
+                };
+                let value = result(response, false).await;
+                assert_eq!(value["ok"], true);
+            }
+            assert_eq!(hits.load(Ordering::SeqCst), 2);
+        } else {
+            for direct in [true, false] {
+                let response = if direct {
+                    direct_call(&f, &auth, name, json!({})).await
+                } else {
+                    call(&f, &auth, name, json!({})).await
+                };
+                let value = result(response, false).await;
                 assert_eq!(value["ok"], true);
             }
             assert_eq!(
@@ -672,11 +741,12 @@ async fn platform_services_require_full_mode_without_creating_service_cards() {
                     .count_documents(doc! {})
                     .await
                     .unwrap(),
-                0
+                1,
+                "Full mode creates no cards"
             );
         }
     }
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
     server.abort();
 }
 

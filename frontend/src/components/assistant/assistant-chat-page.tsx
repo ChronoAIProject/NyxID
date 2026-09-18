@@ -1,6 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { NyxAgentModeSelector } from "./nyxagent-mode-selector";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
+import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import {
   lazy,
   Suspense,
@@ -523,6 +524,29 @@ export function NyxAgentAssistantChatPage() {
           <ChatMessageList
             session={chat.session}
             renderMessage={(message) => {
+              const approval = chat.approvals.find(
+                (row) => message.id === `nyxagent-approval:${row.id}`,
+              );
+              if (approval) {
+                return (
+                  <ApprovalCard
+                    block={{
+                      type: "approval_card",
+                      block_id: message.id,
+                      approval_request_id: approval.id,
+                      body: `${approval.service_name}: ${approval.summary}`,
+                      service_slug: approval.service_slug,
+                      agent_key_prefix: approval.agent_key_prefix,
+                      approval_mode: approval.approval_mode,
+                      grant_duration_sec: null,
+                      expires_at: approval.expires_at,
+                      decision: null,
+                      decision_channel: null,
+                    }}
+                    onDecide={(approved) => chat.decideApproval(approval.id, approved)}
+                  />
+                );
+              }
               const acknowledgement = chat.acknowledgements.find((row) =>
                 message.id === `nyxagent-acknowledgement:${row.id}`,
               );
@@ -538,7 +562,10 @@ export function NyxAgentAssistantChatPage() {
                 />
               );
             }}
-            projectionVersion={chat.acknowledgements.map((row) => `${row.id}:${row.status}`).join(",")}
+            projectionVersion={[
+              ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
+              ...chat.approvals.map((row) => `approval:${row.id}`),
+            ].join(",")}
             bottomInset={composerHeight}
             notice={chat.error}
             emptyDescription={

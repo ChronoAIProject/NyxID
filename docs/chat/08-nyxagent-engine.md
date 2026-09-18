@@ -132,7 +132,7 @@ conversation and credential generation.
 
 Only keys identified by their actual credential row get this authority; a platform
 label alone grants nothing. Their MCP listing/search includes all services visible
-to the owner, with `chat_access: "granted" | "acknowledgement_required" | "full_access_required"`, plus the
+to the owner, with `chat_access: "granted" | "acknowledgement_required"`, plus the
 virtual `nyxid` account service. Node and proxy approval enforcement remain in the
 execution path. Refusals are MCP `tools/call` **results** with `isError: true`, never
 JSON-RPC errors (which NyxAgent would flatten to opaque 502s):
@@ -156,22 +156,17 @@ the card, not settings, is how access is granted. Without this the model read th
 flag as "no permission" and never made the call that creates the card.
 
 Platform-source services have a DownstreamService ID and no owner-visible
-UserService row to grant. In Ask mode, listing/search marks them
-`full_access_required`; both direct `tools/call` and `nyx__call_tool` return this
-`isError` result without creating an acknowledgement:
-
-```json
-{
-  "error": "full_access_required",
-  "service_slug": "<platform slug>",
-  "service_name": "<platform name>",
-  "instructions": "This platform service is available to this chat only in Full access mode. Ask the user to switch the chat's Mode to Full access, or use a connected service instead."
-}
-```
-
-Full mode can execute these services. Human decisions defensively reject any
-service acknowledgement whose ID is not an active, owner-visible UserService;
-inaccessible targets return not found and cannot mutate the key.
+UserService row. They use the same Ask-mode card: the refusal is the ordinary
+`acknowledgement_required` result, the card summary reads "Allow this chat to use
+<name> (NyxID platform credential)?", and Allow records the catalog ID on the key's
+`allowed_platform_service_ids` (never on `allowed_service_ids`, whose REST
+validation admits only UserService rows). Only assistant chat keys hold platform
+grants; `ensure_service_in_scope` honours them for chat keys alone, execution
+still resolves the service through the owner's visible platform grants on every
+call, and Full mode continues to grant everything. `full_access_required` is no
+longer produced. The chat may also mint hosted connect links for any catalog
+service in Ask mode (`nyx__connect_service` skips the allowlist for chat keys);
+the resulting connection needs its own card before use.
 
 Account/action refusals use the same fields (`service_slug`/`service_name` are null)
 and `kind: "account" | "action"`; action instructions require a retry with
@@ -268,7 +263,7 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | Method and path | Request | Response |
 | --- | --- | --- |
 | `GET /conversations` | `limit` 1–100 (default 50), optional `cursor` | `{conversations,next_cursor}` |
-| `GET /conversations/{id}` | `limit` 1–100 (default 50), optional positive `before_seq` | `{conversation,messages,acknowledgements,before_seq}` |
+| `GET /conversations/{id}` | `limit` 1–100 (default 50), optional positive `before_seq` | `{conversation,messages,acknowledgements,approvals,before_seq}` |
 | `PATCH /conversations/{id}` | closed `{title}`; trimmed nonempty, max 200 Unicode scalars | conversation DTO |
 | `DELETE /conversations/{id}` | no body | 204; local hard delete, best-effort upstream session delete |
 | `POST /conversations/{id}/stop` | no body | 204; owner-only, no active turn is a no-op |
@@ -281,6 +276,17 @@ Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message
 pending_acknowledgements,active_turn,context_reset_at`. `active_turn` is null or
 `{turn_id,started_at,activities}`.
 Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities`.
+
+`approvals` lists pending proxy approval requests raised by the chat's key:
+`{id,service_slug,service_name,summary,approval_mode,agent_key_prefix,created_at,expires_at}`.
+Per-service approval policies (per_request or grant, decided on the approvals
+page, Telegram or the mobile app) are enforced in the execution path and block
+the tool call for the channel's approval timeout. The chat now surfaces those
+requests as approval cards at the transcript tail, matched by the key's name in
+`requester_label` and the owner as request owner or notified approver; the card
+decides through the ordinary `POST /approvals/requests/{id}/decide`, and the
+waiting tool call then proceeds within the same turn. Known gap: renaming the
+assistant key hides cards for requests created under the old name.
 
 `activities` lists the tool calls the chat's key made during that turn, oldest
 first: `{id,label,status,started_at,ended_at}` with status `running`, `completed`

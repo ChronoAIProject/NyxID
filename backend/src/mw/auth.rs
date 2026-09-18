@@ -2213,6 +2213,7 @@ mod tests {
             updated_at: Some(chrono::Utc::now()),
             description: None,
             allowed_service_ids: Vec::new(),
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
             allow_auto_connected_services: false,
