@@ -581,6 +581,16 @@ async fn main() {
         .await
         .expect("Failed to backfill stale UserService auth_method snapshots");
 
+    // Remove org-owned public platform rows created by the pre-0.26.1
+    // provisioning bug. The sweep deletes orphan resources before each row so
+    // retries work on standalone MongoDB too. Personal rows, explicit bindings,
+    // and restricted grants are untouched; cleanup failures do not stop startup.
+    if let Err(error) =
+        services::user_service_service::cleanup_public_org_auto_provisions(&db).await
+    {
+        tracing::warn!(%error, "Failed to clean up stale public platform org auto-provisions");
+    }
+
     // Seed system roles for RBAC (idempotent)
     services::role_service::seed_system_roles(&db)
         .await
