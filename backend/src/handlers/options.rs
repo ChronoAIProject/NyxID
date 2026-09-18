@@ -340,6 +340,16 @@ mod tests {
         );
         for (path, token, expected) in [
             (path.clone(), Some(token.clone()), StatusCode::OK),
+            (
+                format!("{path}&search=catalog:"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
+            (
+                format!("{path}&search=catalog:skills:"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
             (path.clone(), None, StatusCode::UNAUTHORIZED),
             (
                 path.replace("service-scope?", "unknown?"),
@@ -364,6 +374,25 @@ mod tests {
             let status = response.status();
             let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             assert_eq!(status, expected, "{}", String::from_utf8_lossy(&body));
+            if status == StatusCode::OK {
+                // No service accounts exist yet: curation scopes must be
+                // discoverable before the first account is configured.
+                let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let items = response["items"].as_array().unwrap();
+                for scope in ["catalog:skills:read", "catalog:skills:write"] {
+                    let matches: Vec<_> =
+                        items.iter().filter(|item| item["value"] == scope).collect();
+                    assert_eq!(matches.len(), 1, "Missing or duplicate suggestion: {scope}");
+                    assert_eq!(matches[0]["source"], "backend_definition");
+                    assert_eq!(matches[0]["disabled"], false);
+                    assert!(
+                        matches[0]["description"]
+                            .as_str()
+                            .unwrap()
+                            .contains("curation grant")
+                    );
+                }
+            }
         }
         let (sa, secret) = service_account_service::create_service_account(
             &db,

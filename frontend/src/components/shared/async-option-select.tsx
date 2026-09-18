@@ -204,7 +204,7 @@ function OptionSelection({ optionSet, context, value, onChange, label, disabled,
   const editor = <input {...inputProps} ref={input}
     id={id} role="combobox" aria-label={label} aria-expanded={open} aria-controls={listId} aria-autocomplete="list" aria-haspopup="listbox"
     aria-activedescendant={open && activeIndex >= 0 ? `${id}-choice-${activeIndex}` : undefined}
-    autoComplete="off" className="h-9 min-w-20 flex-1 bg-transparent px-1 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
+    autoComplete="off" className="h-6 min-w-20 flex-1 bg-transparent p-0 text-[12px] text-foreground outline-none placeholder:text-text-tertiary disabled:cursor-not-allowed"
     size={original === undefined ? undefined : Math.max(10, draft.length + 1)}
     placeholder={selected.length ? "Add scope…" : "Select or type…"} disabled={disabled} value={draft}
     onFocus={() => setOpen(true)} onClick={() => setOpen(true)} onBlur={inputProps.onBlur}
@@ -231,21 +231,21 @@ function OptionSelection({ optionSet, context, value, onChange, label, disabled,
 
   return <Popover open={open} onOpenChange={setOpen}>
     <Anchor asChild>
-      <div ref={field} onBlur={(event) => leaveWidget(event.relatedTarget)} className={cn("flex min-h-11 min-w-0 flex-wrap items-center gap-1.5 rounded-md border border-input bg-background p-1.5 shadow-sm focus-within:ring-2 focus-within:ring-ring", disabled && "opacity-50")}
+      <div ref={field} onBlur={(event) => leaveWidget(event.relatedTarget)} className={cn("flex min-h-8 w-full min-w-0 flex-wrap items-center gap-1 rounded-lg border border-input bg-transparent px-3 py-0.5 text-foreground transition-colors duration-200 focus-within:border-white/[0.15] has-[[aria-invalid=true]]:border-destructive", disabled && "opacity-50")}
         onClick={(event) => { if (!disabled && event.target === event.currentTarget) { input.current?.focus(); setOpen(true); } }}>
-        {selected.map((v) => <div key={v} role="group" aria-label={`Selected ${v}`} className={cn("flex min-h-11 max-w-full items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-xs md:min-h-9", original === v && "border-ring ring-1 ring-ring")}>
-          {original === v ? editor : <button type="button" data-scope-edit={v} disabled={disabled} aria-label={`Edit ${v}`} className="min-w-0 break-all px-2.5 py-1.5 text-left font-mono outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => edit(v)}>{v}</button>}
-          <button type="button" disabled={disabled} aria-label={`Remove ${v}`} className="flex w-11 shrink-0 items-center justify-center border-l border-border/70 text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:w-9"
+        {selected.map((v) => <div key={v} role="group" aria-label={`Selected ${v}`} className={cn("flex min-h-6 max-w-full items-stretch overflow-hidden rounded-md border border-input bg-muted/25 text-[12px]", original === v && "border-ring ring-1 ring-ring")}>
+          {original === v ? editor : <button type="button" data-scope-edit={v} disabled={disabled} aria-label={`Edit ${v}`} className="min-w-0 break-all px-2 py-0.5 text-left font-mono outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => edit(v)}>{v}</button>}
+          <button type="button" disabled={disabled} aria-label={`Remove ${v}`} className="flex w-6 shrink-0 items-center justify-center border-l border-border/70 text-text-tertiary outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
             onPointerDown={(event) => event.preventDefault()} onClick={() => remove(v)}><X className="size-3.5" aria-hidden="true" /></button>
         </div>)}
-        <div className={cn("flex items-center", original === undefined ? "min-w-36 flex-1" : "ml-auto")}>
+        <div className={cn("flex items-center gap-2", original === undefined ? "min-w-36 flex-1" : "ml-auto")}>
           {original === undefined && editor}
-          <button type="button" tabIndex={-1} disabled={disabled} className="shrink-0 rounded p-2 text-muted-foreground" aria-label={`Toggle ${label.toLowerCase()} suggestions`}
-            onPointerDown={(event) => event.preventDefault()} onClick={() => { setOpen(!open); if (!open) input.current?.focus(); }}><ChevronDown className="size-4" aria-hidden="true" /></button>
+          <button type="button" tabIndex={-1} disabled={disabled} className="flex h-6 shrink-0 items-center rounded text-text-tertiary" aria-label={`Toggle ${label.toLowerCase()} suggestions`}
+            onPointerDown={(event) => event.preventDefault()} onClick={() => { setOpen(!open); if (!open) input.current?.focus(); }}><ChevronDown className="size-3.5" aria-hidden="true" /></button>
         </div>
       </div>
     </Anchor>
-    <PopoverContent role="presentation" ref={menu} onBlur={(event) => leaveWidget(event.relatedTarget)} align="start" className="w-[var(--radix-popover-trigger-width)] min-w-56 max-w-[calc(100vw-2rem)] p-1"
+    <PopoverContent role="presentation" ref={menu} onBlur={(event) => leaveWidget(event.relatedTarget)} align="start" className="w-[var(--radix-popover-trigger-width)] min-w-56 max-w-[calc(100vw-2rem)] p-1.5"
       onOpenAutoFocus={(event) => event.preventDefault()} onCloseAutoFocus={(event) => event.preventDefault()}
       onInteractOutside={(event) => { if (field.current?.contains(event.target as Node)) event.preventDefault(); }}
       onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); if (original !== undefined) cancelEdit(); else { setOpen(false); input.current?.focus(); } }}>
@@ -255,7 +255,7 @@ function OptionSelection({ optionSet, context, value, onChange, label, disabled,
       <div id={listId} role="listbox" aria-label={`${label} suggestions`} aria-multiselectable="true" className="max-h-64 overflow-y-auto overscroll-contain">
         {choices.map((choice, index) => <div key={choiceKey(choice)} id={`${id}-choice-${index}`} role="option" aria-label={choice.kind === "branch" ? `Explore ${choice.value}` : choice.value}
           aria-selected="false" aria-disabled={disabled || choice.disabled} data-option-index={index}
-          className={cn("flex cursor-pointer items-center gap-2 rounded px-2 py-2 text-sm hover:bg-accent", activeIndex === index && "bg-accent", (disabled || choice.disabled) && "cursor-not-allowed opacity-50")}
+          className={cn("flex cursor-pointer items-center gap-2 rounded-md px-3 py-1.5 text-[12px] transition-colors duration-200 hover:bg-white/[0.06]", activeIndex === index && "bg-white/[0.06]", (disabled || choice.disabled) && "cursor-not-allowed opacity-50")}
           onPointerDown={(event) => event.preventDefault()} onClick={() => choose(choice)}>
           <span className="min-w-0 flex-1"><span className="block break-all font-mono text-xs">{choice.value}</span>{choice.label && choice.label !== choice.value && <span className="block break-words text-xs text-muted-foreground">{choice.label}</span>}</span>
           {choice.kind === "branch" && <ChevronRight className="size-4 shrink-0" aria-hidden="true" />}

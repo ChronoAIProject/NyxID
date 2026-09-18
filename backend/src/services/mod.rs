@@ -115,6 +115,9 @@ pub mod org_invite_service;
 pub mod org_role_scope_service;
 pub mod org_service;
 pub mod org_slug;
+pub mod ownership_transfer_service;
+#[cfg(test)]
+mod ownership_transfer_tests;
 pub mod par_service;
 pub mod platform_credential_service;
 pub mod platform_settings_service;

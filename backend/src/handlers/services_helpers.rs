@@ -142,8 +142,11 @@ pub async fn is_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<bool>
 pub async fn require_admin_or_creator(
     state: &AppState,
     auth_user: &AuthUser,
-    service_created_by: &str,
+    service: &DownstreamService,
 ) -> AppResult<()> {
+    if service.owner_user_id.is_some() {
+        return require_admin(state, auth_user).await;
+    }
     let user_id_str = auth_user.user_id.to_string();
 
     let user_model = state
@@ -154,7 +157,7 @@ pub async fn require_admin_or_creator(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
-    if !platform_role.is_admin() && service_created_by != user_id_str {
+    if !platform_role.is_admin() && service.created_by != user_id_str {
         return Err(AppError::Forbidden(
             "Only admins or the service creator can perform this action".to_string(),
         ));
@@ -328,6 +331,10 @@ pub async fn service_to_response_with_viewer(
         anonymous_endpoints: s.anonymous_endpoints,
         proxy_operation_policy: s.proxy_operation_policy,
         developer_app_ids: s.developer_app_ids,
+        owner_user_id: s
+            .owner_user_id
+            .clone()
+            .unwrap_or_else(|| s.created_by.clone()),
         created_by: s.created_by,
         created_at: s.created_at.to_rfc3339(),
         updated_at: s.updated_at.to_rfc3339(),

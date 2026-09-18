@@ -1065,7 +1065,10 @@ pub(crate) async fn authorize_ssh_access_for_operation(
             // UserService also resolves to `None` here and must not be locked
             // out of their own service. Public catalog services keep their
             // open behaviour.
-            if service.visibility == "private" && service.created_by != resolution_user_id {
+            if service.visibility == "private"
+                && crate::services::ownership_transfer_service::catalog_owner(&service)
+                    != resolution_user_id
+            {
                 return Err(AppError::NotFound("SSH service not found".to_string()));
             }
             &resolution_user_id
@@ -1413,6 +1416,7 @@ mod tests {
 
     fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
         DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: id.to_string(),
