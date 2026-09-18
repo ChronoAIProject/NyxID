@@ -352,6 +352,16 @@ mod tests {
         );
         for (path, token, expected) in [
             (path.clone(), Some(token.clone()), StatusCode::OK),
+            (
+                format!("{path}&search=catalog:"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
+            (
+                format!("{path}&search=catalog:skills:"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
             (path.clone(), None, StatusCode::UNAUTHORIZED),
             (
                 "/api/v1/options/service-history-action".into(),
@@ -415,8 +425,25 @@ mod tests {
             let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             assert_eq!(status, expected, "{}", String::from_utf8_lossy(&body));
             if status == StatusCode::OK {
-                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(json["option_set"], expected_set);
+                let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(response["option_set"], expected_set);
+                if expected_set == "service-scope" {
+                    // Curation scopes are discoverable before any account exists.
+                    let items = response["items"].as_array().unwrap();
+                    for scope in ["catalog:skills:read", "catalog:skills:write"] {
+                        let matches: Vec<_> =
+                            items.iter().filter(|item| item["value"] == scope).collect();
+                        assert_eq!(matches.len(), 1, "Missing or duplicate suggestion: {scope}");
+                        assert_eq!(matches[0]["source"], "backend_definition");
+                        assert_eq!(matches[0]["disabled"], false);
+                        assert!(
+                            matches[0]["description"]
+                                .as_str()
+                                .unwrap()
+                                .contains("curation grant")
+                        );
+                    }
+                }
             }
         }
         let (sa, secret) = service_account_service::create_service_account(

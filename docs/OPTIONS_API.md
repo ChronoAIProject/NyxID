@@ -13,13 +13,13 @@ This is a management read. Service-account credentials are rejected. Human crede
 
 The new endpoint requires a global admin creating under their own personal owner ID, or an actual admin of the requested organization. For editing, include `service_account_id=<uuid>`: the existing account must match the owner, and the caller must be a global admin or an admin of that owning organization. This endpoint's owner validation does not change existing management routes or grant cross-owner listing.
 
-`principal_type=service_account` is required. Owner/account IDs must be UUIDs. Optional `search` is at most 200 bytes and matches labels, values, and descriptions case-insensitively. `limit` is 1–100 (default 50), and `offset` is 0–10003 (default 0). Unknown query fields are rejected.
+`principal_type=service_account` is required. Owner/account IDs must be UUIDs. Optional `search` is at most 200 bytes and matches labels, values, and descriptions case-insensitively. `limit` is 1–100 (default 50), and `offset` is 0–10005 (default 0). Unknown query fields are rejected.
 
 ## Sources and response
 
 The resolver merges two sources:
 
-- Code-defined suggestions for existing checks: `proxy`, `llm:proxy`, and `roles`.
+- Code-defined suggestions for existing checks: `proxy`, `llm:proxy`, `roles`, `catalog:skills:read`, and `catalog:skills:write`. The catalog skill suggestions are available before any account has used them; using them still requires a platform-admin-issued curation grant for exact catalog services.
 - Scope tokens already configured on service accounts belonging to the authorized effective owner, including disabled accounts. Ownership follows `owner_user_id`, falling back to `created_by` for older records. Values are deduplicated and sorted; known definitions retain their descriptive labels. Other values use `source: "configured_scope"` and are explicitly described as previously configured custom values.
 
 The `proxy:*` alias and `groups` can appear when configured, with descriptions of their existing behavior. UserService IDs, provider OAuth menus, API-key scope vocabularies, and operation catalogs are not sources for this menu. No exact-service permission is generated.
@@ -44,9 +44,9 @@ The `proxy:*` alias and `groups` can appear when configured, with descriptions o
   "selected_items": [],
   "total": 1,
   "next_offset": null,
-  "version": "service-account-suggestions-v1:<content-hash>",
+  "version": "service-account-suggestions-v2:<content-hash>",
   "freshness": {
-    "definitions_version": "service-account-suggestions-v1",
+    "definitions_version": "service-account-suggestions-v2",
     "resources": "live",
     "evaluated_at": "2026-09-17T00:00:00+00:00",
     "max_age_seconds": 0
