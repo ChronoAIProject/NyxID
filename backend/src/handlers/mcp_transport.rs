@@ -1290,7 +1290,70 @@ fn audit_chat_tool(name: &str) -> bool {
         || name.starts_with("nyxid__")
 }
 
+/// The identifier shown to the chat owner for a tool call. Never arguments.
+fn chat_activity_label(params: &serde_json::Value) -> String {
+    let name = params
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("tool");
+    if name == "nyx__call_tool"
+        && let Some(inner) = params
+            .get("arguments")
+            .and_then(|a| a.get("tool_name"))
+            .and_then(|t| t.as_str())
+            .filter(|t| !t.is_empty())
+    {
+        return inner.to_owned();
+    }
+    name.to_owned()
+}
+
+/// Chat-key tool calls are recorded on the live turn as metadata-only activity
+/// so the browser can show what the assistant is doing before its reply streams.
 async fn handle_tools_call(
+    state: &AppState,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
+    request: &JsonRpcRequest,
+    client_accepts_sse: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> Response {
+    let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
+        (Some(chat), Some(params)) => crate::services::assistant_nyxagent::activity_started(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+            &chat_activity_label(params),
+        )
+        .await
+        .ok()
+        .flatten()
+        .map(|id| (chat, id)),
+        _ => None,
+    };
+    let response = dispatch_tools_call(
+        state,
+        auth,
+        session_id,
+        request,
+        client_accepts_sse,
+        billing_egress_permit,
+    )
+    .await;
+    if let Some((chat, id)) = activity {
+        let _ = crate::services::assistant_nyxagent::activity_finished(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+            &id,
+            response.status().is_success(),
+        )
+        .await;
+    }
+    response
+}
+
+async fn dispatch_tools_call(
     state: &AppState,
     auth: &McpAuthContext,
     session_id: Option<&str>,

@@ -60,7 +60,7 @@ export function NyxAgentAcknowledgementCard({
         {acknowledgement.kind === "action"
           ? "This confirmation applies once, to this action only."
           : "This permission applies to this chat only."}
-        {" Tell the assistant to continue after deciding."}
+        {" Allowing lets the assistant continue right away."}
       </p>
       {error ? (
         <p role="alert" className="text-[12px] text-destructive">
