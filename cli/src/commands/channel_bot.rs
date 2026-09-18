@@ -202,7 +202,15 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 );
             }
             let label = label.ok_or_else(|| anyhow::anyhow!("--label is required"))?;
-            let token = resolve_secret(bot_token.as_deref(), token_env.as_deref(), "bot token")?;
+            let token = if matches!(platform.as_str(), "lark" | "feishu") {
+                resolve_optional_secret(bot_token.as_deref(), token_env.as_deref())?
+            } else {
+                Some(resolve_secret(
+                    bot_token.as_deref(),
+                    token_env.as_deref(),
+                    "bot token",
+                )?)
+            };
             let resolved_app_secret =
                 resolve_optional_secret(app_secret.as_deref(), app_secret_env.as_deref())?;
             validate_platform_fields(
@@ -242,10 +250,12 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
 
             let mut body = serde_json::json!({
                 "platform": platform,
-                "bot_token": token,
                 "label": label,
             });
 
+            if let Some(token) = token {
+                body["bot_token"] = Value::String(token);
+            }
             if let Some(id) = app_id {
                 body["app_id"] = Value::String(id);
             }
@@ -1271,6 +1281,37 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_lark_and_feishu_without_bot_token() {
+        for platform in ["lark", "feishu"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/channel-bots"))
+                .and(wiremock::matchers::body_json(serde_json::json!({
+                    "platform": platform,
+                    "label": "support",
+                    "app_id": "cli_app",
+                    "app_secret": "app-secret",
+                    "verification_token": "vtok"
+                })))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": "bot-2", "status": "active"
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut command = register(server.uri(), platform, None, Some("vtok"));
+            if let ChannelBotCommands::Register {
+                app_id, app_secret, ..
+            } = &mut command
+            {
+                *app_id = Some("cli_app".to_string());
+                *app_secret = Some("app-secret".to_string());
+            }
+            run(command).await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -698,7 +698,6 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
         unsupported_patch_message: None,
         token_fields: &["app_id", "app_secret"],
         fields: &[
-            BOT_TOKEN_FIELD,
             RegistrationField {
                 name: "verification_token",
                 label: "Verification Token",
@@ -747,6 +746,25 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 hint: Some(
                     "Optional. Required only when encrypted callbacks are enabled in the platform console.",
                 ),
+                platform_fallback: None,
+            },
+        ],
+        extra_fields: &[
+            // Older clients submit a dummy token alongside the app credentials.
+            RegistrationField {
+                required: false,
+                ..BOT_TOKEN_FIELD
+            },
+            RegistrationField {
+                name: "public_key",
+                label: "Public Key",
+                storage: "public_key",
+                secret: false,
+                required: false,
+                patchable: false,
+                clearable: false,
+                webhook_secret: false,
+                hint: None,
                 platform_fallback: None,
             },
         ],
@@ -1233,6 +1251,80 @@ mod tests {
     /// pass to the adapter constructors.
     fn test_cache() -> Arc<TokenExchangeCache> {
         Arc::new(TokenExchangeCache::new())
+    }
+
+    #[tokio::test]
+    async fn registration_verifies_app_credentials_without_a_bot_token() {
+        use crate::services::channel_platform::{BotCredentials, RegistrationValues};
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for platform in ["lark", "feishu"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+                .and(body_json(serde_json::json!({
+                    "app_id": "cli_test", "app_secret": "app-secret"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "code": 0, "tenant_access_token": "tenant-token", "expire": 7200
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let adapter = LarkFamilyAdapter::media_test_adapter(&server.uri(), platform);
+            let descriptor = adapter.registration();
+            assert!(
+                !descriptor
+                    .fields
+                    .iter()
+                    .any(|field| field.name == "bot_token")
+            );
+            let mut fields = RegistrationValues(std::collections::BTreeMap::from([
+                ("app_id", "cli_test"),
+                ("app_secret", "app-secret"),
+                ("verification_token", "verification-token"),
+            ]));
+            descriptor.validate(&fields, false).unwrap();
+            let token = adapter.registration_token(&fields).unwrap();
+            let identity = adapter
+                .verify_bot_token(
+                    &reqwest::Client::new(),
+                    &BotCredentials::from(token.as_str()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(identity.platform_bot_id, "cli_test");
+
+            // Old clients can still submit the redundant field without changing credentials.
+            fields.0.insert("bot_token", "legacy-placeholder");
+            descriptor.validate(&fields, false).unwrap();
+            assert_eq!(*adapter.registration_token(&fields).unwrap(), *token);
+        }
+    }
+
+    #[test]
+    fn registration_requires_app_and_webhook_credentials_even_with_a_legacy_token() {
+        use crate::services::channel_platform::RegistrationValues;
+
+        for adapter in [
+            LarkFamilyAdapter::lark(test_cache()),
+            LarkFamilyAdapter::feishu(test_cache()),
+        ] {
+            let descriptor = adapter.registration();
+            for missing in ["app_id", "app_secret", "verification_token"] {
+                let mut fields = RegistrationValues(std::collections::BTreeMap::from([
+                    ("bot_token", "legacy-placeholder"),
+                    ("app_id", "cli_test"),
+                    ("app_secret", "app-secret"),
+                    ("verification_token", "verification-token"),
+                ]));
+                fields.0.remove(missing);
+                assert!(descriptor.validate(&fields, false).is_err(), "{missing}");
+                fields.0.insert(missing, " ");
+                assert!(descriptor.validate(&fields, false).is_err(), "{missing}");
+            }
+        }
     }
 
     #[test]

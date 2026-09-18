@@ -19,11 +19,23 @@ nyxid channel-bot register \
 
 `--platform` is one of `telegram`, `discord`, `lark`, `feishu`, `slack`. Some platforms need extra material at registration:
 
-- **Lark / Feishu** — `--app-id`, `--app-secret-env`, and `--verification-token` (used to verify inbound webhooks). `--encrypt-key` is optional, matching the Event Subscriptions console.
+- **Lark / Feishu** — `--app-id`, `--app-secret-env`, and `--verification-token` (used to verify inbound webhooks). NyxID obtains a tenant access token from the app credentials; no `--token-env` or bot token is needed. `--encrypt-key` is optional, matching the Event Subscriptions console.
 - **Discord** — `--public-key` for signature verification.
 - **Slack** — pass the `xoxb-` bot token via `--token-env` and the app **signing secret** via `--app-secret-env`.
 
 Add `--org <id|slug|name>` to register an org-owned bot.
+
+For Lark, set `LARK_APP_SECRET` and `NYXID_LARK_VERIFICATION_TOKEN` in your environment, then register with:
+
+```bash
+nyxid channel-bot register \
+  --platform lark \
+  --label support \
+  --app-id cli_your_app_id \
+  --app-secret-env LARK_APP_SECRET
+```
+
+Use `--platform feishu` for Feishu.
 
 ## 2. Create the agent that will answer
 
