@@ -42,7 +42,6 @@ describe("createChannelBotSchema platform-specific superRefine", () => {
     for (const platform of ["lark", "feishu"] as const) {
       const missing = createChannelBotSchema.safeParse({
         platform,
-        bot_token: "t",
         label: "l",
       });
       expect(missing.success).toBe(false);
@@ -56,13 +55,26 @@ describe("createChannelBotSchema platform-specific superRefine", () => {
       expect(
         createChannelBotSchema.safeParse({
           platform,
-          bot_token: "t",
           label: "l",
           app_id: "cli_x",
           app_secret: "secret",
           verification_token: "vtok",
         }).success,
       ).toBe(true);
+    }
+  });
+
+  it.each(["telegram", "discord", "slack", "whatsapp"])("still requires a bot token for %s", (platform) => {
+    const result = createChannelBotSchema.safeParse({
+      platform,
+      label: "Support",
+      public_key: "public-key",
+      app_secret: "app-secret",
+      phone_number_id: "123456",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.path)).toEqual([["bot_token"]]);
     }
   });
 
