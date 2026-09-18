@@ -276,3 +276,15 @@ advertise an available platform key.
 ## Aurinko email operations
 
 The `api-aurinko` catalog entry uses the `aurinko` hosted overlay and seeds fifteen concrete operations from documented Aurinko account/email/draft/sync contracts. The base is `https://api.aurinko.io`; paths include `/v1`. Authentication is the owner's account Bearer token. Writes carry approval/risk annotations and do not claim upstream idempotency. Aurinko publishes a machine-readable OpenAPI specification and is included in the existing drift map. See [Aurinko integration](./AURINKO_INTEGRATION.md) for connection, permissions, and channel setup.
+
+### Duplicate operation identities
+
+Dynamic (instance-mounted) specs derive each MCP endpoint identity from the
+producer's `operationId`. Producers do publish repeated `operationId`s
+(api.jina.ai did in September 2026). Operations that share an `operationId`
+fall back to their method/path identity, repeated tool names get a numeric
+suffix (`name_2`, `name_3`), and an operation whose identity still collides is
+dropped. Separately, the operation catalog omits any single service whose
+service or endpoint identities are missing or repeated and counts it in
+`invalid_contract_services`, instead of failing `tools/list`, `nyx__call_tool`
+and `/api/v1/mcp/config` for the whole user.
