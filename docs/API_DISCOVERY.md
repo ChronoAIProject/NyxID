@@ -288,3 +288,13 @@ dropped. Separately, the operation catalog omits any single service whose
 service or endpoint identities are missing or repeated and counts it in
 `invalid_contract_services`, instead of failing `tools/list`, `nyx__call_tool`
 and `/api/v1/mcp/config` for the whole user.
+
+### Tool search semantics
+
+`nyx__search_tools` splits the query on non-alphanumeric characters and matches
+each word as a case-insensitive substring of the qualified tool name
+(`<slug>__<operation>`), the service name and the description. Tools containing
+every word rank first, then partial matches in catalog order, capped at 25. Word
+order is irrelevant, so "skill search" and "search skills" both find
+`ornn-api__searchskills`, and concatenated operation names such as
+`getentitystate` match "entity state". An empty query lists the first 25 tools.

@@ -4497,10 +4497,25 @@ pub struct SearchResult {
 /// Search ALL user tools (regardless of activation state) and return matches
 /// plus the service IDs they belong to.
 pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResult {
-    let q_lower = query.to_lowercase();
-    let mut matches = Vec::new();
-    let mut matched_ids: HashSet<String> = HashSet::new();
-
+    // Models phrase queries freely ("skill search", "light state"), so match
+    // each query word independently against the qualified tool name, the
+    // service identity and the description, then rank tools that contain
+    // every word above partial matches. Words are substrings so concatenated
+    // operation names such as `getentitystate` still match "entity state".
+    let tokens: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut candidates: Vec<(
+        usize,
+        usize,
+        &McpToolService,
+        &McpToolEndpoint,
+        String,
+        String,
+    )> = Vec::new();
     for service in services {
         for endpoint in &service.endpoints {
             let name = format!("{}__{}", service.service_slug, endpoint.name);
@@ -4509,29 +4524,34 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name),
             );
-
-            if name.to_lowercase().contains(&q_lower)
-                || description.to_lowercase().contains(&q_lower)
-            {
-                matched_ids.insert(service.service_id.clone());
-                let input_schema = if service.is_generic_proxy {
-                    build_generic_proxy_input_schema()
-                } else {
-                    build_input_schema(endpoint)
-                };
-                matches.push(McpToolDefinition {
-                    name,
-                    description,
-                    input_schema,
-                });
-                if matches.len() >= MAX_SEARCH_RESULTS {
-                    break;
-                }
+            let haystack = format!("{name}\n{description}").to_lowercase();
+            let matched = tokens
+                .iter()
+                .filter(|token| haystack.contains(token.as_str()))
+                .count();
+            if tokens.is_empty() || matched > 0 {
+                let order = candidates.len();
+                candidates.push((matched, order, service, endpoint, name, description));
             }
         }
-        if matches.len() >= MAX_SEARCH_RESULTS {
-            break;
-        }
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    candidates.truncate(MAX_SEARCH_RESULTS);
+
+    let mut matches = Vec::with_capacity(candidates.len());
+    let mut matched_ids: HashSet<String> = HashSet::new();
+    for (_, _, service, endpoint, name, description) in candidates {
+        matched_ids.insert(service.service_id.clone());
+        let input_schema = if service.is_generic_proxy {
+            build_generic_proxy_input_schema()
+        } else {
+            build_input_schema(endpoint)
+        };
+        matches.push(McpToolDefinition {
+            name,
+            description,
+            input_schema,
+        });
     }
 
     SearchResult {
@@ -5883,6 +5903,64 @@ mod tests {
         assert_eq!(result.matched_service_ids.len(), 2);
         assert!(result.matched_service_ids.contains(&"svc-1".to_string()));
         assert!(result.matched_service_ids.contains(&"svc-2".to_string()));
+    }
+
+    #[test]
+    fn search_all_tools_matches_words_in_any_order_and_ranks_full_matches_first() {
+        let services = vec![
+            make_service(
+                "ornn",
+                "Ornn",
+                "ornn-api",
+                vec![
+                    make_endpoint("searchskills", "Search published skills"),
+                    make_endpoint("getformatrules", "Skill format rules"),
+                ],
+            ),
+            make_service(
+                "ha",
+                "Home Assistant at office",
+                "home-assistant",
+                vec![
+                    make_endpoint("getentitystate", "Read an entity"),
+                    make_endpoint("lightturnon", "Turn a light on"),
+                    make_endpoint("switchturnoff", "Turn a switch off"),
+                ],
+            ),
+        ];
+        // Word order does not matter and every word need not be adjacent.
+        for query in ["skill search", "search skills", "SKILL-SEARCH"] {
+            let result = search_all_tools(&services, query);
+            assert_eq!(result.matches[0].name, "ornn-api__searchskills", "{query}");
+        }
+        // Concatenated operation names match by substring; tools that contain
+        // every word rank above partial matches, which are still returned.
+        let result = search_all_tools(&services, "entity state");
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].name, "home-assistant__getentitystate");
+        let result = search_all_tools(&services, "state entity light");
+        let names: Vec<_> = result.matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "home-assistant__getentitystate",
+                "home-assistant__lightturnon"
+            ]
+        );
+        let result = search_all_tools(&services, "light state");
+        assert_eq!(result.matches.len(), 2);
+        let names: Vec<_> = result.matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "home-assistant__getentitystate",
+                "home-assistant__lightturnon"
+            ]
+        );
+        // The service name is searchable too.
+        let result = search_all_tools(&services, "home assistant office");
+        assert_eq!(result.matches.len(), 3);
+        assert_eq!(result.matched_service_ids, vec!["ha".to_string()]);
     }
 
     #[test]
