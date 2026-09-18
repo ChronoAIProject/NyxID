@@ -505,9 +505,12 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // about-to-be-deleted org user_id. Leaving them behind would
     // accumulate dangling rows in MongoDB; the API can never reach
     // them after the org user is gone.
-    db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
-        .delete_many(doc! { "user_id": org_user_id, "is_active": false })
-        .await?;
+    crate::services::service_history::collection::<bson::Document>(
+        db,
+        crate::models::user_service::COLLECTION_NAME,
+    )
+    .delete_many(doc! { "user_id": org_user_id, "is_active": false })
+    .await?;
     db.collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id, "is_active": false })
         .await?;

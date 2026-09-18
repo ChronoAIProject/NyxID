@@ -65,6 +65,102 @@ async fn call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Re
 }
 
 #[tokio::test]
+async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_groups() {
+    use crate::models::service_change_event::{HistoryActorKind, ServiceChangeEvent};
+    use futures::TryStreamExt;
+    use tower::ServiceExt;
+
+    let f = fixture("chat_service_history").await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "history-target",
+        "https://example.com",
+    )
+    .await;
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"active_turn": mongodb::bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    crate::services::assistant_access_mode_service::change(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        crate::models::assistant_conversation::AccessMode::Full,
+    )
+    .await
+    .unwrap();
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+    let router = private.with_state(f.state.clone());
+    for enabled in [false, false, true] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("x-api-key", credential.raw_key.as_str())
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "nyxid__set_service_enabled", "arguments": {
+                                "service_id": service, "enabled": enabled
+                            }}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(result(response, false).await["is_active"], enabled);
+    }
+    let events: Vec<ServiceChangeEvent> = f
+        .state
+        .db
+        .collection(crate::models::service_change_event::COLLECTION_NAME)
+        .find(doc! {"service_id": &service})
+        .sort(doc! {"service_sequence": 1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2, "a no-op toggle must not add history");
+    assert_eq!(events[0].action, "service.disabled");
+    assert_eq!(events[1].action, "service.enabled");
+    assert_ne!(events[0].change_group_id, events[1].change_group_id);
+    for event in events {
+        assert_eq!(event.actor.kind, HistoryActorKind::ApiKey);
+        assert_eq!(
+            event.actor.api_key_id.as_deref(),
+            Some(f.row.credential_api_key_id.as_str())
+        );
+        assert_eq!(event.actor.person_id.as_deref(), Some(f.owner.as_str()));
+        assert_eq!(event.owner_id, f.owner);
+        assert!(event.actor.name.starts_with("NyxID Assistant chat "));
+    }
+}
+
+#[tokio::test]
 async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypassing_denial() {
     let f = fixture("chat_mcp_allow").await;
     let hits = Arc::new(AtomicUsize::new(0));

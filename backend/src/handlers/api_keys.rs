@@ -583,13 +583,12 @@ async fn enrich_api_keys_batch(
     let service_map: HashMap<String, UserService> = if all_service_ids.is_empty() {
         HashMap::new()
     } else {
-        let services: Vec<UserService> = state
-            .db
-            .collection::<UserService>(USER_SERVICES)
-            .find(doc! { "_id": { "$in": &all_service_ids } })
-            .await?
-            .try_collect()
-            .await?;
+        let services: Vec<UserService> =
+            crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+                .find(doc! { "_id": { "$in": &all_service_ids } })
+                .await?
+                .try_collect()
+                .await?;
         services.into_iter().map(|s| (s.id.clone(), s)).collect()
     };
 
@@ -628,13 +627,12 @@ async fn enrich_api_keys_batch(
     let endpoint_label_map: HashMap<String, String> = if endpoint_ids.is_empty() {
         HashMap::new()
     } else {
-        let endpoints: Vec<UserEndpoint> = state
-            .db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
-            .find(doc! { "_id": { "$in": &endpoint_ids } })
-            .await?
-            .try_collect()
-            .await?;
+        let endpoints: Vec<UserEndpoint> =
+            crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+                .find(doc! { "_id": { "$in": &endpoint_ids } })
+                .await?
+                .try_collect()
+                .await?;
         endpoints
             .into_iter()
             .map(|ep| (ep.id.clone(), ep.label))
@@ -792,13 +790,12 @@ async fn load_user_service_info_map(
     state: &AppState,
     user_id: &str,
 ) -> AppResult<HashMap<String, (String, String)>> {
-    let services: Vec<UserService> = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! { "user_id": user_id })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find(doc! { "user_id": user_id })
+            .await?
+            .try_collect()
+            .await?;
 
     let endpoint_ids: Vec<&str> = services
         .iter()
@@ -810,13 +807,12 @@ async fn load_user_service_info_map(
     let endpoint_label_map: HashMap<String, String> = if endpoint_ids.is_empty() {
         HashMap::new()
     } else {
-        let endpoints: Vec<UserEndpoint> = state
-            .db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
-            .find(doc! { "_id": { "$in": &endpoint_ids } })
-            .await?
-            .try_collect()
-            .await?;
+        let endpoints: Vec<UserEndpoint> =
+            crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+                .find(doc! { "_id": { "$in": &endpoint_ids } })
+                .await?
+                .try_collect()
+                .await?;
         endpoints
             .into_iter()
             .map(|endpoint| (endpoint.id, endpoint.label))

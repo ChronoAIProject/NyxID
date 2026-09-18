@@ -482,6 +482,17 @@ pub async fn oauth_callback(
     )
     .await?;
 
+    if outcome.connection_id.is_none() {
+        sync_provider_credentials_to_unified_keys(
+            &state,
+            &outcome.user_id,
+            &provider_id,
+            true,
+            true,
+        )
+        .await?;
+    }
+
     audit_service::log_async(
         state.db.clone(),
         Some(outcome.user_id.clone()),
@@ -1239,8 +1250,7 @@ pub async fn manual_refresh(
         Some(&state.connection_expiry_notifier),
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true, false)
-        .await?;
+    sync_refreshed_credentials_to_unified_keys(&state, effective_user_id, &provider_id).await?;
 
     let mut event_data = serde_json::json!({ "provider_id": &provider_id });
     if effective_user_id != user_id_str {
@@ -1504,6 +1514,28 @@ fn normalized_oauth_error_code(error: &str) -> &'static str {
     }
 }
 
+async fn sync_refreshed_credentials_to_unified_keys(
+    state: &AppState,
+    user_id: &str,
+    provider_id: &str,
+) -> AppResult<()> {
+    user_api_key_service::sync_refreshed_provider_token_to_api_keys(
+        &state.db,
+        user_id,
+        provider_id,
+    )
+    .await?;
+    let db = state.db.clone();
+    let enc = state.encryption_keys.clone();
+    let ws = state.node_ws_manager.clone();
+    let uid = user_id.to_string();
+    let pid = provider_id.to_string();
+    tokio::spawn(async move {
+        credential_push_service::push_oauth_credential_to_nodes(&db, &enc, &ws, &uid, &pid).await;
+    });
+    Ok(())
+}
+
 async fn sync_provider_credentials_to_unified_keys(
     state: &AppState,
     user_id: &str,
@@ -1698,6 +1730,7 @@ mod tests {
     fn test_oauth_state(state_id: &str, user_id: &str, provider_id: &str) -> OAuthState {
         let now = Utc::now();
         OAuthState {
+            history_context: crate::services::service_history::context::current(),
             id: state_id.to_string(),
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
@@ -3179,5 +3212,376 @@ mod tests {
             Some(safe_provider_error_message("access_denied", None).as_str())
         );
         assert_eq!(get_api_key(&db, &key_id).await.status, "pending_auth");
+    }
+    #[tokio::test]
+    async fn service_history_get_oauth_initiation_and_callbacks_preserve_normal_and_admin_actor() {
+        use crate::models::service_change_event::ServiceChangeEvent;
+        use crate::services::{role_service, service_account_service};
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use futures::TryStreamExt;
+        use tower::ServiceExt;
+        let db = crate::test_utils::connect_transaction_test_database("history_get_oauth").await;
+        role_service::seed_system_roles(&db).await.unwrap();
+        let state = test_app_state(db.clone());
+        let actor = Uuid::new_v4();
+        let mut user = test_user(&actor.to_string(), UserType::Person);
+        user.display_name = Some("Initiating admin".into());
+        user.role_ids.push(
+            role_service::get_platform_role_ids(&db)
+                .await
+                .unwrap()
+                .admin,
+        );
+        db.collection(USERS).insert_one(user).await.unwrap();
+        let token = crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "openid",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, private) = crate::routes::build_router();
+        let private = private.with_state(state.clone());
+        let (sa, _) = service_account_service::create_service_account(
+            &db,
+            "History bot",
+            None,
+            "proxy",
+            &[],
+            None,
+            &actor.to_string(),
+        )
+        .await
+        .unwrap();
+        let (token_url, server) = spawn_oauth_token_server().await;
+        for admin_flow in [false, true] {
+            let owner = if admin_flow {
+                sa.id.clone()
+            } else {
+                actor.to_string()
+            };
+            let provider_id = Uuid::new_v4().to_string();
+            let service_id = Uuid::new_v4().to_string();
+            let key_id = Uuid::new_v4().to_string();
+            let mut provider = test_provider_config(&provider_id);
+            provider.token_url = Some(token_url.clone());
+            provider.client_id_encrypted =
+                Some(state.encryption_keys.encrypt(b"client").await.unwrap());
+            provider.client_secret_encrypted =
+                Some(state.encryption_keys.encrypt(b"secret").await.unwrap());
+            db.collection(PROVIDER_CONFIGS)
+                .insert_one(provider)
+                .await
+                .unwrap();
+            db.collection(USER_API_KEYS)
+                .insert_one(test_pending_oauth_api_key(&key_id, &owner, &provider_id))
+                .await
+                .unwrap();
+            let mut service =
+                test_user_service(&service_id, &owner, "oauth-history", "endpoint", None, None);
+            service.api_key_id = Some(key_id.clone());
+            db.collection(USER_SERVICES)
+                .insert_one(service)
+                .await
+                .unwrap();
+            let url = if admin_flow {
+                format!(
+                    "/api/v1/admin/service-accounts/{}/providers/{provider_id}/connect/oauth",
+                    sa.id
+                )
+            } else {
+                format!("/api/v1/providers/{provider_id}/connect/oauth")
+            };
+            let response = private
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(url)
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let url = url::Url::parse(body["authorization_url"].as_str().unwrap()).unwrap();
+            let state_id = url
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .unwrap()
+                .1
+                .into_owned();
+            let saved = db
+                .collection::<OAuthState>(OAUTH_STATES)
+                .find_one(doc! { "_id": &state_id })
+                .await
+                .unwrap()
+                .unwrap();
+            let context = saved.history_context.unwrap();
+            assert_eq!(context.actor.id, actor.to_string());
+            assert_eq!(context.actor.name, "Initiating admin");
+            let response = private
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/v1/providers/callback?state={state_id}&code=authorization"
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(response.status().is_redirection());
+            let events: Vec<_> = db
+                .collection::<ServiceChangeEvent>(
+                    crate::models::service_change_event::COLLECTION_NAME,
+                )
+                .find(doc! { "service_id": &service_id })
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(
+                events.len(),
+                1,
+                "callback must capture the legacy unified-key write"
+            );
+            assert_eq!(events[0].actor.id, actor.to_string());
+            assert_eq!(events[0].owner_id, owner);
+            assert_eq!(events[0].change_group_id, context.change_group_id);
+            assert_eq!(events[0].action, "service.credential_reauthorized");
+            assert!(
+                !serde_json::to_string(&events)
+                    .unwrap()
+                    .contains("test-access-token")
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_history_manual_provider_replacement_and_legacy_device_completion_are_not_refreshes()
+     {
+        use crate::models::service_change_event::{COLLECTION_NAME as HISTORY, ServiceChangeEvent};
+        use crate::services::service_history::context;
+        use futures::TryStreamExt;
+        let db =
+            crate::test_utils::connect_transaction_test_database("history_provider_writers").await;
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let provider_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        let mut provider = test_provider_config(&provider_id);
+        provider.provider_type = "api_key".into();
+        provider.client_secret_encrypted = None;
+        db.collection(PROVIDER_CONFIGS)
+            .insert_one(provider)
+            .await
+            .unwrap();
+        let mut key = test_pending_oauth_api_key(&key_id, &owner, &provider_id);
+        key.credential_type = "api_key".into();
+        key.status = "active".into();
+        db.collection(USER_API_KEYS).insert_one(key).await.unwrap();
+        let mut service = test_user_service(
+            &service_id,
+            &owner,
+            "manual-history",
+            "endpoint",
+            None,
+            None,
+        );
+        service.api_key_id = Some(key_id.clone());
+        db.collection(USER_SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let context = context::system("test_manual_request");
+        context::scope(context.clone(), async {
+            let _ = super::connect_api_key(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                Path(provider_id.clone()),
+                Json(ConnectApiKeyRequest {
+                    api_key: "same-secret".into(),
+                    gateway_url: None,
+                    label: None,
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = super::connect_api_key(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                Path(provider_id.clone()),
+                Json(ConnectApiKeyRequest {
+                    api_key: "same-secret".into(),
+                    gateway_url: None,
+                    label: None,
+                }),
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+        let events: Vec<_> = db
+            .collection::<ServiceChangeEvent>(HISTORY)
+            .find(doc! { "service_id": &service_id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.action == "service.credential_replaced")
+        );
+        let epochs = get_api_key(&db, &key_id).await.credential_epoch;
+        assert!(epochs >= 1);
+        let (token_url, server) = spawn_oauth_token_server().await;
+        db.collection::<bson::Document>(PROVIDER_CONFIGS).update_one(doc! { "_id": &provider_id },doc! { "$set": { "provider_type": "device_code", "device_token_url": token_url, "client_id_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: state.encryption_keys.encrypt(b"client").await.unwrap() } } }).await.unwrap();
+        let state_id = Uuid::new_v4().to_string();
+        let mut oauth = test_oauth_state(&state_id, &owner, &provider_id);
+        oauth.device_code_encrypted = Some(hex::encode(
+            state.encryption_keys.encrypt(b"device").await.unwrap(),
+        ));
+        oauth.user_code_encrypted = Some(hex::encode(
+            state.encryption_keys.encrypt(b"user-code").await.unwrap(),
+        ));
+        oauth.history_context = Some(context.clone());
+        db.collection(OAUTH_STATES).insert_one(oauth).await.unwrap();
+        context::scope(context::system("polling_request"), async {
+            let Json(response) = super::poll_device_code(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                Path(provider_id.clone()),
+                Json(DeviceCodePollRequest { state: state_id }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status, "complete");
+        })
+        .await;
+        let rows: Vec<_> = db
+            .collection::<ServiceChangeEvent>(HISTORY)
+            .find(doc! { "service_id": &service_id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter()
+                .all(|e| e.change_group_id == context.change_group_id)
+        );
+        let before = rows.len();
+        context::scope(context::system("refresh"), async {
+            sync_refreshed_credentials_to_unified_keys(&state, &owner, &provider_id)
+                .await
+                .unwrap();
+        })
+        .await;
+        assert_eq!(
+            db.collection::<ServiceChangeEvent>(HISTORY)
+                .count_documents(doc! { "service_id": &service_id })
+                .await
+                .unwrap() as usize,
+            before
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn service_history_placeholder_recovery_is_system_and_restores_human_context() {
+        use crate::models::service_change_event::{
+            COLLECTION_NAME as HISTORY, HistoryActor, HistoryActorKind, HistoryContext,
+            ServiceChangeEvent,
+        };
+        use crate::services::service_history::{collection, context};
+        use futures::TryStreamExt;
+        let db =
+            crate::test_utils::connect_transaction_test_database("history_placeholder_actor").await;
+        let owner = Uuid::new_v4().to_string();
+        let provider = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        let mut key = test_pending_oauth_api_key(&key_id, &owner, &provider);
+        key.updated_at = Utc::now() - Duration::seconds(10);
+        db.collection(USER_API_KEYS).insert_one(key).await.unwrap();
+        db.collection(USER_PROVIDER_TOKENS)
+            .insert_one(test_provider_token(
+                &Uuid::new_v4().to_string(),
+                &owner,
+                &provider,
+            ))
+            .await
+            .unwrap();
+        let mut service =
+            test_user_service(&service_id, &owner, "recovery", "endpoint", None, None);
+        service.api_key_id = Some(key_id.clone());
+        db.collection(USER_SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let human = HistoryContext {
+            actor: HistoryActor {
+                kind: HistoryActorKind::Person,
+                id: owner.clone(),
+                name: "Human editor".into(),
+                person_id: Some(owner.clone()),
+                api_key_id: None,
+                app_id: None,
+            },
+            change_group_id: Uuid::new_v4().to_string(),
+            operation: "manual_edit".into(),
+        };
+        context::scope(human.clone(), async {
+            user_api_key_service::reconcile_pending_oauth_placeholder(&db, &owner, &key_id)
+                .await
+                .unwrap();
+            assert_eq!(context::current().unwrap().actor.id, owner);
+            collection::<bson::Document>(&db, USER_SERVICES)
+                .update_one(
+                    doc! { "_id": &service_id },
+                    doc! { "$set": { "admin_only": true } },
+                )
+                .await
+                .unwrap();
+        })
+        .await;
+        let events: Vec<_> = db
+            .collection::<ServiceChangeEvent>(HISTORY)
+            .find(doc! { "service_id": &service_id })
+            .sort(doc! { "service_sequence": 1 })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].actor.kind, HistoryActorKind::System);
+        assert_eq!(events[0].actor.id, "oauth_placeholder_reconciliation");
+        assert_eq!(events[1].actor.kind, HistoryActorKind::Person);
+        assert_eq!(events[1].change_group_id, human.change_group_id);
     }
 }

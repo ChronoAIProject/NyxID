@@ -179,6 +179,7 @@ pub mod assistant_nyxagent;
 pub mod channel_retry_ingress;
 pub mod provider_link_service;
 pub mod retired_service_service;
+pub mod service_history;
 
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;

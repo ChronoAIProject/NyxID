@@ -1313,6 +1313,8 @@ async fn main() {
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
     // private API routes get restricted CORS (FRONTEND_URL only).
+    services::service_history::relay::start(state.db.clone());
+
     let (public_oauth, private_api) = routes::build_router_with_state(state.clone());
 
     let csrf_state = state.clone();

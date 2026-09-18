@@ -272,15 +272,15 @@ async fn resolve_scope_storage_service_ids(
     for id in allowed_user_service_ids {
         ids_bson.push(mongodb::bson::Bson::String(id.clone()));
     }
-    let rows: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(mongodb::bson::doc! {
-            "_id": { "$in": ids_bson },
-            "user_id": org_user_id,
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let rows: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(mongodb::bson::doc! {
+                "_id": { "$in": ids_bson },
+                "user_id": org_user_id,
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in rows {
@@ -1287,8 +1287,7 @@ async fn scope_user_service_ids_for_config(
     service_id: &str,
 ) -> AppResult<Vec<String>> {
     let mut ids = Vec::new();
-    if (db
-        .collection::<UserService>(USER_SERVICES)
+    if (crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(mongodb::bson::doc! {
             "_id": service_id,
             "user_id": owner_user_id,
@@ -1398,10 +1397,10 @@ async fn resolve_approval_target(
     owner_user_id: &str,
     service_id: &str,
 ) -> AppResult<ApprovalTarget> {
-    if let Some(user_service) = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc_ownership(owner_user_id, service_id))
-        .await?
+    if let Some(user_service) =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find_one(doc_ownership(owner_user_id, service_id))
+            .await?
     {
         // Pick the display name by key space:
         //  - Catalog-backed: the policy is keyed by `catalog_service_id`
@@ -1412,24 +1411,25 @@ async fn resolve_approval_target(
         //  - Custom: the policy is keyed by the UserService id itself,
         //    so the endpoint label (or slug fallback) is both accurate
         //    and uniquely attached to that one service.
-        let (effective_service_id, display_name) =
-            if let Some(ref catalog_id) = user_service.catalog_service_id {
-                let catalog_name = db
-                    .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-                    .find_one(mongodb::bson::doc! { "_id": catalog_id })
-                    .await?
-                    .map(|s| s.name)
-                    .unwrap_or_else(|| user_service.slug.clone());
-                (catalog_id.clone(), catalog_name)
-            } else {
-                let endpoint_label = db
-                    .collection::<UserEndpoint>(USER_ENDPOINTS)
+        let (effective_service_id, display_name) = if let Some(ref catalog_id) =
+            user_service.catalog_service_id
+        {
+            let catalog_name = db
+                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(mongodb::bson::doc! { "_id": catalog_id })
+                .await?
+                .map(|s| s.name)
+                .unwrap_or_else(|| user_service.slug.clone());
+            (catalog_id.clone(), catalog_name)
+        } else {
+            let endpoint_label =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
                     .find_one(mongodb::bson::doc! { "_id": &user_service.endpoint_id })
                     .await?
                     .map(|ep| ep.label)
                     .unwrap_or_else(|| user_service.slug.clone());
-                (user_service.id.clone(), endpoint_label)
-            };
+            (user_service.id.clone(), endpoint_label)
+        };
         return Ok(ApprovalTarget {
             effective_service_id,
             display_name,
@@ -1479,8 +1479,7 @@ async fn find_matching_user_service_for_config(
     owner_user_id: &str,
     stored_service_id: &str,
 ) -> AppResult<Option<UserService>> {
-    if let Some(us) = db
-        .collection::<UserService>(USER_SERVICES)
+    if let Some(us) = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(doc_ownership(owner_user_id, stored_service_id))
         .await?
         && access.allows_resource(&us.id)
@@ -1493,8 +1492,7 @@ async fn find_matching_user_service_for_config(
     // whose allowed_service_ids doesn't cover any sibling gets `None`,
     // keeping their metadata sealed.
     use futures::TryStreamExt;
-    let mut cursor = db
-        .collection::<UserService>(USER_SERVICES)
+    let mut cursor = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find(mongodb::bson::doc! {
             "user_id": owner_user_id,
             "catalog_service_id": stored_service_id,

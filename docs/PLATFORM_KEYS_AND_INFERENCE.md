@@ -332,3 +332,7 @@ Admin inference flags are `--inference-protocol`, `--inference-model-list`, and
 - xAI [Models REST API](https://docs.x.ai/developers/rest-api-reference/inference/models.md): `GET /v1/models`, OpenAI-style `data`/model objects.
 - xAI [Voice agent guide](https://docs.x.ai/docs/guides/voice/agent): bearer-authenticated `wss://api.x.ai/v1/realtime`.
 - OpenAI [Models](https://developers.openai.com/api/reference/resources/models/methods/list), [DeepSeek models](https://api-docs.deepseek.com/api/list-models), [Mistral models](https://docs.mistral.ai/api/endpoint/models), [Anthropic models](https://docs.anthropic.com/en/api/models-list), and [OpenRouter models](https://openrouter.ai/api/v1/models) establish model-list capability. Transport construction tests cover OpenAI and xAI realtime; no paid upstream session is required for the local test suite.
+
+## Service-instance history
+
+Explicit platform/user credential-binding transitions and platform-instance settings are recorded in the service journal. Automatic provisioning and removal use verified system attribution; retained UUID history remains available after physical cleanup under current owner/admin scope. Re-provisioning starts a new instance history even when the slug is reused. Platform credential material is never included. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe details, archive discovery, and MongoDB transaction prerequisites.

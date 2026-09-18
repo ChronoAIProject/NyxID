@@ -30,6 +30,14 @@ pub fn exclusion_filter() -> Document {
 /// Runs before serving traffic. The namespace guard also rejects rows created
 /// after this sweep by an older replica. No credential or historical row moves.
 pub async fn retire_legacy_vendors(db: &mongodb::Database) -> AppResult<()> {
+    super::service_history::context::scope(
+        super::service_history::context::system("retired_service_migration"),
+        retire_legacy_vendors_inner(db),
+    )
+    .await
+}
+
+async fn retire_legacy_vendors_inner(db: &mongodb::Database) -> AppResult<()> {
     let services = db.collection::<Document>(COLLECTION_NAME);
     let mut cursor = services
         .find(doc! { "$or": [
@@ -48,23 +56,21 @@ pub async fn retire_legacy_vendors(db: &mongodb::Database) -> AppResult<()> {
             "platform_key": { "enabled": false, "audience": "restricted", "allowed_owner_ids": [] },
             "proxy_operation_policy": { "rules": [] },
         }}).await?;
-        for (collection, field) in [
-            (
-                crate::models::user_service::COLLECTION_NAME,
-                "catalog_service_id",
-            ),
-            (
-                crate::models::user_service_connection::COLLECTION_NAME,
-                "service_id",
-            ),
-        ] {
-            db.collection::<Document>(collection)
-                .update_many(
-                    doc! { field: id, "is_active": true },
-                    doc! { "$set": { "is_active": false } },
-                )
-                .await?;
-        }
+        super::service_history::collection::<Document>(
+            db,
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .update_many(
+            doc! { "catalog_service_id": id, "is_active": true },
+            doc! { "$set": { "is_active": false } },
+        )
+        .await?;
+        db.collection::<Document>(crate::models::user_service_connection::COLLECTION_NAME)
+            .update_many(
+                doc! { "service_id": id, "is_active": true },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await?;
     }
     Ok(())
 }
@@ -130,6 +136,25 @@ mod tests {
             .unwrap();
         retire_legacy_vendors(&db).await.unwrap();
         retire_legacy_vendors(&db).await.unwrap();
+        let events: Vec<crate::models::service_change_event::ServiceChangeEvent> = db
+            .collection(crate::models::service_change_event::COLLECTION_NAME)
+            .find(doc! { "service_id": &binding.id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "repeated retirement must not duplicate history"
+        );
+        assert_eq!(events[0].action, "service.disabled");
+        assert_eq!(
+            events[0].actor.kind,
+            crate::models::service_change_event::HistoryActorKind::System
+        );
+        assert_eq!(events[0].operation, "retired_service_migration");
         let stored = db
             .collection::<DownstreamService>(COLLECTION_NAME)
             .find_one(doc! { "_id": &vendor.id })

@@ -1,6 +1,6 @@
 # Reusable options API
 
-`GET /api/v1/options/{option_set}` supplies suggestions for editable fields. The first registered set is `service-scope`; unknown sets return 404. Suggestions are optional prefill data, not an exhaustive vocabulary or a new authorization mechanism. Service-account scope create/update, token subset validation, and runtime permission checks retain their existing behavior.
+`GET /api/v1/options/{option_set}` supplies suggestions for editable fields. Registered sets are `service-scope`, `service-history-action`, and `service-history-field`; unknown sets return 404. Suggestions are optional prefill data, not an exhaustive vocabulary or a new authorization mechanism. Service-account scope create/update, token subset validation, and runtime permission checks retain their existing behavior.
 
 ## Service-account context
 
@@ -83,3 +83,12 @@ To add a set, register an explicit variant and resolver in `services/options_ser
 ## Local mock preview
 
 From `frontend/`, run `node scripts/preview-service-scopes.mjs`, then open `http://127.0.0.1:53226/scope-preview`. The development-only page uses the actual shared picker with mocked HTTP responses for available, empty, and unavailable suggestions and a local save simulation. It does not add a production route or modify real service accounts.
+
+
+## Static service-history definitions
+
+`GET /api/v1/options/service-history-action` and `GET /api/v1/options/service-history-field` expose the shared typed backend history registry. Existing route authentication applies; these static definitions add no owner/service-account permission check. They reject `owner_id`, `principal_type` and `service_account_id`, including empty values. Optional `search` is at most 200 bytes, `limit` is 1–100 (default 50), and `offset` is 0–1000. Unknown query fields are rejected.
+
+Responses contain `option_set`, `items`, `total`, `next_offset`, `version` and `freshness`, without scope-context fields or `selected_items`. Items have `source: "backend_definition"` and null owner/resource IDs. `freshness.resources` is `"static"`; scope suggestions remain `"live"`. The full definition content determines the version, independent of search or page. Next offsets must advance and remain strictly below total.
+
+Frontend response schemas and contexts discriminate on the registered set. History filters use closed choices and backend labels; the service-scope picker preserves editable custom values. Cache keys include authenticated identity, set and applicable context. Version changes restart pagination, and invalid context/pagination or permission failures hide stale choices. History responses embed the same definitions' labels, so capture and timeline rendering work when the options endpoint is unavailable. Retired codes remain filterable; unknown event codes have a generic presentation fallback. Labels are independent of the safe-value persistence allowlist.

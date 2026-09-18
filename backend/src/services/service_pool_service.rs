@@ -91,14 +91,14 @@ async fn validate_members_owned_and_active(
     members: &[ServicePoolMember],
 ) -> AppResult<()> {
     for member in members {
-        let service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "_id": &member.user_service_id,
-                "user_id": owner_id,
-                "is_active": true,
-            })
-            .await?;
+        let service =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "_id": &member.user_service_id,
+                    "user_id": owner_id,
+                    "is_active": true,
+                })
+                .await?;
         if service.is_none() {
             return Err(AppError::ServicePoolMemberInvalid(format!(
                 "Pool member '{}' must be an active UserService owned by the same owner",
@@ -117,8 +117,7 @@ async fn ensure_slug_available(
 ) -> AppResult<()> {
     user_service_service::validate_slug(slug)?;
 
-    if db
-        .collection::<UserService>(USER_SERVICES)
+    if crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(doc! { "user_id": owner_id, "slug": slug })
         .await?
         .is_some()
@@ -376,14 +375,14 @@ pub async fn resolve_member(
         if !member.enabled {
             continue;
         }
-        let Some(service) = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "_id": &member.user_service_id,
-                "user_id": owner_id,
-                "is_active": true,
-            })
-            .await?
+        let Some(service) =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "_id": &member.user_service_id,
+                    "user_id": owner_id,
+                    "is_active": true,
+                })
+                .await?
         else {
             continue;
         };
@@ -439,14 +438,14 @@ pub async fn find_first_viable_member(
         if !member.enabled {
             continue;
         }
-        if let Some(service) = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "_id": &member.user_service_id,
-                "user_id": owner_id,
-                "is_active": true,
-            })
-            .await?
+        if let Some(service) =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "_id": &member.user_service_id,
+                    "user_id": owner_id,
+                    "is_active": true,
+                })
+                .await?
         {
             return Ok(Some(service));
         }

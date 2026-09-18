@@ -2,6 +2,8 @@
 #[openapi(
     modifiers(&SecurityAddon),
     paths(
+        crate::handlers::service_history::get_history,
+        crate::handlers::service_history::get_archived,
         crate::handlers::admin_ownership::list_resources,
         crate::handlers::admin_ownership::preview,
         crate::handlers::admin_ownership::transfer,
@@ -128,7 +130,12 @@
     ),
     components(
         schemas(
+            crate::handlers::service_history::HistoryResponse,
+            crate::handlers::service_history::ArchiveResponse,
+            crate::handlers::service_history::AuthorshipResponse,
             crate::services::options_service::OptionsResponse,
+            crate::services::options_service::RegisteredOptionsResponse,
+            crate::services::options_service::HistoryOptionsResponse,
             crate::services::options_service::OptionItem,
             crate::services::options_service::OptionsFreshness,
             crate::errors::ErrorResponse,

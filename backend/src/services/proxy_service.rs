@@ -2006,12 +2006,11 @@ pub async fn guard_slug_against_viewer_orgs(
             "user_id": &membership.org_user_id,
             "$or": us_or,
         };
-        let us_hit = db
-            .collection::<crate::models::user_service::UserService>(
-                crate::models::user_service::COLLECTION_NAME,
-            )
-            .count_documents(us_query)
-            .await?;
+        let us_hit = crate::services::service_history::collection::<
+            crate::models::user_service::UserService,
+        >(db, crate::models::user_service::COLLECTION_NAME)
+        .count_documents(us_query)
+        .await?;
         if us_hit > 0 {
             return Err(AppError::OrgRoleInsufficient(
                 "your role in the owning org does not permit using this service".to_string(),
@@ -2674,8 +2673,7 @@ async fn finish_resolution(
     verify_auto_provision_eligibility(db, &user_service, effective_owner_id).await?;
 
     // Load the endpoint
-    let endpoint = db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
+    let endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
         .find_one(doc! { "_id": &user_service.endpoint_id })
         .await?
         .ok_or_else(|| {
@@ -2839,8 +2837,7 @@ async fn finish_resolution(
         AppError::Internal("Data integrity error: api_key_id missing".to_string())
     })?;
 
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": ak_id })
         .await?
         .ok_or_else(|| {
@@ -3211,8 +3208,7 @@ pub async fn read_agent_credential_override_identity(
     else {
         return Ok(None);
     };
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::Internal("Bound credential not found".to_string()))?;
@@ -3256,8 +3252,7 @@ pub async fn resolve_agent_credential_override_identity(
         return Ok(None);
     };
 
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| {
@@ -3413,10 +3408,14 @@ async fn maybe_refresh_provider_backed_api_key(
     .await
     {
         Ok(_) => {
-            user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
-                .await?;
+            user_api_key_service::sync_refreshed_provider_token_to_api_keys(
+                db,
+                user_id,
+                provider_config_id,
+            )
+            .await?;
 
-            db.collection::<UserApiKey>(USER_API_KEYS)
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .find_one(doc! { "_id": &api_key.id })
                 .await?
                 .ok_or_else(|| {
@@ -7174,6 +7173,9 @@ mod tests {
 
     fn make_user_service_token_exchange() -> crate::models::user_service::UserService {
         crate::models::user_service::UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "us-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "api-lark-bot".to_string(),

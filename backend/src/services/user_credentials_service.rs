@@ -476,8 +476,7 @@ pub async fn connection_credential_source(
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use mongodb::bson::doc;
 
-    let key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "connection_id": connection_id })
         .await?;
     Ok(key.and_then(|k| k.credential_source))
@@ -502,8 +501,7 @@ pub async fn resolve_connection_oauth_credentials(
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use mongodb::bson::doc;
 
-    let key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "connection_id": connection_id })
         .await?;
     let Some(key) = key else {
