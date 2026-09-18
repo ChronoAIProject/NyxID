@@ -14,6 +14,7 @@ pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;
 pub mod schedules;
+mod targets;
 pub mod topup_expiry;
 pub mod webhook;
 
@@ -1138,6 +1139,8 @@ mod tests {
                     recurrence: AllowanceRecurrence::Monthly,
                     target_kind: BillingTargetKind::AllUsers,
                     target_user_ids: vec![],
+                    target_org_ids: Vec::new(),
+                    target_group_ids: Vec::new(),
                     created_by: owner.clone(),
                 },
             )

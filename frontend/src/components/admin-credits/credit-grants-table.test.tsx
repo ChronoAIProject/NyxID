@@ -91,3 +91,43 @@ describe("CreditGrantsTable", () => {
     );
   });
 });
+
+it.each([
+  [
+    "org_members",
+    "3 organizations · members",
+    { target_org_ids: ["a", "b", "c"] },
+  ],
+  ["groups", "2 groups · members", { target_group_ids: ["a", "b"] }],
+] as const)(
+  "labels %s provenance on each personal grant",
+  (kind, label, targets) => {
+    render(
+      <TooltipProvider>
+        <CreditGrantsTable
+          grants={[
+            grant({
+              target_kind: kind,
+              target_org_ids:
+                "target_org_ids" in targets ? [...targets.target_org_ids] : [],
+              target_group_ids:
+                "target_group_ids" in targets
+                  ? [...targets.target_group_ids]
+                  : [],
+            }),
+          ]}
+          canWrite={false}
+          revokePending={false}
+          page={1}
+          perPage={50}
+          total={1}
+          fetching={false}
+          onPageChange={vi.fn()}
+          onRevoke={vi.fn()}
+        />
+      </TooltipProvider>,
+    );
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText("Example User")).toBeInTheDocument();
+  },
+);

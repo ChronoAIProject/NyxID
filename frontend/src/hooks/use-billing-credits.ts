@@ -1,3 +1,4 @@
+import { normalizedBillingTargets } from "@/lib/billing-targets";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
@@ -47,8 +48,7 @@ export function useIssueCreditGrant() {
       return issueGrantResponseSchema.parse(
         await api.post<unknown>("/admin/credits/grants", {
           ...value,
-          target_user_ids:
-            value.target_kind === "all_users" ? [] : value.target_user_ids,
+          ...normalizedBillingTargets(value),
           service_refs: value.all_services ? [] : value.service_refs,
           expires_at: value.expires_at
             ? new Date(value.expires_at).toISOString()
@@ -94,8 +94,7 @@ export function useCreateCreditSchedule() {
       return creditScheduleSchema.parse(
         await api.post<unknown>("/admin/credits/schedules", {
           ...value,
-          target_user_ids:
-            value.target_kind === "all_users" ? [] : value.target_user_ids,
+          ...normalizedBillingTargets(value),
           service_refs: value.all_services ? [] : value.service_refs,
           reason: value.reason || null,
         }),
@@ -149,8 +148,7 @@ export function useCreateAllowance() {
       return usageAllowanceSchema.parse(
         await api.post<unknown>("/admin/credits/allowances", {
           ...value,
-          target_user_ids:
-            value.target_kind === "all_users" ? [] : value.target_user_ids,
+          ...normalizedBillingTargets(value),
         }),
       );
     },

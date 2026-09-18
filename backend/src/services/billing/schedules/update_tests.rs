@@ -19,6 +19,8 @@ async fn stale_schedule_update_returns_conflict_without_overwriting_winner() {
             expiry: CreditExpiryPolicy::EndOfPeriod,
             target_kind: BillingTargetKind::AllUsers,
             target_user_ids: Vec::new(),
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             all_services: true,
             service_refs: Vec::new(),
             reason: None,

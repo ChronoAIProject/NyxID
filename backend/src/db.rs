@@ -2682,6 +2682,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    for field in ["target_org_ids", "target_group_ids"] {
+        usage_allowances
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { field: 1, "is_active": 1 })
+                    .build(),
+            )
+            .await?;
+    }
+    db.collection::<Document>("users")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "group_ids": 1, "is_active": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
+
     let allowance_periods = db.collection::<Document>(USAGE_ALLOWANCE_PERIODS);
     allowance_periods
         .create_index(
