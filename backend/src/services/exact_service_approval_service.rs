@@ -872,6 +872,7 @@ async fn resolve_execution_authority(
                     &caller.proxy_resolution_user_id,
                     api_key_id,
                     user_service_id,
+                    &resolution.target,
                 )
                 .await?
                 {
@@ -889,6 +890,7 @@ async fn resolve_execution_authority(
                         &caller.proxy_resolution_user_id,
                         api_key_id,
                         user_service_id,
+                        &resolution.target,
                         Some(&state.connection_expiry_notifier),
                     )
                     .await?

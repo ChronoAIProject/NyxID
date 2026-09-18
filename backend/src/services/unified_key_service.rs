@@ -918,7 +918,7 @@ async fn create_key_inner(
     if auth_method == Some(nyxid_service_adapters::ifttt::AUTH_METHOD) && service_slug.is_none() {
         if ws_frame_injections.is_some_and(|rules| !rules.is_empty()) {
             return Err(AppError::BadRequest(
-                "IFTTT Webhooks does not support WebSocket frame injection".into(),
+                "IFTTT does not support WebSocket frame injection".into(),
             ));
         }
         if !credential.is_empty() {
@@ -934,6 +934,30 @@ async fn create_key_inner(
         if let Some(cfg) = identity.as_ref() {
             user_service_service::validate_ifttt_identity(
                 nyxid_service_adapters::ifttt::AUTH_METHOD,
+                &cfg.identity_propagation_mode,
+                cfg.forward_access_token,
+                cfg.inject_delegation_token,
+            )?;
+        }
+    }
+
+    if auth_method == Some(nyxid_service_adapters::ifttt_mcp::AUTH_METHOD) && service_slug.is_none()
+    {
+        if node_id.is_some() {
+            return Err(AppError::BadRequest(
+                "IFTTT OAuth connections use server routing".into(),
+            ));
+        }
+        nyxid_service_adapters::ifttt_mcp::validate_destination(endpoint_url.unwrap_or_default())
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        if ws_frame_injections.is_some_and(|rules| !rules.is_empty()) {
+            return Err(AppError::BadRequest(
+                "IFTTT does not support WebSocket frame injection".into(),
+            ));
+        }
+        if let Some(cfg) = identity.as_ref() {
+            user_service_service::validate_ifttt_identity(
+                nyxid_service_adapters::ifttt_mcp::AUTH_METHOD,
                 &cfg.identity_propagation_mode,
                 cfg.forward_access_token,
                 cfg.inject_delegation_token,
@@ -990,7 +1014,11 @@ async fn create_key_inner(
             )));
         }
 
-        if svc.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+        if matches!(
+            svc.auth_method.as_str(),
+            nyxid_service_adapters::ifttt::AUTH_METHOD
+                | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+        ) {
             let cfg = identity
                 .as_ref()
                 .cloned()
@@ -1003,9 +1031,20 @@ async fn create_key_inner(
             )?;
             if ws_frame_injections.is_some_and(|rules| !rules.is_empty()) {
                 return Err(AppError::BadRequest(
-                    "IFTTT Webhooks does not support WebSocket frame injection".into(),
+                    "IFTTT does not support WebSocket frame injection".into(),
                 ));
             }
+        }
+        if svc.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+            if node_id.is_some() {
+                return Err(AppError::BadRequest(
+                    "IFTTT OAuth connections use server routing".into(),
+                ));
+            }
+            nyxid_service_adapters::ifttt_mcp::validate_destination(
+                endpoint_url.unwrap_or(&svc.base_url),
+            )
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
         }
         let is_ssh = svc.service_type == "ssh";
         let provider = if let Some(ref pid) = svc.provider_config_id {

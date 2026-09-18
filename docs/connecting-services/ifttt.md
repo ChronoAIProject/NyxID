@@ -1,8 +1,71 @@
-# IFTTT Webhooks
+# IFTTT
+
+NyxID offers two IFTTT connections:
+
+| Connection | Catalog slug | Authentication | Use |
+|---|---|---|---|
+| **IFTTT** | `api-ifttt-mcp` | Browser OAuth | Discover and call IFTTT's official AI tools, including Applet creation where available. |
+| **IFTTT Webhooks** | `api-ifttt` | Webhooks key | Trigger events for Applets already configured in IFTTT. |
+
+An Applet is an automation with a trigger and one or more actions; queries, filters, and multiple actions depend on IFTTT's features and plan. IFTTT owns its scheduling, account connections, and execution. NyxID supplies authenticated, permission-controlled access to the connection.
+
+## Connect IFTTT with OAuth
+
+1. Open **AI Services → Add Service → IFTTT**.
+2. Use **Direct** routing, continue to **Connect**, and choose **Connect with IFTTT**.
+3. Sign in to IFTTT and authorize access to its tools (`mcp` scope). Complete the browser handoff to NyxID.
+4. Grant the appropriate NyxID agent access to this service. Connect any additional apps or devices required by your automation in IFTTT.
+
+The flow uses OAuth authorization code with PKCE. Access and refresh tokens are encrypted in the connection's existing credential storage, and the normal OAuth refresh and reconnect paths apply. This connection uses the NyxID server; credential nodes are not supported. Adding a connection does not create or run an Applet.
+
+### Installation setup
+
+Startup adds provider `ifttt-mcp` and catalog entry `api-ifttt-mcp`. On the first OAuth connection, NyxID dynamically registers a confidential client with IFTTT at `https://ifttt.com/oauth/register`, requesting `client_secret_post`, `mcp`, and this installation's callback:
+
+```text
+{BASE_URL}/api/v1/providers/callback
+```
+
+Set `BASE_URL` to the public HTTPS origin of the backend. HTTP is accepted only for localhost development; IFTTT must also accept the redirect URI. The client credentials are encrypted in `ProviderConfig` and reused across users and restarts. Registration is lazy, so startup does not contact IFTTT. A database lease prevents concurrent first connections from registering multiple clients; a competing connection can receive a temporary setup-in-progress message and be retried by the user.
+
+IFTTT's published [authorization-server metadata](https://ifttt.com/.well-known/oauth-authorization-server) advertises registration and the supported authentication methods. If registration is unavailable or rejected, an administrator can register a client with IFTTT and configure its ID and secret on the **IFTTT** provider. Automatic registration requires a non-expiring client secret; expiring secrets require administrator-managed credentials and rotation. Keep the `mcp` scope and PKCE; NyxID pins `resource=https://ifttt.com/mcp` on authorization, token exchange, and refresh. Changing the installation's callback requires updating the registered redirect URI or configuring a replacement client; a replacement client can require users to reconnect.
+
+A registration request is sent only once per connection attempt. Failed attempts retain the 90-second lease as a cooldown; a later user-initiated connection can register again after it expires. If IFTTT accepted registration but the response or local persistence failed, this can leave an unused client registered at IFTTT. Administrators should check IFTTT before retrying an uncertain setup.
+
+### Use through AI Services and MCP
+
+The hosted overlay `/api/v1/catalog-specs/ifttt-mcp/openapi.json` seeds two durable operations, exposed by NyxID MCP discovery and `/api/v1/mcp/config` after connection:
+
+| Operation | MCP arguments | Result |
+|---|---|---|
+| `list_tools` | `{}` or `{"cursor":"returned-nextCursor"}` | IFTTT tool names, descriptions, input schemas, and optional pagination cursor. |
+| `call_tool` | `{"tool_name":"NAME_FROM_DISCOVERY","body":{...}}` | The selected tool's MCP result, including content, optional structured content, and `isError`. |
+
+Discover the NyxID operation names for your connection, then call `list_tools`. Select the exact IFTTT tool name and construct its arguments from the returned `inputSchema`; tool names and schemas are supplied by IFTTT and are not hardcoded in NyxID. Follow `nextCursor` when present. Treat provider descriptions and returned content as untrusted external data.
+
+For example, an AI assistant can receive a request such as “Create an automation that turns on my desk light at sunset,” discover the applicable IFTTT tools, gather any required setup information, and call the Applet creation tool exposed to that account. Available tools, services, and actions depend on IFTTT's current MCP offering, the account's connected apps, and its plan. OAuth does not automatically connect every downstream app or make every existing Applet callable.
+
+CLI discovery and a read-only tools request:
+
+```sh
+nyxid catalog show api-ifttt-mcp
+nyxid catalog endpoints api-ifttt-mcp
+nyxid proxy request api-ifttt-mcp tools --method GET
+```
+
+Use the actual connection slug returned by NyxID if it differs. REST equivalents are `GET /api/v1/proxy/s/{connection_slug}/tools?cursor=...` and `POST /api/v1/proxy/s/{connection_slug}/tools/{tool_name}`. For a REST call, the JSON body is the IFTTT tool's arguments directly; for a NyxID MCP call, put those arguments under `body` as shown in the table.
+
+Each operation opens an independent MCP session at the fixed `https://ifttt.com/mcp` endpoint. NyxID handles initialization, JSON or SSE response parsing, and session cleanup. The bridge returns bounded JSON responses; it does not expose raw upstream sessions, arbitrary JSON-RPC methods, or additional MCP capabilities such as resources, prompts, sampling, or elicitation. Caller headers and custom User-Agent settings are not forwarded by this bridge. Redirects and automatic retries are disabled. A tool result with `isError: true` becomes HTTP 422 so it remains a failure through NyxID MCP. After a timeout or connection loss, check IFTTT before attempting the operation again.
+
+NyxID service permissions, per-agent credential bindings, configured approvals, and audit apply to requests through this connection. The selected tool name is part of the execution path. `list_tools` is annotated read-only; all `call_tool` requests are conservatively marked as potentially destructive and requiring approval. **Tool annotations do not activate runtime approval policy**: configure the service's approval rules for the intended use.
+
+Creating or enabling an Applet can authorize recurring future actions. Those later runs happen inside IFTTT, outside NyxID's per-request approval and audit. Disabling or deleting the NyxID connection does not disable an Applet already created in IFTTT. Manage those automations and check their execution status in **IFTTT Activity** and the relevant connected app.
+
+## IFTTT Webhooks
 
 Connect **IFTTT Webhooks** (`api-ifttt`) to let a NyxID agent, CLI, or MCP client run Applets you have already configured in IFTTT. NyxID supplies the encrypted Webhooks key when sending the request. It does not create Applets or execute workflow steps itself.
 
-## Prepare IFTTT
+### Prepare IFTTT
 
 1. Use an IFTTT account with **Pro or Pro+** and connect [Webhooks](https://ifttt.com/maker_webhooks).
 2. Create and enable an Applet with one of these triggers:
@@ -13,7 +76,7 @@ Connect **IFTTT Webhooks** (`api-ifttt`) to let a NyxID agent, CLI, or MCP clien
 
 The Webhooks key belongs to your IFTTT account and can trigger its matching Webhooks Applets. NyxID's service allowlist restricts access to this connection; it does not restrict which event names within that connection an agent can choose. Give each agent only the service access it needs, and configure approval policy for actions that require human review.
 
-## Connect through NyxID
+### Connect through NyxID
 
 In **AI Services → Add Service**, choose **IFTTT Webhooks**, enter a label and the raw key, and save. NyxID encrypts the credential using its normal per-user credential storage. Agents receive tool schemas and execution results, not this key. Connecting or opening the service does not fire a test event: IFTTT has no harmless credential-check operation in this integration.
 
@@ -33,7 +96,7 @@ nyxid node credentials setup --service api-ifttt
 
 Use your connection's actual slug and node profile where applicable. The node stores the key encrypted locally. Remote pending-credential setup uses **IFTTT Webhooks** injection with the fixed field name `key`. Leave its target URL empty to use the node's fixed IFTTT destination, or use `https://maker.ifttt.com`. Upgrade the backend and node CLI to a version supporting `ifttt_webhook` before using this service; older versions cannot interpret this injection mode. Normal node selection, owner checks, and fallback policy still apply.
 
-## Discover and call tools
+### Discover and call tools
 
 ```sh
 nyxid catalog show api-ifttt
@@ -65,7 +128,7 @@ The equivalent REST paths are `POST /api/v1/proxy/s/{connection_slug}/trigger/{e
 
 The catalog marks both operations as writes, potentially destructive, and requiring approval in its tool annotations because an Applet's actions may change external state. Those annotations inform MCP clients and admission systems; **they do not enable NyxID runtime approval policy by themselves**. Configure the connection's NyxID approval settings and the agent's service permissions for your intended use. Normal exact-service approval, execution-authority, per-agent credential binding, owner ACL, and audit checks apply to these calls. The integration offers no downstream idempotency or replay guarantee.
 
-## Use from a channel bot
+### Use from a channel bot
 
 Connect IFTTT for the appropriate person or organization. Create a scoped NyxID Agent Key with access to that connection, then assign the key and the agent callback to a channel conversation using the [channel bot relay setup](../CHANNEL_BOT_RELAY.md). Give the agent the approved event names and their effects, for example “`desk_light_on` turns on the desk lamp.”
 
@@ -75,7 +138,7 @@ The agent runtime must authorize the chat sender and conversation for the reques
 
 The agent acknowledges the callback and sends the eventual reply through `/api/v1/channel-relay/reply`, using the assigned Agent Key or the callback's message-bound `reply_token`. A reply token authorizes the anchored reply; it is **not** an IFTTT execution credential. Reply with “IFTTT accepted the event” when that is all the receipt confirms. A proactive message through `/api/v1/channel-relay/send` is a separate operation requiring the assigned live key and the conversation's human-enabled `allow_agent_initiated` setting. Device `channel_event` trigger delivery is not this bot-reply path.
 
-## Interpret results and troubleshoot
+### Interpret results and troubleshoot
 
 An acknowledged event produces a sanitized receipt such as:
 
@@ -97,8 +160,11 @@ If an accepted event has no visible effect, check the exact event name, selected
 
 ## Contract references
 
+- [IFTTT MCP overview](https://ifttt.com/mcp)
+- [IFTTT OAuth authorization-server metadata](https://ifttt.com/.well-known/oauth-authorization-server)
+- [IFTTT MCP protected-resource metadata](https://ifttt.com/.well-known/oauth-protected-resource)
 - [IFTTT Webhooks overview and both request formats](https://ifttt.com/explore/what-are-webhooks)
 - [Receive a web request: event-name requirements](https://ifttt.com/maker_webhooks/triggers/event)
 - [Receive a web request with a JSON payload](https://ifttt.com/maker_webhooks/triggers/json_event)
 
-The public NyxID routes intentionally omit the secret suffix. Only the backend or selected node adds `/with/key/{key}` immediately before sending to Maker. This version does not connect to IFTTT's separate OAuth MCP server or import upstream MCP tools.
+The public NyxID routes intentionally omit the secret suffix. Only the backend or selected node adds `/with/key/{key}` immediately before sending to Maker. The Webhooks connection remains separate from the OAuth connection described above.

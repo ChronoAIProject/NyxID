@@ -20,6 +20,7 @@ describe("constants", () => {
       "bearer",
       "bot_bearer",
       "ifttt_webhook",
+      "ifttt_mcp",
       "body",
       "path",
       "oidc",

@@ -55,6 +55,7 @@ pub(crate) const VALID_AUTH_METHODS: &[&str] = &[
     // at the proxy boundary. `auth_key_name` is unused. NyxID#716.
     "aws_sigv4",
     "ifttt_webhook",
+    "ifttt_mcp",
     "none",
 ];
 
@@ -216,10 +217,14 @@ pub(crate) fn validate_ifttt_identity(
     forward_access_token: bool,
     inject_delegation_token: bool,
 ) -> AppResult<()> {
-    if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
-        && (mode != "none" || forward_access_token || inject_delegation_token)
+    if matches!(
+        auth_method,
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && (mode != "none" || forward_access_token || inject_delegation_token)
     {
-        return Err(AppError::ValidationError("IFTTT Webhooks does not support identity, access-token, or delegation-token forwarding".into()));
+        return Err(AppError::ValidationError(
+            "IFTTT does not support identity, access-token, or delegation-token forwarding".into(),
+        ));
     }
     Ok(())
 }
@@ -231,8 +236,18 @@ async fn validate_ifttt_endpoint(
     replacement_url: Option<&str>,
     node_id: Option<&str>,
 ) -> AppResult<()> {
-    if auth_method != nyxid_service_adapters::ifttt::AUTH_METHOD {
+    if !matches!(
+        auth_method,
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
         return Ok(());
+    }
+    if auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+        && node_id.is_some_and(|id| !id.is_empty())
+    {
+        return Err(AppError::ValidationError(
+            "IFTTT OAuth connections use server routing".into(),
+        ));
     }
     let existing;
     let url = match replacement_url {
@@ -248,6 +263,10 @@ async fn validate_ifttt_endpoint(
     };
     if url.is_empty() && node_id.is_some_and(|id| !id.is_empty()) {
         return Ok(());
+    }
+    if auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+        return nyxid_service_adapters::ifttt_mcp::validate_destination(url)
+            .map_err(|error| AppError::ValidationError(error.to_string()));
     }
     nyxid_service_adapters::ifttt::validate_destination(url)
         .map_err(|error| AppError::ValidationError(error.to_string()))
@@ -960,6 +979,15 @@ pub async fn create_user_service_with_id(
 ) -> AppResult<UserService> {
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
+    super::ifttt_oauth_service::validate_key_route(
+        db,
+        api_key_id,
+        auth_method,
+        endpoint_id,
+        None,
+        node_id,
+    )
+    .await?;
     let identity = normalize_identity_config(identity)?;
     validate_ifttt_identity(
         auth_method,
@@ -967,11 +995,13 @@ pub async fn create_user_service_with_id(
         identity.forward_access_token,
         identity.inject_delegation_token,
     )?;
-    if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
-        && ws_frame_injections.is_some_and(|rules| !rules.is_empty())
+    if matches!(
+        auth_method,
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && ws_frame_injections.is_some_and(|rules| !rules.is_empty())
     {
         return Err(AppError::ValidationError(
-            "IFTTT Webhooks does not support WebSocket frame injection".into(),
+            "IFTTT does not support WebSocket frame injection".into(),
         ));
     }
     let node_id = node_id.filter(|nid| !nid.is_empty());
@@ -1215,6 +1245,15 @@ pub async fn update_user_service(
     admin_only: Option<bool>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
+    super::ifttt_oauth_service::validate_key_route(
+        db,
+        current.api_key_id.as_deref(),
+        auth_method.unwrap_or(&current.auth_method),
+        &current.endpoint_id,
+        None,
+        node_id.or(current.node_id.as_deref()),
+    )
+    .await?;
     ensure_service_fields_editable(
         &current,
         &[
@@ -1250,13 +1289,15 @@ pub async fn update_user_service(
             cfg.inject_delegation_token
         }),
     )?;
-    if auth_method.unwrap_or(&current.auth_method) == nyxid_service_adapters::ifttt::AUTH_METHOD
-        && !ws_frame_injections
-            .unwrap_or(&current.ws_frame_injections)
-            .is_empty()
+    if matches!(
+        auth_method.unwrap_or(&current.auth_method),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && !ws_frame_injections
+        .unwrap_or(&current.ws_frame_injections)
+        .is_empty()
     {
         return Err(AppError::ValidationError(
-            "IFTTT Webhooks does not support WebSocket frame injection".into(),
+            "IFTTT does not support WebSocket frame injection".into(),
         ));
     }
     let mut set_doc = doc! {
@@ -1546,13 +1587,28 @@ pub async fn validate_update_inputs(
 ) -> AppResult<()> {
     ensure_user_managed_service(current)?;
 
+    super::ifttt_oauth_service::validate_key_route(
+        db,
+        current.api_key_id.as_deref(),
+        auth_method.unwrap_or(&current.auth_method),
+        &current.endpoint_id,
+        new_endpoint_url,
+        node_id.or(current.node_id.as_deref()),
+    )
+    .await?;
+
     if let Some(am) = auth_method {
         validate_auth_method(am)?;
     }
 
     let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
-    if effective_auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
-        if let Some(key) = credential {
+    if matches!(
+        effective_auth_method,
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
+        if effective_auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
+            && let Some(key) = credential
+        {
             nyxid_service_adapters::ifttt::validate_credential(key)
                 .map_err(|error| AppError::ValidationError(error.to_string()))?;
         }
@@ -2977,7 +3033,15 @@ mod tests {
             .await
             .unwrap();
         db.collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .insert_one(doc! { "_id": &api_key_id, "user_id": &user_id })
+            .insert_one(doc! {
+                "_id": &api_key_id,
+                "user_id": &user_id,
+                "label": "Bearer test key",
+                "credential_type": "bearer",
+                "status": "active",
+                "created_at": mongodb::bson::DateTime::now(),
+                "updated_at": mongodb::bson::DateTime::now(),
+            })
             .await
             .unwrap();
 
