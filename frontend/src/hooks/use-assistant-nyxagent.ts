@@ -1,8 +1,26 @@
 import { useCallback, useRef, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
-import type { NyxAgentAccessMode, NyxAgentHistory } from "@/schemas/assistant-nyxagent";
+import type {
+  NyxAgentAccessMode,
+  NyxAgentAcknowledgement,
+  NyxAgentHistory,
+} from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
+
+/** The user-visible turn that resumes the assistant after an allowed card. */
+export function continuationText(acknowledgement: NyxAgentAcknowledgement): string {
+  switch (acknowledgement.kind) {
+    case "service":
+      return `Approved: this chat may use ${
+        acknowledgement.service_name ?? acknowledgement.service_slug ?? "the service"
+      }. Continue.`;
+    case "account":
+      return "Approved: account management for this chat. Continue.";
+    case "action":
+      return `Confirmed: ${acknowledgement.summary} (acknowledgement_id ${acknowledgement.id}). Retry it now.`;
+  }
+}
 
 export function useNyxAgentAssistantChat({
   selectedConversationId,
@@ -20,6 +38,7 @@ export function useNyxAgentAssistantChat({
     nyxAgentTransport.getRevision,
     nyxAgentTransport.getRevision,
   );
+  const streaming = nyxAgentTransport.isRunning(selectedConversationId);
   const indexKey = ["assistant", "nyxagent", userId, "index"];
   const historyKey = ["assistant", "nyxagent", userId, "history", selectedConversationId];
   const index = useQuery({
@@ -43,7 +62,9 @@ export function useNyxAgentAssistantChat({
     },
     enabled: enabled && Boolean(userId && selectedConversationId),
     retry: false,
+    // Polling during a live turn also carries the turn's tool activity.
     refetchInterval: (query) =>
+      streaming ||
       query.state.data?.conversation.active_turn ||
       query.state.data?.acknowledgements.some((row) => row.status === "pending")
         ? 2000
@@ -92,6 +113,12 @@ export function useNyxAgentAssistantChat({
       }
       lastDecision.current = now;
       return nyxAgentTransport.decide(selectedConversationId, id, choice);
+    },
+    onSuccess: (acknowledgement, { choice }) => {
+      // An allowed card resumes the assistant: the refusal told it to retry after
+      // approval, and it cannot wait for the decision inside its own turn.
+      if (choice !== "allow" || nyxAgentTransport.isRunning(selectedConversationId)) return;
+      void send(continuationText(acknowledgement)).catch(() => undefined);
     },
     onSettled: async () => {
       await Promise.all([

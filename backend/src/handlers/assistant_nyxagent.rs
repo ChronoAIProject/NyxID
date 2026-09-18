@@ -40,9 +40,29 @@ use crate::{
 };
 
 #[derive(Serialize)]
+pub struct ActivityResponse {
+    id: String,
+    label: String,
+    status: String,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+}
+impl From<crate::models::assistant_conversation::TurnActivity> for ActivityResponse {
+    fn from(row: crate::models::assistant_conversation::TurnActivity) -> Self {
+        Self {
+            id: row.id,
+            label: row.label,
+            status: row.status,
+            started_at: row.started_at,
+            ended_at: row.ended_at,
+        }
+    }
+}
+#[derive(Serialize)]
 pub struct ActiveTurnResponse {
     turn_id: String,
     started_at: DateTime<Utc>,
+    activities: Vec<ActivityResponse>,
 }
 #[derive(Serialize)]
 pub struct ConversationResponse {
@@ -62,6 +82,12 @@ impl From<AssistantConversation> for ConversationResponse {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
             turn_id: turn.turn_id.clone(),
             started_at: turn.started_at,
+            activities: turn
+                .activities
+                .iter()
+                .cloned()
+                .map(ActivityResponse::from)
+                .collect(),
         });
         Self {
             id: row.id,
@@ -87,6 +113,7 @@ pub struct MessageResponse {
     status: String,
     error_code: Option<String>,
     created_at: DateTime<Utc>,
+    activities: Vec<ActivityResponse>,
 }
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
@@ -99,6 +126,11 @@ impl From<AssistantMessage> for MessageResponse {
             status: row.status,
             error_code: row.error_code,
             created_at: row.created_at,
+            activities: row
+                .activities
+                .into_iter()
+                .map(ActivityResponse::from)
+                .collect(),
         }
     }
 }

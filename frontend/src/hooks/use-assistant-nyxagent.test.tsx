@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { useNyxAgentAssistantChat } from "./use-assistant-nyxagent";
+import { continuationText, useNyxAgentAssistantChat } from "./use-assistant-nyxagent";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { useAuthStore } from "@/stores/auth-store";
 import type { NyxAgentHistory } from "@/schemas/assistant-nyxagent";
@@ -42,7 +42,7 @@ beforeEach(() => {
       last_message_at: "2026-09-17T00:00:00Z",
       message_count: 1,
       pending_acknowledgements: 0,
-      active_turn: { turn_id: "turn", started_at: "2026-09-17T00:00:00Z" },
+      active_turn: { turn_id: "turn", started_at: "2026-09-17T00:00:00Z", activities: [] },
       context_reset_at: null,
     },
     messages: [{
@@ -54,6 +54,7 @@ beforeEach(() => {
       status: "completed",
       error_code: null,
       created_at: "2026-09-17T00:00:00Z",
+      activities: [],
     }],
     before_seq: null,
     acknowledgements: [],
@@ -103,6 +104,7 @@ it("polls only selected history every two seconds and refreshes the index once o
       text: "Durable answer",
       status: "completed",
       error_code: null,
+      activities: [],
       created_at: "2026-09-17T00:00:01Z",
     });
     await waitFor(() => {
@@ -153,7 +155,7 @@ it("does not fetch when the engine flag is disabled", () => {
   unmount();
 });
 
-it("polls pending acknowledgements after settlement, throttles decisions, and never sends a turn",
+it("polls pending acknowledgements after settlement, throttles decisions, and resumes only on allow",
   async () => {
     page.conversation.active_turn = null;
     page.conversation.pending_acknowledgements = 1;
@@ -172,20 +174,60 @@ it("polls pending acknowledgements after settlement, throttles decisions, and ne
     await waitFor(() => expect(historyReads()).toBeGreaterThanOrEqual(2), { timeout: 3500 });
     let now = Date.now();
     vi.spyOn(Date, "now").mockImplementation(() => now);
-    const decide = vi.spyOn(nyxAgentTransport, "decide").mockImplementation(async () => {
-      page.acknowledgements[0]!.status = "allowed";
+    const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+    const decide = vi.spyOn(nyxAgentTransport, "decide").mockImplementation(async (_c, _i, choice) => {
+      page.acknowledgements[0]!.status = choice === "allow" ? "allowed" : "denied";
       page.conversation.pending_acknowledgements = 0;
       return page.acknowledgements[0]!;
     });
-    const choice = { id: page.acknowledgements[0]!.id, choice: "allow" as const };
-    await act(() => result.current.decideAcknowledgement(choice));
+    const deny = { id: page.acknowledgements[0]!.id, choice: "deny" as const };
+    await act(() => result.current.decideAcknowledgement(deny));
     await act(async () => {
-      await expect(result.current.decideAcknowledgement(choice)).rejects.toThrow("wait a moment");
+      await expect(result.current.decideAcknowledgement(deny)).rejects.toThrow("wait a moment");
     });
     expect(decide).toHaveBeenCalledOnce();
+    expect(send).not.toHaveBeenCalled();
     now += 750;
-    await act(() => result.current.decideAcknowledgement(choice));
+    const allow = { ...deny, choice: "allow" as const };
+    await act(() => result.current.decideAcknowledgement(allow));
     expect(decide).toHaveBeenCalledTimes(2);
+    // Allow resumes the assistant with a visible continuation turn.
+    expect(send).toHaveBeenCalledExactlyOnceWith(
+      id,
+      "Approved: account management for this chat. Continue.",
+      expect.any(Function),
+    );
+    // A turn that is still running retries on its own; no second turn is queued.
+    vi.spyOn(nyxAgentTransport, "isRunning").mockReturnValue(true);
+    now += 750;
+    await act(() => result.current.decideAcknowledgement(allow));
+    expect(send).toHaveBeenCalledOnce();
     expect(requests.some((r) => r.startsWith("POST"))).toBe(false);
   }, 8000,
 );
+
+it("phrases continuation turns per acknowledgement kind", () => {
+  const base = {
+    id: "12345678-1234-4123-8123-123456789012",
+    status: "allowed" as const,
+    summary: "Delete agent key ci-bot",
+    service_slug: null,
+    service_name: null,
+    tool_name: null,
+    created_at: "2026-09-17T00:00:00Z",
+    decided_at: "2026-09-17T00:00:01Z",
+    expires_at: "2026-09-17T00:15:00Z",
+  };
+  expect(
+    continuationText({ ...base, kind: "service", service_slug: "github", service_name: "GitHub" }),
+  ).toBe("Approved: this chat may use GitHub. Continue.");
+  expect(continuationText({ ...base, kind: "service", service_slug: "github" })).toBe(
+    "Approved: this chat may use github. Continue.",
+  );
+  expect(continuationText({ ...base, kind: "account" })).toBe(
+    "Approved: account management for this chat. Continue.",
+  );
+  expect(continuationText({ ...base, kind: "action", tool_name: "delete_agent_key" })).toBe(
+    `Confirmed: Delete agent key ci-bot (acknowledgement_id ${base.id}). Retry it now.`,
+  );
+});

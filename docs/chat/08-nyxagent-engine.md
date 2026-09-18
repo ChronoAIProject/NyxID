@@ -196,8 +196,17 @@ cards appear at the transcript tail; decided cards become compact status lines a
 the request's timestamp. Allow/Deny are explicit human actions with a 750 ms
 minimum throttle. The selected history polls every two seconds while a turn runs
 or a pending card exists. The index refreshes at settlement/count changes and
-mutations; it does not poll every two seconds. A successful decision focuses the
-composer and sends no message automatically.
+mutations; it does not poll every two seconds.
+
+The refusal tells the model to retry after approval, and NyxAgent cannot wait for
+the decision inside its own turn, so the turn that requested the card ends before
+the human decides. A successful **Allow** therefore resumes the assistant: when no
+turn is running, the browser sends an ordinary, visible user turn (`Approved: this
+chat may use <service>. Continue.`, `Approved: account management for this chat.
+Continue.`, or `Confirmed: <summary> (acknowledgement_id <id>). Retry it now.`).
+The continuation is a normal turn with no extra authority; the allowed grant is
+what the retried tool call consumes. If a turn is still running, nothing is sent
+because that turn's own retry observes the grant. **Deny** sends nothing.
 
 ## NyxID account tools
 
@@ -263,8 +272,24 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | `GET /models` | no body | `[{id,label}]` |
 
 Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message_count,
-pending_acknowledgements,active_turn,context_reset_at`. `active_turn` is null or `{turn_id,started_at}`.
-Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at`.
+pending_acknowledgements,active_turn,context_reset_at`. `active_turn` is null or
+`{turn_id,started_at,activities}`.
+Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities`.
+
+`activities` lists the tool calls the chat's key made during that turn, oldest
+first: `{id,label,status,started_at,ended_at}` with status `running`, `completed`
+or `error`. The upstream stream carries text only, so NyxID records activity at
+its own MCP boundary: every `tools/call` authenticated by a conversation key whose
+turn is live appends one entry (bounded to the newest 40, label capped at 120
+scalars) and settles it when the call returns; a non-2xx transport response marks
+`error`, while MCP `isError` results still count as `completed`. The label is the
+effective tool identifier (`nyxid__…`, `<slug>__<tool>`, the inner `tool_name` of
+`nyx__call_tool`, or the meta-tool name) and never arguments, results or secrets.
+Settlement copies the entries onto the assistant reply, marking any still-running
+entry with the turn's outcome. The browser shows the running label beside the
+streaming indicator and the full list as the reply's collapsible actions; it
+learns of new entries through the two-second history poll, which also runs while
+this tab's own turn streams.
 Dates are RFC3339 JSON strings. Index ordering is latest update first, with ID
 as the tie breaker; cursor is an opaque timestamp/ID pair. History returns an
 ascending sequence page, initially the newest messages. Metadata and messages
