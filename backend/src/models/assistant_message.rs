@@ -17,6 +17,9 @@ pub struct AssistantMessage {
     pub error_code: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+    /// Tool calls observed during the turn that produced this reply (assistant rows only).
+    #[serde(default)]
+    pub activities: Vec<super::assistant_conversation::TurnActivity>,
 }
 
 impl std::fmt::Debug for AssistantMessage {

@@ -50,6 +50,7 @@ export class NyxAgentHttpFixtures {
       status: cancelled ? "failed" : "completed",
       error_code: cancelled ? "cancelled" : null,
       created_at: now,
+      activities: [],
     });
     row.history.conversation.active_turn = null;
     row.history.conversation.message_count = row.history.messages.length;
@@ -240,7 +241,7 @@ export class NyxAgentHttpFixtures {
       const rebind = body.text.includes("reset context");
       row.notice = Boolean(row.history.conversation.context_reset_at) || rebind;
       if (rebind) row.history.conversation.context_reset_at = now;
-      row.history.conversation.active_turn = { turn_id: turn, started_at: now };
+      row.history.conversation.active_turn = { turn_id: turn, started_at: now, activities: [] };
       row.history.messages.push({
         id: crypto.randomUUID(),
         seq: row.history.messages.length + 1,
@@ -250,6 +251,7 @@ export class NyxAgentHttpFixtures {
         status: "completed",
         error_code: null,
         created_at: now,
+        activities: [],
       });
       row.history.conversation.message_count = row.history.messages.length;
       this.prepareReply(row, body.text);

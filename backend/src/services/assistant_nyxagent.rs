@@ -15,6 +15,7 @@ use crate::{
     models::{
         assistant_conversation::{
             AccessMode, ActiveTurn, AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
+            TurnActivity,
         },
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
         downstream_service::DownstreamService,
@@ -481,6 +482,7 @@ pub async fn begin_turn(
                         status: "failed".into(),
                         error_code: Some("turn_lost".into()),
                         created_at: now,
+                        activities: Vec::new(),
                     };
                     db.collection::<AssistantMessage>(MESSAGES)
                         .insert_one(message)
@@ -501,6 +503,7 @@ pub async fn begin_turn(
                     turn_id: turn_id.clone(),
                     started_at: now,
                     stop_requested: false,
+                    activities: Vec::new(),
                 });
                 row.updated_at = now;
                 row.message_count += 1;
@@ -523,6 +526,7 @@ pub async fn begin_turn(
                     status: "completed".into(),
                     error_code: None,
                     created_at: now,
+                    activities: Vec::new(),
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -674,6 +678,27 @@ pub async fn finish_turn(
                 } else {
                     result.error.clone()
                 };
+                // Retain the turn's tool activity on the reply; a call still in
+                // flight at settlement shares the turn's outcome.
+                let activities: Vec<TurnActivity> = current
+                    .active_turn
+                    .as_ref()
+                    .map(|turn| turn.activities.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|mut activity| {
+                        if activity.status == "running" {
+                            activity.status = if error.is_some() {
+                                "error"
+                            } else {
+                                "completed"
+                            }
+                            .into();
+                            activity.ended_at = Some(Utc::now());
+                        }
+                        activity
+                    })
+                    .collect();
                 let now = current.context_reset_at.map_or_else(Utc::now, |reset_at| {
                     Utc::now().max(reset_at + chrono::Duration::milliseconds(1))
                 });
@@ -726,6 +751,7 @@ pub async fn finish_turn(
                     .into(),
                     error_code: error.as_ref().map(|e| e.code.into()),
                     created_at: now,
+                    activities,
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -742,6 +768,67 @@ pub async fn finish_turn(
         })
         .await
         .map_err(transactions::map_transaction_error)
+}
+
+pub const MAX_TURN_ACTIVITIES: i64 = 40;
+pub const MAX_ACTIVITY_LABEL_CHARS: usize = 120;
+
+/// Record a tool call started with the chat's key during the live turn. The
+/// label is an identifier only. Returns the activity ID when a turn is live.
+pub async fn activity_started(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    label: &str,
+) -> AppResult<Option<String>> {
+    let id = Uuid::new_v4().to_string();
+    let label: String = label.chars().take(MAX_ACTIVITY_LABEL_CHARS).collect();
+    let entry = doc! {
+        "id": &id,
+        "label": label,
+        "status": "running",
+        "started_at": bson::DateTime::now(),
+        "ended_at": bson::Bson::Null,
+    };
+    let result = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {
+                "_id": conversation_id,
+                "user_id": user_id,
+                "active_turn.turn_id": {"$exists": true},
+            },
+            doc! {"$push": {"active_turn.activities": {
+                "$each": [entry],
+                "$slice": -MAX_TURN_ACTIVITIES,
+            }}},
+        )
+        .await?;
+    Ok((result.matched_count == 1).then_some(id))
+}
+
+/// Settle a recorded tool call. A missing entry (turn settled or evicted) is a no-op.
+pub async fn activity_finished(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    activity_id: &str,
+    ok: bool,
+) -> AppResult<()> {
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {
+                "_id": conversation_id,
+                "user_id": user_id,
+                "active_turn.activities.id": activity_id,
+            },
+            doc! {"$set": {
+                "active_turn.activities.$.status": if ok { "completed" } else { "error" },
+                "active_turn.activities.$.ended_at": bson::DateTime::now(),
+            }},
+        )
+        .await?;
+    Ok(())
 }
 
 pub async fn rename(

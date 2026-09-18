@@ -11,6 +11,20 @@ pub enum AccessMode {
     Full,
 }
 
+/// One tool call made with the chat's key during a live turn. Metadata only:
+/// the label is a tool identifier, never arguments, results, or secrets.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnActivity {
+    pub id: String,
+    pub label: String,
+    /// `running`, `completed`, or `error`.
+    pub status: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub started_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     pub turn_id: String,
@@ -18,6 +32,9 @@ pub struct ActiveTurn {
     pub started_at: DateTime<Utc>,
     #[serde(default)]
     pub stop_requested: bool,
+    /// Bounded, oldest first; the newest entries are retained.
+    #[serde(default)]
+    pub activities: Vec<TurnActivity>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

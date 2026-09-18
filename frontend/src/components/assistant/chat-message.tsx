@@ -169,6 +169,9 @@ export function ChatMessageBubble({
       message.authorizationBlockers?.length,
   );
   const thinking = streaming && !printable;
+  const runningTool = streaming
+    ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
+    : undefined;
   return (
     <article
       role={thinking ? "status" : undefined}
@@ -208,6 +211,14 @@ export function ChatMessageBubble({
             <PulseDot />
             <PulseDot className="[animation-delay:120ms]" />
             <PulseDot className="[animation-delay:240ms]" />
+            {runningTool ? (
+              <span
+                data-running-tool
+                className="ml-1.5 truncate font-mono text-[11px] text-muted-foreground"
+              >
+                {runningTool.name}
+              </span>
+            ) : null}
           </div>
         ) : null}
         {message.status === "error" && message.error ? (
