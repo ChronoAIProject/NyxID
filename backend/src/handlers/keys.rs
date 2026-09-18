@@ -117,39 +117,36 @@ async fn find_user_service_for_actor(
     actor: &str,
     id_or_slug: &str,
 ) -> AppResult<Option<UserService>> {
-    if let Some(svc) = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": id_or_slug })
-        .await?
+    if let Some(svc) =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find_one(doc! { "_id": id_or_slug })
+            .await?
     {
         return Ok(Some(svc));
     }
 
-    if let Some(svc) = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "user_id": actor,
-            "slug": id_or_slug,
-            "is_active": true,
-        })
-        .await?
+    if let Some(svc) =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find_one(doc! {
+                "user_id": actor,
+                "slug": id_or_slug,
+                "is_active": true,
+            })
+            .await?
     {
         return Ok(Some(svc));
     }
 
     let memberships = org_service::find_active_memberships_with_timeout(&state.db, actor).await?;
     for membership in memberships {
-        if let Some(svc) = state
-            .db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "user_id": &membership.org_user_id,
-                "slug": id_or_slug,
-                "is_active": true,
-            })
-            .await?
+        if let Some(svc) =
+            crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &membership.org_user_id,
+                    "slug": id_or_slug,
+                    "is_active": true,
+                })
+                .await?
         {
             return Ok(Some(svc));
         }
@@ -416,6 +413,8 @@ impl std::fmt::Debug for CreateKeyRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeyResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorship: Option<crate::handlers::service_history::AuthorshipResponse>,
     pub id: String,
     pub name: String,
     pub label: String,
@@ -1216,6 +1215,12 @@ pub(crate) async fn create_key_with_service_id(
     )
     .await?;
 
+    crate::handlers::service_history::enrich_summaries(
+        &state.db,
+        &auth_user,
+        std::slice::from_mut(&mut response),
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1238,17 +1243,29 @@ pub async fn list_keys(
     let user_id_str = auth_user.user_id.to_string();
 
     let providers = crate::services::platform_key_service::load_providers(&state.db).await?;
+    let grants = crate::services::platform_key_service::OwnerGrants::load_for_listing(
+        &state.db,
+        &user_id_str,
+    )
+    .await?;
     let views = if auth_user.auth_method == AuthMethod::ApiKey {
-        unified_key_service::list_keys_read_only(
+        unified_key_service::list_keys_read_only_with_grants(
             &state.db,
             &state.encryption_keys,
             &user_id_str,
+            &grants,
             &providers,
         )
         .await?
     } else {
-        unified_key_service::list_keys(&state.db, &state.encryption_keys, &user_id_str, &providers)
-            .await?
+        unified_key_service::list_keys_with_grants(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            &grants,
+            &providers,
+        )
+        .await?
     };
     let scope = auth_user.api_key_service_scope();
     let mut keys = views
@@ -1272,6 +1289,13 @@ pub async fn list_keys(
         state.config.base_url.trim_end_matches('/'),
         &mut keys,
         Some(&providers),
+    )
+    .await?;
+    crate::handlers::service_history::enrich_summaries_with_memberships(
+        &state.db,
+        &auth_user,
+        &mut keys,
+        grants.memberships(),
     )
     .await?;
     Ok(Json(KeyListResponse { keys }))
@@ -1307,6 +1331,12 @@ pub async fn get_key(
         state.config.node_heartbeat_timeout_secs,
         state.config.base_url.trim_end_matches('/'),
         &mut response,
+    )
+    .await?;
+    crate::handlers::service_history::enrich_summaries(
+        &state.db,
+        &auth_user,
+        std::slice::from_mut(&mut response),
     )
     .await?;
     Ok(Json(response))
@@ -1364,11 +1394,10 @@ async fn resolve_key_response(
     // non-OAuth or already-terminal rows. Best-effort: errors are logged
     // and swallowed so the read still proceeds.
     if auth_user.auth_method != AuthMethod::ApiKey
-        && let Some(svc) = state
-            .db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! { "_id": &access.service_id })
-            .await?
+        && let Some(svc) =
+            crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+                .find_one(doc! { "_id": &access.service_id })
+                .await?
         && let Some(api_key_id) = svc.api_key_id.as_deref()
         && let Err(e) = user_api_key_service::reconcile_pending_oauth_placeholder(
             &state.db,
@@ -1525,9 +1554,14 @@ pub async fn update_key(
                 serde_json::json!({ "service_id": &key_id, "credential_binding": if use_platform_key { "platform" } else { "user" } }),
             ),
         );
-        return Ok(Json(
-            resolve_key_response(&state, &auth_user, &key_id).await?,
-        ));
+        let mut response = resolve_key_response(&state, &auth_user, &key_id).await?;
+        crate::handlers::service_history::enrich_summaries(
+            &state.db,
+            &auth_user,
+            std::slice::from_mut(&mut response),
+        )
+        .await?;
+        return Ok(Json(response));
     }
     if view.credential_binding == "platform" && !view.auto_connected {
         let current =
@@ -1601,9 +1635,14 @@ pub async fn update_key(
             },
             Some(serde_json::json!({ "service_id": &key_id })),
         );
-        return Ok(Json(
-            resolve_key_response(&state, &auth_user, &key_id).await?,
-        ));
+        let mut response = resolve_key_response(&state, &auth_user, &key_id).await?;
+        crate::handlers::service_history::enrich_summaries(
+            &state.db,
+            &auth_user,
+            std::slice::from_mut(&mut response),
+        )
+        .await?;
+        return Ok(Json(response));
     }
 
     if view.auto_connected {
@@ -2449,6 +2488,12 @@ pub async fn update_key(
         &mut response,
     )
     .await?;
+    crate::handlers::service_history::enrich_summaries(
+        &state.db,
+        &auth_user,
+        std::slice::from_mut(&mut response),
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -2582,6 +2627,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
     .to_string();
 
     KeyResponse {
+        authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,
         skills_manifest_digest: None,
@@ -2719,6 +2765,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
     let endpoint_url = (!view.auto_connected).then_some(view.endpoint_url);
 
     KeyResponse {
+        authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,
         skills_manifest_digest: None,
@@ -2944,7 +2991,7 @@ async fn enrich_key_discovery_metadata(
     let services: Vec<UserService> = if key_ids.is_empty() {
         vec![]
     } else {
-        db.collection::<UserService>(USER_SERVICES)
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find(doc! { "_id": { "$in": &key_ids } })
             .await?
             .try_collect()
@@ -2962,7 +3009,7 @@ async fn enrich_key_discovery_metadata(
     let endpoints: Vec<UserEndpoint> = if endpoint_ids.is_empty() {
         vec![]
     } else {
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .find(doc! { "_id": { "$in": &endpoint_ids } })
             .await?
             .try_collect()

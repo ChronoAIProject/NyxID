@@ -62,7 +62,7 @@ pub async fn run(db: &mongodb::Database, args: CleanupArgs) -> AppResult<()> {
     let endpoint_deleted = if endpoint_ids.is_empty() {
         0
     } else {
-        db.collection::<Document>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<Document>(db, USER_ENDPOINTS)
             .delete_many(doc! { "_id": { "$in": &endpoint_ids } })
             .await?
             .deleted_count
@@ -70,7 +70,7 @@ pub async fn run(db: &mongodb::Database, args: CleanupArgs) -> AppResult<()> {
     let api_key_deleted = if api_key_ids.is_empty() {
         0
     } else {
-        db.collection::<Document>(USER_API_KEYS)
+        crate::services::service_history::collection::<Document>(db, USER_API_KEYS)
             .delete_many(doc! { "_id": { "$in": &api_key_ids } })
             .await?
             .deleted_count
@@ -81,13 +81,13 @@ pub async fn run(db: &mongodb::Database, args: CleanupArgs) -> AppResult<()> {
 }
 
 async fn collect_orphans(db: &mongodb::Database) -> AppResult<OrphanReport> {
-    let services: Vec<Document> = db
-        .collection::<Document>(USER_SERVICES)
-        .find(doc! { "is_active": true })
-        .projection(doc! { "endpoint_id": 1, "api_key_id": 1 })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<Document> =
+        crate::services::service_history::collection::<Document>(db, USER_SERVICES)
+            .find(doc! { "is_active": true })
+            .projection(doc! { "endpoint_id": 1, "api_key_id": 1 })
+            .await?
+            .try_collect()
+            .await?;
 
     let mut active_endpoint_ids: HashSet<String> = HashSet::new();
     let mut active_api_key_ids: HashSet<String> = HashSet::new();
@@ -100,13 +100,13 @@ async fn collect_orphans(db: &mongodb::Database) -> AppResult<OrphanReport> {
         }
     }
 
-    let all_endpoints: Vec<Document> = db
-        .collection::<Document>(USER_ENDPOINTS)
-        .find(doc! {})
-        .projection(doc! { "_id": 1, "user_id": 1, "label": 1, "url": 1 })
-        .await?
-        .try_collect()
-        .await?;
+    let all_endpoints: Vec<Document> =
+        crate::services::service_history::collection::<Document>(db, USER_ENDPOINTS)
+            .find(doc! {})
+            .projection(doc! { "_id": 1, "user_id": 1, "label": 1, "url": 1 })
+            .await?
+            .try_collect()
+            .await?;
 
     let endpoints: Vec<OrphanRow> = all_endpoints
         .into_iter()
@@ -124,13 +124,13 @@ async fn collect_orphans(db: &mongodb::Database) -> AppResult<OrphanReport> {
         })
         .collect();
 
-    let all_api_keys: Vec<Document> = db
-        .collection::<Document>(USER_API_KEYS)
-        .find(doc! {})
-        .projection(doc! { "_id": 1, "user_id": 1, "label": 1, "status": 1 })
-        .await?
-        .try_collect()
-        .await?;
+    let all_api_keys: Vec<Document> =
+        crate::services::service_history::collection::<Document>(db, USER_API_KEYS)
+            .find(doc! {})
+            .projection(doc! { "_id": 1, "user_id": 1, "label": 1, "status": 1 })
+            .await?
+            .try_collect()
+            .await?;
 
     let api_keys: Vec<OrphanRow> = all_api_keys
         .into_iter()

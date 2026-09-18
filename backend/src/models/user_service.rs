@@ -13,6 +13,12 @@ pub struct UserService {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<crate::models::service_change_event::ServiceChangeSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_change: Option<crate::models::service_change_event::ServiceChangeSummary>,
     /// Proxy path slug (e.g., "llm-openai", "my-custom-api")
     pub slug: String,
     /// FK to UserEndpoint
@@ -148,6 +154,9 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: "llm-openai".to_string(),
@@ -199,6 +208,9 @@ mod tests {
     #[test]
     fn bson_defaults() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
@@ -251,6 +263,9 @@ mod tests {
     #[test]
     fn bson_identity_defaults() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
@@ -310,6 +325,9 @@ mod tests {
     #[test]
     fn bson_roundtrip_no_api_key() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "auto-svc".to_string(),
@@ -359,6 +377,9 @@ mod tests {
     #[test]
     fn user_service_preexisting_documents_deserialize_missing_state_version_as_zero() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "legacy".to_string(),

@@ -113,3 +113,5 @@ pub mod channel_platforms;
 #[cfg(test)]
 mod curation_tests;
 pub mod options;
+
+pub mod service_history;

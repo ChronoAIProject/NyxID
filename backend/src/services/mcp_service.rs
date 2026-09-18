@@ -1127,17 +1127,17 @@ async fn load_user_tools_with_grants(
         .collect();
     let mut blocked_slugs: HashSet<String> =
         executable_slugs.iter().map(|s| (*s).to_string()).collect();
-    let personal_pinned: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": user_id,
-            "is_active": true,
-            "service_type": "http",
-            "node_id": { "$type": "string", "$ne": "" },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let personal_pinned: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": user_id,
+                "is_active": true,
+                "service_type": "http",
+                "node_id": { "$type": "string", "$ne": "" },
+            })
+            .await?
+            .try_collect()
+            .await?;
     for svc in &personal_pinned {
         // Always block, even when the pinned `node_id` is out of the
         // caller's API-key scope. `execute_tool` for the platform copy
@@ -1161,17 +1161,17 @@ async fn load_user_tools_with_grants(
             let effective_scope =
                 crate::services::org_role_scope_service::effective_scope_for_membership(db, m)
                     .await?;
-            let org_pinned: Vec<UserService> = db
-                .collection::<UserService>(USER_SERVICES)
-                .find(doc! {
-                        "user_id": &m.org_user_id,
-                        "is_active": true,
-                        "service_type": "http",
-                        "node_id": { "$type": "string", "$ne": "" },
-                })
-                .await?
-                .try_collect()
-                .await?;
+            let org_pinned: Vec<UserService> =
+                crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                    .find(doc! {
+                            "user_id": &m.org_user_id,
+                            "is_active": true,
+                            "service_type": "http",
+                            "node_id": { "$type": "string", "$ne": "" },
+                    })
+                    .await?
+                    .try_collect()
+                    .await?;
             for svc in org_pinned {
                 if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
                     continue;
@@ -1255,7 +1255,7 @@ async fn load_user_tools_with_grants(
     let user_endpoints: Vec<UserEndpoint> = if user_endpoint_ids.is_empty() {
         vec![]
     } else {
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .find(doc! { "_id": { "$in": &user_endpoint_ids } })
             .await?
             .try_collect()
@@ -1661,12 +1661,12 @@ async fn load_callable_user_services(
     providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
 ) -> AppResult<Vec<ResolvedUserService>> {
     // -- Personal services --
-    let personal_services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! { "user_id": user_id, "is_active": true, "service_type": "http" })
-        .await?
-        .try_collect()
-        .await?;
+    let personal_services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! { "user_id": user_id, "is_active": true, "service_type": "http" })
+            .await?
+            .try_collect()
+            .await?;
 
     // Collect all api_key_ids from personal + org services for batch lookup
     let mut all_api_key_ids: Vec<String> = personal_services
@@ -1684,16 +1684,16 @@ async fn load_callable_user_services(
         let effective_scope =
             crate::services::org_role_scope_service::effective_scope_for_membership(db, m).await?;
 
-        let org_svcs: Vec<UserService> = db
-            .collection::<UserService>(USER_SERVICES)
-            .find(doc! {
-                "user_id": &m.org_user_id,
-                "is_active": true,
-                "service_type": "http",
-            })
-            .await?
-            .try_collect()
-            .await?;
+        let org_svcs: Vec<UserService> =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find(doc! {
+                    "user_id": &m.org_user_id,
+                    "is_active": true,
+                    "service_type": "http",
+                })
+                .await?
+                .try_collect()
+                .await?;
 
         for svc in org_svcs {
             if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
@@ -1733,7 +1733,7 @@ async fn load_callable_user_services(
     let active_api_keys: Vec<UserApiKey> = if all_api_key_ids.is_empty() {
         vec![]
     } else {
-        db.collection::<UserApiKey>(USER_API_KEYS)
+        crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
             .find(doc! { "_id": { "$in": &all_api_key_ids }, "status": "active" })
             .await?
             .try_collect()
@@ -4685,7 +4685,7 @@ pub async fn discover_services_with_scope(
         )
         .await?
     } else {
-        db.collection::<UserService>(USER_SERVICES)
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find(doc! { "user_id": user_id, "is_active": true })
             .await?
             .try_collect()
@@ -4702,7 +4702,14 @@ pub async fn discover_services_with_scope(
     let mut filter = doc! {
         "is_active": true,
         "service_category": { "$ne": "provider" },
-        "$and": [super::catalog_service::visibility_filter(user_id)],
+        "$and": [super::catalog_service::visibility_filter(
+            user_id,
+            &grants
+                .readable_owner_ids()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )],
         "$nor": [
             { "service_category": "internal", "slug": { "$regex": "^platform-" } },
         ],

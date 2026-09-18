@@ -22,7 +22,10 @@ pub async fn connection_token(
     provider_slug: &str,
     required_scopes: &[&str],
 ) -> AppResult<Zeroizing<String>> {
-    let collection = db.collection::<UserApiKey>(crate::models::user_api_key::COLLECTION_NAME);
+    let collection = crate::services::service_history::collection::<UserApiKey>(
+        db,
+        crate::models::user_api_key::COLLECTION_NAME,
+    );
     let load = || collection.find_one(doc! { "_id": connection_id, "user_id": owner });
     let mut key = load().await?.ok_or_else(|| {
         reconnect("Connected OAuth credential was deleted or belongs to another owner")
@@ -257,12 +260,15 @@ pub async fn start_connection(
     )
     .await?;
     // Pin provenance before OAuth initiation so legacy BYO credentials cannot override this app.
-    db.collection::<UserApiKey>(crate::models::user_api_key::COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": &key.id, "user_id": owner },
-            doc! { "$set": { "credential_source": "platform" } },
-        )
-        .await?;
+    crate::services::service_history::collection::<UserApiKey>(
+        db,
+        crate::models::user_api_key::COLLECTION_NAME,
+    )
+    .update_one(
+        doc! { "_id": &key.id, "user_id": owner },
+        doc! { "$set": { "credential_source": "platform" } },
+    )
+    .await?;
     let scopes = required_scopes
         .iter()
         .map(|s| s.to_string())
@@ -289,10 +295,12 @@ pub async fn start_connection(
             attempt_nonce: flow.attempt_nonce,
         }),
         Err(error) => {
-            let _ = db
-                .collection::<UserApiKey>(crate::models::user_api_key::COLLECTION_NAME)
-                .delete_one(doc! { "_id": &key.id, "status": "pending_auth" })
-                .await;
+            let _ = crate::services::service_history::collection::<UserApiKey>(
+                db,
+                crate::models::user_api_key::COLLECTION_NAME,
+            )
+            .delete_one(doc! { "_id": &key.id, "status": "pending_auth" })
+            .await;
             Err(error)
         }
     }

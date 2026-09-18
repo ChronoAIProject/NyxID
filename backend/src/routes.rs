@@ -1282,6 +1282,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_service_account_tokens));
 
     let unified_key_routes = Router::new()
+        .route(
+            "/history/archived",
+            get(handlers::service_history::get_archived),
+        )
+        .route(
+            "/{service_id}/history",
+            get(handlers::service_history::get_history),
+        )
         .route("/", post(handlers::keys::create_key))
         .route(
             "/{key_id}",
@@ -2198,7 +2206,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(DefaultBodyLimit::disable());
     let private = private.merge(mcp_transport_routes).merge(public_mcp_routes);
 
-    (public_oauth, private)
+    (
+        public_oauth.layer(middleware::from_fn(
+            crate::services::service_history::context::middleware,
+        )),
+        private.layer(middleware::from_fn(
+            crate::services::service_history::context::middleware,
+        )),
+    )
 }
 
 #[cfg(test)]

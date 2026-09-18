@@ -22,6 +22,7 @@ services:
     image: mongo:8.0
     container_name: nyxid-mongodb
     restart: unless-stopped
+    entrypoint: ["bash", "/scripts/entrypoint.sh"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: nyxid
       MONGO_INITDB_DATABASE: nyxid
@@ -30,6 +31,8 @@ services:
       # MONGO_ROOT_PASSWORD to be provided via .env.production.
     volumes:
       - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+      - ./scripts/mongodb:/scripts:ro
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -37,5 +40,18 @@ services:
       retries: 5
       start_period: 10s
 
+  mongodb-init:
+    image: mongo:8.0
+    restart: "no"
+    entrypoint: ["bash", "/scripts/init-replica.sh"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: nyxid
+    volumes:
+      - ./scripts/mongodb:/scripts:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
 volumes:
   mongodb_data:
+  mongodb_config:

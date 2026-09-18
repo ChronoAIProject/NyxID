@@ -42,7 +42,7 @@ const MAX_SERVICE_SLUG_LEN: usize = 80;
 /// disabled/deleted service is never silently re-enabled by verification.
 pub(crate) async fn provision_imported_api_key_in_transaction(
     db: &mongodb::Database,
-    session: &mut mongodb::ClientSession,
+    session: &mut crate::services::service_history::transaction::Transaction,
     token: &UserProviderToken,
     catalog: &DownstreamService,
     service_id: &str,
@@ -53,7 +53,7 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
     use crate::models::user_endpoint::COLLECTION_NAME as ENDPOINTS;
     use crate::models::user_service::COLLECTION_NAME as SERVICES;
 
-    let services = db.collection::<UserService>(SERVICES);
+    let services = crate::services::service_history::collection::<UserService>(db, SERVICES);
     if services
         .find_one(doc! {"_id":service_id,"user_id":&token.user_id})
         .session(&mut *session)
@@ -86,7 +86,7 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
             "OpenAI connection requires bearer authentication".into(),
         ));
     }
-    let keys = db.collection::<UserApiKey>(USER_API_KEYS);
+    let keys = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS);
     let key = match keys.find_one(doc! {"user_id":&token.user_id,"source":"user_created","source_id":&token.id,"status":"active"})
         .session(&mut *session).await? {
         Some(key) => key,
@@ -127,6 +127,9 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
     }
     let identity = identity_config_from_downstream_service(catalog);
     let service = UserService {
+        deleted_at: None,
+        created_by: None,
+        last_change: None,
         id: service_id.into(),
         user_id: token.user_id.clone(),
         slug,
@@ -162,7 +165,7 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
         state_version: 1,
         rotation_predecessor_id: None,
     };
-    db.collection::<UserEndpoint>(ENDPOINTS)
+    crate::services::service_history::collection::<UserEndpoint>(db, ENDPOINTS)
         .insert_one(&endpoint)
         .session(&mut *session)
         .await?;
@@ -475,13 +478,15 @@ async fn resolve_oauth_client_credentials_input(
             // by `get_api_key`. We surface NotFound (rather than Forbidden)
             // so existence of a foreign key is not leaked through the
             // error type — R9 / §12 of the design doc.
-            let source = db
-                .collection::<UserApiKey>(USER_API_KEYS)
-                .find_one(doc! { "_id": trimmed, "user_id": user_id })
-                .await?
-                .ok_or_else(|| {
-                    AppError::NotFound("copy_oauth_client_from source key not found".to_string())
-                })?;
+            let source =
+                crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                    .find_one(doc! { "_id": trimmed, "user_id": user_id })
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::NotFound(
+                            "copy_oauth_client_from source key not found".to_string(),
+                        )
+                    })?;
 
             let enc_cid = source.user_oauth_client_id_encrypted.as_ref().ok_or_else(|| {
                 AppError::BadRequest(
@@ -1805,10 +1810,12 @@ async fn create_key_inner(
 }
 
 async fn cleanup_auto_provision_endpoint(db: &mongodb::Database, user_id: &str, endpoint_id: &str) {
-    if let Err(error) = db
-        .collection::<mongodb::bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
-        .delete_one(doc! { "_id": endpoint_id, "user_id": user_id })
-        .await
+    if let Err(error) = crate::services::service_history::collection::<mongodb::bson::Document>(
+        db,
+        crate::models::user_endpoint::COLLECTION_NAME,
+    )
+    .delete_one(doc! { "_id": endpoint_id, "user_id": user_id })
+    .await
     {
         tracing::warn!(
             endpoint_id = %endpoint_id,
@@ -1859,21 +1866,27 @@ async fn auto_provision_with_grants(
     grants: &OwnerGrants,
     providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<()> {
-    Box::pin(auto_provision_owner_services(
-        db, user_id, false, grants, providers,
-    ))
-    .await?;
-    for membership in grants.memberships().iter().filter(|m| m.role.can_proxy()) {
-        Box::pin(auto_provision_owner_services(
-            db,
-            &membership.org_user_id,
-            true,
-            grants,
-            providers,
-        ))
-        .await?;
-    }
-    Ok(())
+    crate::services::service_history::context::scope(
+        crate::services::service_history::context::system("automatic_service_provisioning"),
+        async {
+            Box::pin(auto_provision_owner_services(
+                db, user_id, false, grants, providers,
+            ))
+            .await?;
+            for membership in grants.memberships().iter().filter(|m| m.role.can_proxy()) {
+                Box::pin(auto_provision_owner_services(
+                    db,
+                    &membership.org_user_id,
+                    true,
+                    grants,
+                    providers,
+                ))
+                .await?;
+            }
+            Ok(())
+        },
+    )
+    .await
 }
 
 async fn auto_provision_owner_services(
@@ -1993,8 +2006,9 @@ async fn auto_provision_owner_services(
     // Delete leaves an inactive tombstone without an endpoint; only those
     // non-auto rows may be replaced. Keep disabled rows enableable on their slug.
     let catalog_ids: Vec<&str> = eligible.iter().map(|(s, _)| s.id.as_str()).collect();
-    let existing: Vec<crate::models::user_service::UserService> = db
-        .collection::<crate::models::user_service::UserService>(
+    let existing: Vec<crate::models::user_service::UserService> =
+        crate::services::service_history::collection::<crate::models::user_service::UserService>(
+            db,
             crate::models::user_service::COLLECTION_NAME,
         )
         .find(doc! {
@@ -2114,12 +2128,15 @@ async fn auto_provision_owner_services(
         {
             Ok(service) => {
                 if svc.platform_key.is_some() {
-                    db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
-                        .update_one(
-                            doc! { "_id": &service.id },
-                            doc! { "$set": { "credential_binding": "platform" } },
-                        )
-                        .await?;
+                    crate::services::service_history::collection::<UserService>(
+                        db,
+                        crate::models::user_service::COLLECTION_NAME,
+                    )
+                    .update_one(
+                        doc! { "_id": &service.id },
+                        doc! { "$set": { "credential_binding": "platform" } },
+                    )
+                    .await?;
                 }
             }
             Err(AppError::Conflict(_)) => {
@@ -2214,10 +2231,7 @@ async fn reconcile_stale_auto_provisions(
     };
 
     // Include inactive automatic rows so reconciliation releases their source IDs.
-    let auto_services: Vec<crate::models::user_service::UserService> = match db
-        .collection::<crate::models::user_service::UserService>(
-            crate::models::user_service::COLLECTION_NAME,
-        )
+    let auto_services: Vec<crate::models::user_service::UserService> = match crate::services::service_history::collection::<crate::models::user_service::UserService>(db, crate::models::user_service::COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
             "source": AUTO_PROVISION_SOURCE,
@@ -2393,12 +2407,12 @@ async fn reconcile_stale_auto_provisions(
     // DELETE /keys/:id and PUT /keys/:id both reject auto-connected rows.
     // So all inactive auto-provisioned rows are from reconciliation, and
     // deleting here is always correct.
-    match db
-        .collection::<crate::models::user_service::UserService>(
-            crate::models::user_service::COLLECTION_NAME,
-        )
-        .delete_many(doc! { "_id": { "$in": &stale_service_ids } })
-        .await
+    match crate::services::service_history::collection::<crate::models::user_service::UserService>(
+        db,
+        crate::models::user_service::COLLECTION_NAME,
+    )
+    .delete_many(doc! { "_id": { "$in": &stale_service_ids } })
+    .await
     {
         Ok(result) => {
             if result.deleted_count > 0 {
@@ -2424,25 +2438,25 @@ async fn reconcile_stale_auto_provisions(
     // that are not referenced by any remaining UserService.
     if !stale_endpoint_ids.is_empty() {
         // Find which of these endpoints are still referenced by other services
-        let still_referenced: std::collections::HashSet<String> = match db
-            .collection::<crate::models::user_service::UserService>(
-                crate::models::user_service::COLLECTION_NAME,
-            )
+        let still_referenced: std::collections::HashSet<String> =
+            match crate::services::service_history::collection::<
+                crate::models::user_service::UserService,
+            >(db, crate::models::user_service::COLLECTION_NAME)
             .find(doc! {
                 "user_id": user_id,
                 "endpoint_id": { "$in": &stale_endpoint_ids },
             })
             .await
-        {
-            Ok(cursor) => match cursor
-                .try_collect::<Vec<crate::models::user_service::UserService>>()
-                .await
             {
-                Ok(svcs) => svcs.into_iter().map(|s| s.endpoint_id).collect(),
+                Ok(cursor) => match cursor
+                    .try_collect::<Vec<crate::models::user_service::UserService>>()
+                    .await
+                {
+                    Ok(svcs) => svcs.into_iter().map(|s| s.endpoint_id).collect(),
+                    Err(_) => return,
+                },
                 Err(_) => return,
-            },
-            Err(_) => return,
-        };
+            };
 
         let orphaned: Vec<&str> = stale_endpoint_ids
             .iter()
@@ -2451,15 +2465,15 @@ async fn reconcile_stale_auto_provisions(
             .collect();
 
         if !orphaned.is_empty() {
-            let _ = db
-                .collection::<mongodb::bson::Document>(
-                    crate::models::user_endpoint::COLLECTION_NAME,
-                )
-                .delete_many(doc! {
-                    "_id": { "$in": &orphaned },
-                    "user_id": user_id,
-                })
-                .await;
+            let _ = crate::services::service_history::collection::<mongodb::bson::Document>(
+                db,
+                crate::models::user_endpoint::COLLECTION_NAME,
+            )
+            .delete_many(doc! {
+                "_id": { "$in": &orphaned },
+                "user_id": user_id,
+            })
+            .await;
         }
     }
 }
@@ -2480,23 +2494,22 @@ pub async fn list_keys(
     // Reconciliation and rendering share the request's ACL/provider snapshot.
     // The handler also reuses providers to render revocation capabilities.
     let grants = OwnerGrants::load_for_listing(db, user_id).await?;
-    auto_provision_with_grants(db, user_id, &grants, providers).await?;
     list_keys_with_grants(db, encryption_keys, user_id, &grants, providers).await
 }
 
-/// List existing inventory without creating or reconciling auto-connected rows.
-/// API-key reads use this path; rendering shares the ordinary listing body.
-pub async fn list_keys_read_only(
+pub async fn list_keys_with_grants(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     user_id: &str,
+    grants: &OwnerGrants,
     providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<Vec<KeyView>> {
-    let grants = OwnerGrants::load_for_listing(db, user_id).await?;
-    list_keys_with_grants(db, encryption_keys, user_id, &grants, providers).await
+    auto_provision_with_grants(db, user_id, grants, providers).await?;
+    list_keys_read_only_with_grants(db, encryption_keys, user_id, grants, providers).await
 }
 
-async fn list_keys_with_grants(
+/// Existing inventory only: shares the request grants without provisioning or reconciliation.
+pub async fn list_keys_read_only_with_grants(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     user_id: &str,
@@ -2524,8 +2537,11 @@ async fn list_keys_with_grants(
         .iter()
         .map(|t| t.service.endpoint_id.as_str())
         .collect();
-    let endpoints: Vec<UserEndpoint> = db
-        .collection::<UserEndpoint>(crate::models::user_endpoint::COLLECTION_NAME)
+    let endpoints: Vec<UserEndpoint> =
+        crate::services::service_history::collection::<UserEndpoint>(
+            db,
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
         .find(doc! { "_id": { "$in": &endpoint_ids } })
         .await?
         .try_collect()
@@ -2541,11 +2557,14 @@ async fn list_keys_with_grants(
     let api_keys: Vec<UserApiKey> = if api_key_ids.is_empty() {
         vec![]
     } else {
-        db.collection::<UserApiKey>(crate::models::user_api_key::COLLECTION_NAME)
-            .find(doc! { "_id": { "$in": &api_key_ids } })
-            .await?
-            .try_collect()
-            .await?
+        crate::services::service_history::collection::<UserApiKey>(
+            db,
+            crate::models::user_api_key::COLLECTION_NAME,
+        )
+        .find(doc! { "_id": { "$in": &api_key_ids } })
+        .await?
+        .try_collect()
+        .await?
     };
     let ak_map: HashMap<&str, &UserApiKey> = api_keys.iter().map(|k| (k.id.as_str(), k)).collect();
 
@@ -3518,7 +3537,19 @@ pub async fn disconnect_credentials_with_expected_siblings(
     let mut deleted_endpoints = HashSet::new();
     for service in &plan.services {
         if deleted_endpoints.insert(service.endpoint_id.clone()) {
-            user_endpoint_service::delete_endpoint(db, owner_id, &service.endpoint_id).await?;
+            let service_ids: Vec<_> = plan
+                .services
+                .iter()
+                .filter(|s| s.endpoint_id == service.endpoint_id)
+                .map(|s| s.id.clone())
+                .collect();
+            user_endpoint_service::delete_service_endpoint(
+                db,
+                owner_id,
+                &service.endpoint_id,
+                &service_ids,
+            )
+            .await?;
         }
     }
     for service in &plan.services {
@@ -3746,17 +3777,17 @@ async fn build_disconnect_plan(
         OAuthAppLineage::Unknown("missing-initiator".to_string())
     };
 
-    let all_keys: Vec<UserApiKey> = db
-        .collection::<UserApiKey>(USER_API_KEYS)
-        .find(doc! {
-            "user_id": owner_id,
-            "provider_config_id": &provider_id,
-            "status": { "$nin": ["revoked", "failed"] },
-            "credential_type": { "$ne": "node_managed" },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let all_keys: Vec<UserApiKey> =
+        crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+            .find(doc! {
+                "user_id": owner_id,
+                "provider_config_id": &provider_id,
+                "status": { "$nin": ["revoked", "failed"] },
+                "credential_type": { "$ne": "node_managed" },
+            })
+            .await?
+            .try_collect()
+            .await?;
     let mut affected_keys = Vec::new();
     let mut unaffected_keys = Vec::new();
     for key in all_keys {
@@ -3896,16 +3927,18 @@ async fn active_services_for_keys(
     if key_ids.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(db
-        .collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
-        .find(doc! {
-            "user_id": owner_id,
-            "api_key_id": { "$in": key_ids },
-            "is_active": true,
-        })
-        .await?
-        .try_collect()
-        .await?)
+    Ok(crate::services::service_history::collection::<UserService>(
+        db,
+        crate::models::user_service::COLLECTION_NAME,
+    )
+    .find(doc! {
+        "user_id": owner_id,
+        "api_key_id": { "$in": key_ids },
+        "is_active": true,
+    })
+    .await?
+    .try_collect()
+    .await?)
 }
 
 fn grant_sibling_from_service(service: &UserService) -> GrantCascadeSibling {
@@ -3981,8 +4014,7 @@ async fn claim_legacy_provider_token_if_last_key(
     owner_id: &str,
     provider_id: &str,
 ) -> AppResult<Option<UserProviderToken>> {
-    let remaining = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let remaining = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .count_documents(doc! {
             "user_id": owner_id,
             "provider_config_id": provider_id,
@@ -4701,6 +4733,9 @@ mod tests {
 
     fn sample_service(auth_method: &str) -> UserService {
         UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "svc-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "test".to_string(),
@@ -10544,6 +10579,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+        let original = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "user_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            original.created_by.as_ref().unwrap().actor.kind,
+            crate::models::service_change_event::HistoryActorKind::System
+        );
 
         // Deactivate the catalog entry
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -10565,6 +10610,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0, "stale auto-provisioned service should be deleted");
+        use crate::models::service_change_event::{
+            COLLECTION_NAME, HistoryActorKind, ServiceChangeEvent,
+        };
+        let rows: Vec<ServiceChangeEvent> = db
+            .collection(COLLECTION_NAME)
+            .find(doc! { "service_id": &original.id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(rows.iter().any(|e| e.action == "service.deleted"));
+        assert!(
+            rows.iter()
+                .all(|e| e.actor.kind == HistoryActorKind::System)
+        );
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! { "_id": &catalog.id },
+                doc! { "$set": { "is_active": true } },
+            )
+            .await
+            .unwrap();
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+        let replacement = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "user_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(original.id, replacement.id);
+        assert_eq!(original.slug, replacement.slug);
+        assert_eq!(
+            db.collection::<ServiceChangeEvent>(COLLECTION_NAME)
+                .count_documents(
+                    doc! { "service_id": &replacement.id, "action": "service.created" }
+                )
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -10791,5 +10879,119 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(promoted_key.credential_type, "bearer");
+    }
+
+    #[tokio::test]
+    async fn service_history_platform_binding_roundtrip_retains_key_and_safe_enum_changes() {
+        use super::{create_platform_key, switch_credential_binding};
+        use crate::models::service_change_event::{COLLECTION_NAME, ServiceChangeEvent};
+        use crate::services::service_history::{context, relay};
+        use crate::services::user_service_service;
+        let db =
+            crate::test_utils::connect_transaction_test_database("history_platform_binding").await;
+        relay::ensure_indexes(&db).await.unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection("users")
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("binding-{}", uuid::Uuid::new_v4());
+        catalog.auth_method = "bearer".into();
+        catalog.requires_user_credential = false;
+        catalog.visibility = "public".into();
+        catalog.service_category = "internal".into();
+        catalog.credential_encrypted = vec![1, 2, 3];
+        catalog.provider_config_id = None;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let keys = crate::test_utils::test_encryption_keys();
+        let result = create_platform_key(
+            &db,
+            &owner,
+            &owner,
+            &catalog.slug,
+            "Binding",
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::services::platform_key_service::binding(&result.service),
+            "platform"
+        );
+        let ctx = crate::models::service_change_event::HistoryContext {
+            actor: crate::models::service_change_event::HistoryActor {
+                kind: crate::models::service_change_event::HistoryActorKind::Person,
+                id: owner.clone(),
+                name: "Owner".into(),
+                person_id: Some(owner.clone()),
+                api_key_id: None,
+                app_id: None,
+            },
+            change_group_id: uuid::Uuid::new_v4().to_string(),
+            operation: "test_switch".into(),
+        };
+        context::scope(
+            ctx,
+            switch_credential_binding(
+                &db,
+                &keys,
+                &owner,
+                &result.service.id,
+                false,
+                Some("SECRET_BYOK"),
+                OauthClientCredentialsInput::None,
+            ),
+        )
+        .await
+        .unwrap();
+        let own = user_service_service::get_user_service(&db, &owner, &result.service.id)
+            .await
+            .unwrap();
+        assert!(own.api_key_id.is_some());
+        switch_credential_binding(
+            &db,
+            &keys,
+            &owner,
+            &own.id,
+            true,
+            None,
+            OauthClientCredentialsInput::None,
+        )
+        .await
+        .unwrap();
+        let platform = user_service_service::get_user_service(&db, &owner, &own.id)
+            .await
+            .unwrap();
+        assert_eq!(platform.api_key_id, own.api_key_id);
+        let events: Vec<ServiceChangeEvent> = db
+            .collection(COLLECTION_NAME)
+            .find(doc! { "service_id": &own.id, "action": "service.credential_binding_changed" })
+            .sort(doc! { "service_sequence": 1 })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        let changes: Vec<_> = events
+            .iter()
+            .flat_map(|e| &e.changes)
+            .filter(|c| c.field == "credential_binding")
+            .collect();
+        assert_eq!(changes[0].before, Some(serde_json::json!("platform")));
+        assert_eq!(changes[0].after, Some(serde_json::json!("user")));
+        assert_eq!(changes[1].before, Some(serde_json::json!("user")));
+        assert_eq!(changes[1].after, Some(serde_json::json!("platform")));
+        assert!(!serde_json::to_string(&events).unwrap().contains("SECRET"));
     }
 }

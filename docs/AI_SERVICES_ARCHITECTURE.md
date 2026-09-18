@@ -585,3 +585,7 @@ membership, owner activity, provider eligibility and catalog configuration.
 ## Aurinko account credentials
 
 `api-aurinko` is a normal owner-scoped catalog connection backed by an encrypted account bearer credential. Existing active-service, agent-binding, scope, and approval rules apply. The AI Services UI and CLI support account-token entry and the authenticated `/v1/account` probe. The email channel bot stores its own encrypted account token plus the separate application signing secret; credential rotation and deletion are independent across these surfaces. Managed OAuth is not exposed because official Aurinko contracts do not document the PKCE support required by NyxID. See [Aurinko integration](./AURINKO_INTEGRATION.md) for the documented contracts and decision.
+
+## Service authorship and history
+
+Service cards and tables include authorized creator/latest-editor summaries. Instance detail pages, including platform-managed instances, have a History tab. Deleted UUID histories remain discoverable from Services → Deleted service history under current personal-owner/org-admin/resource-scope checks. The transactional journal covers service, endpoint and credential writers; ordinary timestamps, usage and routine refresh do not count as configuration edits. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe values, writer inventory, audit publication and required MongoDB replica-set migration.

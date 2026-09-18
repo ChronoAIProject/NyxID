@@ -79,15 +79,15 @@ pub async fn compute_viewer_routing(
     }
 
     let id_strings: Vec<String> = catalog_service_ids.iter().map(|s| s.to_string()).collect();
-    let user_services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": viewer_user_id,
-            "catalog_service_id": { "$in": &id_strings },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let user_services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": viewer_user_id,
+                "catalog_service_id": { "$in": &id_strings },
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     // Group by catalog_service_id so we can detect "multiple bindings".
     let mut grouped: HashMap<String, Vec<UserService>> = HashMap::new();
@@ -226,15 +226,14 @@ pub async fn resolve_service_or_user_service(
         return Err(AppError::NotFound("Service not found".to_string()));
     }
 
-    let user_endpoint = state
-        .db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
-        .find_one(doc! {
-            "_id": &user_service.endpoint_id,
-            "user_id": &user_service.user_id,
-        })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+    let user_endpoint =
+        crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+            .find_one(doc! {
+                "_id": &user_service.endpoint_id,
+                "user_id": &user_service.user_id,
+            })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
     Ok(ResolvedService::Owned {
         owner_id: user_service.user_id.clone(),

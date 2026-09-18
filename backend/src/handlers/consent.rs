@@ -193,12 +193,12 @@ async fn resolve_allowed_services(
         return Ok(Vec::new());
     }
 
-    let services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! { "_id": { "$in": allowed_service_ids }, "user_id": user_id })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! { "_id": { "$in": allowed_service_ids }, "user_id": user_id })
+            .await?
+            .try_collect()
+            .await?;
     let endpoint_ids: Vec<String> = services
         .iter()
         .map(|service| service.endpoint_id.clone())
@@ -211,7 +211,7 @@ async fn resolve_allowed_services(
     let endpoints: Vec<UserEndpoint> = if endpoint_ids.is_empty() {
         Vec::new()
     } else {
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .find(doc! { "_id": { "$in": endpoint_ids } })
             .await?
             .try_collect()

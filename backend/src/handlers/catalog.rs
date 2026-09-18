@@ -534,15 +534,14 @@ pub async fn list_catalog_endpoints(
         return Err(AppError::NotFound("Catalog entry not found".to_string()));
     };
 
-    let user_endpoint = state
-        .db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
-        .find_one(doc! {
-            "_id": &user_service.endpoint_id,
-            "user_id": &user_service.user_id,
-        })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
+    let user_endpoint =
+        crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+            .find_one(doc! {
+                "_id": &user_service.endpoint_id,
+                "user_id": &user_service.user_id,
+            })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
     let Some(ref spec_url) = user_endpoint.openapi_spec_url else {
         // Telemetry: catalog.endpoints_fetched (user-service path, no spec).

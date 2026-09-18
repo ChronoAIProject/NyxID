@@ -737,8 +737,7 @@ async fn has_active_user_service_for_catalog(
     catalog_service_id: &str,
 ) -> AppResult<bool> {
     // Fast path: personal row.
-    let personal = db
-        .collection::<UserService>(USER_SERVICES)
+    let personal = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(doc! {
             "user_id": user_id,
             "catalog_service_id": catalog_service_id,
@@ -758,16 +757,16 @@ async fn has_active_user_service_for_catalog(
     }
 
     let org_user_ids: Vec<&str> = memberships.iter().map(|m| m.org_user_id.as_str()).collect();
-    let candidates: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": { "$in": &org_user_ids },
-            "catalog_service_id": catalog_service_id,
-            "is_active": true,
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let candidates: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": { "$in": &org_user_ids },
+                "catalog_service_id": catalog_service_id,
+                "is_active": true,
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     for us in candidates {
         let Some(membership) = memberships.iter().find(|m| m.org_user_id == us.user_id) else {
@@ -887,6 +886,9 @@ mod tests {
 
     fn user_service(id: &str, user_id: &str) -> UserService {
         UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
             slug: "test".to_string(),
