@@ -632,6 +632,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: vec![],
             allow_all_services: allow_all,
             allow_auto_connected_services: false,

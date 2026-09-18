@@ -14,6 +14,10 @@ pub struct AssistantAcknowledgement {
     pub service_id: Option<String>,
     pub service_slug: Option<String>,
     pub service_name: Option<String>,
+    /// The service is a platform-provided catalog entry (DownstreamService ID)
+    /// granted through the key's `allowed_platform_service_ids`.
+    #[serde(default)]
+    pub platform: bool,
     pub tool_name: Option<String>,
     pub arguments_digest: Option<String>,
     pub summary: String,
