@@ -501,6 +501,7 @@ impl AccountTools<'_> {
                         tool: Some(tool_name),
                         arguments: Some(args),
                         summary: &summary,
+                        platform: false,
                     },
                 )
                 .await?;
