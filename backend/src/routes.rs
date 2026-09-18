@@ -695,6 +695,23 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let provider_routes = Router::new()
+        .route("/aurinko/mailboxes", get(handlers::aurinko_mailboxes::list))
+        .route(
+            "/aurinko/mailboxes/authorize",
+            post(handlers::aurinko_mailboxes::authorize),
+        )
+        .route(
+            "/aurinko/mailboxes/attempts/{attempt}",
+            delete(handlers::aurinko_mailboxes::cancel),
+        )
+        .route(
+            "/aurinko/mailboxes/callback",
+            get(handlers::aurinko_mailboxes::callback),
+        )
+        .route(
+            "/aurinko/intermediate",
+            get(handlers::aurinko_mailboxes::intermediate),
+        )
         .route("/", get(handlers::providers::list_providers))
         .route("/", post(handlers::providers::create_provider))
         .route("/my-tokens", get(handlers::user_tokens::list_my_tokens))

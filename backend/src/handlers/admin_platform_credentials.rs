@@ -47,6 +47,8 @@ pub struct PlatformCredentialsResponse {
     pub fields: Vec<CredentialFieldResponse>,
     pub setup_checklist: &'static [&'static str],
     pub callback_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intermediate_redirect_url: Option<String>,
     pub webhook_verify_token: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -90,6 +92,9 @@ async fn response(
     // App secrets are never returned or included in the field projection.
     let credentials =
         service::load_decrypted(&state.db, &state.encryption_keys, &descriptor).await?;
+    let aurinko_callback = (descriptor.provider == "aurinko")
+        .then(|| crate::services::aurinko_oauth_service::callback_url(&state.config.base_url).ok())
+        .flatten();
     Ok(PlatformCredentialsResponse {
         backing: descriptor.backing,
         provider: descriptor.provider,
@@ -104,7 +109,7 @@ async fn response(
         callback_url: if descriptor.provider == "telegram-new" {
             Some(super::telegram_new::service(state).manager_callback())
         } else if descriptor.provider == "aurinko" {
-            None
+            aurinko_callback.clone()
         } else if matches!(
             descriptor.backing,
             crate::services::channel_managed::PlatformCredentialBacking::ProviderOAuth { .. }
@@ -121,6 +126,14 @@ async fn response(
                 )
             })
         },
+        intermediate_redirect_url: aurinko_callback.and_then(|callback| {
+            url::Url::parse(&callback).ok().map(|url| {
+                format!(
+                    "{}/api/v1/providers/aurinko/intermediate",
+                    url.origin().ascii_serialization()
+                )
+            })
+        }),
         webhook_verify_token: if descriptor.provider == "telegram-new" {
             None
         } else {

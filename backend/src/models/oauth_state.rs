@@ -10,6 +10,8 @@ pub struct OAuthState {
     pub user_id: String,
     pub provider_config_id: String,
     pub code_verifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aurinko: Option<AurinkoOAuthBinding>,
     /// Encrypted device_auth_id (OpenAI) or device_code (RFC 8628) for polling
     #[serde(default)]
     pub device_code_encrypted: Option<String>,
@@ -80,6 +82,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let state = OAuthState {
+            aurinko: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -112,6 +115,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_device_code_flow() {
         let state = OAuthState {
+            aurinko: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -142,6 +146,7 @@ mod tests {
         let sa_id = uuid::Uuid::new_v4().to_string();
         let redirect = "/admin/service-accounts/some-sa-id".to_string();
         let state = OAuthState {
+            aurinko: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -197,5 +202,23 @@ mod tests {
         let reserialized = bson::to_document(&restored).expect("reserialize legacy document");
         assert!(!reserialized.contains_key("flow_kind"));
         assert!(!reserialized.contains_key("attempt_nonce"));
+    }
+}
+
+/// Security bindings for Aurinko's confidential-client account code protocol.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AurinkoOAuthBinding {
+    pub session_id: String,
+    pub browser_nonce_hash: String,
+    pub service_type: String,
+    pub config_fingerprint: String,
+    pub key_id: String,
+    pub credential_epoch: i64,
+    pub account_id: Option<String>,
+}
+
+impl std::fmt::Debug for AurinkoOAuthBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AurinkoOAuthBinding([REDACTED])")
     }
 }

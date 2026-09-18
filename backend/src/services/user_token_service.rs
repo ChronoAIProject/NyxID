@@ -331,6 +331,11 @@ async fn get_active_telegram_widget_provider(
 }
 
 fn ensure_oauth_provider_configured(provider: &ProviderConfig) -> AppResult<()> {
+    if provider.slug == "aurinko" {
+        return Err(AppError::ValidationError(
+            "Aurinko mailboxes require the named mailbox authorization flow".into(),
+        ));
+    }
     // URLs are always required regardless of credential mode
     if provider.authorization_url.is_none() || provider.token_url.is_none() {
         return Err(AppError::BadRequest(
@@ -841,6 +846,7 @@ pub async fn initiate_oauth_connect(
     };
 
     let oauth_state = OAuthState {
+        aurinko: None,
         id: state_id.clone(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
@@ -1004,7 +1010,7 @@ pub async fn request_device_code(
         .await?
         .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
 
-    if provider.provider_type != "device_code" {
+    if provider.slug == "aurinko" || provider.provider_type != "device_code" {
         return Err(AppError::BadRequest(
             "This provider does not use the device code flow".to_string(),
         ));
@@ -1151,6 +1157,7 @@ pub async fn request_device_code(
     let expires_at = now + Duration::seconds(expires_in);
 
     let oauth_state = OAuthState {
+        aurinko: None,
         id: state_id.clone(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
@@ -1207,7 +1214,7 @@ pub async fn poll_device_code(
     // Look up state without deleting (we need it for multiple polls)
     let oauth_state = db
         .collection::<OAuthState>(OAUTH_STATES)
-        .find_one(doc! { "_id": state })
+        .find_one(doc! { "_id": state, "aurinko": null })
         .await?
         .ok_or_else(|| AppError::BadRequest("Invalid or expired device code state".to_string()))?;
 
@@ -1651,7 +1658,7 @@ async fn store_device_code_tokens(
 /// Peek at an OAuth state without consuming it (for the generic callback handler).
 pub async fn peek_oauth_state(db: &mongodb::Database, state_id: &str) -> AppResult<OAuthState> {
     db.collection::<OAuthState>(OAUTH_STATES)
-        .find_one(doc! { "_id": state_id })
+        .find_one(doc! { "_id": state_id, "aurinko": null })
         .await?
         .ok_or_else(|| AppError::BadRequest("Invalid or expired OAuth state".to_string()))
 }
@@ -1699,7 +1706,7 @@ pub async fn handle_oauth_callback(
     let oauth_state = db
         .collection::<OAuthState>(OAUTH_STATES)
         .find_one_and_update(
-            doc! { "_id": state, "consumed": { "$ne": true } },
+            doc! { "_id": state, "consumed": { "$ne": true }, "aurinko": null },
             doc! { "$set": { "consumed": true } },
         )
         .await?
@@ -2256,6 +2263,11 @@ pub async fn refresh_user_api_key_in_place(
     api_key: &UserApiKey,
     notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<UserApiKey> {
+    if super::aurinko_oauth_service::is_managed_key(db, api_key).await? {
+        return Err(AppError::BadRequest(
+            "Aurinko mailbox tokens are renewed through Connect mailbox".into(),
+        ));
+    }
     refresh_user_api_key_with_runtime(
         db,
         encryption_keys,
@@ -4507,6 +4519,7 @@ mod tests {
         };
         let now = Utc::now();
         let key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: key_id,
             user_id: Uuid::new_v4().to_string(),
@@ -5830,6 +5843,7 @@ mod tests {
 
         let now = Utc::now();
         let key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),
@@ -6862,6 +6876,7 @@ mod tests {
             None
         };
         let key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),

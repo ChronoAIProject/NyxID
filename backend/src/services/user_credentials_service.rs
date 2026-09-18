@@ -553,6 +553,7 @@ mod tests {
 
     fn placeholder_key(connection_id: &str) -> UserApiKey {
         UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),

@@ -53,13 +53,13 @@ function ManagedBotConnect({
   return (
     <>
       {renderFields({ disabled: false })}
-      {descriptor.managedOnly && !available && (
+      {(descriptor.managedOnly || platform === "aurinko") && !available && (
         <p role="status" className="text-xs text-muted-foreground">
           {managed.isLoading
             ? "Loading account connection..."
             : managed.isError
               ? "Unable to load account connection settings. Retry shortly."
-              : `Not available until an admin configures ${descriptor.label}.`}
+              : `Managed connection is not available until an admin configures ${descriptor.label}.`}
         </p>
       )}
       {available && managed.data && Connect && (

@@ -180,6 +180,25 @@ describe("OAuth completion page", () => {
     expect(document.querySelector(".lucide-circle-check-big")).toBeNull();
   });
 
+  it.each(["complete", "error"])("returns mailbox %s to its original tab without chat actions", (status) => {
+    sessionStorage.setItem(OAUTH_LAUNCH_CONTEXT_KEY, JSON.stringify({
+      providerOrigin: "https://api.aurinko.io",
+      correlationId: NONCE,
+      serviceName: "Aurinko Email",
+      returnToTab: true,
+    }));
+    window.history.replaceState({}, "", `/oauth-complete?status=${status}&flow=cc&nonce=${NONCE}`);
+    render(<OAuthCompletePage />);
+    expect(screen.queryByText(/NyxID chat/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /view connection|try again/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/Return to your NyxID tab/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close window" }));
+    expect(window.close).toHaveBeenCalled();
+    expect(MockBroadcastChannel.instances[0]?.messages).toEqual([
+      { type: "oauth_result", status, flow: "cc" },
+    ]);
+  });
+
   it("ignores launch context when the nonce does not match", () => {
     setLaunchContext(NEXT_NONCE);
     window.history.replaceState(

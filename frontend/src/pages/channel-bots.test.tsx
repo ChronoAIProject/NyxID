@@ -108,6 +108,8 @@ beforeEach(() => {
     if (path === "/channel-platforms") return { platforms: platformFixtures };
     if (path.startsWith(root))
       return { available, manager_username: "NyxSetupBot", request: saved };
+    if (path === "/channel-bots/managed-onboarding/aurinko") return { available, flow: "oauth_connection", provider_slug: "aurinko" };
+    if (path === "/providers/aurinko/mailboxes") return { mailboxes: [] };
     if (path.startsWith("/channel-bots")) return { bots: [], total: 0 };
     if (path.startsWith("/channel-conversations"))
       return { conversations: [], total: 0 };
@@ -502,4 +504,20 @@ it("renders and validates required secret fields from the catalog, including new
   await waitFor(() => expect(submit).toBeEnabled());
   await user.click(submit);
   await waitFor(() => expect(post).toHaveBeenCalledWith("/channel-bots", expect.objectContaining({ future_secret: "private-field", label: "Catalog bot" })));
+});
+
+it("offers the managed Aurinko provider flow while preserving advanced manual setup", async () => {
+  await setup("/channel-bots?connect=aurinko&label=Mailbox");
+  const dialog = within(await screen.findByRole("dialog"));
+  expect(await dialog.findByRole("combobox", { name: "Email provider" })).toBeInTheDocument();
+  await waitFor(() => expect(dialog.getByRole("button", { name: "Connect mailbox" })).toBeEnabled());
+  expect(dialog.queryByLabelText("Bot token")).not.toBeInTheDocument();
+});
+it("explains missing platform configuration without removing manual Aurinko setup", async () => {
+  available = false;
+  await setup("/channel-bots?connect=aurinko&label=Mailbox");
+  const dialog = within(await screen.findByRole("dialog"));
+  expect(await dialog.findByText("Managed connection is not available until an admin configures Aurinko Email.")).toBeInTheDocument();
+  expect(dialog.queryByRole("button", { name: "Connect mailbox" })).not.toBeInTheDocument();
+  expect(dialog.getByLabelText("Bot token")).toBeInTheDocument();
 });

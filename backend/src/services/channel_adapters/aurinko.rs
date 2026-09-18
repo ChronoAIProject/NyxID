@@ -19,7 +19,6 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::LazyLock, time::Duration};
-use zeroize::Zeroizing;
 
 const ORIGIN: &str = "https://api.aurinko.io";
 const MAX_RESPONSE: usize = 2 * 1024 * 1024;
@@ -147,14 +146,28 @@ impl AurinkoAdapter {
     }
     async fn account(&self, token: &str, expected: Option<&str>) -> AppResult<Value> {
         let (status, value) = self
-            .request(
-                Method::GET,
-                token,
-                &["account"],
-                &[("pingProvider", "true")],
-                None,
-            )
+            .request(Method::GET, token, &["account"], &[], None)
             .await?;
+        let value = if matches!(
+            value["serviceType"].as_str(),
+            Some("Google" | "Office365" | "IMAP")
+        ) {
+            let (status, checked) = self
+                .request(
+                    Method::GET,
+                    token,
+                    &["account"],
+                    &[("pingProvider", "true")],
+                    None,
+                )
+                .await?;
+            if !status.is_success() {
+                return Err(upstream());
+            }
+            checked
+        } else {
+            value
+        };
         let id = identity(&value["id"]).ok_or_else(upstream)?;
         if !status.is_success() || value["tokenStatus"].as_str() != Some("active") {
             return Err(upstream());
@@ -167,7 +180,10 @@ impl AurinkoAdapter {
         }
         let scopes = value["authScopes"].as_array().ok_or_else(upstream)?;
         let has = |scope| scopes.iter().any(|value| value.as_str() == Some(scope));
-        if !(has("Mail.All") || ((has("Mail.Read") || has("Mail.ReadWrite")) && has("Mail.Send"))) {
+        if !(has("Mail.All")
+            || ((has("Mail.Read") || has("Mail.ReadWrite"))
+                && (has("Mail.Send") || has("Mail.Drafts"))))
+        {
             return Err(AppError::ValidationError(
                 "Aurinko channel bots require Mail.Read and Mail.Send (or Mail.All)".into(),
             ));
@@ -439,9 +455,31 @@ impl PlatformAdapter for AurinkoAdapter {
             setup_checklist: &[
                 "Use one Aurinko application for NyxID. The application owns upstream billing; each mailbox still requires its owner's authorization.",
                 "The Client Secret and webhook signing secret are different credentials. Never enter a mailbox account token in these fields.",
-                "Saving application credentials does not enable managed OAuth onboarding. Existing manual mailbox connections continue to use their own tokens and signing secrets.",
+                "Register the exact NyxID final callback URL in Aurinko. Configure Google, Microsoft and Zoho upstream OAuth applications in Aurinko for production. The application pair enables managed mailbox consent; signing secret is also required for channel bots.",
             ],
         })
+    }
+    fn credential_resolution(&self) -> CredentialResolution {
+        CredentialResolution::OAuthConnection {
+            provider_slug: "aurinko",
+            required_scopes: &["Mail.Read", "Mail.Send"],
+        }
+    }
+    fn managed_onboarding(
+        &self,
+    ) -> Option<crate::services::channel_managed::ManagedOnboardingDescriptor> {
+        Some(
+            crate::services::channel_managed::ManagedOnboardingDescriptor {
+                flow: "oauth_connection",
+                provider: "aurinko",
+                bootstrap_fields: &[],
+                completion_fields: &["connection_id"],
+                graph_version: "",
+                signup_version: "",
+                signup_extras: |_| json!({}),
+                feature_types: &[],
+            },
+        )
     }
     fn persists_reply_attempt(&self) -> bool {
         true
@@ -470,7 +508,7 @@ impl PlatformAdapter for AurinkoAdapter {
                     patchable: true,
                     clearable: false,
                     webhook_secret: true,
-                    platform_fallback: None,
+                    platform_fallback: Some("signing_secret"),
                 },
             ],
             extra_fields: &[],
@@ -479,14 +517,14 @@ impl PlatformAdapter for AurinkoAdapter {
             setup_instructions: &[
                 "Use an Aurinko mailbox account token with Mail.Read and Mail.Send, plus the separate application signing secret from the Aurinko dashboard.",
                 "NyxID verifies the account and creates the email subscription automatically. Configure a default agent with a callback URL to receive new mail.",
-                "AI Service and channel bot tokens are stored separately. Rotate or delete each connection separately. Managed OAuth onboarding is not available.",
+                "Managed onboarding reuses one AI Service mailbox connection and the platform signing secret. Manual tokens and signing secrets remain independent.",
                 "Only new incoming personal mail is forwarded. Replies target the original sender or its single Reply-To address; attachments are available through the AI Service.",
             ],
             ..Default::default()
         }
     }
     fn validate_stored_verification(&self, bot: &ChannelBot) -> AppResult<()> {
-        if bot.app_secret_encrypted.is_none() {
+        if bot.credential_source != "connection" && bot.app_secret_encrypted.is_none() {
             return Err(AppError::ValidationError(
                 "Aurinko signing secret is required".into(),
             ));

@@ -32,6 +32,10 @@ pub async fn connection_token(
         .find_one(doc! { "slug": provider_slug, "is_active": true })
         .await?
         .ok_or_else(|| reconnect("OAuth provider is unavailable"))?;
+    if provider_slug == "aurinko" {
+        key = super::aurinko_oauth_service::require_live_connection(db, owner, connection_id, true)
+            .await?;
+    }
     validate_connection(&key, &provider.id, required_scopes)?;
     if key
         .expires_at
@@ -127,6 +131,11 @@ pub async fn resolve_bot_token(
             .await
             .map(Zeroizing::new);
     };
+    if bot.credential_source == "user" && !adapter.registration().managed_only {
+        return super::channel_bot_service::decrypt_bot_token(keys, bot)
+            .await
+            .map(Zeroizing::new);
+    }
     let result = if bot.credential_source != "connection" {
         Err(reconnect("Bot is missing its OAuth connection"))
     } else if let Some(connection_id) = &bot.connection_id {
@@ -274,4 +283,44 @@ pub async fn start_connection(
             Err(error)
         }
     }
+}
+
+/// Cleanup only: called under the deletion lifecycle guard for a verified,
+/// same-owner Aurinko bot. A disabled service still needs its subscription removed.
+pub(crate) async fn aurinko_cleanup_token(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    bot: &ChannelBot,
+) -> AppResult<Zeroizing<String>> {
+    let id = bot
+        .connection_id
+        .as_deref()
+        .ok_or_else(|| reconnect("Missing mailbox connection"))?;
+    let key=db.collection::<UserApiKey>(crate::models::user_api_key::COLLECTION_NAME).find_one(doc! {"_id":id,"user_id":&bot.user_id,"credential_type":"oauth2","credential_source":"platform","status":"active"}).await?.ok_or_else(||reconnect("Mailbox connection unavailable"))?;
+    if bot.platform != "aurinko"
+        || bot.credential_source != "connection"
+        || !super::aurinko_oauth_service::is_managed_key(db, &key).await?
+    {
+        return Err(reconnect("Invalid mailbox cleanup binding"));
+    }
+    if key
+        .aurinko_account
+        .as_ref()
+        .is_none_or(|account| account.account_id != bot.platform_bot_id)
+    {
+        return Err(reconnect("Mailbox identity changed"));
+    }
+    let bytes = Zeroizing::new(
+        keys.decrypt(
+            key.access_token_encrypted
+                .as_deref()
+                .ok_or_else(|| reconnect("Missing token"))?,
+        )
+        .await?,
+    );
+    Ok(Zeroizing::new(
+        std::str::from_utf8(&bytes)
+            .map_err(|_| reconnect("Invalid token"))?
+            .into(),
+    ))
 }

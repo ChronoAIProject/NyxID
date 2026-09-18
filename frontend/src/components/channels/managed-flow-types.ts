@@ -12,6 +12,7 @@ export interface ManagedFlowProps {
   readonly orgId: string | null;
   readonly onConnected: (bot: CreateChannelBotResponse) => void;
   readonly botId?: string;
+  readonly connectionId?: string | null;
 }
 
 export interface ManagedDetailProps {

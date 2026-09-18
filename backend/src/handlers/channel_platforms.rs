@@ -191,7 +191,7 @@ mod tests {
                 .unwrap();
         assert_eq!(aurinko["display_name"], "Aurinko Email");
         assert_eq!(aurinko["ingestion"], serde_json::json!({"mode":"webhook"}));
-        assert!(aurinko["managed_onboarding"].is_null());
+        assert_eq!(aurinko["managed_onboarding"]["flow"], "oauth_connection");
         assert_eq!(
             aurinko["capabilities"],
             serde_json::json!({"initiated_send":false,"reply_to":true,"thread":false,"edit":false,

@@ -710,7 +710,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // Aurinko account bearer tokens; managed OAuth requires documented PKCE support.
+    // Preserve manual account tokens; named managed account-code metadata is derived for old and new rows.
     if !slug_exists!("aurinko") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -2520,6 +2520,9 @@ pub async fn seed_default_providers(
     }
 
     backfill_provider_revocation(&collection).await?;
+    collection.update_one(doc! {"slug":"aurinko","provider_type":"api_key","created_by":"system","revocation":null,"revocation_url":null,
+        "$or":[{"revocation_seed_version":{"$exists":false}},{"revocation_seed_version":0}]},
+        doc! {"$set":{"revocation":{"style":"aurinko_account","url":"https://api.aurinko.io/v1/account/token","auth":"none","request_encoding":"form","revokes_grant":true},"revocation_seed_version":1}}).await?;
 
     for adapter in super::channel_adapters::registered_adapters(&std::sync::Arc::new(
         super::provider_token_exchange_service::TokenExchangeCache::new(),
@@ -2529,6 +2532,9 @@ pub async fn seed_default_providers(
             required_scopes,
         } = adapter.credential_resolution()
         {
+            if provider_slug == "aurinko" {
+                continue;
+            }
             collection.update_one(doc! { "slug": provider_slug }, vec![doc! { "$set": {
                 "default_scopes": { "$setUnion": [{ "$ifNull": ["$default_scopes", []] }, required_scopes] },
             } }]).await?;
@@ -2673,6 +2679,26 @@ fn validate_revocation_url_shape(url: &str) -> AppResult<()> {
 pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
     validate_revocation_url_shape(url)?;
     crate::services::url_validation::validate_public_http_url(url, "revocation.url").await
+}
+
+async fn validate_named_revocation(
+    slug: &str,
+    provider_type: &str,
+    config: &RevocationConfig,
+) -> AppResult<()> {
+    if config.style == "aurinko_account" {
+        if slug == "aurinko"
+            && provider_type == "api_key"
+            && config.url == "https://api.aurinko.io/v1/account/token"
+            && config.auth == "none"
+            && config.revokes_grant
+            && config.request_encoding == "form"
+        {
+            return Ok(());
+        }
+        return Err(AppError::ValidationError("Aurinko account revocation requires the fixed Aurinko provider and DELETE account-token configuration".into()));
+    }
+    validate_revocation_config(provider_type, config).await
 }
 
 pub async fn validate_revocation_config(
@@ -3364,10 +3390,10 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         requires_user_credential: true,
         homepage_url: Some("https://www.aurinko.io"),
         auth_notes: Some(
-            "Use a mailbox account access token, not an application credential. Mail.Read permits reads; Mail.Send permits send/reply; Mail.Drafts permits drafts. Channel bot credentials are managed separately.",
+            "Connect a mailbox with the platform Aurinko application, or enter a manual account token. Managed AI Services and channel bots reuse one owner-scoped connection. Mail.Read permits reads; Mail.Send permits send/reply; Mail.Drafts permits drafts and sending. Application credentials are never mailbox tokens.",
         ),
         known_limitations: Some(
-            "Managed OAuth onboarding is unavailable until Aurinko documents PKCE support. Account-token onboarding is supported. Send IDs are best effort; processingStatus Incomplete can follow successful submission. Never blindly retry uncertain sends. Provider mailbox setup and consent remain required.",
+            "Google, Microsoft 365, Zoho Mail, IMAP/SMTP, EWS and iCloud use Aurinko hosted authorization. POP3 is not supported. Operators configure upstream provider apps in Aurinko. Notifications may use upstream polling. Send IDs are best effort; never blindly retry uncertain sends.",
         ),
     },
     DefaultServiceSeed {
@@ -4943,6 +4969,24 @@ pub async fn seed_default_services(
         );
     }
 
+    for (field, old, new) in [
+        (
+            "auth_notes",
+            "Use a mailbox account access token, not an application credential. Mail.Read permits reads; Mail.Send permits send/reply; Mail.Drafts permits drafts. Channel bot credentials are managed separately.",
+            "Connect a mailbox with the platform Aurinko application, or enter a manual account token. Managed AI Services and channel bots reuse one owner-scoped connection. Mail.Read permits reads; Mail.Send permits send/reply; Mail.Drafts permits drafts and sending. Application credentials are never mailbox tokens.",
+        ),
+        (
+            "known_limitations",
+            "Managed OAuth onboarding is unavailable until Aurinko documents PKCE support. Account-token onboarding is supported. Send IDs are best effort; processingStatus Incomplete can follow successful submission. Never blindly retry uncertain sends. Provider mailbox setup and consent remain required.",
+            "Google, Microsoft 365, Zoho Mail, IMAP/SMTP, EWS and iCloud use Aurinko hosted authorization. POP3 is not supported. Operators configure upstream provider apps in Aurinko. Notifications may use upstream polling. Send IDs are best effort; never blindly retry uncertain sends.",
+        ),
+    ] {
+        let mut filter = doc! {"slug":"api-aurinko","created_by":"system"};
+        filter.insert(field, old);
+        let mut set = doc! {"updated_at":bson::DateTime::from_chrono(now)};
+        set.insert(field, new);
+        service_col.update_one(filter, doc! {"$set":set}).await?;
+    }
     reconcile_firecrawl_seed_metadata(&service_col, now).await?;
     reconcile_google_workspace_seed(db, now).await?;
     reconcile_google_mail_send_seed(db, now).await?;
@@ -5636,7 +5680,7 @@ pub async fn create_provider_with_revocation(
         (None, None) => None,
     };
     if let Some(config) = revocation.as_ref() {
-        validate_revocation_config(provider_type, config).await?;
+        validate_named_revocation(slug, provider_type, config).await?;
     }
 
     // Check slug uniqueness
@@ -5858,14 +5902,15 @@ pub async fn update_provider(
     if matches!(
         existing.provider_type.as_str(),
         "api_key" | "telegram_widget"
-    ) && revocation_update.is_some()
+    ) && existing.slug != "aurinko"
+        && revocation_update.is_some()
     {
         return Err(AppError::ValidationError(
             "revocation is only supported for oauth2 and device_code providers".to_string(),
         ));
     }
     if let Some(Some(config)) = revocation_update.as_ref() {
-        validate_revocation_config(&existing.provider_type, config).await?;
+        validate_named_revocation(&existing.slug, &existing.provider_type, config).await?;
     }
 
     // Platform-credential hygiene (spec B5): reject empty values (an

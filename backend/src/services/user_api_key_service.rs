@@ -240,6 +240,7 @@ pub async fn build_api_key(
     };
 
     let api_key = UserApiKey {
+        aurinko_account: None,
         credential_source,
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
@@ -332,6 +333,7 @@ pub(crate) fn api_key_from_provider_token(
     let now = Utc::now();
 
     let api_key = UserApiKey {
+        aurinko_account: None,
         credential_source: None,
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
@@ -1524,6 +1526,11 @@ pub async fn update_api_key(
     }
 
     let existing = get_api_key(db, user_id, key_id).await?;
+    if credential.is_some() && super::aurinko_oauth_service::is_managed_key(db, &existing).await? {
+        return Err(AppError::BadRequest(
+            "Managed Aurinko credentials must be replaced through mailbox reconnect".into(),
+        ));
+    }
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
@@ -1684,6 +1691,11 @@ pub async fn ensure_api_key_not_in_use(
     key_id: &str,
     excluded_service_ids: &[String],
 ) -> AppResult<()> {
+    if let Some(key) = find_api_key(db,user_id,key_id).await?
+        && super::aurinko_oauth_service::is_managed_key(db,&key).await?
+        && db.collection::<bson::Document>("channel_bots").find_one(doc! {"user_id":user_id,"platform":"aurinko","credential_source":"connection","connection_id":key_id,"is_active":true}).await?.is_some() {
+        return Err(AppError::Conflict("Mailbox connection is used by an Aurinko channel bot. Delete its channel bots before deleting this connection.".into()));
+    }
     let mut filter = doc! {
         "user_id": user_id,
         "api_key_id": key_id,
@@ -1706,6 +1718,23 @@ pub async fn ensure_api_key_not_in_use(
 
 /// Atomically claim a key for deletion and return its exact pre-image.
 pub async fn claim_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+) -> AppResult<Option<UserApiKey>> {
+    if let Some(key) = find_api_key(db, user_id, key_id).await?
+        && super::aurinko_oauth_service::is_managed_key(db, &key).await?
+    {
+        return super::channel_retry_ingress::with_connection(db, key_id, async {
+            ensure_api_key_not_in_use(db, user_id, key_id, &[]).await?;
+            claim_api_key_with_connection_claim(db, user_id, key_id).await
+        })
+        .await;
+    }
+    claim_api_key_with_connection_claim(db, user_id, key_id).await
+}
+
+pub(crate) async fn claim_api_key_with_connection_claim(
     db: &mongodb::Database,
     user_id: &str,
     key_id: &str,
@@ -1781,6 +1810,7 @@ mod tests {
 
     fn sample_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: "key-1".to_string(),
             user_id: "user-1".to_string(),
@@ -1862,6 +1892,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 credential_source: None,
                 id: api_key_id.clone(),
                 user_id: org_id.clone(),
@@ -2522,6 +2553,7 @@ mod tests {
     ) -> OAuthState {
         let now = Utc::now();
         OAuthState {
+            aurinko: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.to_string(),
             provider_config_id: provider_id.to_string(),
@@ -2973,6 +3005,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 credential_source: None,
                 id: key_id.clone(),
                 user_id: user_id.clone(),
@@ -3515,6 +3548,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 credential_source: None,
                 id: key_id.clone(),
                 user_id: uuid::Uuid::new_v4().to_string(),
@@ -3589,6 +3623,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 credential_source: None,
                 id: key_id.clone(),
                 user_id: uuid::Uuid::new_v4().to_string(),
@@ -3840,6 +3875,7 @@ mod tests {
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 credential_source: None,
                 id: key_id.clone(),
                 user_id: uuid::Uuid::new_v4().to_string(),
@@ -3914,6 +3950,7 @@ mod tests {
         for (key_id, conn_id) in [(&key_a, &conn_a), (&key_b, &conn_b)] {
             db.collection::<UserApiKey>(super::COLLECTION_NAME)
                 .insert_one(UserApiKey {
+                    aurinko_account: None,
                     credential_source: None,
                     id: key_id.clone(),
                     user_id: user_id.clone(),

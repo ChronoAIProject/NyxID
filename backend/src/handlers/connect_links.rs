@@ -65,6 +65,7 @@ pub struct PreviewConnectLinkResponse {
     pub expires_at: String,
     pub status: String,
     pub connect_method: String,
+    pub managed_onboarding: Option<String>,
     pub auth_key_name: String,
     pub credential_mode: Option<String>,
     pub has_platform_oauth_credentials: bool,
@@ -132,6 +133,7 @@ pub struct CompleteConnectLinkRequest {
     pub oauth_client_secret: Option<String>,
     #[serde(default)]
     pub device_state: Option<String>,
+    pub aurinko_provider: Option<crate::services::aurinko_oauth_service::MailProvider>,
 }
 
 impl std::fmt::Debug for CompleteConnectLinkRequest {
@@ -368,6 +370,10 @@ pub async fn preview_connect_link(
             .expires_at
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         status: status_name(view.link.status).to_string(),
+        managed_onboarding: view
+            .service
+            .managed_aurinko
+            .then(|| crate::services::aurinko_oauth_service::PROTOCOL.to_owned()),
         connect_method,
         auth_key_name: view.service.auth_key_name,
         credential_mode: view.service.credential_mode,
@@ -456,6 +462,20 @@ pub async fn complete_connect_link(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<CompleteConnectLinkRequest>,
+) -> AppResult<(HeaderMap, Json<CompleteConnectLinkResponse>)> {
+    let mut response_headers = HeaderMap::new();
+    let response =
+        complete_connect_link_inner(state, auth_user, addr, headers, body, &mut response_headers)
+            .await?;
+    Ok((response_headers, response))
+}
+async fn complete_connect_link_inner(
+    state: AppState,
+    auth_user: AuthUser,
+    addr: SocketAddr,
+    headers: HeaderMap,
+    body: CompleteConnectLinkRequest,
+    response_headers: &mut HeaderMap,
 ) -> AppResult<Json<CompleteConnectLinkResponse>> {
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
     if !state
@@ -466,6 +486,21 @@ pub async fn complete_connect_link(
         return Err(AppError::ConnectLinkRateLimited);
     }
     let actor_id = auth_user.user_id.to_string();
+    if body
+        .credential
+        .as_deref()
+        .is_none_or(|c| c.trim().is_empty())
+    {
+        let preview = connect_link_service::preview(&state.db, &body.token).await?;
+        if preview.service.managed_aurinko {
+            super::aurinko_mailboxes::session(&auth_user)?;
+            if body.aurinko_provider.is_none() {
+                return Err(AppError::ValidationError(
+                    "Choose a mailbox provider".into(),
+                ));
+            }
+        }
+    }
     let result = match connect_link_service::complete(
         &state.db,
         &state.encryption_keys,
@@ -510,6 +545,40 @@ pub async fn complete_connect_link(
             provider_id,
             connection_id,
         } => {
+            if view.service.managed_aurinko {
+                let session_id = super::aurinko_mailboxes::session(&auth_user)?;
+                let selected = body
+                    .aurinko_provider
+                    .ok_or_else(|| AppError::ValidationError("Choose a mailbox provider".into()))?;
+                let key = crate::services::aurinko_oauth_service::key_for_connection(
+                    &state.db,
+                    &view.link.user_id,
+                    &connection_id,
+                )
+                .await?;
+                let started = crate::services::aurinko_oauth_service::start(
+                    &state.db,
+                    &state.encryption_keys,
+                    &state.config.base_url,
+                    &actor_id,
+                    &session_id,
+                    &view.link.user_id,
+                    view.link.label.as_deref().unwrap_or("Mailbox"),
+                    selected,
+                    Some(&key.id),
+                    Some(&view.link.id),
+                    None,
+                )
+                .await?;
+                *response_headers = super::aurinko_mailboxes::cookies(
+                    &started.state_id,
+                    &started.browser_nonce,
+                    600,
+                )?;
+                let mut response = completion_response(view, "oauth_required")?;
+                response.authorization_url = Some(started.authorization_url);
+                return Ok(Json(response));
+            }
             let redirect_path = format!("/connect/return/{}", view.link.id);
             let on_behalf_of =
                 (view.link.user_id != actor_id).then_some(view.link.user_id.as_str());
@@ -731,6 +800,7 @@ mod tests {
     #[test]
     fn completion_request_debug_redacts_all_secret_inputs() {
         let request = CompleteConnectLinkRequest {
+            aurinko_provider: None,
             token: "nyx_clk_secret".to_string(),
             credential: Some("api-secret".to_string()),
             use_platform_key: None,
@@ -918,12 +988,13 @@ mod tests {
             .next()
             .expect("raw token in connect URL")
             .to_string();
-        let Json(completed) = complete_connect_link(
+        let (_, Json(completed)) = complete_connect_link(
             State(state),
             test_auth_user(&actor_id),
             ConnectInfo("127.0.0.1:43129".parse().unwrap()),
             HeaderMap::new(),
             Json(CompleteConnectLinkRequest {
+                aurinko_provider: None,
                 token: raw_token,
                 credential: Some("test-secret".to_string()),
                 use_platform_key: None,
@@ -1052,6 +1123,7 @@ mod tests {
             ConnectInfo("127.0.0.1:43124".parse().unwrap()),
             HeaderMap::new(),
             Json(CompleteConnectLinkRequest {
+                aurinko_provider: None,
                 token: created.raw_token.clone(),
                 credential: Some("test-secret".to_string()),
                 use_platform_key: None,
@@ -1064,12 +1136,13 @@ mod tests {
         .await;
         assert!(matches!(denied, Err(AppError::ConnectLinkNotFound)));
 
-        let Json(completed) = complete_connect_link(
+        let (_, Json(completed)) = complete_connect_link(
             State(state.clone()),
             test_auth_user(&actor_id),
             ConnectInfo("127.0.0.1:43125".parse().unwrap()),
             HeaderMap::new(),
             Json(CompleteConnectLinkRequest {
+                aurinko_provider: None,
                 token: created.raw_token.clone(),
                 credential: Some("test-secret".to_string()),
                 use_platform_key: None,
@@ -1090,6 +1163,7 @@ mod tests {
             ConnectInfo("127.0.0.1:43126".parse().unwrap()),
             HeaderMap::new(),
             Json(CompleteConnectLinkRequest {
+                aurinko_provider: None,
                 token: created.raw_token,
                 credential: Some("test-secret".to_string()),
                 use_platform_key: None,

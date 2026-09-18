@@ -273,7 +273,14 @@ async fn persist_verified_bot(
         connection_id: connection.map(|(id, _)| id.to_string()),
         poll_cursor: connection.and_then(|(_, outcome)| outcome.cursor.clone()),
         poll_lease_until: None,
-        last_polled_at: connection.map(|_| now),
+        last_polled_at: connection
+            .filter(|_| {
+                matches!(
+                    adapter.ingestion(),
+                    super::channel_platform::Ingestion::Poll { .. }
+                )
+            })
+            .map(|_| now),
         poll_backoff_until: connection
             .and_then(|(_, outcome)| outcome.backoff)
             .map(|d| now + chrono::Duration::seconds(d.as_secs().min(86400) as i64)),
@@ -345,6 +352,34 @@ pub async fn create_managed_bot(
     input: &super::channel_managed::ManagedOnboardingInput,
     progress: &super::channel_managed::ManagedProgress,
 ) -> AppResult<CreateBotResult> {
+    if adapter.platform_id() == "aurinko" {
+        return super::channel_retry_ingress::with_connection(
+            db,
+            input.get("connection_id")?,
+            create_managed_bot_inner(
+                db, config, keys, http, adapter, owner, label, input, progress,
+            ),
+        )
+        .await;
+    }
+    create_managed_bot_inner(
+        db, config, keys, http, adapter, owner, label, input, progress,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_managed_bot_inner(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    owner: &str,
+    label: &str,
+    input: &super::channel_managed::ManagedOnboardingInput,
+    progress: &super::channel_managed::ManagedProgress,
+) -> AppResult<CreateBotResult> {
     let managed = adapter
         .managed_onboarding()
         .ok_or_else(super::channel_managed::unavailable)?;
@@ -362,6 +397,15 @@ pub async fn create_managed_bot(
         return Err(AppError::ValidationError(
             "Label must be between 1 and 128 characters".to_string(),
         ));
+    }
+    if adapter.platform_id() == "aurinko" {
+        let connection_id = input.get("connection_id")?;
+        super::aurinko_oauth_service::require_live_connection(db, owner, connection_id, true)
+            .await?;
+        if let Some(bot)=db.collection::<ChannelBot>(COLLECTION_NAME).find_one(doc! {"user_id":owner,"platform":"aurinko","credential_source":"connection","connection_id":connection_id,"is_active":true}).await? {
+            // A retry after a lost setup response returns the durable bot and lets Verify resume.
+            return Ok(CreateBotResult {bot,webhook_secret:String::new()});
+        }
     }
     let active_count = db
         .collection::<ChannelBot>(COLLECTION_NAME)
@@ -392,23 +436,35 @@ pub async fn create_managed_bot(
         let identity = adapter
             .verify_bot_token(http, &BotCredentials::from(token.as_str()))
             .await?;
-        let outcome = adapter
-            .poll_inbound(
-                http,
-                &BotCredentials {
-                    token: &token,
-                    platform_bot_id: Some(&identity.platform_bot_id),
-                    platform_secrets: None,
-                },
-                None,
-            )
-            .await?;
-        if outcome.cursor.is_none() {
-            return Err(AppError::ChannelPlatformError(
-                "Initial channel poll was rate limited; retry after the provider's reset"
-                    .to_string(),
-            ));
-        }
+        let outcome = if matches!(
+            adapter.ingestion(),
+            super::channel_platform::Ingestion::Poll { .. }
+        ) {
+            let outcome = adapter
+                .poll_inbound(
+                    http,
+                    &BotCredentials {
+                        token: &token,
+                        platform_bot_id: Some(&identity.platform_bot_id),
+                        platform_secrets: None,
+                    },
+                    None,
+                )
+                .await?;
+            if outcome.cursor.is_none() {
+                return Err(AppError::ChannelPlatformError(
+                    "Initial channel poll was rate limited; retry later".into(),
+                ));
+            }
+            outcome
+        } else {
+            super::channel_platform::PollOutcome {
+                messages: vec![],
+                cursor: None,
+                backoff: None,
+                notice: None,
+            }
+        };
         return persist_verified_bot(
             db,
             config,
@@ -589,6 +645,12 @@ pub async fn reconnect_bot(
     };
     if !bot.is_active || bot.credential_source != "connection" {
         return Err(super::channel_managed::unavailable());
+    }
+    if adapter.ingestion() == super::channel_platform::Ingestion::Webhook {
+        if bot.connection_id.as_deref() != Some(connection_id) {
+            return Err(AppError::ValidationError("Reconnect the existing mailbox connection; create a separate bot for a different connection".into()));
+        }
+        return Ok(());
     }
     let token = super::channel_credentials::connection_token(
         db,
@@ -1096,7 +1158,7 @@ async fn delete_bot_serialized(
         async {
             let work = delete_bot_inner(db, http_client, encryption_keys, adapter, bot_id, user_id);
             if adapter.serializes_lifecycle() {
-                super::channel_retry_ingress::with_ingress(db, bot_id, work).await
+                super::channel_retry_ingress::with_bot_ingress(db, bot_id, work).await
             } else {
                 work.await
             }
@@ -1166,7 +1228,11 @@ async fn delete_bot_inner(
     }
     let cleanup = if adapter.serializes_lifecycle() {
         let result = async {
-            let token = zeroize::Zeroizing::new(decrypt_bot_token(encryption_keys, &bot).await?);
+            let token = if bot.platform == "aurinko" && bot.credential_source == "connection" {
+                super::channel_credentials::aurinko_cleanup_token(db, encryption_keys, &bot).await?
+            } else {
+                zeroize::Zeroizing::new(decrypt_bot_token(encryption_keys, &bot).await?)
+            };
             adapter
                 .remove_bot_webhook(db, http_client, &bot, &token)
                 .await
@@ -1237,7 +1303,7 @@ pub async fn verify_serialized_bot(
         if !bot.is_active {
             return Err(AppError::ChannelBotInactive("Bot has been deleted".into()));
         }
-        let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, &bot).await?);
+        let token = super::channel_credentials::resolve_bot_token(db, keys, adapter, &bot).await?;
         adapter
             .verify_bot_token(
                 http,

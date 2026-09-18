@@ -38,6 +38,23 @@ pub async fn with_lifecycle<T>(
     bot_id: &str,
     work: impl Future<Output = AppResult<T>>,
 ) -> AppResult<T> {
+    if serialize {
+        let bot = super::channel_bot_service::get_bot(db, bot_id).await?;
+        if bot.platform == "aurinko" && bot.credential_source == "connection" {
+            let connection = bot.connection_id.as_deref().ok_or_else(retry_later)?;
+            return with_connection(db, connection, async {
+                let live = super::channel_bot_service::get_bot(db, bot_id).await?;
+                if live.connection_id != bot.connection_id
+                    || live.user_id != bot.user_id
+                    || live.updated_at != bot.updated_at
+                {
+                    return Err(retry_later());
+                }
+                with_claim(db, true, "channel-bot-lifecycle", bot_id, work).await
+            })
+            .await;
+        }
+    }
     with_claim(db, serialize, "channel-bot-lifecycle", bot_id, work).await
 }
 
@@ -46,7 +63,88 @@ pub async fn with_ingress<T>(
     bot_id: &str,
     work: impl Future<Output = AppResult<T>>,
 ) -> AppResult<T> {
+    let bot = super::channel_bot_service::get_bot(db, bot_id).await?;
+    if bot.platform == "aurinko" && bot.credential_source == "connection" {
+        return with_connection(
+            db,
+            bot.connection_id.as_deref().ok_or_else(retry_later)?,
+            async {
+                let live = super::channel_bot_service::get_bot(db, bot_id).await?;
+                if live.connection_id != bot.connection_id
+                    || live.user_id != bot.user_id
+                    || live.updated_at != bot.updated_at
+                {
+                    return Err(retry_later());
+                }
+                with_claim(db, true, "channel-bot-ingress", bot_id, work).await
+            },
+        )
+        .await;
+    }
     with_claim(db, true, "channel-bot-ingress", bot_id, work).await
+}
+
+/// Used only inside an already-held lifecycle/connection guard during deletion.
+pub(crate) async fn with_bot_ingress<T>(
+    db: &mongodb::Database,
+    bot_id: &str,
+    work: impl Future<Output = AppResult<T>>,
+) -> AppResult<T> {
+    with_claim(db, true, "channel-bot-ingress", bot_id, work).await
+}
+
+/// Shared mailbox effects and connection mutations use this claim before any
+/// per-bot claim, preventing reconnect/disable/delete from racing an effect.
+pub async fn with_connection<T>(
+    db: &mongodb::Database,
+    key_id: &str,
+    work: impl Future<Output = AppResult<T>>,
+) -> AppResult<T> {
+    with_claim(db, true, "aurinko-connection", key_id, work).await
+}
+
+/// Acquire a sorted set once for grant-cascade mutations, before any bot claims.
+pub(crate) async fn with_connections<T>(
+    db: &mongodb::Database,
+    key_ids: &[String],
+    work: impl Future<Output = AppResult<T>>,
+) -> AppResult<T> {
+    if key_ids.is_empty() {
+        return work.await;
+    }
+    let mut ids = key_ids.to_vec();
+    ids.sort();
+    ids.dedup();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let mut claims = Vec::new();
+    let result = async {
+        for id in ids {
+            match tokio::time::timeout_at(
+                deadline,
+                EventDedupStore::claim(
+                    db,
+                    "aurinko-connection",
+                    &id,
+                    "mutation",
+                    Duration::from_secs(120),
+                ),
+            )
+            .await
+            .map_err(|_| retry_later())??
+            {
+                EventDedupClaimResult::Claimed(claim) => claims.push(claim),
+                EventDedupClaimResult::Duplicate => return Err(retry_later()),
+            }
+        }
+        tokio::time::timeout_at(deadline, work)
+            .await
+            .unwrap_or_else(|_| Err(retry_later()))
+    }
+    .await;
+    for claim in &claims {
+        EventDedupStore::release(db, claim).await?;
+    }
+    result
 }
 
 async fn with_claim<T>(

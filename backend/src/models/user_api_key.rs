@@ -5,7 +5,7 @@ use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "user_api_keys";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserApiKey {
     #[serde(rename = "_id")]
     pub id: String,
@@ -14,6 +14,8 @@ pub struct UserApiKey {
 
     /// "api_key" | "oauth2" | "bearer" | "basic" | "node_managed" | "ssh_certificate"
     pub credential_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aurinko_account: Option<AurinkoAccount>,
 
     // --- Primary credential (encrypted) ---
     /// For api_key/bearer/basic: the raw credential
@@ -116,6 +118,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_api_key() {
         let key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -153,6 +156,7 @@ mod tests {
     #[test]
     fn missing_credential_epoch_defaults_to_one() {
         let key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -188,6 +192,7 @@ mod tests {
     fn bson_roundtrip_oauth2() {
         let conn_id = uuid::Uuid::new_v4().to_string();
         let key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -247,5 +252,32 @@ mod tests {
         assert!(restored.oauth_attempt_nonce.is_none());
         let reserialized = bson::to_document(&restored).expect("reserialize legacy document");
         assert!(!reserialized.contains_key("oauth_attempt_nonce"));
+    }
+}
+
+/// Verified non-secret mailbox identity; the bearer remains in access_token_encrypted.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AurinkoAccount {
+    #[serde(default)]
+    pub application_id_hash: String,
+    pub account_id: String,
+    pub service_type: String,
+    pub mailbox_address: String,
+}
+
+impl std::fmt::Debug for AurinkoAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AurinkoAccount")
+            .field("service_type", &self.service_type)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for UserApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserApiKey")
+            .field("credential_type", &self.credential_type)
+            .field("status", &self.status)
+            .finish_non_exhaustive()
     }
 }

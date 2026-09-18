@@ -56,6 +56,7 @@ export function OAuthLaunchingPage() {
           providerUrl,
           message.nonce,
           message.serviceName,
+          message.returnToTab,
         ),
       );
       window.location.assign(providerUrl.href);

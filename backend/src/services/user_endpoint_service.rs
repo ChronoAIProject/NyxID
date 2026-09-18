@@ -172,6 +172,7 @@ pub async fn update_endpoint(
     openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
     recommended_skills: RecommendedSkillsUpdate,
 ) -> AppResult<()> {
+    protect_managed_mailbox_destination(db, user_id, endpoint_id, url).await?;
     let update_doc = build_endpoint_update(url, label, openapi_spec_url, recommended_skills)?;
 
     let result = db
@@ -198,6 +199,7 @@ pub async fn update_endpoint_in_session(
     openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
     recommended_skills: RecommendedSkillsUpdate,
 ) -> AppResult<()> {
+    protect_managed_mailbox_destination(db, user_id, endpoint_id, url).await?;
     let update_doc = build_endpoint_update(url, label, openapi_spec_url, recommended_skills)?;
 
     let result = db
@@ -210,6 +212,34 @@ pub async fn update_endpoint_in_session(
         return Err(AppError::NotFound("Endpoint not found".to_string()));
     }
 
+    Ok(())
+}
+
+async fn protect_managed_mailbox_destination(
+    db: &Database,
+    owner: &str,
+    endpoint: &str,
+    url: Option<&str>,
+) -> AppResult<()> {
+    if url.is_none_or(|url| url.trim_end_matches('/') == super::aurinko_oauth_service::ORIGIN) {
+        return Ok(());
+    }
+    let rows: Vec<crate::models::user_service::UserService> = db
+        .collection::<crate::models::user_service::UserService>("user_services")
+        .find(doc! {"user_id":owner,"endpoint_id":endpoint})
+        .await?
+        .try_collect()
+        .await?;
+    for service in rows {
+        if let Some(id) = service.api_key_id
+            && let Some(key) = super::user_api_key_service::find_api_key(db, owner, &id).await?
+            && super::aurinko_oauth_service::is_managed_key(db, &key).await?
+        {
+            return Err(AppError::ValidationError(
+                "Managed mailbox API destinations cannot be changed".into(),
+            ));
+        }
+    }
     Ok(())
 }
 

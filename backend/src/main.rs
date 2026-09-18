@@ -1354,7 +1354,9 @@ async fn main() {
     .layer(Extension(global_rate_limiter))
     .layer(Extension(trusted_proxy_ranges))
     .layer(Extension(rate_limit_exempt_ips))
-    .layer(TraceLayer::new_for_http());
+    .layer(TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+        tracing::info_span!("http_request", method = %request.method(), path = request.uri().path(), version = ?request.version())
+    }));
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.

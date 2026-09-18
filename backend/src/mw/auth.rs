@@ -467,6 +467,14 @@ fn delegated_read_denied_path(path: &str) -> bool {
         return true;
     }
 
+    if matches!(
+        segments.as_slice(),
+        ["providers", "aurinko", "mailboxes", "callback"]
+            | ["providers", "aurinko", "intermediate"]
+    ) {
+        return true;
+    }
+
     // Media downloads deliver private content, unlike the platform catalog.
     if matches!(
         segments.as_slice(),
@@ -2431,6 +2439,7 @@ mod tests {
             .unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 id: actor_external_key_id.clone(),
                 user_id: actor_id.to_string(),
                 label: "Secret-bearing fixture".to_string(),

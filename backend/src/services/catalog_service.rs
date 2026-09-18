@@ -29,6 +29,7 @@ pub struct CatalogEntry {
     pub auth_key_name: String,
     pub provider_config_id: Option<String>,
     pub provider_type: Option<String>,
+    pub managed_onboarding: Option<String>,
     pub revokes_grant: Option<bool>,
     pub requires_gateway_url: bool,
     pub api_key_instructions: Option<String>,
@@ -168,6 +169,13 @@ fn build_catalog_entry(
         .and_then(|b| b.byok_pricing.as_ref())
         .map(Into::into);
     CatalogEntry {
+        managed_onboarding: provider
+            .filter(|p| {
+                svc.slug == "api-aurinko"
+                    && svc.base_url.trim_end_matches('/') == super::aurinko_oauth_service::ORIGIN
+                    && super::aurinko_oauth_service::available(p)
+            })
+            .map(|_| super::aurinko_oauth_service::PROTOCOL.to_owned()),
         inference,
         platform_key,
         byok_pricing,

@@ -302,10 +302,10 @@ impl CreateChannelBotResponse {
             },
             webhook_secret: descriptor
                 .webhook_secret_label
-                .filter(|_| bot.credential_source != "platform")
+                .filter(|_| bot.credential_source == "user")
                 .map(|_| webhook_secret),
             webhook_secret_label: descriptor.webhook_secret_label,
-            setup_instructions: if bot.credential_source == "platform" {
+            setup_instructions: if bot.credential_source != "user" {
                 &[]
             } else {
                 descriptor.setup_instructions
@@ -313,7 +313,11 @@ impl CreateChannelBotResponse {
             id: bot.id,
             platform: bot.platform,
             platform_bot_username: bot.platform_bot_username,
-            status: descriptor.create_response_status.to_string(),
+            status: if bot.credential_source == "connection" {
+                bot.status.clone()
+            } else {
+                descriptor.create_response_status.to_string()
+            },
             permission_setup_url,
             permission_setup_scopes,
         })
@@ -739,7 +743,7 @@ pub async fn update_bot(
             state.config.base_url, updated.platform, updated.id
         ),
         webhook_secret_label: adapter.registration().webhook_secret_label,
-        setup_instructions: if updated.credential_source == "platform" {
+        setup_instructions: if updated.credential_source != "user" {
             &[]
         } else {
             adapter.registration().setup_instructions
@@ -810,7 +814,7 @@ pub async fn get_bot(
             state.config.base_url, bot.platform, bot.id
         ),
         webhook_secret_label: adapter.registration().webhook_secret_label,
-        setup_instructions: if bot.credential_source == "platform" {
+        setup_instructions: if bot.credential_source != "user" {
             &[]
         } else {
             adapter.registration().setup_instructions

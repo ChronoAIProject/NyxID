@@ -415,6 +415,41 @@ pub async fn commit_user_service_mutation(
     service_id: &str,
     mut extra_set: Document,
 ) -> AppResult<UserService> {
+    let current = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .find_one(doc! {"_id":service_id,"user_id":owner_id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User service not found".into()))?;
+    if let Ok(id) = extra_set.get_str("api_key_id")
+        && let Some(key) = super::user_api_key_service::find_api_key(db, owner_id, id).await?
+        && super::aurinko_oauth_service::is_managed_key(db, &key).await?
+    {
+        return Err(AppError::ValidationError(
+            "Managed mailbox bindings require mailbox reconnect".into(),
+        ));
+    }
+    if let Some(id) = &current.api_key_id
+        && let Some(key) = super::user_api_key_service::find_api_key(db, owner_id, id).await?
+        && super::aurinko_oauth_service::is_managed_key(db, &key).await?
+    {
+        if extra_set.contains_key("api_key_id")
+            || extra_set.contains_key("endpoint_id")
+            || extra_set
+                .get_str("auth_method")
+                .is_ok_and(|s| s != "bearer")
+            || extra_set
+                .get_str("auth_key_name")
+                .is_ok_and(|s| s != "Authorization")
+            || extra_set
+                .get("node_id")
+                .is_some_and(|v| !matches!(v, bson::Bson::Null))
+        {
+            return Err(AppError::ValidationError(
+                "Managed mailbox credentials and routing require mailbox reconnect".into(),
+            ));
+        }
+    }
     extra_set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
     db.collection::<UserService>(COLLECTION_NAME)
         .find_one_and_update(
@@ -1114,9 +1149,42 @@ pub async fn create_user_service_with_id(
         rotation_predecessor_id: None,
     };
 
-    db.collection::<UserService>(COLLECTION_NAME)
-        .insert_one(&service)
+    let managed_key = if let Some(id) = api_key_id
+        && let Some(key) = super::user_api_key_service::find_api_key(db, user_id, id).await?
+        && super::aurinko_oauth_service::is_managed_key(db, &key).await?
+    {
+        Some(key)
+    } else {
+        None
+    };
+    if let Some(key) = managed_key {
+        super::channel_retry_ingress::with_connection(db, &key.id, async {
+            let live = super::user_api_key_service::find_api_key(db, user_id, &key.id)
+                .await?
+                .ok_or_else(|| AppError::NotFound("Mailbox connection not found".into()))?;
+            super::aurinko_oauth_service::validate_connection_route(db, &service, &live).await?;
+            if db
+                .collection::<UserService>(COLLECTION_NAME)
+                .find_one(doc! {"api_key_id": &key.id})
+                .await?
+                .is_some()
+            {
+                return Err(AppError::Conflict(
+                    "Managed mailbox connections already have an AI Service; reuse that service"
+                        .into(),
+                ));
+            }
+            db.collection::<UserService>(COLLECTION_NAME)
+                .insert_one(&service)
+                .await?;
+            Ok(())
+        })
         .await?;
+    } else {
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&service)
+            .await?;
+    }
 
     if !service.admin_only {
         crate::services::org_role_scope_service::add_service_to_configured_role_scope(
@@ -1188,6 +1256,83 @@ pub async fn set_source_app_id(
 /// `create_user_service` for rationale).
 #[allow(clippy::too_many_arguments)]
 pub async fn update_user_service(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor_user_id: &str,
+    service_id: &str,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    node_priority: Option<i32>,
+    is_active: Option<bool>,
+    identity: Option<&IdentityConfig>,
+    custom_user_agent: Option<&str>,
+    default_request_headers: Option<
+        &Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    >,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: Option<bool>,
+) -> AppResult<()> {
+    let current = get_user_service(db, user_id, service_id).await?;
+    if let Some(key_id) = &current.api_key_id
+        && let Some(key) =
+            crate::services::user_api_key_service::find_api_key(db, user_id, key_id).await?
+        && crate::services::aurinko_oauth_service::is_managed_key(db, &key).await?
+    {
+        if auth_method.is_some_and(|m| m != "bearer")
+            || auth_key_name.is_some_and(|n| n != "Authorization")
+            || node_id.is_some_and(|n| !n.is_empty())
+        {
+            return Err(AppError::ValidationError(
+                "Managed mailboxes require direct Aurinko bearer routing".into(),
+            ));
+        }
+        return crate::services::channel_retry_ingress::with_connection(db, key_id, async {
+            let live = get_user_service(db, user_id, service_id).await?;
+            if live.api_key_id != current.api_key_id {
+                return Err(AppError::Conflict("Mailbox binding changed; retry".into()));
+            }
+            update_user_service_inner(
+                db,
+                user_id,
+                actor_user_id,
+                service_id,
+                auth_method,
+                auth_key_name,
+                node_id,
+                node_priority,
+                is_active,
+                identity,
+                custom_user_agent,
+                default_request_headers,
+                ws_frame_injections,
+                admin_only,
+            )
+            .await
+        })
+        .await;
+    }
+    update_user_service_inner(
+        db,
+        user_id,
+        actor_user_id,
+        service_id,
+        auth_method,
+        auth_key_name,
+        node_id,
+        node_priority,
+        is_active,
+        identity,
+        custom_user_agent,
+        default_request_headers,
+        ws_frame_injections,
+        admin_only,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_user_service_inner(
     db: &mongodb::Database,
     user_id: &str,
     actor_user_id: &str,
@@ -1935,6 +2080,13 @@ pub async fn link_api_key(
     service_id: &str,
     api_key_id: &str,
 ) -> AppResult<()> {
+    if let Some(key) = super::user_api_key_service::find_api_key(db, user_id, api_key_id).await?
+        && super::aurinko_oauth_service::is_managed_key(db, &key).await?
+    {
+        return Err(AppError::ValidationError(
+            "Managed mailbox connections must use their original AI Service".into(),
+        ));
+    }
     let ak_count = db
         .collection::<mongodb::bson::Document>(USER_API_KEYS)
         .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
@@ -2034,6 +2186,23 @@ pub async fn rebind_user_service_api_key(
     slug: &str,
     api_key_id: &str,
 ) -> AppResult<()> {
+    let current = find_by_slug(db, user_id, slug)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".into()))?;
+    for id in current
+        .api_key_id
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(api_key_id))
+    {
+        if let Some(key) = super::user_api_key_service::find_api_key(db, user_id, id).await?
+            && super::aurinko_oauth_service::is_managed_key(db, &key).await?
+        {
+            return Err(AppError::ValidationError(
+                "Managed mailbox bindings require mailbox reconnect".into(),
+            ));
+        }
+    }
     let ak_count = db
         .collection::<mongodb::bson::Document>(USER_API_KEYS)
         .count_documents(doc! { "_id": api_key_id, "user_id": user_id, "status": "active" })
@@ -2200,6 +2369,40 @@ pub async fn deactivate_user_service(
     )
     .await?;
 
+    cleanup_deactivated_service(db, user_id, service_id).await
+}
+
+/// Only the disconnect orchestrator calls this while holding every affected mailbox claim.
+pub(crate) async fn deactivate_with_connection_claim(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor: &str,
+    service_id: &str,
+) -> AppResult<()> {
+    update_user_service_inner(
+        db,
+        user_id,
+        actor,
+        service_id,
+        None,
+        None,
+        None,
+        None,
+        Some(false),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    cleanup_deactivated_service(db, user_id, service_id).await
+}
+async fn cleanup_deactivated_service(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<()> {
     // Cascade-clean any agent service bindings that referenced this
     // service. Without this, the Agent Key detail page keeps showing
     // bindings pointing at a now-inactive service (issue #324).

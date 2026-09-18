@@ -665,7 +665,7 @@ export interface ProviderConfig {
 
 export interface ProviderRevocationConfig {
   readonly request_encoding?: "form" | "json";
-  readonly style: "rfc7009" | "github" | "self_bearer" | "facebook_deauth";
+  readonly style: "rfc7009" | "github" | "self_bearer" | "facebook_deauth" | "aurinko_account";
   readonly url: string;
   readonly auth: "inherit" | "none" | "client_id" | "basic" | "post";
   readonly revokes_grant: boolean;

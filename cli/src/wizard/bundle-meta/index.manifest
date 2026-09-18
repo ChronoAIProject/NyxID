@@ -64,8 +64,10 @@ frontend/src/components/service-icons/llm-openai.tsx
 frontend/src/components/service-icons/llm-openclaw.tsx
 frontend/src/components/service-icons/llm-openrouter.tsx
 frontend/src/components/shared/async-option-select.tsx
+frontend/src/components/shared/aurinko-mailbox-connect.tsx
 frontend/src/components/shared/copyable-url-callout.tsx
 frontend/src/components/shared/credential-binding-choice.tsx
+frontend/src/components/shared/error-banner.tsx
 frontend/src/components/shared/not-found-page.tsx
 frontend/src/components/shared/org-scope-select.tsx
 frontend/src/components/shared/platform-service-scope.tsx
@@ -81,6 +83,7 @@ frontend/src/components/ui/select.tsx
 frontend/src/components/ui/skeleton.tsx
 frontend/src/components/ui/switch.tsx
 frontend/src/components/ui/tooltip.tsx
+frontend/src/hooks/use-aurinko-mailboxes.ts
 frontend/src/hooks/use-keys.ts
 frontend/src/hooks/use-nodes.ts
 frontend/src/hooks/use-options.ts
@@ -92,14 +95,17 @@ frontend/src/lib/assistant/connect-watch.ts
 frontend/src/lib/assistant/identity.ts
 frontend/src/lib/form-errors.ts
 frontend/src/lib/navigation.ts
+frontend/src/lib/oauth-popup.ts
 frontend/src/lib/parse-additional-scopes.ts
 frontend/src/lib/telemetry.ts
 frontend/src/lib/utils.ts
 frontend/src/pages/cli-pair/reserve-action.ts
 frontend/src/schemas/api-keys.ts
 frontend/src/schemas/assistant-wire-log.ts
+frontend/src/schemas/aurinko-mailboxes.ts
 frontend/src/schemas/cli-wizard.ts
 frontend/src/schemas/http-url.ts
+frontend/src/schemas/oauth-popup.ts
 frontend/src/schemas/options.ts
 frontend/src/schemas/platform-keys.ts
 frontend/src/schemas/runtime-config.ts
@@ -109,5 +115,6 @@ frontend/src/stores/assistant-draft-store.ts
 frontend/src/stores/assistant-wire-log-store.ts
 frontend/src/stores/auth-store.ts
 frontend/src/stores/theme-store.ts
+frontend/src/types/oauth-popup.ts
 frontend/src/wizard-entry.tsx
 frontend/wizard.html

@@ -156,6 +156,7 @@ export interface ScopeCatalogEntry {
 }
 
 export interface CatalogEntry {
+  readonly managed_onboarding?: string | null;
   readonly billing?: import("./api").ServiceBilling | null;
   readonly inference?: InferenceView | null;
   readonly platform_key?: { readonly available: boolean; readonly pricing?: LanePricingView | null };

@@ -100,9 +100,16 @@ pub async fn bootstrap(
                 )
                 .find_one(bson::doc! { "slug": provider_slug, "is_active": true })
                 .await?;
-            response.available &= provider.is_some();
-            response.authorize_start_url =
-                provider.map(|_| format!("/channel-bots/managed-onboarding/{platform}/start"));
+            response.available &= provider.as_ref().is_some_and(|p| {
+                provider_slug != "aurinko" || crate::services::aurinko_oauth_service::available(p)
+            });
+            response.authorize_start_url = provider.map(|_| {
+                if provider_slug == "aurinko" {
+                    "/providers/aurinko/mailboxes/authorize".to_owned()
+                } else {
+                    format!("/channel-bots/managed-onboarding/{platform}/start")
+                }
+            });
         }
         if response.available {
             for field in managed.bootstrap_fields {
@@ -216,6 +223,11 @@ pub async fn start(
     let actor = auth.user_id.to_string();
     let owner = resolve_create_owner(&state, &actor, body.target_org_id.as_deref()).await?;
     let adapter = resolve_adapter(&platform, &state.token_exchange_cache)?;
+    if platform == "aurinko" {
+        return Err(AppError::ValidationError(
+            "Choose a mailbox provider using /providers/aurinko/mailboxes/authorize".into(),
+        ));
+    }
     let started = crate::services::channel_credentials::start_connection(
         &state.db,
         &state.encryption_keys,
@@ -289,6 +301,32 @@ pub(crate) async fn complete_inner(
         "{}/api/v1/webhooks/channel/{platform}/{}",
         state.config.base_url, created.bot.id
     );
+    let created = if adapter.ingestion() == crate::services::channel_platform::Ingestion::Webhook
+        && created.bot.credential_source == "connection"
+    {
+        let verified = channel_bot_service::verify_serialized_bot(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &created.bot.id,
+            &owner,
+            &webhook_url,
+        )
+        .await;
+        let bot = match verified {
+            Ok(bot) => bot,
+            Err(_) => {
+                channel_bot_service::get_bot_for_user(&state.db, &created.bot.id, &owner).await?
+            }
+        };
+        channel_bot_service::CreateBotResult {
+            bot,
+            webhook_secret: created.webhook_secret,
+        }
+    } else {
+        created
+    };
     audit_service::log_for_user(
         state.db.clone(),
         auth,
@@ -357,6 +395,22 @@ pub async fn reconnect(
         &body.connection_id,
     )
     .await?;
+    if adapter.ingestion() == crate::services::channel_platform::Ingestion::Webhook {
+        let url = format!(
+            "{}/api/v1/webhooks/channel/{}/{}",
+            state.config.base_url, bot.platform, bot.id
+        );
+        channel_bot_service::verify_serialized_bot(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &bot.id,
+            &bot.user_id,
+            &url,
+        )
+        .await?;
+    }
     audit_service::log_for_user(
         state.db.clone(),
         &auth,

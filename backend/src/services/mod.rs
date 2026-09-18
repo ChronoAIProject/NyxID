@@ -178,3 +178,5 @@ pub mod retired_service_service;
 
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;
+
+pub mod aurinko_oauth_service;

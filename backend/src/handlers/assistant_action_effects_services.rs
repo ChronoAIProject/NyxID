@@ -1140,6 +1140,7 @@ mod tests {
 
     fn fixture_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            aurinko_account: None,
             credential_epoch: 1,
             credential_source: None,
             id: id.to_string(),
