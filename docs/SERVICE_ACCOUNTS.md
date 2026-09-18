@@ -660,7 +660,7 @@ Before rolling back to a backend without these checks, disable the Curation acco
 
 ### Platform administration
 
-Create the account with `catalog:skills:read catalog:skills:write`. If it also needs Ornn content authoring, include `proxy` and configure exactly one Ornn catalog UUID when issuing the grant. The grant endpoint rejects other scopes and org-owned accounts. For an existing protected account with a live grant, scope updates must stay within this set. After revocation, metadata updates and disable remain available to platform admins.
+Create the account with `catalog:skills:read catalog:skills:write`. In Allowed Scopes, choose **catalog: → skills: → read/write**, or paste the complete scopes. These suggestions come from `/options/service-scope` and do not require previously configured accounts. After creation, issue the separate grant from **Catalog skill curation** on the account detail page; selecting scopes alone does not grant access. If it also needs Ornn content authoring, include `proxy` and configure exactly one Ornn catalog UUID when issuing the grant. The grant endpoint rejects other scopes and org-owned accounts. For an existing protected account with a live grant, scope updates must stay within this set. After revocation, metadata updates and disable remain available to platform admins.
 
 Use the existing Admin → Service Accounts detail page, or:
 
