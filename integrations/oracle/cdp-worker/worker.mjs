@@ -1731,7 +1731,25 @@ export async function pickerSnapshot(page, budget = interactionBudget(1000)) {
     if (!form) while (region && !region.querySelector(sendSelector)) region = region.parentElement;
     if (region === body || region === document.documentElement) region = null;
     // Model tiers are not effort evidence, even when the trigger looks like a pill.
-    const pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]:not([data-nyx-switcher])')].filter(visible);
+    let pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]:not([data-nyx-switcher])')].filter(visible);
+    // Self-heal a stranded switcher marker. readModelSwitcher stamps
+    // data-nyx-switcher on whichever control it claims, and on a page with no
+    // header switcher that claim lands on the composer pill itself - so the
+    // selector above skips the only pill there is and we report
+    // pill_source=none. Nothing else clears the attribute: readModelSwitcher
+    // is the sole clear site and it re-stamps the same pill on the next
+    // attempt, so the worker rebuilds the fault on every retry and can never
+    // select a model again. Unmark a marked composer pill only when it left us
+    // with no candidate at all; a marker on a real header switcher is
+    // load-bearing (it is how the effort step avoids re-picking the switcher)
+    // and must stay.
+    if (!pills.length) {
+      const stranded = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"][data-nyx-switcher]')].filter(visible);
+      if (stranded.length) {
+        stranded.forEach((el) => el.removeAttribute('data-nyx-switcher'));
+        pills = stranded;
+      }
+    }
     const candidates = pills.length ? pills : [...(region?.querySelectorAll('button[aria-haspopup="menu"]:not([data-nyx-switcher])') || [])].filter(visible);
     const menus = window.__nyx?.modelPickerMenus(pickerId) || [];
     const items = (window.__nyx?.modelPickerItems(pickerId) || []).map((el) => ({
