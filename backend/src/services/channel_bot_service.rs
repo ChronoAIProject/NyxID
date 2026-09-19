@@ -1086,17 +1086,106 @@ pub(crate) async fn register_webhook_with_telegram_api(
         .await;
     }
     let bot = get_bot(db, bot_id).await?;
+    if bot.platform == "telegram" {
+        return super::telegram_new_service::with_operation(
+            db,
+            &format!("telegram-manager-identity:{}", bot.platform_bot_id),
+            async {
+                let bot = get_bot(db, bot_id).await?;
+                ensure_telegram_webhook_owner(db, &bot).await?;
+                if bot.credential_source != "telegram_manager" {
+                    verify_telegram_token_identity(telegram_api.http, adapter, &bot, bot_token)
+                        .await?;
+                }
+                register_telegram_webhook_locked(
+                    db,
+                    telegram_api,
+                    adapter,
+                    &bot,
+                    bot_token,
+                    webhook_url,
+                    webhook_secret,
+                )
+                .await
+            },
+        )
+        .await;
+    }
+    adapter
+        .register_webhook(telegram_api.http, bot_token, webhook_url, webhook_secret)
+        .await?;
+    store_webhook_registration(db, adapter, doc! { "_id": bot_id }).await
+}
+
+async fn is_telegram_manager_identity(db: &mongodb::Database, remote_id: &str) -> AppResult<bool> {
+    let manager = super::platform_credential_service::load(
+        db,
+        &super::channel_adapters::telegram_new::credential_descriptor(),
+    )
+    .await?;
+    Ok(manager.is_some_and(|manager| {
+        manager.fields.get("manager_bot_id").map(String::as_str) == Some(remote_id)
+    }))
+}
+
+async fn ensure_telegram_webhook_owner(db: &mongodb::Database, bot: &ChannelBot) -> AppResult<()> {
+    if !bot.is_active {
+        return Err(AppError::ChannelBotInactive("Bot has been deleted".into()));
+    }
+    if bot.credential_source != "telegram_manager"
+        && is_telegram_manager_identity(db, &bot.platform_bot_id).await?
+    {
+        return Err(AppError::Conflict(
+            "This Telegram identity is configured as the manager. Reconnect it as a manager channel.".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_telegram_token_identity(
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    token: &str,
+) -> AppResult<()> {
+    let identity = adapter
+        .verify_bot_token(
+            http,
+            &BotCredentials {
+                billing: None,
+                token,
+                platform_bot_id: Some(&bot.platform_bot_id),
+                platform_secrets: None,
+            },
+        )
+        .await?;
+    if identity.platform_bot_id != bot.platform_bot_id {
+        return Err(AppError::ValidationError(
+            "Telegram token belongs to a different bot. Reconnect the channel with its own token."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+// The identity lease covers the provider effect and its matching local secret/status.
+async fn register_telegram_webhook_locked(
+    db: &mongodb::Database,
+    telegram_api: &super::telegram_new_api::TelegramApi<'_>,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    bot_token: &str,
+    webhook_url: &str,
+    webhook_secret: &str,
+) -> AppResult<()> {
     if bot.credential_source == "telegram_manager" {
-        if !bot.is_active {
-            return Err(AppError::ChannelBotInactive(bot.id));
-        }
         let verification = async {
             let manager = super::platform_credential_service::load(
                 db,
                 &super::channel_adapters::telegram_new::credential_descriptor(),
             )
             .await?;
-            if !manager_channel_ready(&bot, manager.as_ref()) {
+            if !manager_channel_ready(bot, manager.as_ref()) {
                 return Err(AppError::Conflict(
                     super::telegram_new_admin::MANAGER_WEBHOOK_ERROR.into(),
                 ));
@@ -1108,26 +1197,98 @@ pub(crate) async fn register_webhook_with_telegram_api(
         }
         .await;
         if let Err(error) = verification {
-            mark_manager_channel_failed(db, bot_id).await?;
+            mark_manager_channel_failed(db, &bot.id).await?;
             return Err(error);
         }
-        db.collection::<ChannelBot>(COLLECTION_NAME)
-            .update_one(
-                doc! { "_id": bot_id },
-                doc! { "$set": {
-                    "status": "active",
-                    "webhook_registered": true,
-                    "error": bson::Bson::Null,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }},
-            )
+    } else {
+        adapter
+            .register_webhook(telegram_api.http, bot_token, webhook_url, webhook_secret)
             .await?;
-        return Ok(());
     }
-    adapter
-        .register_webhook(telegram_api.http, bot_token, webhook_url, webhook_secret)
+    let mut fields = doc! {
+        "status": "active", "webhook_registered": true, "error": bson::Bson::Null,
+        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+    };
+    if bot.credential_source != "telegram_manager" {
+        fields.insert(
+            "webhook_secret_hash",
+            hex::encode(Sha256::digest(webhook_secret.as_bytes())),
+        );
+    }
+    let mut filter = doc! {
+        "_id": &bot.id,
+        "is_active": true,
+        "credential_source": &bot.credential_source,
+        "platform_bot_id": &bot.platform_bot_id,
+    };
+    if bot.credential_source == "user" {
+        filter.insert(
+            "credential_source",
+            doc! { "$in": ["user", bson::Bson::Null] },
+        );
+    }
+    let result = db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .update_one(filter, doc! { "$set": fields })
         .await?;
-    store_webhook_registration(db, adapter, doc! { "_id": bot_id }).await
+    if result.matched_count == 0 {
+        return Err(AppError::Conflict(
+            "Telegram channel changed during verification. Try again.".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn verify_telegram_bot(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    telegram_api: &super::telegram_new_api::TelegramApi<'_>,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    owner_id: &str,
+    base_url: &str,
+) -> AppResult<ChannelBot> {
+    let bot = get_bot_for_user(db, bot_id, owner_id).await?;
+    super::telegram_new_service::with_operation(
+        db,
+        &format!("telegram-manager-identity:{}", bot.platform_bot_id),
+        async {
+            let bot = get_bot_for_user(db, bot_id, owner_id).await?;
+            ensure_telegram_webhook_owner(db, &bot).await?;
+            let verified_token = async {
+                let token = super::channel_credentials::resolve_bot_token(db, keys, adapter, &bot).await?;
+                verify_telegram_token_identity(telegram_api.http, adapter, &bot, &token).await?;
+                adapter.validate_stored_verification(&bot)?;
+                Ok(token)
+            }.await;
+            let token = match verified_token {
+                Ok(token) => token,
+                Err(error) => {
+                    if bot.credential_source == "telegram_manager" {
+                        mark_manager_channel_failed(db, bot_id).await?;
+                    }
+                    return Err(error);
+                }
+            };
+            let secret = if bot.credential_source == "telegram_manager" {
+                String::new()
+            } else {
+                hex::encode(rand::random::<[u8; 32]>())
+            };
+            if let Err(error) = register_telegram_webhook_locked(
+                db, telegram_api, adapter, &bot, &token, &webhook_url(base_url, &bot), &secret,
+            ).await {
+                if bot.credential_source == "telegram_manager" {
+                    return Err(error);
+                }
+                db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+                    doc! {"_id": bot_id, "is_active": true},
+                    doc! {"$set": {"status": "failed", "webhook_registered": false, "updated_at": bson::DateTime::now()}},
+                ).await?;
+            }
+            get_bot_for_user(db, bot_id, owner_id).await
+        },
+    ).await
 }
 
 async fn register_webhook_inner(
@@ -1223,7 +1384,10 @@ pub async fn mark_bot_failed(db: &mongodb::Database, bot_id: &str) -> AppResult<
     let now = bson::DateTime::from_chrono(Utc::now());
     db.collection::<ChannelBot>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": bot_id },
+            doc! { "_id": bot_id, "$or": [
+                { "platform": { "$ne": "telegram" } },
+                { "is_active": true, "status": "pending", "webhook_registered": false }
+            ] },
             doc! { "$set": {
                 "status": "failed",
                 "updated_at": now,
@@ -1291,6 +1455,14 @@ pub async fn delete_bot(
     user_id: &str,
 ) -> AppResult<Option<&'static str>> {
     let bot = get_bot_for_user(db, bot_id, user_id).await?;
+    if bot.platform == "telegram" {
+        return super::telegram_new_service::with_operation(
+            db,
+            &format!("telegram-manager-identity:{}", bot.platform_bot_id),
+            delete_bot_inner(db, http_client, encryption_keys, adapter, bot_id, user_id),
+        )
+        .await;
+    }
     if bot.platform == "telegram-new" {
         return super::telegram_new_service::with_operation(db, &format!("telegram-child:{}", bot.platform_bot_id), async {
             db.collection::<bson::Document>(crate::models::telegram_bot_request::MANAGED_BOTS).update_many(doc! {"telegram_bot_id": bot.platform_bot_id.parse::<i64>().unwrap_or_default()}, doc! {"$set": {"retired": true}}).await?;
@@ -1345,9 +1517,15 @@ async fn delete_bot_inner(
         && bot.credential_source != "telegram_manager"
         && bot.webhook_registered
         && !adapter.serializes_lifecycle()
+        && (bot.platform != "telegram" || bot.is_active)
+        && (bot.platform != "telegram"
+            || !is_telegram_manager_identity(db, &bot.platform_bot_id).await?)
         && let Ok(token) = decrypt_bot_token(encryption_keys, &bot).await
+        && (bot.platform != "telegram"
+            || verify_telegram_token_identity(http_client, adapter, &bot, &token)
+                .await
+                .is_ok())
     {
-        // Register with an empty URL to remove the webhook
         let _ = adapter
             .remove_bot_webhook(db, http_client, &bot, &token)
             .await;

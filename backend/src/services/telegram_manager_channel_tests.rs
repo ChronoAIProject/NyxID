@@ -682,6 +682,9 @@ async fn telegram_manager_channel_get_me_failure_persists_safe_status_and_verify
     assert_only_telegram_reads(&server, 1, 1).await;
 
     server.reset().await;
+    credentials::delete(&state.db, &credential_descriptor())
+        .await
+        .unwrap();
     state
         .db
         .collection::<ChannelBot>(BOTS)
@@ -713,4 +716,465 @@ async fn telegram_manager_channel_get_me_failure_persists_safe_status_and_verify
     );
     assert_only_telegram_reads(&server, 0, 1).await;
     state.db.drop().await.unwrap();
+}
+
+mod migration {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Semaphore;
+
+    struct ProviderState {
+        webhook: Mutex<Value>,
+        calls: Mutex<Vec<String>>,
+        pause: Mutex<Option<&'static str>>,
+        entered: Semaphore,
+        resume: Semaphore,
+    }
+
+    struct Provider {
+        base: String,
+        state: Arc<ProviderState>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for Provider {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl Provider {
+        async fn start() -> Self {
+            let state = Arc::new(ProviderState {
+                webhook: Mutex::new(json!({"url": "", "allowed_updates": []})),
+                calls: Mutex::new(Vec::new()),
+                pause: Mutex::new(None),
+                entered: Semaphore::new(0),
+                resume: Semaphore::new(0),
+            });
+            let app = axum::Router::new()
+                .route("/{bot}/{method}", axum::routing::any(provider_call))
+                .with_state(state.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            Self { base, state, task }
+        }
+
+        fn api<'a>(&'a self, state: &'a crate::AppState) -> TelegramApi<'a> {
+            TelegramApi {
+                http: &state.http_client,
+                base_url: &self.base,
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.state.calls.lock().unwrap().clone()
+        }
+
+        fn webhook(&self) -> Value {
+            self.state.webhook.lock().unwrap().clone()
+        }
+
+        fn pause(&self, method: &'static str) {
+            *self.state.pause.lock().unwrap() = Some(method);
+        }
+
+        async fn wait_until_paused(&self) {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                self.state.entered.acquire(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        }
+
+        fn release(&self) {
+            self.state.resume.add_permits(1);
+        }
+    }
+
+    async fn provider_call(
+        axum::extract::State(state): axum::extract::State<Arc<ProviderState>>,
+        axum::extract::Path((bot, method)): axum::extract::Path<(String, String)>,
+        body: axum::body::Bytes,
+    ) -> axum::Json<Value> {
+        state.calls.lock().unwrap().push(method.clone());
+        let pause = {
+            let mut selected = state.pause.lock().unwrap();
+            if selected.as_deref() == Some(method.as_str()) {
+                selected.take();
+                true
+            } else {
+                false
+            }
+        };
+        if pause {
+            state.entered.add_permits(1);
+            state.resume.acquire().await.unwrap().forget();
+        }
+        let input: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+        let result = match method.as_str() {
+            "getMe" => {
+                json!({"id": if bot.starts_with("bot900:") {900} else {100}, "is_bot": true, "username": "NyxSetupBot", "can_manage_bots": true})
+            }
+            "getWebhookInfo" => state.webhook.lock().unwrap().clone(),
+            "setWebhook" => {
+                *state.webhook.lock().unwrap() = input;
+                json!(true)
+            }
+            "deleteWebhook" => {
+                *state.webhook.lock().unwrap() = json!({"url": ""});
+                json!(true)
+            }
+            _ => panic!("unexpected simulated Telegram method {method}"),
+        };
+        axum::Json(json!({"ok": true, "result": result}))
+    }
+
+    async fn ordinary_channel(
+        state: &crate::AppState,
+        actor: &str,
+        provider: &Provider,
+    ) -> ChannelBot {
+        credentials::delete(&state.db, &credential_descriptor())
+            .await
+            .unwrap();
+        let adapter = TelegramAdapter::media_test_adapter(&provider.base);
+        let created = bots::create_bot(
+            &state.db,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            actor,
+            "Ordinary Telegram",
+            &RegistrationValues([("bot_token", MANAGER)].into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.bot.credential_source, "user");
+        bots::mark_bot_failed(&state.db, &created.bot.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            bots::get_bot(&state.db, &created.bot.id)
+                .await
+                .unwrap()
+                .status,
+            "failed"
+        );
+        bots::register_webhook_with_telegram_api(
+            &state.db,
+            &provider.api(state),
+            &adapter,
+            &created.bot.id,
+            MANAGER,
+            &bots::webhook_url(&state.config.base_url, &created.bot),
+            &created.webhook_secret,
+        )
+        .await
+        .unwrap();
+        bots::get_bot(&state.db, &created.bot.id).await.unwrap()
+    }
+
+    async fn verify(
+        state: &crate::AppState,
+        provider: &Provider,
+        bot: &ChannelBot,
+    ) -> AppResult<axum::Json<crate::handlers::channel_bots::VerifyBotResponse>> {
+        crate::handlers::channel_bots::verify_bot_with_adapter(
+            state,
+            bot.clone(),
+            &TelegramAdapter::media_test_adapter(&provider.base),
+            &provider.api(state),
+            None,
+        )
+        .await
+    }
+
+    async fn delete(
+        state: &crate::AppState,
+        provider: &Provider,
+        bot: &ChannelBot,
+    ) -> AppResult<Option<&'static str>> {
+        bots::delete_bot(
+            &state.db,
+            &state.config,
+            &state.http_client,
+            &state.encryption_keys,
+            &TelegramAdapter::media_test_adapter(&provider.base),
+            &bot.id,
+            &bot.user_id,
+        )
+        .await
+    }
+
+    async fn configure_manager(
+        state: &crate::AppState,
+        actor: &str,
+        provider: &Provider,
+    ) -> AppResult<()> {
+        service(state, &provider.base)
+            .configure_manager(
+                actor,
+                &[(
+                    "manager_bot_token".into(),
+                    Some(Zeroizing::new(MANAGER.into())),
+                )]
+                .into(),
+                false,
+            )
+            .await
+    }
+
+    async fn assert_stale_operations_are_inert(
+        state: &crate::AppState,
+        provider: &Provider,
+        old: &ChannelBot,
+    ) {
+        let before = provider.webhook();
+        let count = provider.calls().len();
+        assert!(verify(state, provider, old).await.is_err());
+        assert!(
+            bots::register_webhook_with_telegram_api(
+                &state.db,
+                &provider.api(state),
+                &TelegramAdapter::media_test_adapter(&provider.base),
+                &old.id,
+                MANAGER,
+                &bots::webhook_url(&state.config.base_url, old),
+                "stale-secret"
+            )
+            .await
+            .is_err()
+        );
+        delete(state, provider, old).await.unwrap();
+        assert_eq!(provider.calls().len(), count);
+        assert_eq!(provider.webhook(), before);
+        let saved = bots::get_bot(&state.db, &old.id).await.unwrap();
+        assert!(!saved.is_active);
+        assert_eq!(saved.status, "inactive");
+        assert!(!saved.webhook_registered);
+    }
+
+    #[tokio::test]
+    async fn telegram_manager_migration_deleted_verify_registration_and_delete_preserve_webhook() {
+        let (state, actor, _server) = fixture().await;
+        let provider = Provider::start().await;
+        let old = ordinary_channel(&state, &actor, &provider).await;
+        delete(&state, &provider, &old).await.unwrap();
+        configure_manager(&state, &actor, &provider).await.unwrap();
+        assert_eq!(
+            provider.webhook()["url"],
+            service(&state, &provider.base).manager_callback()
+        );
+        assert_eq!(provider.webhook()["allowed_updates"], json!(UPDATES));
+        // Model a partial old deletion: webhook flag stale, routes not cleaned yet.
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(
+                doc! {"_id": &old.id},
+                doc! {"$set": {"webhook_registered": true}},
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .insert_one(doc! {"_id": "stale-route", "channel_bot_id": &old.id, "is_active": true})
+            .await
+            .unwrap();
+        assert_stale_operations_are_inert(&state, &provider, &old).await;
+        let route = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id": "stale-route"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!route.get_bool("is_active").unwrap());
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_manager_migration_serializes_paused_verify_and_registration_with_delete_and_configure()
+     {
+        for verify_operation in [true, false] {
+            let (state, actor, _server) = fixture().await;
+            let provider = Arc::new(Provider::start().await);
+            let old = ordinary_channel(&state, &actor, &provider).await;
+            // Legacy ordinary rows predate the explicit credential source.
+            state
+                .db
+                .collection::<ChannelBot>(BOTS)
+                .update_one(
+                    doc! {"_id": &old.id},
+                    doc! {"$unset": {"credential_source": ""}},
+                )
+                .await
+                .unwrap();
+            provider.pause(if verify_operation {
+                "getMe"
+            } else {
+                "setWebhook"
+            });
+            let task_state = state.clone();
+            let task_provider = provider.clone();
+            let task_bot = old.clone();
+            let operation = tokio::spawn(async move {
+                if verify_operation {
+                    verify(&task_state, &task_provider, &task_bot)
+                        .await
+                        .map(|_| ())
+                } else {
+                    bots::register_webhook_with_telegram_api(
+                        &task_state.db,
+                        &task_provider.api(&task_state),
+                        &TelegramAdapter::media_test_adapter(&task_provider.base),
+                        &task_bot.id,
+                        MANAGER,
+                        &bots::webhook_url(&task_state.config.base_url, &task_bot),
+                        "registration-secret",
+                    )
+                    .await
+                }
+            });
+            provider.wait_until_paused().await;
+            assert!(matches!(
+                verify(&state, &provider, &old).await,
+                Err(crate::errors::AppError::Conflict(_))
+            ));
+            assert!(matches!(
+                delete(&state, &provider, &old).await,
+                Err(crate::errors::AppError::Conflict(_))
+            ));
+            assert!(matches!(
+                configure_manager(&state, &actor, &provider).await,
+                Err(crate::errors::AppError::Conflict(_))
+            ));
+            assert!(bots::get_bot(&state.db, &old.id).await.unwrap().is_active);
+            assert!(
+                credentials::load(&state.db, &credential_descriptor())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(!operation.is_finished());
+            provider.release();
+            operation.await.unwrap().unwrap();
+            // The original create request may report its earlier registration
+            // failure after this successful retry has installed the webhook.
+            bots::mark_bot_failed(&state.db, &old.id).await.unwrap();
+            let saved = bots::get_bot(&state.db, &old.id).await.unwrap();
+            assert_eq!(saved.status, "active");
+            assert!(saved.webhook_registered);
+            let live_secret = provider.webhook()["secret_token"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(
+                saved.webhook_secret_hash,
+                telegram_new_service::hash(&live_secret)
+            );
+            delete(&state, &provider, &old).await.unwrap();
+            configure_manager(&state, &actor, &provider).await.unwrap();
+            assert_stale_operations_are_inert(&state, &provider, &old).await;
+            state.db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_manager_migration_rejects_mismatched_stored_identity_without_webhook_mutation()
+     {
+        let (state, actor, _server) = fixture().await;
+        let provider = Provider::start().await;
+        let mut old = ordinary_channel(&state, &actor, &provider).await;
+        // A historical row identifies bot 900 but still carries manager bot 100's token.
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(
+                doc! {"_id": &old.id},
+                doc! {"$set": {"platform_bot_id": "900"}},
+            )
+            .await
+            .unwrap();
+        old.platform_bot_id = "900".into();
+        *provider.state.webhook.lock().unwrap() = json!({"url": ""});
+        configure_manager(&state, &actor, &provider).await.unwrap();
+        let webhook = provider.webhook();
+        let count = provider.calls().len();
+        assert!(verify(&state, &provider, &old).await.is_err());
+        assert!(
+            bots::register_webhook_with_telegram_api(
+                &state.db,
+                &provider.api(&state),
+                &TelegramAdapter::media_test_adapter(&provider.base),
+                &old.id,
+                MANAGER,
+                &bots::webhook_url(&state.config.base_url, &old),
+                "wrong-identity-secret"
+            )
+            .await
+            .is_err()
+        );
+        delete(&state, &provider, &old).await.unwrap();
+        assert_eq!(&provider.calls()[count..], &["getMe", "getMe", "getMe"]);
+        assert_eq!(provider.webhook(), webhook);
+        assert!(!bots::get_bot(&state.db, &old.id).await.unwrap().is_active);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_manager_migration_rejects_live_ordinary_row_for_unready_manager_identity() {
+        let (state, actor, _server) = fixture().await;
+        let provider = Provider::start().await;
+        let old = ordinary_channel(&state, &actor, &provider).await;
+        delete(&state, &provider, &old).await.unwrap();
+        configure_manager(&state, &actor, &provider).await.unwrap();
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(
+                doc! {"_id": &old.id},
+                doc! {"$set": {"is_active": true, "webhook_registered": true}},
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<PlatformCredential>(CREDENTIALS)
+            .update_one(
+                doc! {"provider": "telegram-new"},
+                doc! {"$set": {"fields.webhook_ready": "false"}},
+            )
+            .await
+            .unwrap();
+        let before = provider.webhook();
+        let count = provider.calls().len();
+        assert!(verify(&state, &provider, &old).await.is_err());
+        assert!(
+            bots::register_webhook_with_telegram_api(
+                &state.db,
+                &provider.api(&state),
+                &TelegramAdapter::media_test_adapter(&provider.base),
+                &old.id,
+                MANAGER,
+                &bots::webhook_url(&state.config.base_url, &old),
+                "wrong-secret"
+            )
+            .await
+            .is_err()
+        );
+        delete(&state, &provider, &old).await.unwrap();
+        assert_eq!(provider.calls().len(), count);
+        assert_eq!(provider.webhook(), before);
+        state.db.drop().await.unwrap();
+    }
 }

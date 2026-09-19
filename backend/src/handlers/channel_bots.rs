@@ -939,6 +939,23 @@ pub(crate) async fn verify_bot_with_adapter(
     telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
     api_key_id: Option<&str>,
 ) -> AppResult<Json<VerifyBotResponse>> {
+    if bot.platform == "telegram" {
+        let verified = channel_bot_service::verify_telegram_bot(
+            &state.db,
+            &state.encryption_keys,
+            telegram_api,
+            adapter,
+            &bot.id,
+            &bot.user_id,
+            &state.config.base_url,
+        )
+        .await?;
+        return Ok(Json(VerifyBotResponse {
+            id: verified.id,
+            status: verified.status,
+            webhook_registered: verified.webhook_registered,
+        }));
+    }
     if bot.platform == "telegram-new" {
         if !bot.is_active || bot.status == "suspended" {
             return Err(AppError::Conflict(
@@ -974,78 +991,47 @@ pub(crate) async fn verify_bot_with_adapter(
         }));
     }
 
-    let verified_token = async {
-        let bot_token = crate::services::channel_credentials::resolve_bot_token(
-            &state.db,
-            &state.encryption_keys,
-            adapter,
-            &bot,
+    let bot_token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter,
+        &bot,
+    )
+    .await?;
+    let platform_secrets = if bot.credential_source == "platform" {
+        Some(
+            crate::services::channel_managed::build_verify_secrets(
+                &state.db,
+                &state.encryption_keys,
+                adapter,
+                &bot,
+            )
+            .await?,
         )
-        .await?;
-        let platform_secrets = if bot.credential_source == "platform" {
-            Some(
-                crate::services::channel_managed::build_verify_secrets(
-                    &state.db,
-                    &state.encryption_keys,
-                    adapter,
-                    &bot,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-
-        let channel_billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
-            &state.db,
-            &state.billing,
-            &bot,
-            api_key_id,
-        );
-        adapter
-            .verify_bot_token(
-                &state.http_client,
-                &BotCredentials {
-                    billing: channel_billing.as_ref(),
-                    token: &bot_token,
-                    platform_bot_id: Some(&bot.platform_bot_id),
-                    platform_secrets: platform_secrets.as_ref(),
-                },
-            )
-            .await?;
-
-        if bot.credential_source != "connection" {
-            ensure_verify_material_present(&bot, adapter)?;
-        }
-        Ok(bot_token)
-    }
-    .await;
-    let bot_token = match verified_token {
-        Ok(token) => token,
-        Err(error) => {
-            if bot.credential_source == "telegram_manager" {
-                channel_bot_service::mark_manager_channel_failed(&state.db, &bot.id).await?;
-            }
-            return Err(error);
-        }
+    } else {
+        None
     };
 
-    if bot.credential_source == "telegram_manager" {
-        channel_bot_service::register_webhook_with_telegram_api(
-            &state.db,
-            telegram_api,
-            adapter,
-            &bot.id,
-            &bot_token,
-            &channel_bot_service::webhook_url(&state.config.base_url, &bot),
-            "",
+    let channel_billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        api_key_id,
+    );
+    adapter
+        .verify_bot_token(
+            &state.http_client,
+            &BotCredentials {
+                billing: channel_billing.as_ref(),
+                token: &bot_token,
+                platform_bot_id: Some(&bot.platform_bot_id),
+                platform_secrets: platform_secrets.as_ref(),
+            },
         )
         .await?;
-        return Ok(Json(VerifyBotResponse {
-            id: bot.id,
-            status: "active".into(),
-            webhook_registered: true,
-        }));
+
+    if bot.credential_source != "connection" {
+        ensure_verify_material_present(&bot, adapter)?;
     }
 
     if bot.credential_source == "connection" {

@@ -49,7 +49,7 @@ criteria below, and findings must be fixed and re-reviewed before completion.
 | A5 | Plain and addressed `/start`, setup payloads, recovery, creation events, and setup callbacks remain isolated from agents. | Welcome/deep-link/recovery tests and interleaved manager/chat integration. |
 | A6 | Setup quote/claim content cannot leak through the supported normalized or raw callback fields covered by the protocol. | Text, caption, reply, quote, external reply, pinned/nested service messages, and claim-link regression cases, including encoded query parameter names and values. |
 | A7 | Auth/control failures remain errors; ordinary post-auth lookup/processing failures acknowledge without manager effects. | Failure injection and unchanged provisioning delivery-fence tests. |
-| A8 | Live token rotation, channel deletion, configuration clear blocking, and disabled routes preserve their lifecycle contracts. | Rotation/delete/clear integration and old reply-token rejection. |
+| A8 | Live token rotation, channel deletion, configuration clear blocking, and disabled routes preserve their lifecycle contracts. Stale ordinary-channel operations cannot replace the manager webhook after migration. | Rotation/delete/clear integration, old reply-token rejection, and migration tests for deleted rows, concurrent provider operations, and mismatched token identities. |
 | A9 | Dashboard and CLI explain credential source, public routing, verification failure, and deletion behavior; exact-route input cannot silently enable public routing. | Desktop/mobile browser flows, wildcard rejection, positive/negative chat IDs, frontend checks, CLI show regression. |
 | A10 | Existing creation and ordinary-channel behavior pass relevant regressions; independent review has no unresolved findings. | Focused backend/frontend/CLI suites, formatting/static checks, Astra xhigh review and follow-up. |
 
@@ -108,3 +108,35 @@ reported no unresolved findings against A1–A10. The implementation lead review
 the final backend/frontend changes. All required local validation checks passed.
 The accepted 32-delivery cap, transient delivery behavior, and live-provider
 validation boundary remain documented limitations of this version.
+
+## Follow-up implementation review
+
+A fresh independent Astra reviewer at xhigh reviewed the published feature and
+its integration with main's X webhook billing changes on 2026-09-20. The review
+identified an existing ordinary-Telegram lifecycle defect relevant to migration:
+Verify on a deleted channel could replace the manager's shared webhook. The
+fix coordinates ordinary registration, Verify, deletion, and manager
+configuration through the same remote-identity lease, checks the current row
+and actual token identity before webhook mutations, and keeps the matching
+status and secret-hash writes inside the operation. Repeated deletion still
+finishes local route cleanup without changing the manager webhook.
+
+The implementation lead also identified a delayed creation-failure update that
+could overwrite a concurrent successful Verify. That Telegram update now only
+matches an active, pending, unregistered row. Four migration regressions cover
+deleted rows, paused provider operations, mismatched stored token identities,
+an unready manager, legacy credential-source fields, matching installed/stored
+secrets, and delayed failure writes. The final backend run of
+`cargo test -p nyxid --bin nyxid-server -- telegram_new channel_ --test-threads=4`
+passed **593 tests, with zero failures or ignored tests**, using an isolated
+MongoDB replica set and simulated provider HTTP endpoints.
+Workspace Clippy with `--all-targets -- -D warnings`, workspace formatting,
+and `git diff --check` also passed on the final source.
+
+Astra re-reviewed both fixes and reported no remaining actionable findings
+against A1–A10, including X billing attribution and Aurinko lifecycle
+compatibility. This was a source and test-design review; the implementation
+lead ran the tests. Fable's final implementation review was retried but could
+not run because its provider reported exhausted usage credits. Fable's earlier
+design consultation remains recorded; a final Fable implementation sign-off
+is still outstanding.
