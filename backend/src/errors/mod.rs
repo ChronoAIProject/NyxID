@@ -480,6 +480,9 @@ pub enum AppError {
     #[error("Organization membership query timed out")]
     OrgQueryTimeout,
 
+    #[error("Usage query timed out; select a shorter window or narrower filters and retry")]
+    AdminUsageQueryTimeout,
+
     #[error("Organization not found: {0}")]
     OrgNotFound(String),
 
@@ -734,7 +737,7 @@ impl AppError {
             Self::ChannelConversationNotAddressable => StatusCode::BAD_REQUEST,
             Self::ChannelAgentInitiateNotAllowed => StatusCode::FORBIDDEN,
             Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
-            Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
+            Self::OrgQueryTimeout | Self::AdminUsageQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
             Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
             Self::OrgSlugTaken(_) => StatusCode::CONFLICT,
             Self::OrgMembershipRequired => StatusCode::FORBIDDEN,
@@ -923,6 +926,7 @@ impl AppError {
             Self::ChannelAgentInitiateNotAllowed => 10008,
             Self::OrgCannotAuthenticate => 1403,
             Self::OrgQueryTimeout => 8100,
+            Self::AdminUsageQueryTimeout => 12200,
             Self::OrgNotFound(_) => 8101,
             Self::OrgSlugTaken(_) => 8107,
             Self::OrgMembershipRequired => 8102,
@@ -1147,6 +1151,7 @@ impl AppError {
             Self::ChannelAgentInitiateNotAllowed => "channel_agent_initiate_not_allowed",
             Self::OrgCannotAuthenticate => "org_cannot_authenticate",
             Self::OrgQueryTimeout => "org_query_timeout",
+            Self::AdminUsageQueryTimeout => "admin_usage_query_timeout",
             Self::OrgNotFound(_) => "org_not_found",
             Self::OrgSlugTaken(_) => "org_slug_taken",
             Self::OrgMembershipRequired => "org_membership_required",

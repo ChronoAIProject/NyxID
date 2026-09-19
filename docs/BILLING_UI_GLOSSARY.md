@@ -272,6 +272,53 @@ the person has no chargeable wallet.
 
 ---
 
+### Admin usage
+
+`/admin/usage` (API: `GET /api/v1/admin/usage`) is available to platform admins
+and read-only operators. It reports all credential classes, including free BYOK,
+agent overrides, node credentials and no-auth traffic. **`BILLING_ENABLED` must
+be on when traffic occurs** for meters to exist; turning it on does not backfill
+past usage. No Lago connection or per-user billing rollout is required to read it.
+
+The default window is the last 24 hours; presets are 24h, 7d and 30d. Custom
+RFC 3339 windows use `[from, to)` and must be positive and at most 31 days;
+inverted or longer windows are rejected. The user picker searches names/emails
+and matches either the actor or billing owner, so selecting an organization shows
+its members' usage of that organization's wallet. Ranking attributes each row to
+the actor and separately identifies a differing billing owner. Deleted identities
+say **Unknown user**; their IDs are available only in a tooltip.
+
+Only non-null quantities in finalized rows or forwarded dead letters count.
+Requests and provider token classes come exclusively from the unique primary
+`{billing_request_id}:platform` row; historical component copies and resale rows
+cannot inflate them. New component rows no longer store `token_breakdown`.
+Events and per-metric quantities include primary, component and resale rows;
+quantities are billing units, not a second count of distinct requests. Cache-read
+and cache-write retain provider accounting and can overlap input. **Total tokens**
+is derived as prompt + completion; cache counts are displayed separately because
+no provider-independent non-overlapping grand total can be reconstructed from
+historical `token_breakdown` alone. Estimated tokens without a breakdown remain
+visible in metric quantities, not in provider token-class totals.
+
+Costs follow the personal Usage card: exact persisted settlements first, then
+current model-specific/generic rates for legacy billable groups; free events cost
+zero. Known costs are summed, unknown groups remain null and are skipped by totals.
+A **Partial estimate** notice exposes missing historical rates. Grant micros stay
+known even without a rate. Funding amounts are pre-rounding costs, not wallet debits.
+Ranking is paged by actor × billing owner × service, descending by requests, cost,
+a selected metric's quantity, or a token class, with stable identity tie-breakers.
+A quantity ranking never adds unlike metrics. Expanding a user shows all their
+services in the exact response window. The service picker retains all options in
+the selected window/user scope when a service is selected.
+
+All reductions, rate joins, ranking sorts and paging run in MongoDB with a 20-second
+server limit (and a 22-second complete-request guard); timeouts return HTTP 503.
+One additive non-unique status/date index bounds the reporting scans, at the cost
+of another index update on meter inserts and status transitions. No existing index,
+meter lifecycle, charging rule, or ledger format changes.
+
+---
+
 ## 6. Top-up history card
 
 Backed by `GET /api/v1/billing/topups?page=&per_page=&period=` (`handlers/billing.rs:429-558`),

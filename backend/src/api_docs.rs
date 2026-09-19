@@ -2,6 +2,7 @@
 #[openapi(
     modifiers(&SecurityAddon),
     paths(
+        crate::handlers::admin_usage::get_usage,
         crate::handlers::options::get_options,
         crate::handlers::docs::docs_ui,
         crate::handlers::docs::catalog_ui,

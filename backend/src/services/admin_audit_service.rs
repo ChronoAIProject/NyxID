@@ -11,6 +11,10 @@
 //! `api_key_id`, each compounded with `created_at`) wherever possible.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+use mongodb::options::Hint;
+use tokio::sync::Mutex;
 
 use chrono::NaiveDate;
 use futures::TryStreamExt;
@@ -140,27 +144,105 @@ pub async fn list_entries(
     let filter = admin_audit_filter(&params)?;
     let sort = admin_audit_sort(params.sort)?;
     let collection = db.collection::<AuditLog>(AUDIT_LOG);
+    let count_hint = admin_count_hint(&params, &filter);
+    let page_hint = admin_page_hint(&params, &filter);
 
-    let total = collection.count_documents(filter.clone()).await?;
-    if offset >= total {
-        return Ok((Vec::new(), total));
-    }
     let limit = i64::try_from(params.per_page)
         .map_err(|_| AppError::ValidationError("per_page is too large".to_string()))?;
     if i64::try_from(offset).is_err() {
         return Err(AppError::ValidationError("page is too large".to_string()));
     }
 
-    let entries: Vec<AuditLog> = collection
-        .find(filter)
-        .sort(sort)
-        .skip(offset)
-        .limit(limit)
-        .await?
-        .try_collect()
-        .await?;
+    // Keep totals exact. MongoDB otherwise scans every document for an empty
+    // count; the mandatory _id index supports an index-only COUNT_SCAN.
+    let count = async {
+        collection
+            .count_documents(filter.clone())
+            .with_options(
+                mongodb::options::CountOptions::builder()
+                    .hint(count_hint)
+                    .build(),
+            )
+            .await
+    };
+    let page = async {
+        collection
+            .find(filter.clone())
+            .with_options(
+                mongodb::options::FindOptions::builder()
+                    .hint(page_hint)
+                    .build(),
+            )
+            .sort(sort)
+            .skip(offset)
+            .limit(limit)
+            .await?
+            .try_collect::<Vec<AuditLog>>()
+            .await
+    };
+    let (total, entries) = tokio::try_join!(count, page)?;
 
     Ok((entries, total))
+}
+
+// An unanchored contains OR can choose seven FULL index scans for an exact
+// count. With no narrowing predicates one collection pass is cheaper (see the
+// seeded executionStats benchmark). Do not force it when date/event/owner/status
+// predicates can bound an index scan before evaluating the regex.
+fn global_search_only(params: &AdminAuditLogListParams<'_>, filter: &Document) -> bool {
+    params.search.is_some_and(|value| !value.trim().is_empty())
+        && filter.len() == 1
+        && filter.contains_key("$or")
+}
+
+pub(super) fn admin_count_hint(
+    params: &AdminAuditLogListParams<'_>,
+    filter: &Document,
+) -> Option<Hint> {
+    if filter.is_empty() {
+        Some(Hint::Name("_id_".into()))
+    } else if global_search_only(params, filter) {
+        Some(Hint::Keys(doc! { "$natural": 1 }))
+    } else {
+        None
+    }
+}
+
+pub(super) fn admin_page_hint(
+    params: &AdminAuditLogListParams<'_>,
+    filter: &Document,
+) -> Option<Hint> {
+    global_search_only(params, filter).then(|| {
+        let key = params.sort.trim_start_matches('-');
+        let key = if key == "status" {
+            "event_data_response_status"
+        } else {
+            key
+        };
+        Hint::Name(format!("audit_log_sort_{key}"))
+    })
+}
+
+/// Derived filter-option display data only, never authorization or audit facts.
+/// Scoped to AppState so separate database clients cannot share cached vocabulary.
+/// The mutex also coalesces concurrent cold reads. Failed refreshes are not cached.
+#[derive(Default)]
+pub struct EventTypeCache {
+    cached: Mutex<Option<(Instant, Vec<String>)>>,
+}
+
+impl EventTypeCache {
+    pub async fn get(&self, db: &mongodb::Database) -> AppResult<Vec<String>> {
+        let mut cached = self.cached.lock().await;
+        if let Some((at, values)) = &*cached
+            && at.elapsed() < Duration::from_secs(30)
+        {
+            return Ok(values.clone());
+        }
+        let values = distinct_event_types(db).await?;
+        *cached = Some((Instant::now(), values.clone()));
+        Ok(values)
+    }
 }
 
 /// Event types present in the collection, for the `event_type` filter's
@@ -189,7 +271,7 @@ pub async fn distinct_event_types(db: &mongodb::Database) -> AppResult<Vec<Strin
     Ok(event_types)
 }
 
-fn admin_audit_filter(params: &AdminAuditLogListParams<'_>) -> AppResult<Document> {
+pub(super) fn admin_audit_filter(params: &AdminAuditLogListParams<'_>) -> AppResult<Document> {
     let mut clauses = Vec::new();
 
     if let Some(search) = params
@@ -699,7 +781,7 @@ fn one_or_many(mut filters: Vec<Document>) -> Document {
     }
 }
 
-fn admin_audit_sort(sort: &str) -> AppResult<Document> {
+pub(super) fn admin_audit_sort(sort: &str) -> AppResult<Document> {
     let (field, direction) = match sort.strip_prefix('-') {
         Some(field) => (field, -1),
         None => (sort, 1),
@@ -1041,5 +1123,34 @@ mod tests {
     fn malformed_calendar_date_is_rejected() {
         assert!(admin_created_at_filter(None, Some("07/01/2026"), None).is_err());
         assert!(admin_created_at_filter(None, Some("2026-7-1"), None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn vocabulary_cache_expires_and_is_scoped_to_its_state() {
+        let db = crate::test_utils::connect_test_database("audit_display_cache")
+            .await
+            .expect("MongoDB required");
+        let cache = EventTypeCache::default();
+        assert!(cache.get(&db).await.unwrap().is_empty());
+        db.collection::<Document>(AUDIT_LOG)
+            .insert_one(doc! { "_id": "display-cache", "event_type": "new.event" })
+            .await
+            .unwrap();
+        assert!(
+            cache.get(&db).await.unwrap().is_empty(),
+            "derived options may lag by at most 30 seconds"
+        );
+        assert_eq!(
+            EventTypeCache::default().get(&db).await.unwrap(),
+            ["new.event"]
+        );
+        cache.cached.lock().await.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(31);
+        assert_eq!(cache.get(&db).await.unwrap(), ["new.event"]);
+        db.drop().await.unwrap();
     }
 }

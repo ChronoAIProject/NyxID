@@ -1,3 +1,4 @@
+import { formatCredits, formatNumber, formatEstimatedCredits } from "@/lib/billing-format";
 import { billingMetricLabel } from "@/lib/billing-units";
 import { Fragment, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -747,23 +748,6 @@ function labelize(value: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
-}
-
-function formatCredits(value: number): string {
-  return `${formatNumber(value)} credits`;
-}
-
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat().format(value);
-}
-
-function formatEstimatedCredits(value: number | null | undefined): string {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  return `${new Intl.NumberFormat(undefined, {
-    maximumFractionDigits: 6,
-  }).format(value / 1_000_000)} credits`;
 }
 
 function isBillingNotConfigured(error: unknown): boolean {

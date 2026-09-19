@@ -343,7 +343,15 @@ async fn materialize_component_rows(
             doc! { "_id": &row.id, "status": "forwarded" },
             platform_quantity(row.metric, usage),
             coordinator.model.clone(),
-            usage.token_breakdown.as_ref(),
+            // Classes describe the request, not each independently priced row.
+            (row.transaction_id
+                == transaction_id(
+                    &row.billing_request_id,
+                    BillingLayer::Platform,
+                    row.flush_seq,
+                ))
+            .then_some(usage.token_breakdown.as_ref())
+            .flatten(),
             None,
             coordinator.finalized_at.unwrap_or(coordinator.updated_at),
         )
@@ -2041,6 +2049,58 @@ mod tests {
             crate::models::service_billing::TokenBreakdown::default(),
         ));
         assert!(empty.token_breakdown.is_none());
+    }
+
+    #[tokio::test]
+    async fn component_rows_do_not_duplicate_primary_token_breakdown() {
+        let db = connect_test_database("billing_component_classes")
+            .await
+            .expect("MongoDB required");
+        create_usage_transaction_index(&db).await;
+        let mut ctx = platform_context("component-classes", "owner");
+        ctx.platform_metric = BillingMetric::InputTokens;
+        ctx.platform_components
+            .push(crate::models::service_billing::ResaleSpec {
+                metric: BillingMetric::OutputTokens,
+                lago_metric_code: "output".into(),
+            });
+        let request = open(&db, &ctx, None).await.unwrap();
+        mark_forwarded(&db, &request).await.unwrap();
+        let breakdown = crate::models::service_billing::TokenBreakdown {
+            prompt_tokens: 120,
+            completion_tokens: 40,
+            cached_tokens: 30,
+            cache_creation_tokens: 5,
+        };
+        let usage = PlatformUsage {
+            input_tokens: 120,
+            output_tokens: 40,
+            token_breakdown: Some(breakdown),
+            ..Default::default()
+        };
+        settle(&db, &request, usage.clone(), None, None)
+            .await
+            .unwrap();
+        settle(&db, &request, usage, None, None).await.unwrap();
+        let rows: Vec<UsageMeterRow> = db
+            .collection::<UsageMeterRow>(super::USAGE_METER)
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            if row.transaction_id == "component-classes:platform" {
+                assert_eq!(row.token_breakdown, Some(breakdown));
+                assert_eq!(row.quantity, Some(120));
+            } else {
+                assert_eq!(row.token_breakdown, None);
+                assert_eq!(row.quantity, Some(40));
+            }
+        }
+        db.drop().await.unwrap();
     }
 
     fn platform_context(request_id: &str, owner_id: &str) -> BillingRouteContext {

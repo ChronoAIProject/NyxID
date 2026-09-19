@@ -2515,6 +2515,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // Global admin reporting has no owner prefix. One additional non-unique
+    // index bounds both finalized/dead-letter branches by the selected window.
+    // Trade-off: one extra B-tree update per meter insert/status transition;
+    // avoids separate actor, owner and service indexes for this bounded report.
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "created_at": -1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("usage_meter_admin_window".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── billing_wallet ──
     let billing_wallet = db.collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME);
     billing_wallet

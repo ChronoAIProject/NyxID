@@ -464,3 +464,11 @@ export interface PlatformCredentialsUpdate {
   readonly fields?: Record<string, string | null>;
   readonly regenerate_verify_token?: boolean;
 }
+
+// Dedicated admin usage API types are inferred from the receipt validators.
+export type AdminUsageResponse = import("zod").z.infer<typeof import("@/schemas/admin-usage").adminUsageResponseSchema>;
+export type AdminUsageSearch = import("zod").z.infer<typeof import("@/schemas/admin-usage").adminUsageSearchSchema>;
+export type AdminUsageStats = import("zod").z.infer<typeof import("@/schemas/admin-usage").usageStatsSchema>;
+export type AdminUsageIdentity = import("zod").z.infer<typeof import("@/schemas/admin-usage").usageIdentitySchema>;
+export type AdminUsageService = import("zod").z.infer<typeof import("@/schemas/admin-usage").usageServiceSchema>;
+export type AdminUsageRanking = import("zod").z.infer<typeof import("@/schemas/admin-usage").usageRankingSchema>;
