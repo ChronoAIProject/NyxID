@@ -208,6 +208,7 @@ pub struct AppState {
     /// Vendor-neutral telemetry client. `None` when no DSN is configured
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
+    pub audit_event_types: Arc<services::admin_audit_service::EventTypeCache>,
 }
 
 impl AppState {
@@ -953,6 +954,7 @@ async fn main() {
         ),
         billing,
         telemetry: telemetry::TelemetryClient::from_config(&config),
+        audit_event_types: Arc::default(),
     };
 
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`

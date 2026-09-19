@@ -49,6 +49,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11900-11909 Agent Key login: 11900 `AgentKeyLoginNotFound`, 11901 `AgentKeyLoginExpired`, 11902 `AgentKeyLoginPending`, 11903 `AgentKeyLoginSlowDown`, 11904 `AgentKeyLoginDenied`, 11905 `AgentKeyLoginAlreadyDelivered`, 11906 `AgentKeyLoginRateLimited`, 11907 `AgentKeyLoginUserCodeInvalid`, 11908 `AgentKeyLoginKeyIneligible`, 11909 `AgentKeyCredentialNotFound`
 - 12000-12004 one-time login codes: 12000 `LoginCodeInvalid`, 12001 `LoginCodeExpired`, 12002 `LoginCodeCancelled`, 12003 `LoginCodeRedeemed`, 12004 `LoginCodeRateLimited`
 - 12100 `AssistantTurnActive` (HTTP 409, `turn_active`): a persisted NyxAgent conversation already has an active turn.
+- 12200 `AdminUsageQueryTimeout` (HTTP 503): bounded admin usage aggregation timed out; retry with a narrower window or filters.
 
 ### 4. Frontend Patterns
 
@@ -295,6 +296,8 @@ All API routes under `/api/v1`:
 - `/connections` -- connect/disconnect services
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management + per-user credentials; `/codex-connection` status/import and `/codex-connection/verify` require first-party human auth and exact reviewed connection versions (see `docs/CODEX_CONNECTION.md`)
 - `/admin` -- user management, audit log, OAuth clients, service accounts
+- `/admin/usage` -- admin/operator platform-wide usage, default 24 hours and maximum 31 days; actor/owner and service filters, primary-request deduplication, MongoDB ranking and exact/legacy funding costs. Metering requires `BILLING_ENABLED`.
+- `/admin/audit-log` -- unchanged substring filters; count and page queries run concurrently. Unfiltered totals are metadata-based via `estimated_document_count` (exact except briefly after an unclean shutdown), avoiding a collection-sized count scan. Every non-empty filter keeps an exact count; global-search-only counts use one collection pass instead of seven full index scans, and their pages use the existing sort index. Narrowing predicates retain normal index selection. Event-type filter options are derived display data cached per process/AppState for 30 seconds; audit rows and counts are never cached.
 - `/assistant/nyxagent/*` -- human-only, default-on NyxAgent conversations/history/rename/delete, turn SSE, Stop, acknowledgement decisions (`POST /conversations/{id}/acknowledgements/{ack_id}`), mode switches (`PATCH /conversations/{id}/access-mode`), and cached profile discovery; all routes enforce the engine flag and acting-person ownership
 - `/assistant/actions` -- public static assistant action manifest for Aevatar startup discovery
 - `/proxy/{service_id}/{path}` and `/proxy/s/{slug}/{path}` -- authenticated proxy (UUID- and slug-based); HTTP + WebSocket passthrough

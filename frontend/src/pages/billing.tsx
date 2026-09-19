@@ -1,3 +1,5 @@
+import { MetricBlock } from "@/components/shared/metric-block";
+import { formatCredits, formatNumber, formatEstimatedCredits } from "@/lib/billing-format";
 import { billingMetricLabel } from "@/lib/billing-units";
 import { Fragment, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -693,23 +695,6 @@ function describeAgent(row: BillingUsageRow): string {
   return "No agent key";
 }
 
-function MetricBlock({
-  label,
-  value,
-}: {
-  readonly label: string;
-  readonly value: string;
-}) {
-  return (
-    <div className="rounded-lg border border-border/70 bg-overlay px-3 py-3">
-      <div className="text-[11px] text-muted-foreground">{label}</div>
-      <div className="mt-1 truncate text-[20px] font-semibold leading-tight">
-        {value}
-      </div>
-    </div>
-  );
-}
-
 function formatTokenBreakdown(
   breakdown: NonNullable<BillingUsageRow["token_breakdown"]>,
 ): string {
@@ -747,23 +732,6 @@ function labelize(value: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
-}
-
-function formatCredits(value: number): string {
-  return `${formatNumber(value)} credits`;
-}
-
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat().format(value);
-}
-
-function formatEstimatedCredits(value: number | null | undefined): string {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  return `${new Intl.NumberFormat(undefined, {
-    maximumFractionDigits: 6,
-  }).format(value / 1_000_000)} credits`;
 }
 
 function isBillingNotConfigured(error: unknown): boolean {

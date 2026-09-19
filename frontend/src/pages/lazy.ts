@@ -317,3 +317,5 @@ export const DocsIndexPage = lazy(() =>
 export const DocsPage = lazy(() =>
   import("@/features/docs/docs-page").then((m) => ({ default: m.DocsPage })),
 );
+
+export const AdminUsagePage = lazy(() => import("@/pages/admin-usage").then((m) => ({ default: m.AdminUsagePage })));

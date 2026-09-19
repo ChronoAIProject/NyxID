@@ -1,3 +1,4 @@
+import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
@@ -71,6 +72,7 @@ import {
   NodeDetailPage,
   AdminNodesPage,
   AdminAuditLogPage,
+  AdminUsagePage,
   AdminFeatureFlagsPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
@@ -881,6 +883,13 @@ const adminAuditLogRoute = createRoute({
   validateSearch: normalizeAdminAuditLogSearch,
 });
 
+const adminUsageRoute = createRoute({
+  path: "usage",
+  getParentRoute: () => adminLayout,
+  component: AdminUsagePage,
+  validateSearch: normalizeAdminUsageSearch,
+});
+
 const adminIntegrityRoute = createRoute({
   path: "integrity",
   getParentRoute: () => adminLayout,
@@ -1004,6 +1013,7 @@ const routeTree = rootRoute.addChildren([
       adminOAuthClientsRoute,
       adminNodesRoute,
       adminAuditLogRoute,
+      adminUsageRoute,
       adminIntegrityRoute,
       adminCreditsRoute,
       adminInviteCodesRoute,
