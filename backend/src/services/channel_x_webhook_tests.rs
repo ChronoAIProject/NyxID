@@ -222,6 +222,73 @@ async fn x_webhook_activation_stops_polling_and_deletion_removes_only_its_subscr
 }
 
 #[tokio::test]
+async fn x_deleted_channel_retains_subscription_cleanup_until_retry_succeeds() {
+    let (state, adapter, server, owner, connection) = fixture().await;
+    let bot = insert_bot(&state, &owner, &connection).await;
+    credentials(&state, &adapter, &owner).await;
+    provider_setup(&server, &bot).await;
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+    Mock::given(method("DELETE"))
+        .and(path("/2/activity/subscriptions/200"))
+        .respond_with(move |_: &wiremock::Request| {
+            ResponseTemplate::new(
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    503
+                } else {
+                    204
+                },
+            )
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        channel_bot_service::delete_bot(
+            &state.db,
+            &state.config,
+            &state.http_client,
+            &state.encryption_keys,
+            &adapter,
+            &bot.id,
+            &owner,
+        )
+        .await
+        .unwrap(),
+        Some("failed")
+    );
+    let deleted = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(!deleted.is_active);
+    assert_eq!(deleted.status, "inactive");
+    assert!(deleted.webhook_registered);
+    webhooks::remove_stopped(
+        &state.db,
+        &state.encryption_keys,
+        &state.http_client,
+        &adapter,
+        &deleted,
+    )
+    .await
+    .unwrap();
+    let cleaned = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(!cleaned.is_active);
+    assert!(!cleaned.webhook_registered);
+    webhooks::remove_stopped(
+        &state.db,
+        &state.encryption_keys,
+        &state.http_client,
+        &adapter,
+        &deleted,
+    )
+    .await
+    .unwrap();
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn x_webhook_verify_preserves_subscription_when_channel_is_edited_concurrently() {
     let (state, _, _, owner, connection) = fixture().await;
     let mut bot = insert_bot(&state, &owner, &connection).await;
@@ -363,18 +430,24 @@ async fn x_webhook_setup_failures_preserve_polling_and_revoked_connections_canno
 
 #[tokio::test]
 async fn x_crc_endpoint_returns_json_using_live_platform_secret() {
-    use axum::http::StatusCode;
+    use axum::http::{Request, StatusCode};
     use base64::{Engine, engine::general_purpose::STANDARD};
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
+    use tower::ServiceExt;
     let (state, adapter, _, owner, _) = fixture().await;
     credentials(&state, &adapter, &owner).await;
-    let response = crate::handlers::channel_webhooks::platform_subscription(
-        State(state),
-        Path("x".into()),
-        axum::extract::Query([("crc_token".into(), "challenge".into())].into()),
-    )
-    .await;
+    let (_, router) = crate::routes::build_router_with_state(state.clone());
+    let response = router
+        .with_state(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/webhooks/channel/x/platform?crc_token=challenge")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "application/json");
     let body = axum::body::to_bytes(response.into_body(), 1024)

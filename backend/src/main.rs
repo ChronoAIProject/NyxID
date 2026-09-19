@@ -1136,7 +1136,7 @@ async fn main() {
         });
     }
 
-    if config.channel_poll_interval_secs > 0 || config.billing_enabled {
+    {
         let poll_state = state.clone();
         let poll_interval = if config.channel_poll_interval_secs > 0 {
             config.channel_poll_interval_secs

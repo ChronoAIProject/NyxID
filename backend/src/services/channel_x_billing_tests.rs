@@ -467,6 +467,38 @@ async fn x_billing_subscription_admission_checks_funding_before_x_setup() {
 }
 
 #[tokio::test]
+async fn x_billing_setup_lease_conflict_records_a_recoverable_channel_failure() {
+    use crate::services::coordination_service::{LeaseStore, cluster_lease_runtime};
+    let (mut state, adapter, server, owner, key) = fixture().await;
+    enable_billing(&mut state, &owner).await;
+    let bot = insert_bot(&state, &owner, &key).await;
+    let lease = cluster_lease_runtime()
+        .acquire(&state.db, "channel-webhook:x")
+        .await
+        .unwrap()
+        .unwrap();
+    let result = crate::services::channel_connection_webhook_service::configure(
+        &state.db,
+        &state.billing,
+        &state.encryption_keys,
+        &state.http_client,
+        &adapter,
+        &bot,
+        "https://nyx.example",
+    )
+    .await;
+    LeaseStore::release(&state.db, &lease).await.unwrap();
+    assert!(matches!(result, Err(AppError::Conflict(_))));
+    let current = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(current.status, "failed");
+    assert!(!current.webhook_registered);
+    assert!(current.error.as_deref().unwrap().contains("Verify"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
     let (mut state, adapter, server, owner, key) = fixture().await;
     enable_billing(&mut state, &owner).await;
@@ -511,7 +543,7 @@ async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
         failed.webhook_registered,
         "retain cleanup retry marker on provider failure"
     );
-    crate::services::channel_connection_webhook_service::remove_failed(
+    crate::services::channel_connection_webhook_service::remove_stopped(
         &state.db,
         &state.encryption_keys,
         &state.http_client,
@@ -539,7 +571,7 @@ async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
     .await
     .unwrap();
     // A cleanup task holding the old failed snapshot cannot remove the recovered subscription.
-    crate::services::channel_connection_webhook_service::remove_failed(
+    crate::services::channel_connection_webhook_service::remove_stopped(
         &state.db,
         &state.encryption_keys,
         &state.http_client,

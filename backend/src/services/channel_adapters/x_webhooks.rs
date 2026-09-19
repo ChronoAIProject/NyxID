@@ -177,6 +177,20 @@ fn subscription(body: &Value) -> AppResult<&Value> {
     Ok(row)
 }
 
+pub(super) fn list_data(body: &Value) -> AppResult<&[Value]> {
+    if body
+        .get("errors")
+        .is_some_and(|errors| errors.as_array().is_none_or(|rows| !rows.is_empty()))
+    {
+        return Err(protocol_error());
+    }
+    match body.get("data") {
+        Some(Value::Array(rows)) => Ok(rows),
+        None if body["meta"]["result_count"] == 0 => Ok(&[]),
+        _ => Err(protocol_error()),
+    }
+}
+
 async fn subscriptions(
     adapter: &XAdapter,
     http: &reqwest::Client,
@@ -196,16 +210,7 @@ async fn subscriptions(
             request = request.query(&[("pagination_token", cursor)]);
         }
         let body = response_json(send(request).await?).await?;
-        if body.get("errors").is_some() {
-            return Err(protocol_error());
-        }
-        result.extend(
-            body["data"]
-                .as_array()
-                .ok_or_else(protocol_error)?
-                .iter()
-                .cloned(),
-        );
+        result.extend(list_data(&body)?.iter().cloned());
         match body["meta"]["next_token"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -248,12 +253,7 @@ pub(super) async fn setup(
         .await?,
     )
     .await?;
-    if webhooks.get("errors").is_some() {
-        return Err(protocol_error());
-    }
-    let existing = webhooks["data"]
-        .as_array()
-        .ok_or_else(protocol_error)?
+    let existing = list_data(&webhooks)?
         .iter()
         .find(|row| row["url"] == webhook_url);
     let webhook = if let Some(row) = existing {

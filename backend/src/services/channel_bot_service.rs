@@ -1212,14 +1212,17 @@ async fn delete_bot_inner(
 
     let now = bson::DateTime::from_chrono(Utc::now());
 
-    // Soft-delete the bot
+    let connection_webhook = bot.credential_source == "connection"
+        && super::channel_connection_webhook_service::supports(adapter);
+
+    // Keep possible remote subscriptions eligible for cleanup after deletion.
     db.collection::<ChannelBot>(COLLECTION_NAME)
         .update_one(
             doc! { "_id": bot_id, "user_id": user_id },
             doc! { "$set": {
                 "is_active": false,
                 "status": "inactive",
-                "webhook_registered": false,
+                "webhook_registered": connection_webhook,
                 "updated_at": now,
             }},
         )
@@ -1247,25 +1250,24 @@ async fn delete_bot_inner(
                 .await?;
         }
     }
-    let cleanup = if bot.credential_source == "connection"
-        && super::channel_connection_webhook_service::supports(adapter)
-    {
-        Some(
-            if super::channel_connection_webhook_service::remove(
-                db,
-                encryption_keys,
-                http_client,
-                adapter,
-                &bot,
-            )
-            .await
-            .is_ok()
-            {
-                "removed"
-            } else {
-                "failed"
-            },
+    let cleanup = if connection_webhook {
+        let result = super::channel_connection_webhook_service::remove(
+            db,
+            encryption_keys,
+            http_client,
+            adapter,
+            &bot,
         )
+        .await;
+        if result.is_ok() {
+            db.collection::<ChannelBot>(COLLECTION_NAME)
+                .update_one(
+                    doc! { "_id": bot_id, "is_active": false },
+                    doc! { "$set": { "webhook_registered": false } },
+                )
+                .await?;
+        }
+        Some(if result.is_ok() { "removed" } else { "failed" })
     } else if adapter.serializes_lifecycle() {
         let result = async {
             let token = zeroize::Zeroizing::new(decrypt_bot_token(encryption_keys, &bot).await?);

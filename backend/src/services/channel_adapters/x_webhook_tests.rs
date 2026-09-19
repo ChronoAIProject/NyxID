@@ -99,7 +99,9 @@ async fn x_webhook_setup_uses_app_token_for_management_and_user_token_for_privat
         .and(path("/2/webhooks"))
         .and(header("authorization", "Bearer app-token"))
         .and(query_param("webhook_config.fields", "id,url,valid"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"meta": {"result_count": 0}})),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -116,7 +118,7 @@ async fn x_webhook_setup_uses_app_token_for_management_and_user_token_for_privat
     Mock::given(method("GET"))
         .and(path("/2/activity/subscriptions"))
         .and(header("authorization", "Bearer app-token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [], "errors": []})))
         .mount(&server)
         .await;
     Mock::given(method("POST")).and(path("/2/activity/subscriptions")).and(header("authorization", "Bearer user-token"))
@@ -136,6 +138,19 @@ async fn x_webhook_setup_uses_app_token_for_management_and_user_token_for_privat
         )
         .await
         .unwrap();
+}
+
+#[test]
+fn x_webhook_lists_require_explicit_empty_results_and_reject_partial_errors() {
+    for body in [
+        json!({}),
+        json!({"data": null, "meta": {"result_count": 0}}),
+        json!({"meta": {"result_count": 1}}),
+        json!({"data": [], "errors": [{"detail": "partial failure"}]}),
+        json!({"meta": {"result_count": 0}, "errors": {}}),
+    ] {
+        assert!(webhooks::list_data(&body).is_err(), "{body}");
+    }
 }
 
 #[tokio::test]

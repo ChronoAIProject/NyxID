@@ -20,12 +20,19 @@ pub(crate) async fn serialized<T>(
     work: impl std::future::Future<Output = AppResult<T>>,
 ) -> AppResult<T> {
     let runtime = cluster_lease_runtime();
-    let lease = runtime
-        .acquire(db, &format!("channel-webhook:{platform}"))
-        .await?
-        .ok_or_else(|| {
-            AppError::Conflict("Channel webhook setup is in progress; retry shortly".into())
-        })?;
+    let lease_key = format!("channel-webhook:{platform}");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let lease = loop {
+        if let Some(lease) = runtime.acquire(db, &lease_key).await? {
+            break lease;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AppError::Conflict(
+                "Channel operation is in progress; retry shortly".into(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
     let result = runtime
         .run_while_renewed(
             db,
@@ -54,7 +61,7 @@ pub async fn configure(
     if !supports(adapter) {
         return Ok(false);
     }
-    serialized(db, adapter.platform_id(), async {
+    let result = serialized(db, adapter.platform_id(), async {
         let current = super::channel_bot_service::get_bot(db, &bot.id).await?;
         if !current.is_active || current.connection_id != bot.connection_id {
             return Err(AppError::Conflict("Channel connection changed during webhook setup".into()));
@@ -65,7 +72,12 @@ pub async fn configure(
                 "Webhook or billing setup needs attention. Restore credits and configuration, then select Verify.").await?;
         }
         result
-    }).await
+    }).await;
+    if result.is_err() && billing.billing_enabled() && bot.platform == "x" {
+        super::channel_credentials::fail_bot(db, bot,
+            "Webhook setup did not complete. Check credits and webhook configuration, then select Verify.").await?;
+    }
+    result
 }
 
 async fn configure_inner(
@@ -115,10 +127,13 @@ async fn configure_inner(
         if billing.billing_enabled() {
             // Record a possible remote subscription before the provider effect,
             // so failed/partial setup remains eligible for cleanup retry.
-            db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
-                doc! {"_id": &current.id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},
+            let marked = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+                doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},
                 doc! {"$set": {"webhook_registered": true}},
             ).await?;
+            if marked.matched_count == 0 {
+                return Err(AppError::Conflict("Channel changed before webhook setup; retry".into()));
+            }
         }
         adapter.setup_connection_webhook(http, &credentials, &current.id, &url).await?;
         let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
@@ -137,9 +152,9 @@ async fn configure_inner(
     }.await
 }
 
-/// Recheck failure while holding the same lease as Verify. A recovered channel
-/// must never lose the subscription that Verify has just restored.
-pub async fn remove_failed(
+/// Recheck failed/deleted state under the Verify lease so a recovered channel
+/// never loses its restored subscription.
+pub async fn remove_stopped(
     db: &mongodb::Database,
     keys: &EncryptionKeys,
     http: &reqwest::Client,
@@ -148,7 +163,7 @@ pub async fn remove_failed(
 ) -> AppResult<()> {
     serialized(db, adapter.platform_id(), async {
         let current = super::channel_bot_service::get_bot(db, &bot.id).await?;
-        if current.status != "failed" || !current.webhook_registered {
+        if (current.is_active && current.status != "failed") || !current.webhook_registered {
             return Ok(());
         }
         let descriptor = adapter
@@ -160,7 +175,7 @@ pub async fn remove_failed(
             .remove_connection_webhook(http, &platform, &current.id)
             .await?;
         db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
-            doc! {"_id": &current.id, "status": "failed", "connection_id": &current.connection_id},
+            doc! {"_id": &current.id, "is_active": current.is_active, "status": &current.status, "connection_id": &current.connection_id},
             doc! {"$set": {"webhook_registered": false}},
         ).await?;
         Ok(())

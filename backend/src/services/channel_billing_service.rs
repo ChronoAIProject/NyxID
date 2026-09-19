@@ -247,7 +247,7 @@ async fn cleanup(
     adapter: &dyn super::channel_platform::PlatformAdapter,
     bot: &ChannelBot,
 ) -> AppResult<()> {
-    super::channel_connection_webhook_service::remove_failed(db, keys, http, adapter, bot).await
+    super::channel_connection_webhook_service::remove_stopped(db, keys, http, adapter, bot).await
 }
 
 pub fn blocks_channel(error: &AppError) -> bool {
@@ -265,7 +265,8 @@ pub async fn sweep(state: &crate::AppState) -> AppResult<()> {
     let bots: Vec<ChannelBot> = state
         .db
         .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-        .find(doc! {"platform": "x", "status": "failed", "webhook_registered": true})
+        .find(doc! {"platform": "x", "webhook_registered": true,
+        "$or": [{"status": "failed"}, {"is_active": false}]})
         .limit(100)
         .await?
         .try_collect()
