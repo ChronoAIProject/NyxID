@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::channel_connection_webhook_service as webhooks;
 
-async fn credentials(state: &AppState, adapter: &XAdapter, owner: &str) {
+pub(super) async fn credentials(state: &AppState, adapter: &XAdapter, owner: &str) {
     platform_credential_service::update(
         &state.db,
         &state.encryption_keys,
@@ -24,7 +24,7 @@ async fn credentials(state: &AppState, adapter: &XAdapter, owner: &str) {
     .unwrap();
 }
 
-async fn provider_setup(server: &MockServer, bot: &ChannelBot) {
+pub(super) async fn provider_setup(server: &MockServer, bot: &ChannelBot) {
     Mock::given(method("GET"))
         .and(path("/2/webhooks"))
         .respond_with(
@@ -162,6 +162,7 @@ async fn x_webhook_activation_stops_polling_and_deletion_removes_only_its_subscr
     assert!(
         webhooks::configure(
             &state.db,
+            &state.billing,
             &state.encryption_keys,
             &state.http_client,
             &adapter,
@@ -281,6 +282,7 @@ async fn x_webhook_verify_preserves_subscription_when_channel_is_edited_concurre
     assert!(matches!(
         webhooks::configure(
             &state.db,
+            &state.billing,
             &state.encryption_keys,
             &state.http_client,
             &adapter,
@@ -312,6 +314,7 @@ async fn x_webhook_setup_failures_preserve_polling_and_revoked_connections_canno
         .await;
     let result = webhooks::configure(
         &state.db,
+        &state.billing,
         &state.encryption_keys,
         &state.http_client,
         &adapter,
@@ -338,6 +341,7 @@ async fn x_webhook_setup_failures_preserve_polling_and_revoked_connections_canno
     assert!(
         webhooks::configure(
             &state.db,
+            &state.billing,
             &state.encryption_keys,
             &state.http_client,
             &adapter,

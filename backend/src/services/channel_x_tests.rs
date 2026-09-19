@@ -115,6 +115,7 @@ async fn create(
 ) -> Result<ChannelBot, AppError> {
     channel_bot_service::create_managed_bot(
         &state.db,
+        &state.billing,
         &state.config,
         &state.encryption_keys,
         &state.http_client,
@@ -665,7 +666,7 @@ async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config()
             .count_documents(doc! {"provider": "x"})
             .await
             .unwrap(),
-        0
+        1
     );
     let (_, Json(bootstrap)) =
         channel_managed::bootstrap(State(state.clone()), auth.clone(), Path("x".into()))
@@ -703,6 +704,7 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
     assert!(
         channel_bot_service::reconnect_bot(
             &state.db,
+            &state.billing,
             &state.encryption_keys,
             &state.http_client,
             &adapter,
@@ -723,6 +725,7 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
         .await;
     channel_bot_service::reconnect_bot(
         &state.db,
+        &state.billing,
         &state.encryption_keys,
         &state.http_client,
         &adapter,
@@ -766,3 +769,6 @@ mod review;
 
 #[path = "channel_x_webhook_tests.rs"]
 mod webhooks;
+
+#[path = "channel_x_billing_tests.rs"]
+mod billing;

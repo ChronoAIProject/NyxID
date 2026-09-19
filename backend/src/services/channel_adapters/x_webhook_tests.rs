@@ -126,6 +126,7 @@ async fn x_webhook_setup_uses_app_token_for_management_and_user_token_for_privat
         .setup_connection_webhook(
             &reqwest::Client::new(),
             &BotCredentials {
+                billing: None,
                 token: "user-token",
                 platform_bot_id: Some("10"),
                 platform_secrets: Some(&secrets()),
@@ -179,6 +180,7 @@ async fn x_webhook_repair_reuses_subscriptions_and_delete_preserves_other_channe
         .setup_connection_webhook(
             &reqwest::Client::new(),
             &BotCredentials {
+                billing: None,
                 token: "user-token",
                 platform_bot_id: Some("10"),
                 platform_secrets: Some(&secrets()),
@@ -203,6 +205,7 @@ async fn x_webhooks_reject_unsafe_callback_urls_before_provider_effects() {
                 .setup_connection_webhook(
                     &reqwest::Client::new(),
                     &BotCredentials {
+                        billing: None,
                         token: "user-token",
                         platform_bot_id: Some("10"),
                         platform_secrets: Some(&secrets()),
@@ -258,6 +261,7 @@ async fn x_webhook_repoint_requires_provider_confirmation() {
             .setup_connection_webhook(
                 &reqwest::Client::new(),
                 &BotCredentials {
+                    billing: None,
                     token: "user-token",
                     platform_bot_id: Some("10"),
                     platform_secrets: Some(&secrets()),

@@ -296,7 +296,7 @@ pub(super) async fn setup(
         return Ok(());
     }
     // Repoint only this channel's subscription; never alter another app user's events.
-    for row in existing.iter().filter(|row| {
+    if let Some(row) = existing.iter().find(|row| {
         row["tag"] == tag
             && row["event_type"] == "dm.received"
             && row["filter"]["user_id"] == own_id

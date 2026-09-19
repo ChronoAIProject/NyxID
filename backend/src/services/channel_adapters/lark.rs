@@ -2242,6 +2242,7 @@ mod tests {
                     .send_reply(
                         &reqwest::Client::new(),
                         &crate::services::channel_platform::BotCredentials {
+                            billing: None,
                             token: "app:secret",
                             platform_bot_id: None,
                             platform_secrets: None,

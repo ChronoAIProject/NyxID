@@ -14,7 +14,7 @@ pub fn supports(adapter: &dyn PlatformAdapter) -> bool {
         )
 }
 
-async fn serialized<T>(
+pub(crate) async fn serialized<T>(
     db: &mongodb::Database,
     platform: &str,
     work: impl std::future::Future<Output = AppResult<T>>,
@@ -44,6 +44,33 @@ async fn serialized<T>(
 
 pub async fn configure(
     db: &mongodb::Database,
+    billing: &super::billing::BillingService,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    base_url: &str,
+) -> AppResult<bool> {
+    if !supports(adapter) {
+        return Ok(false);
+    }
+    serialized(db, adapter.platform_id(), async {
+        let current = super::channel_bot_service::get_bot(db, &bot.id).await?;
+        if !current.is_active || current.connection_id != bot.connection_id {
+            return Err(AppError::Conflict("Channel connection changed during webhook setup".into()));
+        }
+        let result = configure_inner(db, billing, keys, http, adapter, &current, base_url).await;
+        if result.is_err() && billing.billing_enabled() && current.platform == "x" {
+            super::channel_credentials::fail_bot(db, &current,
+                "Webhook or billing setup needs attention. Restore credits and configuration, then select Verify.").await?;
+        }
+        result
+    }).await
+}
+
+async fn configure_inner(
+    db: &mongodb::Database,
+    billing: &super::billing::BillingService,
     keys: &EncryptionKeys,
     http: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
@@ -59,6 +86,11 @@ pub async fn configure(
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
     if !adapter.connection_webhook_configured(&platform) {
+        if billing.billing_enabled() && adapter.platform_id() == "x" {
+            return Err(AppError::BillingNotConfigured(
+                "Paid X channels require the platform webhook credentials".into(),
+            ));
+        }
         if bot.webhook_registered {
             return Err(AppError::ValidationError(
                 "Restore the platform webhook credentials to verify this connection".into(),
@@ -66,16 +98,28 @@ pub async fn configure(
         }
         return Ok(false);
     }
-    serialized(db, adapter.platform_id(), async {
+    async {
         let current = super::channel_bot_service::get_bot(db, &bot.id).await?;
         if !current.is_active || current.connection_id != bot.connection_id {
             return Err(AppError::Conflict("Channel connection changed during webhook setup".into()));
         }
         let token = super::channel_credentials::resolve_bot_token(db, keys, adapter, &current).await?;
+        if let Some(meter) = super::channel_billing_service::ChannelBilling::for_bot(db, billing, &current, None) {
+            meter.admit().await?;
+        }
         let credentials = BotCredentials {
+            billing: None,
             token: &token, platform_bot_id: Some(&current.platform_bot_id), platform_secrets: Some(&platform),
         };
         let url = format!("{}/api/v1/webhooks/channel/{}/platform", base_url.trim_end_matches('/'), adapter.platform_id());
+        if billing.billing_enabled() {
+            // Record a possible remote subscription before the provider effect,
+            // so failed/partial setup remains eligible for cleanup retry.
+            db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+                doc! {"_id": &current.id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},
+                doc! {"$set": {"webhook_registered": true}},
+            ).await?;
+        }
         adapter.setup_connection_webhook(http, &credentials, &current.id, &url).await?;
         let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
             doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},
@@ -90,7 +134,38 @@ pub async fn configure(
             return Err(AppError::Conflict("Channel connection changed during webhook setup; retry".into()));
         }
         Ok(true)
-    }).await
+    }.await
+}
+
+/// Recheck failure while holding the same lease as Verify. A recovered channel
+/// must never lose the subscription that Verify has just restored.
+pub async fn remove_failed(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    serialized(db, adapter.platform_id(), async {
+        let current = super::channel_bot_service::get_bot(db, &bot.id).await?;
+        if current.status != "failed" || !current.webhook_registered {
+            return Ok(());
+        }
+        let descriptor = adapter
+            .platform_credentials()
+            .ok_or_else(super::channel_managed::unavailable)?;
+        let platform =
+            super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
+        adapter
+            .remove_connection_webhook(http, &platform, &current.id)
+            .await?;
+        db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+            doc! {"_id": &current.id, "status": "failed", "connection_id": &current.connection_id},
+            doc! {"$set": {"webhook_registered": false}},
+        ).await?;
+        Ok(())
+    })
+    .await
 }
 
 pub async fn remove(

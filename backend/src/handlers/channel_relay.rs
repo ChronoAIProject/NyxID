@@ -992,6 +992,12 @@ async fn deliver_initiated_message(
         None
     };
 
+    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        bot,
+        auth_user.api_key_id.as_deref(),
+    );
     let send_result = async {
         let attachments = channel_media_service::materialize(
             &body.message.attachments,
@@ -1022,6 +1028,7 @@ async fn deliver_initiated_message(
             .send_reply(
                 &state.http_client,
                 &crate::services::channel_platform::BotCredentials {
+                    billing: billing.as_ref(),
                     token: &token,
                     platform_bot_id: Some(&bot.platform_bot_id),
                     platform_secrets: platform_secrets.as_ref(),
@@ -1040,7 +1047,22 @@ async fn deliver_initiated_message(
     let platform_message_id = match send_result {
         Ok(id) => id,
         Err(error) => {
-            if let Some(claim) = &claim {
+            if crate::services::channel_billing_service::blocks_channel(&error)
+                && crate::services::channel_billing_service::suspend(
+                    &crate::services::channel_inbound_service::InboundDeps::from(state),
+                    bot,
+                    adapter,
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
+            }
+            if let Some(claim) = &claim
+                && !billing
+                    .as_ref()
+                    .is_some_and(|context| context.has_forwarded())
+            {
                 channel_send_service::release_send(&state.db, claim).await?;
             }
             return Err(error);
@@ -1252,6 +1274,12 @@ async fn deliver_async_reply(
     } else {
         None
     };
+    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        Some(&attributed_api_key_id),
+    );
     let platform_msg_id = adapter
         .send_bound_reply(
             &state.db,
@@ -1259,6 +1287,7 @@ async fn deliver_async_reply(
             &bot,
             &original,
             &crate::services::channel_platform::BotCredentials {
+                billing: billing.as_ref(),
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: platform_secrets.as_ref(),
@@ -1460,6 +1489,7 @@ async fn edit_resolved_reply(
         .edit_reply(
             &state.http_client,
             &crate::services::channel_platform::BotCredentials {
+                billing: None,
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: platform_secrets.as_ref(),
@@ -1587,6 +1617,7 @@ async fn fetch_resolved_attachment(
         .fetch_attachment(
             &state.http_client,
             &crate::services::channel_platform::BotCredentials {
+                billing: None,
                 token: &token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: secrets.as_ref(),

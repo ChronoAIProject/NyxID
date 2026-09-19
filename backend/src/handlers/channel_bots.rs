@@ -964,10 +964,17 @@ pub async fn verify_bot(
         None
     };
 
+    let channel_billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        auth_user.api_key_id.as_deref(),
+    );
     adapter
         .verify_bot_token(
             &state.http_client,
             &BotCredentials {
+                billing: channel_billing.as_ref(),
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: platform_secrets.as_ref(),
@@ -978,6 +985,7 @@ pub async fn verify_bot(
     if bot.credential_source == "connection"
         && crate::services::channel_connection_webhook_service::configure(
             &state.db,
+            &state.billing,
             &state.encryption_keys,
             &state.http_client,
             adapter.as_ref(),

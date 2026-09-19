@@ -31,6 +31,7 @@ pub mod catalog_spec_registry;
 pub mod catalog_spec_sync;
 pub mod chain_verify_service;
 pub mod channel_adapters;
+pub mod channel_billing_service;
 pub mod channel_bot_service;
 pub mod channel_connection_webhook_service;
 pub mod channel_credentials;

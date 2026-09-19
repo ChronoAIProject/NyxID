@@ -88,6 +88,7 @@ async fn maybe_rebuild_bot_token(
         .verify_bot_token(
             http_client,
             &BotCredentials {
+                billing: None,
                 token: &token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: None,
@@ -177,6 +178,7 @@ pub async fn create_bot(
         .verify_bot_token(
             http_client,
             &BotCredentials {
+                billing: None,
                 token: &effective_token,
                 platform_bot_id: descriptor.identity(fields),
                 platform_secrets: None,
@@ -336,6 +338,7 @@ async fn persist_verified_bot(
 #[allow(clippy::too_many_arguments)]
 pub async fn create_managed_bot(
     db: &mongodb::Database,
+    billing: &super::billing::BillingService,
     config: &AppConfig,
     keys: &EncryptionKeys,
     http: &reqwest::Client,
@@ -388,13 +391,23 @@ pub async fn create_managed_bot(
             required_scopes,
         )
         .await?;
-        progress.stage("verifying");
-        let identity = adapter
-            .verify_bot_token(http, &BotCredentials::from(token.as_str()))
-            .await?;
         let platform =
             super::platform_credential_service::load_decrypted(db, keys, &credential_descriptor)
                 .await?;
+        if !adapter.connection_webhook_configured(&platform) {
+            super::channel_billing_service::require_webhooks(config, adapter.platform_id())?;
+        }
+        progress.stage("verifying");
+        let channel_billing = super::channel_billing_service::ChannelBilling::for_owner(
+            db,
+            billing,
+            adapter.platform_id(),
+            owner,
+            None,
+        );
+        let mut credentials = BotCredentials::from(token.as_str());
+        credentials.billing = channel_billing.as_ref();
+        let identity = adapter.verify_bot_token(http, &credentials).await?;
         let outcome = if adapter.connection_webhook_configured(&platform) {
             super::channel_platform::PollOutcome {
                 messages: vec![],
@@ -403,10 +416,12 @@ pub async fn create_managed_bot(
                 notice: None,
             }
         } else {
+            super::channel_billing_service::require_webhooks(config, adapter.platform_id())?;
             let outcome = adapter
                 .poll_inbound(
                     http,
                     &BotCredentials {
+                        billing: None,
                         token: &token,
                         platform_bot_id: Some(&identity.platform_bot_id),
                         platform_secrets: None,
@@ -439,6 +454,7 @@ pub async fn create_managed_bot(
         progress.stage("subscribing");
         if super::channel_connection_webhook_service::configure(
             db,
+            billing,
             keys,
             http,
             adapter,
@@ -447,10 +463,11 @@ pub async fn create_managed_bot(
         )
         .await
         .is_err()
+            && !billing.billing_enabled()
         {
             db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
-                doc! {"_id": &created.bot.id, "is_active": true, "status": "active"},
-                doc! {"$set": {"error": "Webhook setup did not complete. Polling remains enabled; select Verify to retry webhook setup."}},
+                    doc! {"_id": &created.bot.id, "is_active": true, "status": "active"},
+                    doc! {"$set": {"error": "Webhook setup did not complete. Polling remains enabled; select Verify to retry webhook setup."}},
             ).await?;
         }
         return Ok(CreateBotResult {
@@ -493,6 +510,7 @@ pub async fn create_managed_bot(
         created.bot.id
     );
     let credentials = BotCredentials {
+        billing: None,
         token: &result.token,
         platform_bot_id: Some(&created.bot.platform_bot_id),
         platform_secrets: Some(&platform),
@@ -608,6 +626,24 @@ pub async fn store_managed_setup(
 
 pub async fn reconnect_bot(
     db: &mongodb::Database,
+    billing: &super::billing::BillingService,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    connection_id: &str,
+) -> AppResult<()> {
+    super::channel_connection_webhook_service::serialized(
+        db,
+        adapter.platform_id(),
+        reconnect_bot_inner(db, billing, keys, http, adapter, bot, connection_id),
+    )
+    .await
+}
+
+async fn reconnect_bot_inner(
+    db: &mongodb::Database,
+    billing: &super::billing::BillingService,
     keys: &EncryptionKeys,
     http: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
@@ -633,46 +669,50 @@ pub async fn reconnect_bot(
         required_scopes,
     )
     .await?;
-    let identity = adapter
-        .verify_bot_token(http, &BotCredentials::from(token.as_str()))
-        .await?;
+    let channel_billing =
+        super::channel_billing_service::ChannelBilling::for_bot(db, billing, bot, None);
+    let mut credentials = BotCredentials::from(token.as_str());
+    credentials.billing = channel_billing.as_ref();
+    let identity = adapter.verify_bot_token(http, &credentials).await?;
     if identity.platform_bot_id != bot.platform_bot_id {
         return Err(AppError::ValidationError(
             "Reconnect the same platform account to preserve its conversation routes".to_string(),
         ));
     }
-    let (cursor, backoff, last_polled_at) = if bot.webhook_registered {
-        (
-            bot.poll_cursor.clone(),
-            None,
-            bot.last_polled_at.map(bson::DateTime::from_chrono),
-        )
-    } else if let Some(cursor) = &bot.poll_cursor {
-        // Resume from the last committed event so DMs received during failure remain eligible.
-        (
-            Some(cursor.clone()),
-            None,
-            bot.last_polled_at.map(bson::DateTime::from_chrono),
-        )
-    } else {
-        let outcome = adapter
-            .poll_inbound(
-                http,
-                &BotCredentials {
-                    token: &token,
-                    platform_bot_id: Some(&identity.platform_bot_id),
-                    platform_secrets: None,
-                },
+    let (cursor, backoff, last_polled_at) =
+        if bot.webhook_registered || (billing.billing_enabled() && bot.platform == "x") {
+            (
+                bot.poll_cursor.clone(),
                 None,
+                bot.last_polled_at.map(bson::DateTime::from_chrono),
             )
-            .await?;
-        let cursor = outcome.cursor.ok_or_else(|| {
-            AppError::ChannelPlatformError(
-                "Initial channel poll was rate limited; retry later".to_string(),
+        } else if let Some(cursor) = &bot.poll_cursor {
+            // Resume from the last committed event so DMs received during failure remain eligible.
+            (
+                Some(cursor.clone()),
+                None,
+                bot.last_polled_at.map(bson::DateTime::from_chrono),
             )
-        })?;
-        (Some(cursor), outcome.backoff, Some(bson::DateTime::now()))
-    };
+        } else {
+            let outcome = adapter
+                .poll_inbound(
+                    http,
+                    &BotCredentials {
+                        billing: None,
+                        token: &token,
+                        platform_bot_id: Some(&identity.platform_bot_id),
+                        platform_secrets: None,
+                    },
+                    None,
+                )
+                .await?;
+            let cursor = outcome.cursor.ok_or_else(|| {
+                AppError::ChannelPlatformError(
+                    "Initial channel poll was rate limited; retry later".to_string(),
+                )
+            })?;
+            (Some(cursor), outcome.backoff, Some(bson::DateTime::now()))
+        };
     let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
         doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true, "connection_id": &bot.connection_id, "poll_cursor": &bot.poll_cursor, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
         doc! { "$set": {
@@ -721,6 +761,7 @@ pub async fn reregister_managed_bot(
     let pin = std::str::from_utf8(&pin_bytes)
         .map_err(|_| AppError::Internal("Invalid registration PIN encoding".to_string()))?;
     let credentials = BotCredentials {
+        billing: None,
         token: &token,
         platform_bot_id: Some(&bot.platform_bot_id),
         platform_secrets: Some(&platform),
@@ -772,6 +813,7 @@ pub async fn repair_managed_bot(
     let pin = std::str::from_utf8(&pin)
         .map_err(|_| AppError::Internal("Invalid registration PIN encoding".to_string()))?;
     let credentials = BotCredentials {
+        billing: None,
         token: &token,
         platform_bot_id: Some(&bot.platform_bot_id),
         platform_secrets: Some(&platform),
@@ -1272,6 +1314,7 @@ async fn cleanup_managed_webhook(
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
     let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
     let credentials = BotCredentials {
+        billing: None,
         token: &token,
         platform_bot_id: Some(&bot.platform_bot_id),
         platform_secrets: Some(&platform),
@@ -1302,6 +1345,7 @@ pub async fn verify_serialized_bot(
             .verify_bot_token(
                 http,
                 &BotCredentials {
+                    billing: None,
                     token: &token,
                     platform_bot_id: Some(&bot.platform_bot_id),
                     platform_secrets: None,

@@ -92,6 +92,11 @@ pub(crate) async fn poll_bot(
         return Ok(());
     };
 
+    if super::channel_billing_service::require_webhooks(&state.config, &bot.platform).is_err() {
+        super::channel_credentials::fail_bot(&state.db, &bot, "Paid X channels require webhook delivery. Configure webhook credentials and select Verify.").await?;
+        return Ok(());
+    }
+
     let work = async {
         let token = super::channel_credentials::resolve_bot_token(
             &state.db,
@@ -101,6 +106,7 @@ pub(crate) async fn poll_bot(
         )
         .await?;
         let credentials = BotCredentials {
+            billing: None,
             token: &token,
             platform_bot_id: Some(&bot.platform_bot_id),
             platform_secrets: None,

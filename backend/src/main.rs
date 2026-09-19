@@ -1136,18 +1136,31 @@ async fn main() {
         });
     }
 
-    if config.channel_poll_interval_secs > 0 {
+    if config.channel_poll_interval_secs > 0 || config.billing_enabled {
         let poll_state = state.clone();
-        let poll_interval = config.channel_poll_interval_secs;
+        let poll_interval = if config.channel_poll_interval_secs > 0 {
+            config.channel_poll_interval_secs
+        } else {
+            60
+        };
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
             loop {
                 interval.tick().await;
-                if services::channel_poll_service::sweep(&poll_state)
+                if services::channel_billing_service::sweep(&poll_state)
                     .await
                     .is_err()
+                {
+                    tracing::warn!(
+                        "Channel subscription cleanup failed; retrying on the next tick"
+                    );
+                }
+                if poll_state.config.channel_poll_interval_secs > 0
+                    && services::channel_poll_service::sweep(&poll_state)
+                        .await
+                        .is_err()
                 {
                     tracing::warn!("Channel poll sweep failed; retrying on the next tick");
                 }

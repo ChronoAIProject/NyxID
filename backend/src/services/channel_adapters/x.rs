@@ -412,15 +412,21 @@ impl PlatformAdapter for XAdapter {
         http: &reqwest::Client,
         credentials: &BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
-        let body = response_json(
-            send(
-                http.get(format!("{}/2/users/me", base(self, credentials)))
-                    .query(&[("user.fields", "username,name")])
-                    .bearer_auth(credentials.token),
-            )
-            .await?,
-        )
-        .await?;
+        let request = http
+            .get(format!("{}/2/users/me", base(self, credentials)))
+            .query(&[("user.fields", "username,name")])
+            .bearer_auth(credentials.token);
+        let response = match credentials.billing {
+            Some(billing) => billing.verify_account(request).await?,
+            #[cfg(test)]
+            None if self.api_base.is_some() => send(request).await?,
+            None => {
+                return Err(AppError::BillingNotConfigured(
+                    "X account verification is missing its billing context".into(),
+                ));
+            }
+        };
+        let body = response_json(response).await?;
         let id = body["data"]["id"]
             .as_str()
             .filter(|id| numeric_id(id))
@@ -592,6 +598,9 @@ impl PlatformAdapter for XAdapter {
             ));
         }
         if !reply.attachments.is_empty() {
+            if let Some(billing) = credentials.billing {
+                billing.admit().await?;
+            }
             if reply.text.as_deref().is_some_and(|s| !s.is_empty())
                 || reply
                     .metadata
@@ -678,18 +687,24 @@ impl PlatformAdapter for XAdapter {
         }
         let mut last = None;
         for body in reply_bodies(reply)? {
-            let response = send_response_json(
-                send(
-                    http.post(format!(
-                        "{}/2/dm_conversations/{conversation_id}/messages",
-                        base(self, credentials)
-                    ))
-                    .bearer_auth(credentials.token)
-                    .json(&body),
-                )
-                .await?,
-            )
-            .await?;
+            let request = http
+                .post(format!(
+                    "{}/2/dm_conversations/{conversation_id}/messages",
+                    base(self, credentials)
+                ))
+                .bearer_auth(credentials.token)
+                .json(&body);
+            let response = match credentials.billing {
+                Some(billing) => billing.send(request).await?,
+                #[cfg(test)]
+                None if self.api_base.is_some() => send(request).await?,
+                None => {
+                    return Err(AppError::BillingNotConfigured(
+                        "X channel send is missing its billing context".into(),
+                    ));
+                }
+            };
+            let response = send_response_json(response).await?;
             last = Some(
                 response["data"]["dm_event_id"]
                     .as_str()
@@ -777,6 +792,10 @@ impl PlatformAdapter for XAdapter {
         if webhooks::target(body)?.as_deref() != Some(bot.platform_bot_id.as_str()) {
             return Err(webhooks::verification_error());
         }
+        let envelope: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
+        if envelope["data"]["tag"].as_str() != Some(format!("nyxid:{}", bot.id).as_str()) {
+            return Err(webhooks::verification_error());
+        }
         Ok(())
     }
 
@@ -805,6 +824,7 @@ mod tests {
 
     fn credentials() -> BotCredentials<'static> {
         BotCredentials {
+            billing: None,
             token: "private-test-token",
             platform_bot_id: Some("10"),
             platform_secrets: None,

@@ -522,7 +522,7 @@ mod tests {
             }).await.unwrap();
         let payload = |id: &str, target: &str, recipient: &str| {
             serde_json::to_vec(&serde_json::json!({
-            "data": {"event_type": "dm.received", "filter": {"user_id": target}, "payload": {
+            "data": {"event_type": "dm.received", "tag": format!("nyxid:{bot_id}"), "filter": {"user_id": target}, "payload": {
                 "direct_message_events": [{"id": id, "type": "message_create", "message_create": {
                     "sender_id": "2", "target": {"recipient_id": recipient},
                     "message_data": {"text": "private webhook message"}
@@ -563,6 +563,13 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let mut stale: serde_json::Value =
+            serde_json::from_slice(&payload("505", "10", "10")).unwrap();
+        stale["data"]["tag"] = serde_json::json!("nyxid:previous-channel");
+        let stale = serde_json::to_vec(&stale).unwrap();
+        dispatch_platform_webhook(&state, "x", &sign(&stale), &stale)
+            .await
+            .unwrap();
         assert_eq!(received.lock().await.len(), 1);
         assert!(
             received.lock().await[0]
@@ -1238,6 +1245,10 @@ mod tests {
         let deps = WebhookHandlerDeps {
             db: &db,
             config: &config,
+            billing: &crate::services::billing::BillingService::new(
+                db.clone(),
+                std::sync::Arc::new(config.clone()),
+            ),
             jwt_keys: &jwt_keys,
             http_client: &http_client,
             encryption_keys: &encryption_keys,
