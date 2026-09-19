@@ -87,8 +87,8 @@ export function useDeleteChannelBot() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (id: string): Promise<void> => {
-      return api.delete<void>(`/channel-bots/${id}`);
+    mutationFn: async (id: string): Promise<{ webhook_cleanup?: string } | undefined> => {
+      return api.delete<{ webhook_cleanup?: string } | undefined>(`/channel-bots/${id}`);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });

@@ -1,5 +1,7 @@
 # API Discovery and Catalog
 
+Admin service creation, provider linking, and legacy vendor retirement are documented in [SERVICE_CONFIGURATION.md](SERVICE_CONFIGURATION.md).
+
 NyxID now documents both its own API surface and the downstream APIs it proxies. This guide shows where those documents live, how downstream specs are discovered, and how to test everything through NyxID instead of talking to services directly.
 
 ---
@@ -212,6 +214,12 @@ credential provisioning.
 4. Enrich the service with metadata: `homepage_url`, `repository_url`, `capabilities`, `auth_notes`, `known_limitations`, `required_permissions` so AI agents can discover the service fully.
 5. Share `GET /api/v1/proxy/services/{service_id}/docs` with internal consumers so they test through NyxID instead of bypassing it.
 
+
+## Catalog recommendation curation
+
+Catalog responses add optional `recommended_skill_refs`, `skills_revision`, and a separate versioned `skills_manifest_digest`. MCP keeps the existing name-based `catalog_digest` construction; exact-ref changes are discoverable through the new manifest digest. An instance's `recommended_skills` override suppresses inherited refs, even for an empty override.
+
+A dedicated protected Curation service account uses `/api/v1/catalog-curation/services` for grant-scoped discovery and `/services/{id}/skills`, `/skills/history`, and `/skills/restore` for conditional recommendation management. It cannot use unrestricted catalog or service-management routes. Human service editing shares the same revision/history transaction and must send the observed skill revision; omitted legacy revision means zero. See [Service accounts: catalog skill curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for grant administration, request examples, no-op/replay semantics, rollout ordering, and the Ornn package-content boundary.
 ## Inference and platform-key discovery (0.20)
 
 Catalog list, `?include_all=true`, single-entry lookup and MCP
@@ -264,3 +272,29 @@ stored, defaulted tombstone and is not a client inference capability. Admin cata
 responses additionally expose `legacy_public_master`; editors render such absent
 platform configurations as enabled/public (implicit). Gateway-URL providers never
 advertise an available platform key.
+
+## Aurinko email operations
+
+The `api-aurinko` catalog entry uses the `aurinko` hosted overlay and seeds fifteen concrete operations from documented Aurinko account/email/draft/sync contracts. The base is `https://api.aurinko.io`; paths include `/v1`. Authentication is the owner's account Bearer token. Writes carry approval/risk annotations and do not claim upstream idempotency. Aurinko publishes a machine-readable OpenAPI specification and is included in the existing drift map. See [Aurinko integration](./AURINKO_INTEGRATION.md) for connection, permissions, and channel setup.
+
+### Duplicate operation identities
+
+Dynamic (instance-mounted) specs derive each MCP endpoint identity from the
+producer's `operationId`. Producers do publish repeated `operationId`s
+(api.jina.ai did in September 2026). Operations that share an `operationId`
+fall back to their method/path identity, repeated tool names get a numeric
+suffix (`name_2`, `name_3`), and an operation whose identity still collides is
+dropped. Separately, the operation catalog omits any single service whose
+service or endpoint identities are missing or repeated and counts it in
+`invalid_contract_services`, instead of failing `tools/list`, `nyx__call_tool`
+and `/api/v1/mcp/config` for the whole user.
+
+### Tool search semantics
+
+`nyx__search_tools` splits the query on non-alphanumeric characters and matches
+each word as a case-insensitive substring of the qualified tool name
+(`<slug>__<operation>`), the service name and the description. Tools containing
+every word rank first, then partial matches in catalog order, capped at 25. Word
+order is irrelevant, so "skill search" and "search skills" both find
+`ornn-api__searchskills`, and concatenated operation names such as
+`getentitystate` match "entity state". An empty query lists the first 25 tools.

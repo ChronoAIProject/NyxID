@@ -1,4 +1,9 @@
-import { inferenceMetadataSchema, platformKeyConfigSchema, lanePricingViewSchema } from "./platform-keys";
+import { BILLING_METRICS, unitPriceSchema } from "./billing-metrics";
+import {
+  inferenceMetadataSchema,
+  platformKeyConfigSchema,
+  lanePricingInputSchema,
+} from "./platform-keys";
 import { z } from "zod";
 import { isValidHttpUrl } from "./http-url";
 import {
@@ -25,6 +30,7 @@ export const AUTH_TYPES = [
   "basic",
   "bearer",
   "bot_bearer",
+  "ifttt_webhook",
   "body",
   "path",
   "oidc",
@@ -150,9 +156,73 @@ function applySshFieldValidation(
   }
 }
 
+export const proxyOperationPolicySchema = z.object({
+  rules: z
+    .array(
+      z.object({
+        method: z.enum([
+          "GET",
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE",
+          "HEAD",
+          "OPTIONS",
+        ]),
+        path_template: z
+          .string()
+          .refine(
+            (path) => new TextEncoder().encode(path).length <= 2048,
+            "Path must be at most 2048 bytes",
+          )
+          .refine((path) => {
+            if (
+              !path.startsWith("/") ||
+              /[%?#\\]/.test(path) ||
+              Array.from(path).some(
+                (char) =>
+                  char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127,
+              ) ||
+              path.includes("//")
+            )
+              return false;
+            if (path === "/") return true;
+            return path
+              .slice(1)
+              .split("/")
+              .every(
+                (part) =>
+                  part !== "" &&
+                  part !== "." &&
+                  part !== ".." &&
+                  (/^\{[A-Za-z0-9_]+\}$/.test(part) ||
+                    !Array.from(part).some((char) =>
+                      "{}*[]()|".includes(char),
+                    )),
+              );
+          }, "Use an absolute path with optional {parameter} segments; wildcards and query strings are not allowed"),
+      }),
+    )
+    .max(256),
+});
+export type ProxyOperationPolicy = z.infer<typeof proxyOperationPolicySchema>;
+
+const sharedServiceFields = {
+  inference: inferenceMetadataSchema.nullish(),
+  platform_key: platformKeyConfigSchema.optional(),
+  credential: z.string().optional(),
+  byok_pricing: lanePricingInputSchema.nullish(),
+  platform_key_pricing: lanePricingInputSchema.nullish(),
+  proxy_operation_policy: proxyOperationPolicySchema.nullish(),
+};
+export const sharedServiceSchema = z.object(sharedServiceFields);
+export type SharedServiceFormData = z.infer<typeof sharedServiceSchema>;
+
 // CR-6: Aligned with backend max length of 200 characters
 export const createServiceSchema = z
   .object({
+    ...sharedServiceFields,
+    provider_config_id: z.string().optional(),
     name: z
       .string()
       .min(1, "Name is required")
@@ -167,7 +237,6 @@ export const createServiceSchema = z
     auth_type: z.enum(AUTH_TYPES).optional(),
     /// JSON body key for `body` auth. Required when `auth_type === "body"`.
     auth_key_name: optionalString,
-    credential: optionalString,
     service_category: z.enum(SERVICE_CATEGORIES).optional(),
     host: optionalString,
     port: optionalString,
@@ -201,7 +270,11 @@ export const createServiceSchema = z
         });
       }
 
-      if (value.credential && value.service_category !== "internal") {
+      if (
+        value.credential &&
+        !value.platform_key &&
+        value.service_category !== "internal"
+      ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["service_category"],
@@ -263,9 +336,7 @@ export const wsFrameTriggerSchema = z.union([
 
 export const wsFrameInjectionSchema = z.object({
   trigger: wsFrameTriggerSchema,
-  template: z
-    .string()
-    .max(4096, "Template must be at most 4096 characters"),
+  template: z.string().max(4096, "Template must be at most 4096 characters"),
   frame_kind: z.enum(["text", "binary"]),
   consume_trigger: z.boolean(),
   direction: z.enum(["downstream", "upstream"]),
@@ -280,11 +351,7 @@ export type WsFrameInjection = z.infer<typeof wsFrameInjectionSchema>;
 
 export const updateServiceSchema = z
   .object({
-    inference: inferenceMetadataSchema.nullish(),
-    platform_key: platformKeyConfigSchema.optional(),
-    credential: z.string().optional(),
-    byok_pricing: lanePricingViewSchema.nullish(),
-    platform_key_pricing: lanePricingViewSchema.nullish(),
+    ...sharedServiceFields,
     service_type: z.enum(SERVICE_TYPES),
     visibility: z.enum(VISIBILITY_OPTIONS).optional(),
     name: z
@@ -317,18 +384,7 @@ export const updateServiceSchema = z
     platform_billable: z.boolean().optional(),
     platform_charge_nyxid_credentials_only: z.boolean().optional(),
     platform_metric: z.enum(["auto", "tokens", "requests", "bytes"]).optional(),
-    platform_price: z
-      .string()
-      .trim()
-      .refine(
-        (value) => value === "" || /^\d+(?:\.\d{1,6})?$/.test(value),
-        "Use a non-negative decimal with at most 6 decimal places",
-      )
-      .refine(
-        (value) => value === "" || Number(value) <= 1_000_000,
-        "Price must not exceed 1,000,000 credits per unit",
-      )
-      .optional(),
+    platform_price: z.union([unitPriceSchema, z.literal("")]).optional(),
     delegation_token_scope: z
       .string()
       .max(200, "Scope must be at most 200 characters")
@@ -343,22 +399,54 @@ export const updateServiceSchema = z
       .optional()
       .or(z.literal("")),
     // Rich metadata
-    homepage_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
-    repository_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
-    issues_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
-    auth_notes: z.string().max(4096, "Must be at most 4096 characters").optional().or(z.literal("")),
-    known_limitations: z.string().max(4096, "Must be at most 4096 characters").optional().or(z.literal("")),
+    homepage_url: z
+      .string()
+      .refine(isValidHttpUrl, "Must be a valid URL")
+      .optional()
+      .or(z.literal("")),
+    repository_url: z
+      .string()
+      .refine(isValidHttpUrl, "Must be a valid URL")
+      .optional()
+      .or(z.literal("")),
+    issues_url: z
+      .string()
+      .refine(isValidHttpUrl, "Must be a valid URL")
+      .optional()
+      .or(z.literal("")),
+    auth_notes: z
+      .string()
+      .max(4096, "Must be at most 4096 characters")
+      .optional()
+      .or(z.literal("")),
+    known_limitations: z
+      .string()
+      .max(4096, "Must be at most 4096 characters")
+      .optional()
+      .or(z.literal("")),
     required_permissions: z
       .string()
       .max(2000, "Must be at most 2000 characters")
       .refine((v) => {
-        const entries = v.split(/[,\n]/).map((e) => e.trim()).filter(Boolean);
+        const entries = v
+          .split(/[,\n]/)
+          .map((e) => e.trim())
+          .filter(Boolean);
         return entries.length <= 100 && entries.every((e) => e.length <= 256);
       }, "At most 100 permissions, each at most 256 characters")
       .optional()
       .or(z.literal("")),
-    examples_url: z.string().refine(isValidHttpUrl, "Must be a valid URL").optional().or(z.literal("")),
-    recommended_skills: z.string().max(2000, "Must be at most 2000 characters").optional().or(z.literal("")),
+    examples_url: z
+      .string()
+      .refine(isValidHttpUrl, "Must be a valid URL")
+      .optional()
+      .or(z.literal("")),
+    recommended_skills: z
+      .string()
+      .max(2000, "Must be at most 2000 characters")
+      .optional()
+      .or(z.literal("")),
+    clear_skill_refs: z.boolean().optional(),
     // Developer app scoping (admin-only, private services)
     developer_app_ids: z.array(z.string()).optional(),
     supports_proxy_read: z.boolean().optional(),
@@ -370,6 +458,7 @@ export const updateServiceSchema = z
     supports_streaming: z.boolean().optional(),
     host: optionalString,
     port: optionalString,
+    ssh_auth_mode: sshAuthModeSchema.optional(),
     certificate_auth_enabled: z.boolean().optional(),
     certificate_ttl_minutes: optionalString,
     allowed_principals: optionalString,
@@ -401,7 +490,9 @@ export const updateServiceSchema = z
       {
         host: value.host,
         port: value.port,
-        certificate_auth_enabled: value.certificate_auth_enabled,
+        certificate_auth_enabled: value.ssh_auth_mode
+          ? value.ssh_auth_mode === "cert"
+          : value.certificate_auth_enabled,
         certificate_ttl_minutes: value.certificate_ttl_minutes,
         allowed_principals: value.allowed_principals,
       },
@@ -410,6 +501,11 @@ export const updateServiceSchema = z
   });
 
 export type UpdateServiceFormData = z.infer<typeof updateServiceSchema>;
+
+/** Computed admin allowance units; older replicas may omit the list. */
+export const serviceResponseAllowanceMetricsSchema = z.object({
+  allowance_metrics: z.array(z.enum(BILLING_METRICS)).optional(),
+});
 
 /**
  * Shape fragment for NyxID#356 on `ServiceResponse` / `DownstreamService`

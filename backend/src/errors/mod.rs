@@ -60,6 +60,8 @@ pub struct ErrorResponse {
     pub details: Option<serde_json::Value>,
 }
 
+// Retired error codes 11800 and 11801 are reserved; never reuse them.
+
 /// Application-level error variants.
 /// Each variant maps to a specific HTTP status code and error payload.
 #[derive(Debug, thiserror::Error)]
@@ -69,12 +71,6 @@ pub enum AppError {
 
     #[error("{context} request body exceeds the configured limit of {max_bytes} bytes")]
     RequestBodyTooLarge { max_bytes: usize, context: String },
-
-    #[error("Platform operation vendor is unavailable")]
-    PlatformOperationUnavailable,
-
-    #[error("{0}")]
-    PlatformVendorProvisioningInvalid(String),
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
@@ -87,6 +83,9 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error("A turn is already active in this conversation")]
+    AssistantTurnActive,
 
     #[error("Grant cascade confirmation required")]
     GrantCascadeConfirmationRequired(Box<GrantCascadePayload>),
@@ -481,6 +480,9 @@ pub enum AppError {
     #[error("Organization membership query timed out")]
     OrgQueryTimeout,
 
+    #[error("Usage query timed out; select a shorter window or narrower filters and retry")]
+    AdminUsageQueryTimeout,
+
     #[error("Organization not found: {0}")]
     OrgNotFound(String),
 
@@ -603,14 +605,13 @@ impl AppError {
         match self {
             Self::BadRequest(_) | Self::ValidationError(_) => StatusCode::BAD_REQUEST,
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::PlatformOperationUnavailable => StatusCode::BAD_GATEWAY,
-            Self::PlatformVendorProvisioningInvalid(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
+            Self::AssistantTurnActive => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
@@ -736,7 +737,7 @@ impl AppError {
             Self::ChannelConversationNotAddressable => StatusCode::BAD_REQUEST,
             Self::ChannelAgentInitiateNotAllowed => StatusCode::FORBIDDEN,
             Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
-            Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
+            Self::OrgQueryTimeout | Self::AdminUsageQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
             Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
             Self::OrgSlugTaken(_) => StatusCode::CONFLICT,
             Self::OrgMembershipRequired => StatusCode::FORBIDDEN,
@@ -784,12 +785,11 @@ impl AppError {
         match self {
             Self::BadRequest(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
-            Self::PlatformOperationUnavailable => 11800,
-            Self::PlatformVendorProvisioningInvalid(_) => 11801,
             Self::Unauthorized(_) => 1001,
             Self::Forbidden(_) => 1002,
             Self::NotFound(_) => 1003,
             Self::Conflict(_) => 1004,
+            Self::AssistantTurnActive => 12100,
             Self::RateLimited => 1005,
             Self::Internal(_) => 1006,
             Self::DatabaseError(_) => 1007,
@@ -926,6 +926,7 @@ impl AppError {
             Self::ChannelAgentInitiateNotAllowed => 10008,
             Self::OrgCannotAuthenticate => 1403,
             Self::OrgQueryTimeout => 8100,
+            Self::AdminUsageQueryTimeout => 12200,
             Self::OrgNotFound(_) => 8101,
             Self::OrgSlugTaken(_) => 8107,
             Self::OrgMembershipRequired => 8102,
@@ -1006,12 +1007,11 @@ impl AppError {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
-            Self::PlatformOperationUnavailable => "platform_operation_unavailable",
-            Self::PlatformVendorProvisioningInvalid(_) => "platform_vendor_provisioning_invalid",
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
+            Self::AssistantTurnActive => "turn_active",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::RateLimited => "rate_limited",
             Self::Internal(_) => "internal_error",
@@ -1151,6 +1151,7 @@ impl AppError {
             Self::ChannelAgentInitiateNotAllowed => "channel_agent_initiate_not_allowed",
             Self::OrgCannotAuthenticate => "org_cannot_authenticate",
             Self::OrgQueryTimeout => "org_query_timeout",
+            Self::AdminUsageQueryTimeout => "admin_usage_query_timeout",
             Self::OrgNotFound(_) => "org_not_found",
             Self::OrgSlugTaken(_) => "org_slug_taken",
             Self::OrgMembershipRequired => "org_membership_required",

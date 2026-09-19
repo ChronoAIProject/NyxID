@@ -40,44 +40,85 @@ pub async fn load(
     descriptor: &PlatformCredentialDescriptor,
 ) -> AppResult<Option<PlatformCredential>> {
     if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
-        let row = db
-            .collection::<crate::models::provider_config::ProviderConfig>(
-                crate::models::provider_config::COLLECTION_NAME,
+        let providers = db.collection::<crate::models::provider_config::ProviderConfig>(
+            crate::models::provider_config::COLLECTION_NAME,
+        );
+        let (row, auxiliary) = if has_auxiliary_fields(descriptor) {
+            // Keep the snapshot pinned between reads even with no retained history window.
+            let mut session = db.client().start_session().await?;
+            session
+                .start_transaction()
+                .read_concern(mongodb::options::ReadConcern::snapshot())
+                .and_run(
+                    (
+                        providers.clone(),
+                        db.collection::<PlatformCredential>(COLLECTION_NAME),
+                        provider_slug,
+                        descriptor.provider,
+                    ),
+                    |session, (providers, auxiliary, slug, provider)| {
+                        Box::pin(async move {
+                            let row = providers
+                                .find_one(doc! { "slug": *slug })
+                                .session(&mut *session)
+                                .await?;
+                            let auxiliary = auxiliary
+                                .find_one(doc! { "provider": *provider })
+                                .session(&mut *session)
+                                .await?;
+                            Ok((row, auxiliary))
+                        })
+                    },
+                )
+                .await?
+        } else {
+            (
+                providers.find_one(doc! { "slug": provider_slug }).await?,
+                None,
             )
-            .find_one(doc! { "slug": provider_slug })
-            .await?;
-        let mut extra = db
-            .collection::<PlatformCredential>(COLLECTION_NAME)
-            .find_one(doc! { "provider": descriptor.provider })
-            .await?;
-        return Ok(row.map(|row| {
-            let mut credential = extra.take().unwrap_or_else(|| PlatformCredential {
-                id: row.id.clone(),
-                provider: descriptor.provider.to_string(),
-                fields: BTreeMap::new(),
-                secrets: BTreeMap::new(),
-                updated_by: row.created_by.clone(),
-                updated_at: row.updated_at,
-            });
-            credential.secrets.remove("client_id");
-            credential.secrets.remove("client_secret");
-            for (name, bytes) in [
+        };
+        let mut projected = row.map(|row| PlatformCredential {
+            id: row.id,
+            provider: descriptor.provider.to_string(),
+            fields: BTreeMap::new(),
+            secrets: [
                 ("client_id", row.client_id_encrypted),
                 ("client_secret", row.client_secret_encrypted),
-            ] {
-                if let Some(bytes) = bytes {
-                    credential.secrets.insert(
-                        name.into(),
+            ]
+            .into_iter()
+            .filter_map(|(name, bytes)| {
+                bytes.map(|bytes| {
+                    (
+                        name.to_string(),
                         bson::Binary {
                             subtype: bson::spec::BinarySubtype::Generic,
                             bytes,
                         },
-                    );
+                    )
+                })
+            })
+            .collect(),
+            updated_by: row.created_by,
+            updated_at: row.updated_at,
+        });
+        if let Some(stored) = auxiliary
+            && let Some(projected) = projected.as_mut()
+        {
+            for field in descriptor
+                .fields
+                .iter()
+                .filter(|field| !is_oauth_field(field.name))
+            {
+                if let Some(secret) = stored.secrets.get(field.name) {
+                    projected.secrets.insert(field.name.into(), secret.clone());
                 }
             }
-            credential.updated_at = credential.updated_at.max(row.updated_at);
-            credential
-        }));
+            if stored.updated_at >= projected.updated_at {
+                projected.updated_at = stored.updated_at;
+                projected.updated_by = stored.updated_by;
+            }
+        }
+        return Ok(projected);
     }
     Ok(db
         .collection::<PlatformCredential>(COLLECTION_NAME)
@@ -133,56 +174,18 @@ pub async fn update(
     fields: &BTreeMap<String, Option<Zeroizing<String>>>,
     regenerate_verify_token: bool,
 ) -> AppResult<()> {
-    // Validate the whole patch before writing either credential backing.
-    for (name, value) in fields {
-        let field = descriptor
-            .fields
-            .iter()
-            .find(|field| field.name == name)
-            .ok_or_else(|| AppError::ValidationError("Unknown platform credential field".into()))?;
-        if let Some(value) = value {
-            let value = value.trim();
-            if value.is_empty()
-                || value.len() > 4096
-                || (field.numeric
-                    && (value.len() > 32 || !value.bytes().all(|b| b.is_ascii_digit())))
-            {
-                return Err(AppError::ValidationError(format!(
-                    "Invalid {}",
-                    field.label
-                )));
-            }
-        }
+    if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
+        return update_provider_oauth(
+            db,
+            keys,
+            descriptor,
+            provider_slug,
+            actor,
+            fields,
+            regenerate_verify_token,
+        )
+        .await;
     }
-    let stored_fields;
-    let fields =
-        if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
-            let oauth_fields = fields
-                .iter()
-                .filter(|(name, _)| matches!(name.as_str(), "client_id" | "client_secret"))
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect();
-            update_provider_oauth(
-                db,
-                keys,
-                descriptor,
-                provider_slug,
-                &oauth_fields,
-                regenerate_verify_token,
-            )
-            .await?;
-            stored_fields = fields
-                .iter()
-                .filter(|(name, _)| !matches!(name.as_str(), "client_id" | "client_secret"))
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect::<BTreeMap<_, _>>();
-            if stored_fields.is_empty() {
-                return Ok(());
-            }
-            &stored_fields
-        } else {
-            fields
-        };
     let mut set = doc! { "updated_by": actor, "updated_at": bson::DateTime::now() };
     let mut unset = doc! {};
     for (name, value) in fields {
@@ -234,7 +237,7 @@ pub async fn update(
         .is_some_and(|field| fields.get(field).is_some_and(Option::is_some));
     if regenerate_verify_token && descriptor.webhook_secret_field.is_none() {
         return Err(AppError::ValidationError(
-            "This platform does not support generating a verification token".to_string(),
+            "Platform webhooks are not supported".to_string(),
         ));
     }
     // A pipeline atomically preserves an existing verify token during rotation.
@@ -280,15 +283,30 @@ pub async fn delete(
     descriptor: &PlatformCredentialDescriptor,
 ) -> AppResult<()> {
     if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
+        if has_auxiliary_fields(descriptor) {
+            write_composite_provider(
+                db,
+                provider_slug,
+                descriptor.provider,
+                doc! {
+                    "$unset": { "client_id_encrypted": "", "client_secret_encrypted": "" },
+                    "$set": { "updated_at": bson::DateTime::now() },
+                },
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
         db.collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
             .update_one(
-                doc! { "slug": provider_slug },
+                doc! { "slug": &provider_slug },
                 doc! {
                     "$unset": { "client_id_encrypted": "", "client_secret_encrypted": "" },
                     "$set": { "updated_at": bson::DateTime::now() },
                 },
             )
             .await?;
+        return Ok(());
     }
     db.collection::<PlatformCredential>(COLLECTION_NAME)
         .delete_one(doc! { "provider": descriptor.provider })
@@ -301,25 +319,38 @@ async fn update_provider_oauth(
     keys: &EncryptionKeys,
     descriptor: &PlatformCredentialDescriptor,
     provider_slug: &str,
+    actor: &str,
     fields: &BTreeMap<String, Option<Zeroizing<String>>>,
     regenerate_verify_token: bool,
 ) -> AppResult<()> {
     if regenerate_verify_token {
         return Err(AppError::ValidationError(
-            "This platform does not support generating a verification token".to_string(),
+            "Platform webhooks are not supported".to_string(),
         ));
     }
     let mut set = doc! { "updated_at": bson::DateTime::now() };
     let mut unset = doc! {};
+    let mut auxiliary_set = doc! { "updated_by": actor, "updated_at": bson::DateTime::now() };
+    let mut auxiliary_unset = doc! {};
     for (name, value) in fields {
-        if !matches!(name.as_str(), "client_id" | "client_secret")
-            || !descriptor.fields.iter().any(|field| field.name == name)
+        if !descriptor
+            .fields
+            .iter()
+            .any(|field| field.name == name && field.secret)
         {
             return Err(AppError::ValidationError(
                 "Unknown platform credential field".to_string(),
             ));
         }
-        let path = format!("{name}_encrypted");
+        let (path, set, unset) = if is_oauth_field(name) {
+            (format!("{name}_encrypted"), &mut set, &mut unset)
+        } else {
+            (
+                format!("secrets.{name}"),
+                &mut auxiliary_set,
+                &mut auxiliary_unset,
+            )
+        };
         match value {
             Some(value) => {
                 let value = value.trim();
@@ -343,6 +374,27 @@ async fn update_provider_oauth(
     if !unset.is_empty() {
         update.insert("$unset", unset);
     }
+    if has_auxiliary_fields(descriptor) {
+        let mut auxiliary_update = doc! {
+            "$set": auxiliary_set,
+            "$setOnInsert": { "_id": uuid::Uuid::new_v4().to_string(), "provider": descriptor.provider },
+        };
+        if !auxiliary_unset.is_empty() {
+            auxiliary_update.insert("$unset", auxiliary_unset);
+        }
+        if !write_composite_provider(
+            db,
+            provider_slug,
+            descriptor.provider,
+            update,
+            Some(auxiliary_update),
+        )
+        .await?
+        {
+            return Err(AppError::NotFound("Provider is not configured".into()));
+        }
+        return Ok(());
+    }
     let result = db
         .collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
         .update_one(
@@ -356,4 +408,66 @@ async fn update_provider_oauth(
         ));
     }
     Ok(())
+}
+
+fn is_oauth_field(name: &str) -> bool {
+    matches!(name, "client_id" | "client_secret")
+}
+
+fn has_auxiliary_fields(descriptor: &PlatformCredentialDescriptor) -> bool {
+    descriptor
+        .fields
+        .iter()
+        .any(|field| !is_oauth_field(field.name))
+}
+
+async fn write_composite_provider(
+    db: &mongodb::Database,
+    provider_slug: &str,
+    provider_name: &'static str,
+    update: bson::Document,
+    auxiliary_update: Option<bson::Document>,
+) -> AppResult<bool> {
+    let mut session = db.client().start_session().await?;
+    let context = (
+        db.clone(),
+        provider_slug.to_string(),
+        provider_name,
+        update,
+        auxiliary_update,
+    );
+    Ok(session
+        .start_transaction()
+        .and_run(
+            context,
+            |session, (db, slug, provider, update, auxiliary)| {
+                Box::pin(async move {
+                    let result = db
+                        .collection::<bson::Document>(
+                            crate::models::provider_config::COLLECTION_NAME,
+                        )
+                        .update_one(doc! { "slug": slug.as_str() }, update.clone())
+                        .session(&mut *session)
+                        .await?;
+                    let stored = db.collection::<PlatformCredential>(COLLECTION_NAME);
+                    if let Some(auxiliary) = auxiliary {
+                        if result.matched_count != 1 {
+                            return Ok(false);
+                        }
+                        stored
+                            .update_one(doc! { "provider": *provider }, auxiliary.clone())
+                            .upsert(true)
+                            .session(&mut *session)
+                            .await?;
+                    } else {
+                        stored
+                            .delete_one(doc! { "provider": *provider })
+                            .session(&mut *session)
+                            .await?;
+                    }
+                    Ok(true)
+                })
+            },
+        )
+        .await?)
 }

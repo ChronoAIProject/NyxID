@@ -1308,6 +1308,35 @@ export function modelItemMatches(itemText, targets, exact) {
 const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
   Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
 const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
+// Clamp a composer bounding rect to the region actually on screen and return
+// the centre of what remains, or null when nothing is visible. Intersect the
+// rect with the viewport, then with each scroll/clip ancestor (clips: entries
+// of { x, y, left, right, top, bottom } where x/y say the axis is clipped).
+// A very long draft can push the composer's geometric centre tens of thousands
+// of pixels above the viewport, where elementFromPoint returns null and the
+// composer is wrongly judged obstructed (composer_unobstructed_failed).
+// NOTE: keep this in sync with the inline copy inside ensureComposerUnobstructed
+// (same maths, separate runtime), mirroring the fileMime split noted below.
+export function composerVisibleHitPoint(rect, clips = [], viewport = {}) {
+  if (!rect) return null;
+  let left = Math.max(0, rect.left);
+  let right = Math.min(viewport.width, rect.right);
+  let top = Math.max(0, rect.top);
+  let bottom = Math.min(viewport.height, rect.bottom);
+  for (const clip of clips) {
+    if (clip.x) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
+    if (clip.y) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+  }
+  if (!(right > left && bottom > top)) return null;
+  return { x: (left + right) / 2, y: (top + bottom) / 2 };
+}
+
+// A composer holds a draft worth clearing when it contains any non-whitespace.
+// Used by clearComposerDraft to skip the clear on an already-empty composer.
+export function composerHasDraft(text) {
+  return typeof text === "string" && text.trim().length > 0;
+}
+
 export const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
@@ -1702,7 +1731,25 @@ export async function pickerSnapshot(page, budget = interactionBudget(1000)) {
     if (!form) while (region && !region.querySelector(sendSelector)) region = region.parentElement;
     if (region === body || region === document.documentElement) region = null;
     // Model tiers are not effort evidence, even when the trigger looks like a pill.
-    const pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]:not([data-nyx-switcher])')].filter(visible);
+    let pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]:not([data-nyx-switcher])')].filter(visible);
+    // Self-heal a stranded switcher marker. readModelSwitcher stamps
+    // data-nyx-switcher on whichever control it claims, and on a page with no
+    // header switcher that claim lands on the composer pill itself - so the
+    // selector above skips the only pill there is and we report
+    // pill_source=none. Nothing else clears the attribute: readModelSwitcher
+    // is the sole clear site and it re-stamps the same pill on the next
+    // attempt, so the worker rebuilds the fault on every retry and can never
+    // select a model again. Unmark a marked composer pill only when it left us
+    // with no candidate at all; a marker on a real header switcher is
+    // load-bearing (it is how the effort step avoids re-picking the switcher)
+    // and must stay.
+    if (!pills.length) {
+      const stranded = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"][data-nyx-switcher]')].filter(visible);
+      if (stranded.length) {
+        stranded.forEach((el) => el.removeAttribute('data-nyx-switcher'));
+        pills = stranded;
+      }
+    }
     const candidates = pills.length ? pills : [...(region?.querySelectorAll('button[aria-haspopup="menu"]:not([data-nyx-switcher])') || [])].filter(visible);
     const menus = window.__nyx?.modelPickerMenus(pickerId) || [];
     const items = (window.__nyx?.modelPickerItems(pickerId) || []).map((el) => ({
@@ -1921,6 +1968,35 @@ async function selectModelInner(page, targets, budget, result) {
 // Clear overlays before typing and again immediately before Send. Never force
 // a click through an obstruction: failure stays pre-send and enters the
 // existing browser recovery / infrastructure retry path.
+// Clear a stale draft left in the composer by an earlier attempt on this tab.
+// Model selection runs before the prompt is typed, but a very long leftover
+// draft makes the page heavy enough that the selection interactions exceed
+// MODEL_SELECT_TIMEOUT_MS and the task fails as operation_timeout@selecting_model
+// on every subsequent pickup. The prompt is (re)typed after selection, so
+// clearing here is a no-op on a fresh composer and never drops real work.
+async function clearComposerDraft(page) {
+  const budget = interactionBudget(PRE_SEND_ACTION_MS);
+  const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
+  try {
+    const draft = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
+      if (Date.now() >= deadline) return "";
+      window.__nyx?.discoverControls();
+      const input = body.querySelector(composerSelector);
+      return input ? String(input.value ?? input.innerText ?? "").trim().slice(0, 8) : "";
+    }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+    if (!composerHasDraft(draft)) return;
+    const input = page.locator(COMPOSER_SELECTOR).first();
+    await input.click(interactionOptions(budget)).catch(() => {});
+    await input.fill("", interactionOptions(budget)).catch(() => {});
+  } catch (error) {
+    if (stableErrorCode(error) === "page_crashed") throw error;
+    // Best-effort: a failed clear must not consume a recovery attempt.
+  } finally {
+    budget.controller.abort();
+    clearTimeout(timer);
+  }
+}
+
 async function ensureComposerUnobstructed(page) {
   const budget = interactionBudget(PRE_SEND_ACTION_MS);
   const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
@@ -1930,9 +2006,35 @@ async function ensureComposerUnobstructed(page) {
       const state = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
         if (Date.now() >= deadline) return null;
         window.__nyx?.discoverControls();
-    const input = body.querySelector(composerSelector);
+        const input = body.querySelector(composerSelector);
         const rect = input?.getBoundingClientRect();
-        const hit = rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        // Hit-test the composer's VISIBLE centre, not its geometric centre. A
+        // long draft can make the composer taller than the viewport and push
+        // its midpoint far off screen, where elementFromPoint returns null and
+        // the composer is wrongly judged obstructed. Intersect the composer rect
+        // with the viewport and every scroll/clip ancestor, then test the middle
+        // of what remains. Keep this in sync with composerVisibleHitPoint (same
+        // maths, separate runtime: this copy runs in the page and cannot import).
+        let visible = rect && {
+          left: Math.max(0, rect.left),
+          right: Math.min(window.innerWidth, rect.right),
+          top: Math.max(0, rect.top),
+          bottom: Math.min(window.innerHeight, rect.bottom),
+        };
+        for (let ancestor = input?.parentElement; visible && ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          const bounds = ancestor.getBoundingClientRect();
+          if (/auto|scroll|hidden|clip/.test(style.overflowX)) {
+            visible.left = Math.max(visible.left, bounds.left);
+            visible.right = Math.min(visible.right, bounds.right);
+          }
+          if (/auto|scroll|hidden|clip/.test(style.overflowY)) {
+            visible.top = Math.max(visible.top, bounds.top);
+            visible.bottom = Math.min(visible.bottom, bounds.bottom);
+          }
+        }
+        const hasVisibleArea = !!visible && visible.right > visible.left && visible.bottom > visible.top;
+        const hit = hasVisibleArea && document.elementFromPoint((visible.left + visible.right) / 2, (visible.top + visible.bottom) / 2);
         const main = body.querySelector("main");
         const mainRect = main?.getBoundingClientRect();
         const neutral = mainRect && document.elementFromPoint(mainRect.x + 4, mainRect.y + 4) === main;
@@ -2273,6 +2375,9 @@ async function handlePrompt(runtime, page, task, recovering) {
     await failModelSelection(runtime, task, header.metadata, effortMetadata(pill.observed), 'model_unavailable');
   }
   if (readyError) throw new TaskFailure(readyError);
+  // A stale draft from a prior attempt makes model selection time out; clear
+  // it so each attempt selects the model against a light, empty composer.
+  await clearComposerDraft(page);
   if (task.model && task.model !== "unknown") {
     if (await ack(runtime, task, "selecting_model")) throw new TaskFailure("cancelled");
     const headerSelection = await selectModelSwitcher(page, task.model);

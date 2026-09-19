@@ -28,8 +28,6 @@ use crate::models::node_service_binding::{
 use crate::models::oauth_broker_binding::{
     COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding,
 };
-use crate::models::platform_op_usage::COLLECTION_NAME as PLATFORM_OP_USAGE;
-use crate::models::platform_operation::COLLECTION_NAME as PLATFORM_OPERATIONS;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
@@ -102,6 +100,8 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    crate::services::catalog_skill_service::ensure_indexes(db).await?;
+    crate::services::assistant_nyxagent::ensure_indexes(db).await?;
     crate::services::coordination_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
@@ -297,34 +297,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             IndexModel::builder()
                 .keys(doc! { "user_id": 1, "action": 1, "action_request_id": 1 })
                 .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
-
-    // ── platform operations ──
-    db.collection::<mongodb::bson::Document>(PLATFORM_OPERATIONS)
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "op": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name("platform_operations_op_unique".to_string())
-                        .unique(true)
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
-    db.collection::<mongodb::bson::Document>(PLATFORM_OP_USAGE)
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "op": 1, "user_id": 1, "yyyymmdd": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name("platform_op_usage_user_day_unique".to_string())
-                        .unique(true)
-                        .build(),
-                )
                 .build(),
         )
         .await?;
@@ -949,6 +921,12 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
     sa.create_index(IndexModel::builder().keys(doc! { "created_by": 1 }).build())
         .await?;
+    sa.create_index(
+        IndexModel::builder()
+            .keys(doc! { "owner_user_id": 1 })
+            .build(),
+    )
+    .await?;
 
     // ── service_account_tokens ──
     let sat = db.collection::<mongodb::bson::Document>("service_account_tokens");
@@ -2050,6 +2028,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // ── channel_bots ──
     crate::services::telegram_new_service::ensure_indexes(db).await?;
     let channel_bots = db.collection::<mongodb::bson::Document>("channel_bots");
+    crate::services::channel_adapters::aurinko::ensure_indexes(db).await?;
+
     channel_bots
         .create_index(
             IndexModel::builder()
@@ -2310,29 +2290,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
-    // ── platform_vendor_templates ──
-    // Vendor keys and canonical slugs are the stable admin-facing identities;
-    // inactive templates remain available for audit/history, so uniqueness is
-    // enforced across all rows.
-    let platform_vendor_templates =
-        db.collection::<Document>(crate::models::platform_vendor_template::COLLECTION_NAME);
-    platform_vendor_templates
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "vendor": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
-    platform_vendor_templates
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "slug": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
-
     // ── feature_flag_overrides ──
     // One override per (org, flag, target scope). target_key is null for
     // org-scope rows, the role string for role scope, the member_user_id for
@@ -2558,6 +2515,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // Global admin reporting has no owner prefix. One additional non-unique
+    // index bounds both finalized/dead-letter branches by the selected window.
+    // Trade-off: one extra B-tree update per meter insert/status transition;
+    // avoids separate actor, owner and service indexes for this bounded report.
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "created_at": -1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("usage_meter_admin_window".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── billing_wallet ──
     let billing_wallet = db.collection::<Document>(crate::models::billing_wallet::COLLECTION_NAME);
     billing_wallet
@@ -2721,6 +2695,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "target_user_ids": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
+
+    for field in ["target_org_ids", "target_group_ids"] {
+        usage_allowances
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { field: 1, "is_active": 1 })
+                    .build(),
+            )
+            .await?;
+    }
+    db.collection::<Document>("users")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "group_ids": 1, "is_active": 1, "_id": 1 })
                 .build(),
         )
         .await?;
@@ -4693,6 +4684,8 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "svc-1".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),

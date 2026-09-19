@@ -320,11 +320,13 @@ input[type="number"] {
   -moz-appearance: textfield;
 }
 
-/* ── iOS zoom prevention: force 16px on inputs to prevent auto-zoom ── */
+/* ── iOS: prevent input zoom and keep custom selects at the same text size ── */
 @supports (-webkit-touch-callout: none) {
   input,
   select,
-  textarea {
+  textarea,
+  [role="combobox"],
+  [role="option"] {
     font-size: 16px !important;
   }
 }

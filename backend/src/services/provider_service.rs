@@ -71,6 +71,53 @@ pub async fn seed_default_providers(
         ($slug:expr) => {{ collection.find_one(doc! { "slug": $slug }).await?.is_some() }};
     }
 
+    // IFTTT Webhooks (per-user raw key)
+    if !slug_exists!("ifttt") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "ifttt".to_string(),
+            name: "IFTTT Webhooks".to_string(),
+            description: Some("Run preconfigured IFTTT Webhooks Applets".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "IFTTT Pro or Pro+ is required. In Webhooks settings, open Documentation and copy only the raw Webhooks key, not the full URL. Create and enable an Applet using Receive a web request or Receive a web request with a JSON payload. Event names contain only letters, numbers, and underscores.".to_string(),
+            ),
+            api_key_url: Some("https://ifttt.com/maker_webhooks".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://ifttt.com/explore/what-are-webhooks".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "ifttt", "Seeded default provider: IFTTT Webhooks");
+        seeded_count += 1;
+    }
+
     // 1. OpenAI (API Key)
     if !slug_exists!("openai") {
         let provider = ProviderConfig {
@@ -660,6 +707,57 @@ pub async fn seed_default_providers(
         validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "elevenlabs", "Seeded default provider: ElevenLabs");
+        seeded_count += 1;
+    }
+
+    // Aurinko account bearer tokens; managed OAuth requires documented PKCE support.
+    if !slug_exists!("aurinko") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "aurinko".to_string(),
+            name: "Aurinko".to_string(),
+            description: Some(
+                "Aurinko unified email API for a user-connected mailbox."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Paste an Aurinko account access token (not an application API key or signing secret). Authorize Mail.Read for reading, Mail.Send for sending, and Mail.Drafts for drafts. NyxID sends Authorization: Bearer. Channel bots are configured separately."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://app.aurinko.io/".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://docs.aurinko.io/unified-apis/email-api".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "aurinko", "Seeded default provider: Aurinko");
         seeded_count += 1;
     }
 
@@ -2840,6 +2938,18 @@ struct SeededHeader {
 /// capability flags to clients.
 fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
     match slug {
+        "api-ifttt" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: false,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: false,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         "api-google-workspace"
         | "api-google-calendar"
         | "api-google-drive"
@@ -2911,7 +3021,7 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             true,
         )),
-        "api-twilio" => Some((
+        "api-twilio" | "api-aurinko" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
                 supports_proxy_write: true,
@@ -3006,6 +3116,29 @@ const OPENROUTER_DEFAULT_HEADERS: &[SeededHeader] = &[
 ];
 
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
+    DefaultServiceSeed {
+        provider_slug: "ifttt",
+        service_slug: "api-ifttt",
+        service_name: "IFTTT Webhooks",
+        base_url: nyxid_service_adapters::ifttt::BASE_URL,
+        injection_method: "ifttt_webhook",
+        injection_key: "",
+        service_auth_method: Some("ifttt_webhook"),
+        service_auth_key_name: Some("key"),
+        description: Some(
+            "Run preconfigured IFTTT Webhooks Applets with value1/value2/value3 or a JSON payload. POST /trigger/EVENT or /trigger/EVENT/json; EVENT uses letters, numbers, and underscores. A receipt confirms event acceptance, not Applet completion.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://ifttt.com/maker_webhooks"),
+        auth_notes: Some(
+            "Requires IFTTT Pro or Pro+. Enter only the raw Webhooks key from Documentation, never a full URL. The key can trigger all matching Applets in its IFTTT account. NyxID appends it at egress. Use the returned connection slug, including any suffix.",
+        ),
+        known_limitations: Some(
+            "Only preconfigured Webhooks Applets; no Applet creation, listing, history, or completion polling. POST only; JSON bodies only, no query parameters or WebSocket. Fixed maker.ifttt.com destination. No identity/access-token/delegation forwarding. No automatic verification, retry, redirect following, or idempotency guarantee. Check IFTTT Activity after an uncertain result. Node routing requires a node version supporting ifttt_webhook.",
+        ),
+    },
     DefaultServiceSeed {
         provider_slug: "xai",
         service_slug: "llm-xai",
@@ -3212,6 +3345,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "The hosted overlay covers core AI, speech, calling, and messaging REST operations. Inbound webhooks and call media streams require a separate application receiver. Calls require a Telnyx voice connection and an authorized caller ID; messaging requires a configured sender and applicable registration.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "aurinko",
+        service_slug: "api-aurinko",
+        service_name: "Aurinko Email",
+        base_url: "https://api.aurinko.io",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Read, search, and reply to email, inspect threads and attachments, and manage drafts in your connected Aurinko mailbox.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.aurinko.io"),
+        auth_notes: Some(
+            "Use a mailbox account access token, not an application credential. Mail.Read permits reads; Mail.Send permits send/reply; Mail.Drafts permits drafts. Channel bot credentials are managed separately.",
+        ),
+        known_limitations: Some(
+            "Managed OAuth onboarding is unavailable until Aurinko documents PKCE support. Account-token onboarding is supported. Send IDs are best effort; processingStatus Incomplete can follow successful submission. Never blindly retry uncertain sends. Provider mailbox setup and consent remain required.",
         ),
     },
     DefaultServiceSeed {
@@ -4678,6 +4834,8 @@ pub async fn seed_default_services(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: service_id.clone(),
             name: seed.service_name.to_string(),
             slug: seed.service_slug.to_string(),
@@ -5757,7 +5915,11 @@ pub async fn update_provider(
         set_doc.insert("name", name.as_str());
     }
     if let Some(ref desc) = updates.description {
-        set_doc.insert("description", desc.as_str());
+        if desc.trim().is_empty() {
+            unset_doc.insert("description", "");
+        } else {
+            set_doc.insert("description", desc.trim());
+        }
     }
     if let Some(active) = updates.is_active {
         set_doc.insert("is_active", active);
@@ -5824,28 +5986,60 @@ pub async fn update_provider(
         set_doc.insert("supports_pkce", pkce);
     }
     if let Some(ref url) = updates.device_code_url {
-        set_doc.insert("device_code_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_code_url", "");
+        } else {
+            set_doc.insert("device_code_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.device_token_url {
-        set_doc.insert("device_token_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_token_url", "");
+        } else {
+            set_doc.insert("device_token_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.device_verification_url {
-        set_doc.insert("device_verification_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("device_verification_url", "");
+        } else {
+            set_doc.insert("device_verification_url", url.as_str());
+        }
     }
     if let Some(ref url) = updates.hosted_callback_url {
-        set_doc.insert("hosted_callback_url", url.as_str());
+        if url.is_empty() {
+            unset_doc.insert("hosted_callback_url", "");
+        } else {
+            set_doc.insert("hosted_callback_url", url.as_str());
+        }
     }
     if let Some(ref instr) = updates.api_key_instructions {
-        set_doc.insert("api_key_instructions", instr.as_str());
+        if instr.trim().is_empty() {
+            unset_doc.insert("api_key_instructions", "");
+        } else {
+            set_doc.insert("api_key_instructions", instr.trim());
+        }
     }
     if let Some(ref url) = updates.api_key_url {
-        set_doc.insert("api_key_url", url.as_str());
+        if url.trim().is_empty() {
+            unset_doc.insert("api_key_url", "");
+        } else {
+            set_doc.insert("api_key_url", url.trim());
+        }
     }
     if let Some(ref url) = updates.icon_url {
-        set_doc.insert("icon_url", url.as_str());
+        if url.trim().is_empty() {
+            unset_doc.insert("icon_url", "");
+        } else {
+            set_doc.insert("icon_url", url.trim());
+        }
     }
     if let Some(ref url) = updates.documentation_url {
-        set_doc.insert("documentation_url", url.as_str());
+        if url.trim().is_empty() {
+            unset_doc.insert("documentation_url", "");
+        } else {
+            set_doc.insert("documentation_url", url.trim());
+        }
     }
     if let Some(ref mode) = updates.credential_mode {
         let valid_modes = ["admin", "user", "both"];
@@ -5909,7 +6103,11 @@ pub async fn update_provider(
         } else {
             name.clone()
         };
-        set_doc.insert("client_id_param_name", value);
+        if value.trim().is_empty() {
+            unset_doc.insert("client_id_param_name", "");
+        } else {
+            set_doc.insert("client_id_param_name", value.trim());
+        }
     }
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
@@ -10569,6 +10767,79 @@ mod tests {
                     "direct-auth seed '{slug}' must have a service_auth_method"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_form_optional_provider_text_clears_are_absent() {
+        let db = connect_test_database("admin_form_provider_clear")
+            .await
+            .expect("Mongo required");
+        let enc = test_encryption_keys();
+        let provider = super::create_provider(
+            &db,
+            &enc,
+            "Clear",
+            "clear-test",
+            "api_key",
+            "admin",
+            "client_secret_post",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fields = [
+            "description",
+            "api_key_instructions",
+            "api_key_url",
+            "icon_url",
+            "documentation_url",
+            "client_id_param_name",
+        ];
+        let mut set = bson::Document::new();
+        for field in fields {
+            set.insert(field, "saved");
+        }
+        db.collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .update_one(doc! {"_id": &provider.id}, doc! {"$set": set})
+            .await
+            .unwrap();
+        let saved = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                description: Some(" ".into()),
+                api_key_instructions: Some("".into()),
+                api_key_url: Some("".into()),
+                icon_url: Some("".into()),
+                documentation_url: Some("".into()),
+                client_id_param_name: Some("".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(saved.description.is_none());
+        assert!(saved.icon_url.is_none());
+        let raw = db
+            .collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .find_one(doc! {"_id": &provider.id})
+            .await
+            .unwrap()
+            .unwrap();
+        for field in fields {
+            assert!(!raw.contains_key(field), "{field} must be absent");
         }
     }
 }

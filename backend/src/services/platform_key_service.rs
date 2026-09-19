@@ -17,8 +17,35 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::services::org_service;
 
+/// Read-only status for management responses. Old creators encrypted even an
+/// absent credential. Decrypt through the version-aware API, never infer usable
+/// material from ciphertext length. None means stored material is unreadable.
+pub async fn credential_configured(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    service: &DownstreamService,
+) -> Option<bool> {
+    if service.credential_encrypted.is_empty() {
+        return Some(false);
+    }
+    match keys.decrypt(&service.credential_encrypted).await {
+        Ok(material) => Some(!zeroize::Zeroizing::new(material).is_empty()),
+        Err(_) => None,
+    }
+}
+
+pub fn legacy_master_credential(service: &DownstreamService) -> bool {
+    !super::retired_service_service::is_retired(service)
+        && service.service_category == "internal"
+        && service.auth_method != "none"
+        && !service.requires_user_credential
+        && service.service_type == "http"
+        && !service.credential_encrypted.is_empty()
+        && service.provider_config_id.is_none()
+}
+
 pub fn legacy_public_master(service: &DownstreamService) -> bool {
-    service.visibility == "public"
+    !super::retired_service_service::is_retired(service)
+        && service.visibility == "public"
         && service.service_category == "internal"
         && !matches!(service.auth_method.as_str(), "none" | "token_exchange")
         && !service.requires_user_credential
@@ -29,6 +56,9 @@ pub fn legacy_public_master(service: &DownstreamService) -> bool {
 }
 
 pub fn has_platform_key(service: &DownstreamService) -> bool {
+    if super::retired_service_service::is_retired(service) {
+        return false;
+    }
     match &service.platform_key {
         Some(config) => {
             config.enabled
@@ -56,6 +86,7 @@ pub fn binding(service: &UserService) -> &str {
 pub struct OwnerGrants {
     actor_id: String,
     active_owner_ids: HashSet<String>,
+    org_owner_ids: HashSet<String>,
     memberships: Vec<OrgMembership>,
 }
 
@@ -98,6 +129,11 @@ impl OwnerGrants {
             .try_collect()
             .await?;
         let actor_active = owners.iter().any(|u| u.id == owner_id);
+        let org_owner_ids = owners
+            .iter()
+            .filter(|u| u.user_type.is_org())
+            .map(|u| u.id.clone())
+            .collect();
         let active_owner_ids = owners
             .into_iter()
             .filter(|u| actor_active && (u.id == owner_id || u.user_type.is_org()))
@@ -106,6 +142,7 @@ impl OwnerGrants {
         Ok(Self {
             actor_id: owner_id.to_string(),
             active_owner_ids,
+            org_owner_ids,
             memberships: memberships.to_vec(),
         })
     }
@@ -188,6 +225,28 @@ pub fn available_with_grants(
     })
 }
 
+/// Automatic connections have narrower ownership rules than explicit bindings:
+/// public keys belong to active people; restricted keys require a direct owner
+/// grant. Keep this separate from the execution ACL used by explicit org rows.
+pub fn auto_provisionable_with_grants(
+    service: &DownstreamService,
+    provider: Option<&ProviderConfig>,
+    owner_id: &str,
+    grants: &OwnerGrants,
+) -> bool {
+    let Some(config) = &service.platform_key else {
+        return false;
+    };
+    grants.active_owner_ids.contains(owner_id)
+        && match config.audience {
+            PlatformKeyAudience::Public => !grants.org_owner_ids.contains(owner_id),
+            PlatformKeyAudience::Restricted => {
+                config.allowed_owner_ids.iter().any(|id| id == owner_id)
+            }
+        }
+        && available_with_grants(service, provider, owner_id, grants)
+}
+
 pub async fn require(
     db: &mongodb::Database,
     service: &DownstreamService,
@@ -208,7 +267,7 @@ pub async fn effective_auth(
 ) -> AppResult<(String, String)> {
     let requirement = db
         .collection::<ServiceProviderRequirement>(REQUIREMENTS)
-        .find_one(doc! { "service_id": &service.id })
+        .find_one(crate::services::provider_link_service::primary_requirement_filter(service))
         .await?;
     let auth = super::unified_key_service::derive_effective_auth(service, requirement.as_ref());
     if auth.0 == "none" {

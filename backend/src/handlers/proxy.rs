@@ -556,6 +556,9 @@ struct PreResolved {
     /// lookups so the failover list reflects the org's bindings, not
     /// just the calling member's personal bindings.
     effective_owner_id: String,
+    /// Dedicated curation credentials belong to the SA, while its effective
+    /// owner pays. This override applies only to billing, never resolution.
+    billing_owner_id: Option<String>,
     /// Whether the resolved UserService is platform-managed and
     /// auto-connected. This suppresses only the implicit global approval
     /// fallback; explicit per-service policies remain in force.
@@ -961,6 +964,57 @@ async fn proxy_request_inner(
     validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
 
+    if auth_user.auth_method == AuthMethod::ServiceAccount {
+        let sa = crate::services::service_account_service::get_service_account(
+            &state.db,
+            &auth_user.user_id.to_string(),
+        )
+        .await?;
+        if sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation {
+            let grant = crate::services::curation_grant_service::live_grant(&sa)?;
+            crate::services::curation_grant_service::require_scope(&sa, &auth_user.scope, "proxy")?;
+            if grant.ornn_proxy_service_id.as_deref() != Some(service_id)
+                || extract_via_service(&request).is_some()
+            {
+                return Err(AppError::Forbidden(
+                    "Curation proxy requires its exact catalog target without instance selection"
+                        .into(),
+                ));
+            }
+            let target = proxy_service::resolve_curation_proxy_target(
+                &state.db,
+                &state.encryption_keys,
+                &sa.id,
+                service_id,
+            )
+            .await?;
+            let slug = target.service.slug.clone();
+            return execute_proxy_inner(
+                state,
+                auth_user,
+                service_id,
+                path,
+                request,
+                Some(PreResolved {
+                    target,
+                    catalog_service_slug: Some(slug),
+                    node_id: None,
+                    user_service_id: None,
+                    has_server_credential: true,
+                    master_credential: false,
+                    credential_source: Some("user".into()),
+                    effective_owner_id: sa.id,
+                    billing_owner_id: Some(auth_user.proxy_resolution_user_id()),
+                    is_auto_connected: true,
+                }),
+                TargetMode::CallerAddressed,
+                Vec::new(),
+                resolved_slug,
+            )
+            .await;
+        }
+    }
+
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
     preflight_proxy_deny_before_resolution(
@@ -1030,6 +1084,7 @@ async fn proxy_request_inner(
                         .as_ref()
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
+                    billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
                 TargetMode::CallerAddressed,
@@ -1096,6 +1151,7 @@ async fn proxy_request_inner(
                     .as_ref()
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
+                billing_owner_id: None,
                 is_auto_connected: resolved.is_auto_connected,
             }),
             TargetMode::CallerAddressed,
@@ -1269,6 +1325,7 @@ async fn proxy_request_by_slug_inner(
                         .as_ref()
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
+                    billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
                 TargetMode::CallerAddressed,
@@ -1335,6 +1392,7 @@ async fn proxy_request_by_slug_inner(
                     .as_ref()
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
+                billing_owner_id: None,
                 is_auto_connected: resolved.is_auto_connected,
             }),
             TargetMode::CallerAddressed,
@@ -1838,6 +1896,7 @@ async fn execute_proxy_inner(
     // Captured outside the resolution match so the downstream approval
     // block can apply the org-aware cascade.
     let mut effective_owner_for_approval: Option<String> = None;
+    let mut effective_billing_owner_id: Option<String> = None;
     let mut is_auto_connected_for_approval = false;
 
     // Resolve target and node routing.
@@ -1858,6 +1917,7 @@ async fn execute_proxy_inner(
         credential_source,
     ) = if let Some(mut pre) = pre_resolved {
         effective_owner_for_approval = Some(pre.effective_owner_id.clone());
+        effective_billing_owner_id = pre.billing_owner_id;
         is_auto_connected_for_approval = pre.is_auto_connected;
         // New UserService path: target already resolved.
         // Use the resolved service's effective owner (the org's user_id
@@ -2103,8 +2163,9 @@ async fn execute_proxy_inner(
     // here would make `resolve_owner_access` deny a service account billing
     // its own owner and abort an otherwise-authorized proxy request.
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
-    let billing_resource_owner_id = effective_owner_for_approval
+    let billing_resource_owner_id = effective_billing_owner_id
         .as_deref()
+        .or(effective_owner_for_approval.as_deref())
         .unwrap_or(&billing_resolution_user_id);
     let credential_class = final_credential_class(
         resolved_user_service_id.as_deref(),
@@ -2239,6 +2300,19 @@ async fn execute_proxy_inner(
         let bytes = read_proxy_request_body(request, state.config.proxy_max_body_size).await?;
         (bytes, None)
     };
+
+    proxy_service::validate_ifttt_request(
+        &target,
+        &method,
+        path,
+        query.as_deref(),
+        if body_bytes.is_empty() {
+            None
+        } else {
+            Some(body_bytes.as_ref())
+        },
+        node_route.is_some(),
+    )?;
 
     let operation = operation_descriptor::build_http_descriptor(
         &method_str,
@@ -2416,6 +2490,8 @@ async fn execute_proxy_inner(
         }
     };
 
+    proxy_service::validate_ifttt_delegation(&target, &delegated)?;
+
     // Build identity headers before the node/direct split so both proxy paths
     // preserve the same downstream identity and delegation context.
     let mut identity_headers = Vec::new();
@@ -2540,6 +2616,7 @@ async fn execute_proxy_inner(
         }
     }
 
+    let billing_ctx = billing_ctx.with_request_body(body.as_deref());
     let metered = state.billing.open(&billing_ctx).await?;
 
     let durable_reservation = if let Some(api_key_id) = scheduled_api_key_id {
@@ -2680,6 +2757,11 @@ async fn execute_proxy_inner(
     // If this is a WS upgrade request, branch into the WS path now that
     // target, credentials, and identity headers are fully resolved.
     if let Some(ws_request) = ws_request {
+        if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+            return Err(AppError::BadRequest(
+                nyxid_service_adapters::ifttt::Error::Method.to_string(),
+            ));
+        }
         // WS connections are not compatible with per-request approval.
         if enforce_approval {
             return Err(AppError::BadRequest(
@@ -2762,9 +2844,11 @@ async fn execute_proxy_inner(
 
         let mut base_headers = node_forward_headers;
         // Forward the caller's NyxID access token when the service is configured for it.
-        if target.service.forward_access_token
-            && let Some(ref token) = caller_token
-        {
+        if let Some(token) = proxy_service::forwarded_caller_token(
+            &target,
+            caller_token.as_deref(),
+            &extra_outbound_headers,
+        ) {
             base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
         let enriched_headers = proxy_service::build_effective_outbound_headers(
@@ -2890,10 +2974,12 @@ async fn execute_proxy_inner(
                         ProxyResponseType::Complete(node_response) => {
                             let response_len = node_response.body.len() as i64;
                             let request_len = request_body_len;
+                            let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && should_capture_llm_usage(&target.service, platform_metric))
+                                .then(|| llm_usage_service::usage_from_body(&node_response.body, path, (200..300).contains(&node_response.status))).flatten();
                             settle_meter_async(
                                 state.billing.clone(),
                                 metered.clone(),
-                                llm_platform_usage(None, request_len + response_len),
+                                llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 None,
                                 None,
                             )
@@ -3001,16 +3087,25 @@ async fn execute_proxy_inner(
                             let stream_billing = state.billing.clone();
                             let stream_metered = metered.clone();
                             let request_len = request_body_len;
+                            let usage_path = path.to_string();
+                            let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
 
                             // Convert the mpsc receiver into a streaming body.
                             let mut exchange_diagnostics =
                                 ProxyStreamDiagnostics::new(stream_diagnostics);
                             let stream = async_stream::stream! {
                                 let mut response_len: i64 = 0;
+                                let mut captured = (capture_usage && !node_is_sse).then(Vec::new);
+                                let mut usage_events = llm_usage_service::BoundedUsageEvents::default();
                                 loop {
                                     match tokio::time::timeout(idle_timeout, rx.recv()).await {
                                         Ok(Some(StreamChunk::Data(bytes))) => {
                                             response_len += bytes.len() as i64;
+                                            if capture_usage && node_is_sse { usage_events.push(&bytes); }
+                                            if let Some(buffer) = captured.as_mut() {
+                                                if buffer.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES { buffer.extend_from_slice(&bytes); }
+                                                else { captured = None; }
+                                            }
                                             yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
                                         }
                                         Ok(Some(StreamChunk::End)) => {
@@ -3049,10 +3144,12 @@ async fn execute_proxy_inner(
                                         }
                                     }
                                 }
+                                let mut usage = if node_is_sse { usage_events.finalize_success((200..300).contains(&status)) } else { captured.as_deref().and_then(|b| llm_usage_service::usage_from_body(b, &usage_path, (200..300).contains(&status))) };
+                                if !(200..300).contains(&status) && let Some(usage) = usage.as_mut() { usage.images = 0; }
                                 settle_meter_async(
                                     stream_billing,
                                     stream_metered,
-                                    llm_platform_usage(None, request_len + response_len),
+                                    llm_platform_usage(usage.as_ref(), request_len + response_len),
                                     None,
                                     None,
                                 )
@@ -3752,12 +3849,15 @@ async fn execute_proxy_inner(
                             response_len += bytes.len() as i64;
                             sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
                             while let Some(event) = parse_sse_event(&mut sse_buffer) {
-                                if let Some((usage, mode)) =
+                                if let Some((mut usage, mode)) =
                                     llm_usage_service::extract_reported_usage_from_sse_event(
                                         event.event_type.as_deref(),
                                         &event.data,
                                     )
                                 {
+                                    if !status.is_success() {
+                                        usage.images = 0;
+                                    }
                                     usage_accumulator.observe(usage, mode);
                                 }
                             }
@@ -3969,7 +4069,7 @@ async fn execute_proxy_inner(
                 if let Some(ctx) = stream_usage_context
                     && let Some(buf) = captured
                     && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&buf)
-                    && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+                    && let Some(usage) = llm_usage_service::extract_reported_usage_for_path(&json, &ctx.path, status.is_success())
                 {
                     model = ctx.model.clone();
                     llm_usage_service::log_reported_usage_async(ctx, usage.clone());
@@ -4038,7 +4138,11 @@ async fn execute_proxy_inner(
         let mut model = None;
         if let Some(nonstream_usage_context) = usage_context
             && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
-            && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+            && let Some(usage) = llm_usage_service::extract_reported_usage_for_path(
+                &json,
+                &nonstream_usage_context.path,
+                status.is_success(),
+            )
         {
             model = nonstream_usage_context.model.clone();
             llm_usage_service::log_reported_usage_async(nonstream_usage_context, usage.clone());
@@ -4146,10 +4250,6 @@ fn should_enforce_runtime_approval(
 }
 
 /// Convenience alias so existing call-sites compile without renaming.
-fn parse_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
-    sse_parser::parse_next_event(buffer)
-}
-
 fn final_credential_class(
     resolved_user_service_id: Option<&str>,
     node_route_active: bool,
@@ -4168,7 +4268,7 @@ fn final_credential_class(
     if agent_override_applied {
         return CredentialClass::AgentOverrideUserOwned;
     }
-    if resolved_user_service_id.is_some() {
+    if resolved_user_service_id.is_some() || credential_source == Some("user") {
         // Auto-provisioned UserServices with no user key inject the
         // catalog master credential; classify by whose key was used,
         // not by which resolution path matched.
@@ -4196,12 +4296,16 @@ fn platform_metric_for_target(
     )
 }
 
+fn parse_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
+    sse_parser::parse_next_event(buffer)
+}
+
 fn should_capture_llm_usage(
     service: &crate::models::downstream_service::DownstreamService,
     platform_metric: BillingMetric,
 ) -> bool {
-    platform_metric == BillingMetric::Tokens
-        || crate::services::billing::metric_resolution::captures_tokens(service)
+    platform_metric.is_token_family()
+        || crate::services::billing::metric_resolution::captures_usage(service)
 }
 
 fn resale_usage_from_optional_reported(
@@ -4222,6 +4326,7 @@ fn resale_usage_from_optional_reported(
             metric,
             quantity: fallback_bytes.max(0),
         }),
+        _ => None,
     }
 }
 
@@ -4229,38 +4334,32 @@ pub(crate) fn llm_platform_usage(
     usage: Option<&llm_usage_service::ReportedLlmUsage>,
     fallback_bytes: i64,
 ) -> PlatformUsage {
-    PlatformUsage::llm_completion(
-        fallback_bytes,
-        llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
-    )
-    .with_token_breakdown(usage.map(llm_usage_service::ReportedLlmUsage::token_breakdown))
+    llm_usage_service::platform_usage(usage, fallback_bytes, true)
 }
 
 fn websocket_realtime_usage_enabled(
     catalog_service_slug: Option<&str>,
     metered: &crate::services::billing::MeteredProxyContext,
 ) -> bool {
-    catalog_service_slug == Some("llm-openai")
-        && metered
-            .route
-            .as_ref()
-            .and_then(|route| route.resale.as_ref())
-            .is_some_and(|resale| resale.metric == BillingMetric::Tokens)
+    metered.route.as_ref().is_some_and(|route| {
+        route.capture_tokens
+            || (catalog_service_slug == Some("llm-openai")
+                && route
+                    .resale
+                    .as_ref()
+                    .is_some_and(|r| r.metric.is_token_family()))
+    })
 }
 
 fn websocket_platform_usage(stats: &ConnectionUsageStats) -> PlatformUsage {
     if stats.realtime_llm_usage.collection_enabled {
-        PlatformUsage::llm_completion(
+        let mut usage = llm_usage_service::platform_usage(
+            stats.realtime_llm_usage.reported_usage.as_ref(),
             stats.total_bytes(),
-            stats.realtime_llm_usage.token_quantity(),
-        )
-        .with_token_breakdown(
-            stats
-                .realtime_llm_usage
-                .reported_usage
-                .as_ref()
-                .map(llm_usage_service::ReportedLlmUsage::token_breakdown),
-        )
+            false,
+        );
+        usage.tokens = stats.realtime_llm_usage.token_quantity();
+        usage
     } else {
         llm_platform_usage(None, stats.total_bytes())
     }
@@ -4308,6 +4407,7 @@ fn websocket_resale_usage(
         BillingMetric::Tokens => llm_usage_service::estimate_tokens_from_bytes(stats.total_bytes()),
         BillingMetric::Requests => 1,
         BillingMetric::Bytes => stats.total_bytes().max(0),
+        _ => 0,
     };
 
     Some(ResaleUsage { metric, quantity })
@@ -6291,6 +6391,7 @@ mod tests {
             platform_key_pricing: None,
             byok_pricing_cleanup_metric_code: None,
             platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -6348,9 +6449,11 @@ mod tests {
                     prompt_tokens: 20,
                     completion_tokens: 10,
                     total_tokens: 30,
-                    cached_tokens: 0,
+                    cached_tokens: 5,
                     cache_creation_tokens: 0,
                     reported_cost: None,
+                    cached_tokens_included_in_prompt: true,
+                    ..Default::default()
                 }),
                 uncovered_bytes: 20,
                 reported_response_count: 1,
@@ -6362,6 +6465,15 @@ mod tests {
         let resale = websocket_resale_usage(&metered, &stats).expect("resale usage");
         assert_eq!(resale.metric, BillingMetric::Tokens);
         assert_eq!(resale.quantity, 35);
+        let platform = super::websocket_platform_usage(&stats);
+        assert_eq!(
+            (
+                platform.input_tokens,
+                platform.output_tokens,
+                platform.cache_read_tokens
+            ),
+            (15, 10, 5)
+        );
 
         let mut event = serde_json::json!({});
         add_websocket_usage_provenance(&mut event, &stats);
@@ -6967,6 +7079,8 @@ mod tests {
                 recurrence: crate::models::usage_allowance::AllowanceRecurrence::Monthly,
                 target_kind: crate::models::billing_target::BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 created_by: "admin-1".to_string(),
             },
         )
@@ -7063,6 +7177,22 @@ mod tests {
         assert_eq!(
             final_credential_class(Some("us-1"), false, false, true, false, None, &target),
             CredentialClass::UserOwned
+        );
+    }
+
+    #[test]
+    fn curation_connection_credential_keeps_byok_class_for_master_capable_catalog() {
+        let mut target = make_target("http://localhost:8080");
+        target.auth_method = "bearer".into();
+        target.credential = "dedicated-sa-key".into();
+        target.service.requires_user_credential = false;
+        assert_eq!(
+            final_credential_class(None, false, false, true, false, Some("user"), &target),
+            CredentialClass::UserOwned
+        );
+        assert_eq!(
+            final_credential_class(None, false, false, true, false, None, &target),
+            CredentialClass::NyxidManagedMaster
         );
     }
 
@@ -9744,7 +9874,18 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let owner_id = Uuid::new_v4().to_string();
-        let sa_id = Uuid::new_v4().to_string();
+        let (sa, _) = crate::services::service_account_service::create_service_account(
+            &db,
+            "General service account",
+            None,
+            "proxy",
+            &[],
+            None,
+            &owner_id,
+        )
+        .await
+        .expect("create general service account for live purpose check");
+        let sa_id = sa.id;
         let catalog_service_id = Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&owner_id, UserType::Person))
@@ -10172,7 +10313,7 @@ mod proxy_resolution_integration_tests {
             .insert_one(test_user(&user_id, UserType::Person))
             .await
             .unwrap();
-        let service = insert_platform_service(&db, "platform-assistant", &base_url).await;
+        let service = insert_platform_service(&db, "shared-assistant", &base_url).await;
 
         let state = test_app_state(db.clone());
         let mut auth = access_token_auth(&user_id);
@@ -10231,7 +10372,7 @@ mod proxy_resolution_integration_tests {
             .insert_one(test_user(&user_id, UserType::Person))
             .await
             .unwrap();
-        let service = insert_platform_service(&db, "platform-assistant-2", &base_url).await;
+        let service = insert_platform_service(&db, "shared-assistant-2", &base_url).await;
         let now = chrono::Utc::now();
         db.collection::<crate::models::user_service_connection::UserServiceConnection>(
             crate::models::user_service_connection::COLLECTION_NAME,
@@ -10304,7 +10445,7 @@ mod proxy_resolution_integration_tests {
             .insert_one(test_user(&user_id, UserType::Person))
             .await
             .unwrap();
-        let mut service = insert_platform_service(&db, "platform-needs-cred", &base_url).await;
+        let mut service = insert_platform_service(&db, "shared-needs-cred", &base_url).await;
         service.requires_user_credential = true;
         db.collection::<crate::models::downstream_service::DownstreamService>(
             crate::models::downstream_service::COLLECTION_NAME,

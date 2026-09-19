@@ -231,6 +231,32 @@ impl ExponentialBackoff {
     }
 }
 
+/// Reconnect-only policy; credential polling retains its independent backoff.
+/// Equal jitter spreads a fleet over half of each exponential window, with a
+/// nonzero 1s floor and 60s cap. Only actual authenticated service resets it.
+struct ReconnectBackoff(ExponentialBackoff);
+
+const RECONNECT_STABLE_INTERVAL: Duration = Duration::from_secs(60);
+
+impl ReconnectBackoff {
+    fn new() -> Self {
+        Self(ExponentialBackoff::new(
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+            2.0,
+        ))
+    }
+
+    fn next_delay(&mut self, served_for: Option<Duration>) -> Duration {
+        if served_for.is_some_and(|duration| duration >= RECONNECT_STABLE_INTERVAL) {
+            self.0.reset();
+        }
+        let upper_ms = self.0.next_delay().as_millis() as u64;
+        use rand::Rng;
+        Duration::from_millis(rand::thread_rng().gen_range(upper_ms / 2..=upper_ms))
+    }
+}
+
 /// Register a node using a one-time registration token.
 /// Returns (node_id, auth_token, signing_secret).
 pub async fn register_node(
@@ -767,15 +793,14 @@ async fn run_connection_loop(
     in_flight: Arc<AtomicUsize>,
     shutdown: watch::Receiver<bool>,
 ) {
-    let mut backoff =
-        ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
+    let mut backoff = ReconnectBackoff::new();
 
     loop {
         if shutdown_requested(&shutdown) {
             break;
         }
 
-        match connect_and_serve(
+        let result = connect_and_serve(
             config,
             config_path,
             config_dir,
@@ -787,31 +812,26 @@ async fn run_connection_loop(
             in_flight.clone(),
             shutdown.clone(),
         )
-        .await
-        {
-            Ok(()) => {
-                if shutdown_requested(&shutdown) {
-                    break;
-                }
-                tracing::info!("Disconnected cleanly, reconnecting...");
-                backoff.reset();
-            }
-            Err(e) => {
-                if shutdown_requested(&shutdown) {
-                    break;
-                }
-                let delay = backoff.next_delay();
-                tracing::warn!(
-                    error = %e,
-                    delay_ms = delay.as_millis(),
-                    "Connection failed, retrying"
-                );
-                let mut shutdown_wait = shutdown.clone();
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    _ = wait_for_shutdown(&mut shutdown_wait) => break,
-                }
-            }
+        .await;
+        if shutdown_requested(&shutdown) {
+            break;
+        }
+        let served_for = result.as_ref().ok().copied().flatten();
+        let delay = backoff.next_delay(served_for);
+        match result {
+            Ok(_) => tracing::info!(
+                delay_ms = delay.as_millis(),
+                ?served_for,
+                "Disconnected, retrying"
+            ),
+            Err(error) => tracing::warn!(
+                %error, delay_ms = delay.as_millis(), "Connection failed, retrying"
+            ),
+        }
+        let mut shutdown_wait = shutdown.clone();
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = wait_for_shutdown(&mut shutdown_wait) => break,
         }
     }
 }
@@ -829,7 +849,7 @@ async fn connect_and_serve(
     credential_sender: &Arc<SharedCredentialsSender>,
     in_flight: Arc<AtomicUsize>,
     mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
+) -> Result<Option<Duration>> {
     // 1. Connect
     let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
     let connect =
@@ -839,7 +859,7 @@ async fn connect_and_serve(
         result = &mut connect => {
             result.map_err(|e| Error::WebSocket(format!("Failed to connect: {e}")))?
         }
-        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     };
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
@@ -854,7 +874,7 @@ async fn connect_and_serve(
         result = ws_sink.send(Message::Text(auth_msg.to_string().into())) => {
             result.map_err(|e| Error::WebSocket(format!("Failed to send auth: {e}")))?;
         }
-        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     }
 
     // 3. Wait for auth_ok
@@ -865,7 +885,7 @@ async fn connect_and_serve(
                 .ok_or_else(|| Error::AuthFailed("Connection closed during auth".to_string()))?
                 .map_err(|e| Error::WebSocket(format!("Read error during auth: {e}")))?
         }
-        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     };
 
     let text = match response {
@@ -931,7 +951,7 @@ async fn connect_and_serve(
 
     // Writer task: forwards messages from the channel to the WS sink.
     // Text frames carry JSON control messages; binary frames carry raw data chunks.
-    let writer_task = tokio::spawn(async move {
+    let mut writer_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let ws_msg = match msg {
                 NodeWsMessage::Text(text) => Message::Text(text.into()),
@@ -971,6 +991,8 @@ async fn connect_and_serve(
     let metrics = Arc::new(NodeMetrics::new());
     let replay_guard = Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()));
 
+    let serving_started = tokio::time::Instant::now();
+
     // 5. Reader loop: process incoming messages from the server
     let shutting_down = loop {
         // Wrap ws_stream.next() with an idle timeout when the server
@@ -983,6 +1005,7 @@ async fn connect_and_serve(
                 match tokio::select! {
                     result = tokio::time::timeout(Duration::from_secs(secs), ws_stream.next()) => result,
                     _ = wait_for_shutdown(&mut shutdown) => break true,
+                    _ = &mut writer_task => break false,
                 } {
                     Ok(msg) => msg,
                     Err(_) => {
@@ -1002,6 +1025,7 @@ async fn connect_and_serve(
             None => tokio::select! {
                 msg = ws_stream.next() => msg,
                 _ = wait_for_shutdown(&mut shutdown) => break true,
+                _ = &mut writer_task => break false,
             },
         };
         let Some(msg) = read_result else {
@@ -1009,7 +1033,10 @@ async fn connect_and_serve(
         };
         let text = match msg {
             Ok(Message::Text(t)) => t.to_string(),
-            Ok(Message::Close(_)) => break false,
+            Ok(Message::Close(frame)) => {
+                tracing::info!(?frame, "Server closed node WebSocket");
+                break false;
+            }
             Ok(Message::Ping(_)) => continue,
             Ok(_) => continue,
             Err(e) => {
@@ -1283,6 +1310,7 @@ async fn connect_and_serve(
         }
     };
 
+    let served_for = serving_started.elapsed();
     if shutting_down {
         close_active_ssh_tunnels(
             &active_ssh_tunnels,
@@ -1296,7 +1324,7 @@ async fn connect_and_serve(
     drain_active_web_terminals(&active_web_terminals).await;
     drain_active_ws_proxies(&active_ws_proxies).await;
     writer_task.abort();
-    Ok(())
+    Ok(Some(served_for))
 }
 
 async fn handle_ssh_tunnel_open(
@@ -3197,6 +3225,22 @@ fn process_credential_update(
     let injection_method = parsed["injection_method"].as_str().unwrap_or("header");
 
     let result = match injection_method {
+        "ifttt_webhook" => (|| {
+            let key = parsed["header_value"]
+                .as_str()
+                .ok_or_else(|| super::error::Error::Validation("IFTTT key missing".into()))?;
+            let mut config = NodeConfig::load(config_path)?;
+            config.add_ifttt_credential_via(
+                service_slug,
+                key,
+                parsed["target_url"].as_str(),
+                backend,
+            )?;
+            config.save(config_path)?;
+            let credentials = CredentialStore::from_config_with_backend(&config, backend)?;
+            credential_sender.update(credentials);
+            Ok(())
+        })(),
         "header" => {
             let header_name = parsed["header_name"].as_str().unwrap_or("Authorization");
             let header_value = match parsed["header_value"].as_str() {
@@ -3659,6 +3703,15 @@ async fn handle_ws_proxy_open(
             return;
         }
     };
+    if cred.ifttt_key().is_some() {
+        let _ = send_ws_proxy_error(
+            &tx,
+            &session_id,
+            "IFTTT Webhooks does not support WebSocket",
+        )
+        .await;
+        return;
+    }
     let raw_credential = cred.raw_credential().map(str::to_string);
 
     // Resolve effective base URL.
@@ -4850,6 +4903,137 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_backoff_only_resets_after_stable_authenticated_service() {
+        let mut backoff = ReconnectBackoff::new();
+        for (served, lower, upper) in [
+            (Some(Duration::ZERO), 1, 2),
+            (Some(Duration::from_secs(59)), 2, 4),
+            (None, 4, 8),
+            (Some(Duration::ZERO), 8, 16),
+            (None, 16, 32),
+            (None, 30, 60),
+            (None, 30, 60),
+            (Some(RECONNECT_STABLE_INTERVAL), 1, 2),
+            (None, 2, 4),
+        ] {
+            let delay = backoff.next_delay(served);
+            assert!(
+                delay >= Duration::from_secs(lower) && delay <= Duration::from_secs(upper),
+                "unexpected delay {delay:?}"
+            );
+        }
+    }
+
+    async fn assert_short_connections_back_off(authenticated: bool, clean_close: bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = rci_test_config(format!("ws://{}/ws", listener.local_addr().unwrap()));
+        let dir = tempfile::tempdir().unwrap();
+        let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+        let (sender, credentials) =
+            SharedCredentials::new(CredentialStore::from_config(&config, &encryption).unwrap());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let connection_task = tokio::spawn(async move {
+            run_connection_loop(
+                &config,
+                &dir.path().join("config.toml"),
+                dir.path(),
+                "file",
+                "test-auth",
+                None,
+                &credentials,
+                &Arc::new(sender),
+                Arc::new(AtomicUsize::new(0)),
+                shutdown_rx,
+            )
+            .await;
+        });
+        let mut attempts = Vec::new();
+        for attempt in 0..3 {
+            let (stream, _) = tokio::time::timeout(Duration::from_secs(8), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            attempts.push(tokio::time::Instant::now());
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let auth = socket.next().await.unwrap().unwrap();
+            let auth: serde_json::Value = serde_json::from_str(auth.to_text().unwrap()).unwrap();
+            assert_eq!(auth["type"], "auth");
+            if authenticated {
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({"type": "auth_ok"}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+                // Read capability advertisement to ensure the serving loop is entered.
+                assert!(socket.next().await.unwrap().unwrap().is_text());
+            }
+            if clean_close {
+                socket
+                    .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: if authenticated {
+                            1000.into()
+                        } else {
+                            4008.into()
+                        },
+                        reason: "test closure".into(),
+                    }))
+                    .await
+                    .unwrap();
+            }
+            // Dropping without Close simulates an EOF/read error. End the
+            // mock transport before asking the client to shut down, so Close
+            // never races a client socket dropped by the shutdown branch.
+            drop(socket);
+            if attempt == 2 {
+                // Let the third closed session enter its 4–8s retry sleep.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert!(!connection_task.is_finished());
+                shutdown_tx.send(true).unwrap();
+            }
+        }
+        assert!(attempts[1].duration_since(attempts[0]) >= Duration::from_secs(1));
+        assert!(
+            attempts[2].duration_since(attempts[1]) >= Duration::from_secs(2),
+            "short auth_ok sessions must not reset backoff"
+        );
+        tokio::time::timeout(Duration::from_secs(2), connection_task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_repeated_clean_closes_are_delayed() {
+        tokio::time::timeout(
+            Duration::from_secs(25),
+            assert_short_connections_back_off(true, true),
+        )
+        .await
+        .expect("reconnect regression timed out");
+    }
+
+    #[tokio::test]
+    async fn reconnect_repeated_eof_after_auth_is_delayed() {
+        tokio::time::timeout(
+            Duration::from_secs(25),
+            assert_short_connections_back_off(true, false),
+        )
+        .await
+        .expect("reconnect regression timed out");
+    }
+
+    #[tokio::test]
+    async fn reconnect_ownership_rejection_during_auth_is_delayed() {
+        tokio::time::timeout(
+            Duration::from_secs(25),
+            assert_short_connections_back_off(false, true),
+        )
+        .await
+        .expect("reconnect regression timed out");
+    }
+
+    #[test]
     fn exponential_backoff_increases() {
         let mut backoff =
             ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
@@ -5062,6 +5246,68 @@ mod tests {
                 assert_eq!(value.as_str(), "Bearer sk-rci");
             }
             _ => panic!("expected header credential"),
+        }
+    }
+
+    #[test]
+    fn ifttt_server_push_stores_mode_and_failed_replacements_leave_key_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let cfg = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        cfg.save(&config_path).unwrap();
+        let store = CredentialStore::from_config_with_backend(&cfg, &backend).unwrap();
+        let (sender, credentials) = SharedCredentials::new(store);
+        let sender = Arc::new(sender);
+        let key = "ifttt_push_test-NOT_REAL";
+        let mut frame = serde_json::json!({
+            "service_slug": "api-ifttt", "request_id": "request",
+            "injection_method": "ifttt_webhook", "header_value": key,
+            "target_url": "https://maker.ifttt.com",
+        });
+        let ack = process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+            "ok"
+        );
+        assert!(!ack.contains(key));
+        assert_eq!(
+            credentials.snapshot().get("api-ifttt").unwrap().ifttt_key(),
+            Some(key)
+        );
+        let saved = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!saved.contains(key));
+        for (method, replacement, destination) in [
+            (
+                "ifttt_webhook",
+                "https://maker.ifttt.com/with/key/secret",
+                "https://maker.ifttt.com",
+            ),
+            (
+                "ifttt_webhook",
+                "valid_replacement",
+                "https://other.invalid",
+            ),
+            (
+                "future_adapter",
+                "valid_replacement",
+                "https://maker.ifttt.com",
+            ),
+        ] {
+            frame["injection_method"] = method.into();
+            frame["header_value"] = replacement.into();
+            frame["target_url"] = destination.into();
+            let ack = process_credential_update(&frame, &sender, &config_path, &backend).unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&ack).unwrap()["status"],
+                "error"
+            );
+            assert!(!ack.contains(replacement));
+            assert_eq!(std::fs::read_to_string(&config_path).unwrap(), saved);
+            assert_eq!(
+                credentials.snapshot().get("api-ifttt").unwrap().ifttt_key(),
+                Some(key)
+            );
         }
     }
 

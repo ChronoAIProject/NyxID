@@ -15,10 +15,10 @@ use crate::models::usage_allowance::{
 use crate::models::usage_allowance_period::{
     COLLECTION_NAME as USAGE_ALLOWANCE_PERIODS, UsageAllowancePeriod,
 };
+#[cfg(test)]
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 pub const MAX_ALLOWANCE_QUANTITY: i64 = 1_000_000_000_000;
-pub const MAX_ALLOWANCE_TARGET_USERS: usize = 500;
 
 #[derive(Clone, Debug)]
 pub struct CreateAllowanceInput {
@@ -28,6 +28,8 @@ pub struct CreateAllowanceInput {
     pub recurrence: AllowanceRecurrence,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub created_by: String,
 }
 
@@ -39,6 +41,8 @@ pub struct UpdateAllowanceInput {
     pub recurrence: Option<AllowanceRecurrence>,
     pub target_kind: Option<BillingTargetKind>,
     pub target_user_ids: Option<Vec<String>>,
+    pub target_org_ids: Option<Vec<String>>,
+    pub target_group_ids: Option<Vec<String>>,
     pub is_active: Option<bool>,
 }
 
@@ -53,7 +57,14 @@ pub async fn create_allowance(
     input: CreateAllowanceInput,
 ) -> AppResult<UsageAllowance> {
     validate_quantity(input.quantity)?;
-    validate_targets(db, input.target_kind, &input.target_user_ids).await?;
+    super::targets::validate(
+        db,
+        input.target_kind,
+        &input.target_user_ids,
+        &input.target_org_ids,
+        &input.target_group_ids,
+    )
+    .await?;
     let service = resolve_service(db, &input.service_ref).await?;
     let metric = super::metric_resolution::allowance_metric(&service, input.metric)?;
     let now = Utc::now();
@@ -66,6 +77,8 @@ pub async fn create_allowance(
         recurrence: input.recurrence,
         target_kind: input.target_kind,
         target_user_ids: input.target_user_ids,
+        target_org_ids: input.target_org_ids,
+        target_group_ids: input.target_group_ids,
         is_active: true,
         created_by: input.created_by,
         created_at: now,
@@ -95,10 +108,28 @@ pub async fn update_allowance(
     let quantity = input.quantity.unwrap_or(current.quantity);
     validate_quantity(quantity)?;
     let target_kind = input.target_kind.unwrap_or(current.target_kind);
-    let target_user_ids = input
-        .target_user_ids
-        .unwrap_or_else(|| current.target_user_ids.clone());
-    validate_targets(db, target_kind, &target_user_ids).await?;
+    let [target_user_ids, target_org_ids, target_group_ids] = super::targets::updated_lists(
+        current.target_kind,
+        target_kind,
+        [
+            &current.target_user_ids,
+            &current.target_org_ids,
+            &current.target_group_ids,
+        ],
+        [
+            input.target_user_ids,
+            input.target_org_ids,
+            input.target_group_ids,
+        ],
+    )?;
+    super::targets::validate_existing(
+        db,
+        target_kind,
+        &target_user_ids,
+        &target_org_ids,
+        &target_group_ids,
+    )
+    .await?;
 
     let mut set = doc! {
         "quantity": quantity,
@@ -108,6 +139,8 @@ pub async fn update_allowance(
         "target_user_ids": bson::to_bson(&target_user_ids).map_err(|error| {
             AppError::Internal(format!("failed to encode allowance targets: {error}"))
         })?,
+        "target_org_ids": &target_org_ids,
+        "target_group_ids": &target_group_ids,
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
     if let Some(recurrence) = input.recurrence {
@@ -174,13 +207,7 @@ pub async fn list_current_for_user(
         .collection::<UsageAllowance>(USAGE_ALLOWANCES)
         .find(doc! {
             "is_active": true,
-            "$or": [
-                { "target_kind": "all_users" },
-                {
-                    "target_kind": "selected_users",
-                    "target_user_ids": owner_user_id,
-                },
-            ],
+            "$or": super::targets::allowance_clauses(db, owner_user_id).await?,
         })
         .sort(doc! { "service_slug": 1, "created_at": 1 })
         .await?
@@ -219,13 +246,7 @@ pub async fn applicable_allowances(
             })?,
             "$and": [
                 { "$or": service_match },
-                { "$or": [
-                    { "target_kind": "all_users" },
-                    {
-                        "target_kind": "selected_users",
-                        "target_user_ids": owner_user_id,
-                    },
-                ] },
+                { "$or": super::targets::allowance_clauses(db, owner_user_id).await? },
             ],
         })
         .sort(doc! { "created_at": 1 })
@@ -352,50 +373,6 @@ fn validate_quantity(quantity: i64) -> AppResult<()> {
     Ok(())
 }
 
-async fn validate_targets(
-    db: &mongodb::Database,
-    target_kind: BillingTargetKind,
-    target_user_ids: &[String],
-) -> AppResult<()> {
-    if target_kind == BillingTargetKind::AllUsers {
-        if !target_user_ids.is_empty() {
-            return Err(AppError::ValidationError(
-                "all-users allowances must not include target_user_ids".to_string(),
-            ));
-        }
-        return Ok(());
-    }
-    if target_user_ids.is_empty() || target_user_ids.len() > MAX_ALLOWANCE_TARGET_USERS {
-        return Err(AppError::ValidationError(format!(
-            "selected allowances require 1-{MAX_ALLOWANCE_TARGET_USERS} target users"
-        )));
-    }
-    let unique: std::collections::BTreeSet<&str> = target_user_ids
-        .iter()
-        .map(|id| id.trim())
-        .filter(|id| !id.is_empty())
-        .collect();
-    if unique.len() != target_user_ids.len() {
-        return Err(AppError::ValidationError(
-            "target_user_ids must be unique and non-empty".to_string(),
-        ));
-    }
-    let ids: Vec<&str> = unique.into_iter().collect();
-    let count = db
-        .collection::<User>(USERS)
-        .count_documents(doc! {
-            "_id": { "$in": &ids },
-            "is_active": true,
-        })
-        .await?;
-    if count != ids.len() as u64 {
-        return Err(AppError::ValidationError(
-            "one or more target users do not exist or are inactive".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 async fn resolve_service(db: &mongodb::Database, reference: &str) -> AppResult<DownstreamService> {
     let reference = reference.trim();
     if reference.is_empty() {
@@ -488,6 +465,8 @@ mod tests {
             recurrence: AllowanceRecurrence::Daily,
             target_kind: BillingTargetKind::AllUsers,
             target_user_ids: Vec::new(),
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             is_active: true,
             created_by: "admin-1".to_string(),
             created_at: now - Duration::days(2),
@@ -530,6 +509,8 @@ mod tests {
             recurrence: AllowanceRecurrence::Daily,
             target_kind: BillingTargetKind::AllUsers,
             target_user_ids: Vec::new(),
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             is_active: true,
             created_by: "admin-1".to_string(),
             created_at: now - Duration::days(2),
@@ -598,10 +579,12 @@ mod tests {
             .await
             .expect("insert organization owner");
 
-        validate_targets(
+        super::super::targets::validate(
             &db,
             BillingTargetKind::SelectedUsers,
             &["org-1".to_string()],
+            &[],
+            &[],
         )
         .await
         .expect("organization owner is eligible");

@@ -205,10 +205,19 @@ fn descriptors_keep_all_previous_adapters_on_stored_webhook_defaults() {
             );
             assert!(adapter.registration().webhook_ingestion);
             if let Some(descriptor) = adapter.platform_credentials() {
-                assert!(matches!(
-                    descriptor.backing,
-                    PlatformCredentialBacking::Stored
-                ));
+                if adapter.platform_id() == "aurinko" {
+                    assert!(matches!(
+                        descriptor.backing,
+                        PlatformCredentialBacking::ProviderOAuth {
+                            provider_slug: "aurinko"
+                        }
+                    ));
+                } else {
+                    assert!(matches!(
+                        descriptor.backing,
+                        PlatformCredentialBacking::Stored
+                    ));
+                }
             }
         }
     }
@@ -597,7 +606,7 @@ async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config()
         .unwrap();
     assert_eq!(
         list.iter().map(|p| p.provider).collect::<Vec<_>>(),
-        ["meta", "telegram-new", "x"]
+        ["aurinko", "meta", "telegram-new", "x"]
     );
     let (_, Json(updated)) = admin::update(
         State(state.clone()),

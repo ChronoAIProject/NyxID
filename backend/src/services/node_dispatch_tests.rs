@@ -68,7 +68,7 @@ async fn two_replica_fixture_with_limit(
     let connection_id = uuid::Uuid::new_v4().to_string();
     let owner_manager = Arc::new(NodeWsManager::new(5, 100));
     let (outbound_tx, outbound) = mpsc::channel(256);
-    let pending_proxy =
+    let (pending_proxy, _close_rx) =
         owner_manager.register_connection_with_id(&node_id, connection_id.clone(), outbound_tx);
     node_owner_service::claim(
         &db,

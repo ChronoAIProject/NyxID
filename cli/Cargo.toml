@@ -1,6 +1,6 @@
 [package]
 name = "nyxid-cli"
-version = "0.23.0"
+version = "0.28.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -87,6 +87,7 @@ x509-cert = "0.2"
 # agent's proxy executor to sign requests with AWS SigV4 / GCP service-
 # account JWT when credentials live on the node rather than NyxID.
 nyxid-cloud-auth = { path = "../cloud-auth" }
+nyxid-service-adapters = { path = "../service-adapters" }
 nyxid-crypto = { path = "../nyxid-crypto", features = ["decrypt"] }
 
 # Wizard v2 (CLI-served local browser UI). See docs/CLI_WIZARD_V2.md
@@ -99,6 +100,7 @@ rust-embed = { version = "8", features = ["include-exclude"] }
 constant_time_eq = "=0.4.2"
 
 [dev-dependencies]
+nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }
 tempfile = "3"
 # HTTP mock server for command-level integration tests: point an
 # ApiClient (via AuthArgs.base_url) at a MockServer and assert on the

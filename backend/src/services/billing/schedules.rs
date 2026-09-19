@@ -21,7 +21,7 @@ use crate::models::credit_schedule_period::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
-use super::grants::{CREDIT_MICROS, MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN, MAX_SELECTED_USERS};
+use super::grants::{CREDIT_MICROS, MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN};
 
 mod progress;
 
@@ -37,6 +37,8 @@ pub struct CreateScheduleInput {
     pub expiry: CreditExpiryPolicy,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub all_services: bool,
     pub service_refs: Vec<String>,
     pub reason: Option<String>,
@@ -49,6 +51,8 @@ pub struct UpdateScheduleInput {
     pub expiry: Option<CreditExpiryPolicy>,
     pub target_kind: Option<BillingTargetKind>,
     pub target_user_ids: Option<Vec<String>>,
+    pub target_org_ids: Option<Vec<String>>,
+    pub target_group_ids: Option<Vec<String>>,
     pub all_services: Option<bool>,
     pub service_refs: Option<Vec<String>>,
     pub reason: Option<Option<String>>,
@@ -80,7 +84,20 @@ pub async fn create_schedule(
 ) -> AppResult<CreditSchedule> {
     let amount_micros = validate_amount(input.amount_credits)?;
     validate_expiry(&input.expiry)?;
-    let target_user_ids = validate_targets(db, input.target_kind, &input.target_user_ids).await?;
+    super::targets::validate_shape(
+        input.target_kind,
+        &input.target_user_ids,
+        &input.target_org_ids,
+        &input.target_group_ids,
+    )?;
+    let target_user_ids = validate_targets(
+        db,
+        input.target_kind,
+        &input.target_user_ids,
+        &input.target_org_ids,
+        &input.target_group_ids,
+    )
+    .await?;
     let scope =
         super::grants::resolve_service_scope(db, input.all_services, &input.service_refs).await?;
     let now = Utc::now();
@@ -92,6 +109,8 @@ pub async fn create_schedule(
         expiry: input.expiry,
         target_kind: input.target_kind,
         target_user_ids,
+        target_org_ids: input.target_org_ids,
+        target_group_ids: input.target_group_ids,
         scope,
         reason: normalize_reason(input.reason)?,
         is_active: true,
@@ -132,10 +151,28 @@ async fn update_schedule_with_current(
     let expiry = input.expiry.unwrap_or_else(|| current.expiry.clone());
     validate_expiry(&expiry)?;
     let target_kind = input.target_kind.unwrap_or(current.target_kind);
-    let requested_targets = input
-        .target_user_ids
-        .unwrap_or_else(|| current.target_user_ids.clone());
-    let target_user_ids = validate_targets(db, target_kind, &requested_targets).await?;
+    let [requested_targets, target_org_ids, target_group_ids] = super::targets::updated_lists(
+        current.target_kind,
+        target_kind,
+        [
+            &current.target_user_ids,
+            &current.target_org_ids,
+            &current.target_group_ids,
+        ],
+        [
+            input.target_user_ids,
+            input.target_org_ids,
+            input.target_group_ids,
+        ],
+    )?;
+    let target_user_ids = validate_targets(
+        db,
+        target_kind,
+        &requested_targets,
+        &target_org_ids,
+        &target_group_ids,
+    )
+    .await?;
 
     let scope = if input.all_services.is_some() || input.service_refs.is_some() {
         let all_services = input.all_services.unwrap_or(current.scope.all_services);
@@ -173,6 +210,8 @@ async fn update_schedule_with_current(
                 "expiry": encode(&expiry, "schedule expiry")?,
                 "target_kind": encode(&target_kind, "schedule target kind")?,
                 "target_user_ids": encode(&target_user_ids, "schedule targets")?,
+                "target_org_ids": &target_org_ids,
+                "target_group_ids": &target_group_ids,
                 "scope": encode(&scope, "schedule scope")?,
                 "reason": reason.as_ref().map_or(Bson::Null, |value| value.clone().into()),
                 "is_active": input.is_active.unwrap_or(current.is_active),
@@ -400,6 +439,8 @@ async fn claim_period(
                 .map_or(Bson::Null, |value| bson::DateTime::from_chrono(value).into()),
             "target_kind": encode(&schedule.target_kind, "period target kind")?,
             "target_user_ids": encode(&schedule.target_user_ids, "period targets")?,
+            "target_org_ids": &schedule.target_org_ids,
+            "target_group_ids": &schedule.target_group_ids,
             "scope": encode(&schedule.scope, "period scope")?,
             "reason": schedule.reason.as_ref().map_or(Bson::Null, |value| value.clone().into()),
             "cursor_user_id": Bson::Null,
@@ -454,6 +495,18 @@ async fn next_recipients(
     limit: usize,
 ) -> AppResult<Vec<String>> {
     match period.target_kind {
+        BillingTargetKind::OrgMembers | BillingTargetKind::Groups => {
+            super::targets::member_recipients(
+                db,
+                period.target_kind,
+                &period.target_org_ids,
+                &period.target_group_ids,
+                Some(period.created_at),
+                period.cursor_user_id.as_deref(),
+                limit,
+            )
+            .await
+        }
         BillingTargetKind::AllUsers => {
             // The claim timestamp excludes later signups. Re-checking
             // is_active while paging deliberately permits an existing owner
@@ -510,6 +563,8 @@ fn grants_for_recipients(
             }),
             recipient_user_id,
             target_kind: period.target_kind,
+            target_org_ids: period.target_org_ids.clone(),
+            target_group_ids: period.target_group_ids.clone(),
             amount_credits: period.amount_micros / CREDIT_MICROS,
             amount_micros: period.amount_micros,
             remaining_micros: period.amount_micros,
@@ -736,29 +791,18 @@ fn validate_expiry(expiry: &CreditExpiryPolicy) -> AppResult<()> {
     Ok(())
 }
 
+/// The create/update paths validate shape before checking referenced rows.
 async fn validate_targets(
     db: &mongodb::Database,
     target_kind: BillingTargetKind,
     targets: &[String],
+    orgs: &[String],
+    groups: &[String],
 ) -> AppResult<Vec<String>> {
-    match target_kind {
-        BillingTargetKind::AllUsers => {
-            if !targets.is_empty() {
-                return Err(AppError::ValidationError(
-                    "all-users schedules must not include target_user_ids".to_string(),
-                ));
-            }
-            Ok(Vec::new())
-        }
-        BillingTargetKind::SelectedUsers => {
-            if targets.is_empty() || targets.len() > MAX_SELECTED_USERS {
-                return Err(AppError::ValidationError(format!(
-                    "selected schedules require 1-{MAX_SELECTED_USERS} target users"
-                )));
-            }
-            super::grants::resolve_recipients(db, target_kind, targets).await
-        }
-    }
+    super::targets::validate_existing(db, target_kind, targets, orgs, groups).await?;
+    let mut targets = targets.to_vec();
+    targets.sort();
+    Ok(targets)
 }
 
 fn normalize_reason(reason: Option<String>) -> AppResult<Option<String>> {
@@ -796,3 +840,6 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 #[path = "schedules/update_tests.rs"]
 mod update_tests;
+
+#[cfg(test)]
+mod target_tests;

@@ -835,6 +835,32 @@ pub async fn update_bot(
     user_id: &str,
     params: UpdateBotParams<'_>,
 ) -> AppResult<ChannelBot> {
+    super::channel_retry_ingress::with_lifecycle(
+        db,
+        adapter.serializes_lifecycle(),
+        bot_id,
+        update_bot_inner(
+            db,
+            encryption_keys,
+            http_client,
+            adapter,
+            bot_id,
+            user_id,
+            params,
+        ),
+    )
+    .await
+}
+
+async fn update_bot_inner(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    http_client: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    user_id: &str,
+    params: UpdateBotParams<'_>,
+) -> AppResult<ChannelBot> {
     let bot = get_bot_for_user(db, bot_id, user_id).await?;
     if matches!(bot.credential_source.as_str(), "platform" | "connection")
         && !params.fields().0.is_empty()
@@ -843,6 +869,9 @@ pub async fn update_bot(
             "Platform-managed credentials cannot be edited. Reconnect through managed onboarding."
                 .to_string(),
         ));
+    }
+    if adapter.serializes_lifecycle() && !bot.is_active {
+        return Err(AppError::ChannelBotInactive("Bot has been deleted".into()));
     }
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
@@ -861,6 +890,11 @@ pub async fn update_bot(
     let descriptor = adapter.registration();
     let fields = params.fields();
     descriptor.validate(&fields, true)?;
+    if adapter.serializes_lifecycle() && fields.get("app_secret").is_some() {
+        set_doc.insert("status", "pending_webhook");
+        set_doc.insert("webhook_registered", false);
+    }
+
     write_registration_fields(
         encryption_keys,
         &descriptor,
@@ -906,10 +940,74 @@ pub async fn register_webhook(
     webhook_url: &str,
     webhook_secret: &str,
 ) -> AppResult<()> {
-    adapter
-        .register_webhook(http_client, bot_token, webhook_url, webhook_secret)
-        .await?;
+    if !adapter.serializes_lifecycle() {
+        adapter
+            .register_webhook(http_client, bot_token, webhook_url, webhook_secret)
+            .await?;
+        return store_webhook_registration(db, adapter, doc! { "_id": bot_id }).await;
+    }
+    super::channel_retry_ingress::with_lifecycle(
+        db,
+        adapter.serializes_lifecycle(),
+        bot_id,
+        register_webhook_inner(
+            db,
+            http_client,
+            adapter,
+            bot_id,
+            bot_token,
+            webhook_url,
+            webhook_secret,
+        ),
+    )
+    .await
+}
 
+async fn register_webhook_inner(
+    db: &mongodb::Database,
+    http_client: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    bot_token: &str,
+    webhook_url: &str,
+    webhook_secret: &str,
+) -> AppResult<()> {
+    let bot = get_bot(db, bot_id).await?;
+    if !bot.is_active {
+        return Err(AppError::ChannelBotInactive("Bot has been deleted".into()));
+    }
+    let setup = adapter
+        .setup_bot_webhook(
+            db,
+            http_client,
+            &bot,
+            bot_token,
+            webhook_url,
+            webhook_secret,
+        )
+        .await;
+    if let Err(error) = setup {
+        if adapter.serializes_lifecycle() {
+            db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+                doc! { "_id": bot_id, "is_active": true, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
+                doc! { "$set": { "status": "failed", "webhook_registered": false, "updated_at": bson::DateTime::now() } },
+            ).await?;
+        }
+        return Err(error);
+    }
+
+    store_webhook_registration(
+        db,
+        adapter,
+        doc! { "_id": bot_id, "is_active": true, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
+    ).await
+}
+
+async fn store_webhook_registration(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    filter: bson::Document,
+) -> AppResult<()> {
     // Platforms with manual webhook setup (Discord, Lark, Feishu) return Ok
     // from register_webhook but the user must configure the URL themselves.
     // Only mark as fully registered for platforms where we actually set the URL.
@@ -924,7 +1022,7 @@ pub async fn register_webhook(
     let now = bson::DateTime::from_chrono(Utc::now());
     db.collection::<ChannelBot>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": bot_id },
+            filter,
             doc! { "$set": {
                 "status": status,
                 "webhook_registered": registered,
@@ -1020,7 +1118,31 @@ pub async fn delete_bot(
             Ok(Some(service.remove_owned_webhook(&bot).await.unwrap_or("failed")))
         }).await;
     }
-    delete_bot_inner(db, http_client, encryption_keys, adapter, bot_id, user_id).await
+    delete_bot_serialized(db, http_client, encryption_keys, adapter, bot_id, user_id).await
+}
+
+async fn delete_bot_serialized(
+    db: &mongodb::Database,
+    http_client: &reqwest::Client,
+    encryption_keys: &EncryptionKeys,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    user_id: &str,
+) -> AppResult<Option<&'static str>> {
+    super::channel_retry_ingress::with_lifecycle(
+        db,
+        adapter.serializes_lifecycle(),
+        bot_id,
+        async {
+            let work = delete_bot_inner(db, http_client, encryption_keys, adapter, bot_id, user_id);
+            if adapter.serializes_lifecycle() {
+                super::channel_retry_ingress::with_ingress(db, bot_id, work).await
+            } else {
+                work.await
+            }
+        },
+    )
+    .await
 }
 
 async fn delete_bot_inner(
@@ -1037,10 +1159,13 @@ async fn delete_bot_inner(
     if bot.platform != "telegram-new"
         && bot.credential_source != "connection"
         && bot.webhook_registered
+        && !adapter.serializes_lifecycle()
         && let Ok(token) = decrypt_bot_token(encryption_keys, &bot).await
     {
         // Register with an empty URL to remove the webhook
-        let _ = adapter.register_webhook(http_client, &token, "", "").await;
+        let _ = adapter
+            .remove_bot_webhook(db, http_client, &bot, &token)
+            .await;
     }
 
     let now = bson::DateTime::from_chrono(Utc::now());
@@ -1069,6 +1194,17 @@ async fn delete_bot_inner(
         )
         .await?;
 
+    if adapter.serializes_lifecycle() {
+        for collection in [
+            crate::models::channel_email::SENDS,
+            crate::models::channel_email::RECEIPTS,
+            crate::models::channel_email::BATCHES,
+        ] {
+            db.collection::<bson::Document>(collection)
+                .delete_many(doc! { "bot_id": bot_id, "user_id": user_id })
+                .await?;
+        }
+    }
     let cleanup = if bot.credential_source == "connection"
         && super::channel_connection_webhook_service::supports(adapter)
     {
@@ -1088,6 +1224,15 @@ async fn delete_bot_inner(
                 "failed"
             },
         )
+    } else if adapter.serializes_lifecycle() {
+        let result = async {
+            let token = zeroize::Zeroizing::new(decrypt_bot_token(encryption_keys, &bot).await?);
+            adapter
+                .remove_bot_webhook(db, http_client, &bot, &token)
+                .await
+        }
+        .await;
+        Some(if result.is_ok() { "removed" } else { "failed" })
     } else if bot.credential_source == "platform" && bot.platform != "telegram-new" {
         Some(
             cleanup_managed_webhook(db, http_client, encryption_keys, adapter, &bot)
@@ -1135,6 +1280,90 @@ async fn cleanup_managed_webhook(
         .remove_managed_webhook_override(http, &credentials, bot)
         .await?;
     Ok("removed")
+}
+
+/// Verify/repair under the same fence as credential rotation and deletion.
+pub async fn verify_serialized_bot(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot_id: &str,
+    owner_id: &str,
+    url: &str,
+) -> AppResult<ChannelBot> {
+    super::channel_retry_ingress::with_lifecycle(db, true, bot_id, async {
+        let bot = get_bot_for_user(db, bot_id, owner_id).await?;
+        if !bot.is_active {
+            return Err(AppError::ChannelBotInactive("Bot has been deleted".into()));
+        }
+        let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, &bot).await?);
+        adapter
+            .verify_bot_token(
+                http,
+                &BotCredentials {
+                    token: &token,
+                    platform_bot_id: Some(&bot.platform_bot_id),
+                    platform_secrets: None,
+                },
+            )
+            .await?;
+        adapter.validate_stored_verification(&bot)?;
+        register_webhook_inner(db, http, adapter, bot_id, &token, url, "").await?;
+        get_bot_for_user(db, bot_id, owner_id).await
+    })
+    .await
+}
+
+/// Acquire all Aurinko effect fences before changing owner or bot state.
+/// A busy request leaves the owner able to authenticate and retry deletion.
+/// Hard deletion removes credentials locally; upstream subscriptions become inert.
+pub async fn delete_owner_aurinko_channels(db: &mongodb::Database, owner: &str) -> AppResult<()> {
+    use super::coordination_service::{EventDedupClaimResult, EventDedupStore};
+    let bots: Vec<ChannelBot> = db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .find(doc! { "user_id": owner, "platform": "aurinko" })
+        .await?
+        .try_collect()
+        .await?;
+    let mut claims = Vec::new();
+    let result = async {
+        for bot in &bots {
+            for namespace in ["channel-bot-lifecycle", "channel-bot-ingress"] {
+                match EventDedupStore::claim(
+                    db,
+                    namespace,
+                    &bot.id,
+                    "mutation",
+                    std::time::Duration::from_secs(120),
+                )
+                .await?
+                {
+                    EventDedupClaimResult::Claimed(claim) => claims.push(claim),
+                    EventDedupClaimResult::Duplicate => {
+                        return Err(super::channel_retry_ingress::retry_later());
+                    }
+                }
+            }
+        }
+        db.collection::<ChannelBot>(COLLECTION_NAME)
+            .delete_many(doc! { "user_id": owner, "platform": "aurinko" })
+            .await?;
+        for collection in [
+            CONVERSATIONS,
+            crate::models::channel_message::COLLECTION_NAME,
+        ] {
+            db.collection::<bson::Document>(collection)
+                .delete_many(doc! { "user_id": owner, "platform": "aurinko" })
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    for claim in claims {
+        EventDedupStore::release(db, &claim).await?;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1277,6 +1506,67 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_lifecycle_preserves_inactive_patch_and_manual_registration() {
+        let db = crate::test_utils::connect_test_database("legacy_channel_lifecycle")
+            .await
+            .expect("real Mongo required");
+        let keys = test_encryption_keys();
+        let http = reqwest::Client::new();
+        let mut bot = make_lark_bot(&keys, "app:secret").await;
+        bot.is_active = false;
+        db.collection::<ChannelBot>(COLLECTION_NAME)
+            .insert_one(&bot)
+            .await
+            .unwrap();
+        let adapter = crate::services::channel_adapters::lark::LarkFamilyAdapter::lark(Arc::new(
+            crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+        ));
+        let patched = update_bot(
+            &db,
+            &keys,
+            &http,
+            &adapter,
+            &bot.id,
+            &bot.user_id,
+            UpdateBotParams {
+                label: Some("Renamed"),
+                bot_token: None,
+                app_id: None,
+                app_secret: None,
+                verification_token: None,
+                encrypt_key: SecretPatch::Unchanged,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(patched.label, "Renamed");
+        assert!(!patched.is_active);
+        register_webhook(
+            &db,
+            &http,
+            &adapter,
+            &bot.id,
+            "app:secret",
+            "https://nyxid.test/hook",
+            "unused",
+        )
+        .await
+        .unwrap();
+        let registered = get_bot(&db, &bot.id).await.unwrap();
+        assert_eq!(registered.status, "pending_webhook");
+        assert!(!registered.webhook_registered);
+        assert!(!registered.is_active);
+        assert_eq!(registered.label, "Renamed");
+        assert_eq!(
+            db.collection::<bson::Document>("coordination_event_dedup")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

@@ -4,6 +4,12 @@ This document describes the system architecture, component design, data flows, a
 
 ---
 
+Catalog services own shared credentials, audience grants, endpoint policy, and
+billing; providers supply authentication configuration and may back multiple
+services. Provider linking and requirement mutations are serialized through the
+service record. A small retirement guard keeps historical vendor credential
+stores inaccessible. See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md).
+
 ## Table of Contents
 
 - [System Overview](#system-overview)
@@ -647,6 +653,19 @@ Client                     NyxID Backend                     Downstream
 ```
 
 ### Collection Details
+
+#### Aurinko email coordination
+
+The `aurinko` channel adapter extends the existing registry and relay. Its backend descriptor supplies registration fields, setup instructions, and capabilities to the platform catalog. It supports anchored text replies; initiated sends, edits, and channel media are unavailable. The separate `api-aurinko` AI Service uses ordinary owner-scoped catalog credentials and MCP discovery.
+
+| Collection | Persisted coordination state |
+|---|---|
+| `channel_email_subscriptions` | Bot/account/subscription binding and signing-secret verification fingerprint |
+| `channel_email_batches` | Notification digest and rotating progress offset, with a 31-day TTL |
+| `channel_email_receipts` | Stable inbound UUID-v4 and durable completion marker |
+| `channel_email_sends` | Irreversible send-attempt barrier and optional provider reply ID |
+
+These documents use person/org `user_id` ownership, UUID-string identifiers, and BSON dates. Message content stays transient under ADR-013. Existing shared Mongo coordination serializes lifecycle and ingress work; only Aurinko opts into these hooks. A partial index enforces one active Aurinko bot per account without constraining existing platforms. Bot/owner cleanup removes email metadata; receipts and send barriers otherwise survive ordinary message-log expiry. See [Aurinko integration](AURINKO_INTEGRATION.md).
 
 #### users
 

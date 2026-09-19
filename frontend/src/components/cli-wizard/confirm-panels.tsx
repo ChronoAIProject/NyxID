@@ -7,6 +7,12 @@
 // touch that endpoint.
 
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useAppForm } from "@/components/ui/form";
+import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
+import { createServiceAccountSchema } from "@/schemas/service-accounts";
+import { useAuthStore } from "@/stores/auth-store";
 import { Info, Plus, Trash2 } from "lucide-react";
 import QRCode from "qrcode";
 import { Button } from "@/components/ui/button";
@@ -340,12 +346,14 @@ export function ApiKeyCreateConfirm({
 interface ApiKeyRotateResponse {
   readonly id: string;
   readonly full_key: string;
+  readonly platform?: string | null;
 }
 
 export interface ApiKeyRotateSuccess {
   readonly kind: "api-key-rotate";
   readonly resource_id: string;
   readonly full_key: string;
+  readonly platform?: string | null;
 }
 
 interface ApiKeyRotateConfirmProps {
@@ -376,6 +384,7 @@ export function ApiKeyRotateConfirm({
         kind: "api-key-rotate",
         resource_id: res.id,
         full_key: res.full_key,
+        platform: res.platform,
       });
     } catch (e) {
       setError(errorMessage(e));
@@ -595,16 +604,36 @@ export function ServiceAccountCreateConfirm({
   pairingId,
   onSuccess,
 }: ServiceAccountCreateConfirmProps) {
-  const [name, setName] = useState(prefill.name ?? "");
-  const [scopes, setScopes] = useState(prefill.scopes ?? "openid profile");
-  const [description, setDescription] = useState(prefill.description ?? "");
-  const [roleIds, setRoleIds] = useState(prefill.role_ids_csv ?? "");
+  const form = useAppForm({
+    resolver: zodResolver(createServiceAccountSchema),
+    defaultValues: {
+      name: prefill.name ?? "", allowed_scopes: prefill.scopes ?? "openid profile",
+      description: prefill.description ?? "", role_ids: prefill.role_ids_csv ?? "",
+    },
+  });
+  const name = form.watch("name");
+  const scopes = form.watch("allowed_scopes");
+  const description = form.watch("description") ?? "";
+  const roleIds = form.watch("role_ids") ?? "";
   const [ownerId, setOwnerId] = useState(prefill.org_id ?? "");
+  const currentUser = useAuthStore((state) => state.user);
+  const identity = useQuery({
+    queryKey: ["wizard-current-user", pairingId],
+    enabled: !currentUser,
+    queryFn: async () => {
+      await useAuthStore.getState().checkAuth({ ephemeral: true });
+      const user = useAuthStore.getState().user;
+      if (!user) throw new Error("Unable to load your account. Check your CLI login and retry.");
+      return user;
+    },
+    retry: false,
+  });
   const orgs = useOrgs();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (!(await form.trigger())) return;
     setLoading(true);
     setError(null);
     try {
@@ -662,31 +691,23 @@ export function ServiceAccountCreateConfirm({
             id="pair-sa-name"
             value={name}
             onChange={(e) => {
-              setName(e.target.value);
+              form.setValue("name", e.target.value);
             }}
             placeholder="e.g. ci-deploys"
             autoFocus
           />
         </Field>
         <Field label="Allowed scopes" htmlFor="pair-sa-scopes">
-          <Input
-            id="pair-sa-scopes"
-            value={scopes}
-            onChange={(e) => {
-              setScopes(e.target.value);
-            }}
-            placeholder="openid profile"
-          />
-          <p className="text-xs text-muted-foreground">
-            Space-separated. The SA may only request these scopes.
-          </p>
+          <ServiceAccountScopePicker id="pair-sa-scopes" value={scopes}
+            onChange={(value) => form.setValue("allowed_scopes", value)}
+            ownerId={ownerId || currentUser?.id || ""} />
         </Field>
         <Field label="Description (optional)" htmlFor="pair-sa-desc">
           <Input
             id="pair-sa-desc"
             value={description}
             onChange={(e) => {
-              setDescription(e.target.value);
+              form.setValue("description", e.target.value);
             }}
             placeholder="What this account is for"
           />
@@ -696,7 +717,7 @@ export function ServiceAccountCreateConfirm({
             id="pair-sa-roles"
             value={roleIds}
             onChange={(e) => {
-              setRoleIds(e.target.value);
+              form.setValue("role_ids", e.target.value);
             }}
             placeholder="role-id-1,role-id-2"
           />
@@ -721,6 +742,9 @@ export function ServiceAccountCreateConfirm({
           </Field>
         ) : null}
       </div>
+      {!currentUser && identity.isPending && <p role="status">Loading your account…</p>}
+      {!currentUser && identity.isError && <div role="alert"><ErrorLine message={identity.error.message} /><Button variant="outline" onClick={() => void identity.refetch()}>Retry account</Button></div>}
+      {Object.entries(form.formState.errors).map(([field, value]) => <ErrorLine key={field} message={value.message ?? "Invalid value"} />)}
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={submitDisabled}>
         {loading ? "Creating..." : "Create Service Account"}

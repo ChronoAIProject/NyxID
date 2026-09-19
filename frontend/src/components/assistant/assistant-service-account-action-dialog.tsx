@@ -1,3 +1,6 @@
+import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
+import { useAuthStore } from "@/stores/auth-store";
+import { useAppForm } from "@/components/ui/form";
 import { useRef, useState } from "react";
 import { KeyRound, ShieldAlert } from "lucide-react";
 import { z } from "zod";
@@ -84,9 +87,9 @@ export function AssistantServiceAccountActionDialog({
   const [description, setDescription] = useState(
     textParam(params, "description"),
   );
-  const [allowedScopes, setAllowedScopes] = useState(
-    textParam(params, "allowedScopes") || "proxy",
-  );
+  const currentUserId = useAuthStore((state) => state.user?.id);
+  const scopeForm = useAppForm({ defaultValues: { allowed_scopes: textParam(params, "allowedScopes") || "proxy" } });
+  const allowedScopes = scopeForm.watch("allowed_scopes");
   const [confirmed, setConfirmed] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -299,10 +302,11 @@ export function AssistantServiceAccountActionDialog({
               <>
                 <div className="space-y-2">
                   <Label htmlFor="sa-scopes">Allowed scopes</Label>
-                  <Input
+                  <ServiceAccountScopePicker
                     id="sa-scopes"
+                    ownerId={targetOrgId || currentUserId || ""}
                     value={allowedScopes}
-                    onChange={(event) => setAllowedScopes(event.target.value)}
+                    onChange={(value) => scopeForm.setValue("allowed_scopes", value)}
                   />
                 </div>
                 {targetOrgId ? (

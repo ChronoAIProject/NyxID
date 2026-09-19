@@ -434,6 +434,8 @@ function CreateBotDialog({
                 <div className="space-y-2">
                   <Label htmlFor="scope">Scope</Label>
                   <OrgScopeSelect
+                    id="scope"
+                    aria-describedby="scope-description"
                     value={targetOrgId}
                     disabled={disabled}
                     onChange={(next) =>
@@ -441,7 +443,7 @@ function CreateBotDialog({
                     }
                     label="Scope"
                   />
-                  <p className="text-xs text-muted-foreground">
+                  <p id="scope-description" className="text-xs text-muted-foreground">
                     {scopeDescription ?? "Choose where this bot lives. Org bots are visible to every org admin and can be bound to org-owned agent keys."}
                   </p>
                 </div>
@@ -532,8 +534,12 @@ function DeleteBotDialog({
   async function handleDelete() {
     if (!botId) return;
     try {
-      await deleteMutation.mutateAsync(botId);
-      toast.success("Bot deleted");
+      const result = await deleteMutation.mutateAsync(botId);
+      if (result?.webhook_cleanup === "failed") {
+        toast.warning("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard.");
+      } else {
+        toast.success("Bot deleted");
+      }
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to delete bot",
@@ -601,7 +607,7 @@ function CreateDeviceChannelDialog({
   // Device events arrive through an agent callback URL, so only keys with
   // one configured are selectable.
   const activeApiKeys = useMemo(
-    () => (apiKeys ?? []).filter((k) => k.is_active),
+    () => (apiKeys ?? []).filter((k) => k.is_active && k.platform !== "nyxid-assistant"),
     [apiKeys],
   );
 

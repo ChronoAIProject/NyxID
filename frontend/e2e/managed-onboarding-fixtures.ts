@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { channelPlatforms } from "./channel-platform-fixtures";
 
 export const managedBot = {
   id: "managed-whatsapp",
@@ -58,6 +59,7 @@ export async function mockDashboard(page: Page) {
         email_verified: true,
         created_at: managedBot.created_at,
       };
+    else if (path === "/channel-platforms") body = { platforms: channelPlatforms };
     else if (path === "/channel-bots") body = { bots: [], total: 0 };
     else if (path === "/channel-bots/managed-whatsapp") body = managedBot;
     else if (path.includes("conversations"))

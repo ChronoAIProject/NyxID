@@ -242,11 +242,6 @@ export const AdminIntegrityPage = lazy(() =>
     default: m.AdminIntegrityPage,
   })),
 );
-export const AdminPlatformOpsPage = lazy(() =>
-  import("@/pages/admin-platform-ops").then((m) => ({
-    default: m.AdminPlatformOpsPage,
-  })),
-);
 export const AdminCreditsPage = lazy(() =>
   import("@/pages/admin-credits").then((m) => ({
     default: m.AdminCreditsPage,
@@ -322,3 +317,5 @@ export const DocsIndexPage = lazy(() =>
 export const DocsPage = lazy(() =>
   import("@/features/docs/docs-page").then((m) => ({ default: m.DocsPage })),
 );
+
+export const AdminUsagePage = lazy(() => import("@/pages/admin-usage").then((m) => ({ default: m.AdminUsagePage })));

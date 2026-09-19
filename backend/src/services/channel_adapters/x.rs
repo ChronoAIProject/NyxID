@@ -471,15 +471,24 @@ impl PlatformAdapter for XAdapter {
                 });
             }
             let body = response_json(response).await?;
-            if body.get("errors").is_some() {
-                return Err(protocol_error());
-            }
             let empty = Vec::new();
             let events = match body.get("data") {
                 None if body["meta"]["result_count"] == 0 => &empty,
                 Some(Value::Array(events)) => events,
                 _ => return Err(protocol_error()),
             };
+            if let Some(errors) = body.get("errors") {
+                let errors = errors.as_array().ok_or_else(protocol_error)?;
+                // X can return DMs with failed optional expansions. Only those
+                // errors are safe to ignore when committing the event cursor.
+                let expansion_errors_only = !events.is_empty()
+                    && errors.iter().all(|error| {
+                        matches!(error["resource_type"].as_str(), Some("user" | "media"))
+                    });
+                if !errors.is_empty() && !expansion_errors_only {
+                    return Err(protocol_error());
+                }
+            }
             if page == 0 {
                 if let Some(event) = events.first() {
                     let id = event["id"]
@@ -863,6 +872,83 @@ mod tests {
             ["103", "105"]
         );
         assert!(!format!("{outcome:?}").contains("private DM"));
+    }
+
+    #[tokio::test]
+    async fn polling_continues_after_optional_expansion_errors() {
+        let server = MockServer::start().await;
+        let http = reqwest::Client::new();
+        let adapter = adapter(&server);
+        let mut cursor = Some("100".to_string());
+        for id in 101..=106 {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": [event(&id.to_string(), "20"), event("100", "20")],
+                    "errors": [
+                        {"resource_type": "user", "resource_id": "30", "type": "https://api.x.com/2/problems/resource-not-found", "detail": "PRIVATE upstream detail"},
+                        {"resource_type": "media", "resource_id": "3_missing", "type": "https://api.x.com/2/problems/resource-not-found"}
+                    ]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let outcome = adapter
+                .poll_inbound(&http, &credentials(), cursor.as_deref())
+                .await
+                .expect("optional expansion errors must not stop DM polling");
+            assert_eq!(outcome.cursor.as_deref(), Some(id.to_string().as_str()));
+            assert_eq!(outcome.messages.len(), 1);
+            assert_eq!(outcome.messages[0].platform_message_id, id.to_string());
+            assert!(outcome.messages[0].sender_display_name.is_none());
+            cursor = outcome.cursor;
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_error_arrays_do_not_fail_polling_or_initialization() {
+        for cursor in [None, Some("100")] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "meta": {"result_count": 0}, "errors": []
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let outcome = adapter(&server)
+                .poll_inbound(&reqwest::Client::new(), &credentials(), cursor)
+                .await
+                .unwrap();
+            assert_eq!(outcome.cursor.as_deref(), Some(cursor.unwrap_or("0")));
+            assert!(outcome.messages.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_dm_results_still_fail_without_advancing_the_cursor() {
+        for body in [
+            json!({"data": [event("101", "20")], "errors": [{"resource_type": "dm_event", "detail": "PRIVATE upstream detail"}]}),
+            json!({"data": [event("101", "20")], "errors": [{"title": "Unknown failure", "detail": "PRIVATE upstream detail"}]}),
+            json!({"meta": {"result_count": 0}, "errors": [{"resource_type": "user", "detail": "PRIVATE upstream detail"}]}),
+            json!({"errors": [{"resource_type": "media", "detail": "PRIVATE upstream detail"}]}),
+            json!({"data": [event("101", "20")], "errors": {"detail": "PRIVATE upstream detail"}}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+            let error = adapter(&server)
+                .poll_inbound(&reqwest::Client::new(), &credentials(), Some("100"))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::ChannelPlatformError(_)));
+            assert!(!error.to_string().contains("PRIVATE"));
+        }
     }
 
     #[tokio::test]

@@ -416,16 +416,26 @@ For end-user setup, certificate issuance, and OpenSSH `ProxyCommand` examples, s
 
 The agent automatically reconnects on disconnection using exponential backoff:
 
-| Attempt | Delay |
-|---------|-------|
-| 1 | 100ms |
-| 2 | 200ms |
-| 3 | 400ms |
-| 4 | 800ms |
-| ... | Doubles each time |
-| Max | 60 seconds |
+| Attempt | Jittered delay |
+|---------|----------------|
+| 1 | 1–2 seconds |
+| 2 | 2–4 seconds |
+| 3 | 4–8 seconds |
+| 4 | 8–16 seconds |
+| 5 | 16–32 seconds |
+| Later | 30–60 seconds |
 
-On a clean disconnect (server-initiated close), the backoff resets to the initial delay. On errors (network failure, auth rejection), the backoff increases.
+Every disconnect triggers a delayed retry, including clean server closes and
+errors. The backoff resets only after at least 60 seconds of authenticated
+service; a briefly successful handshake does not reset it. Shutdown interrupts
+the retry sleep immediately.
+
+After a backend crash/restart, the previous generation's owner lease can remain
+live for up to `NODE_OWNER_LEASE_TTL_SECS` (default 90s). The server rejects such
+attempts with WebSocket Close `4008` before `auth_ok`; the agent retries with
+backoff until ownership is available. The node auth token is long-lived and
+is not a JWT; an unrelated `Token expired` JWT log does not diagnose this lease
+rejection.
 
 The agent handles the full reconnection lifecycle:
 

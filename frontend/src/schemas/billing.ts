@@ -1,3 +1,4 @@
+import { BILLING_METRICS } from "./billing-metrics";
 import { z } from "zod";
 
 export const BILLING_USAGE_PERIODS = [
@@ -23,7 +24,7 @@ const fundingBreakdownShape = {
   allowance_quantity: z.number().int().nonnegative().optional(),
 };
 
-export const billingMetricSchema = z.enum(["tokens", "requests", "bytes"]);
+export const billingMetricSchema = z.enum(BILLING_METRICS);
 export const billingPlanKindSchema = z.enum([
   "prepaid",
   "subscription",
@@ -58,7 +59,7 @@ export const billingUsageRowSchema = z.object({
   ...fundingBreakdownShape,
   service_slug: z.string().nullable().optional(),
   service_id: z.string().nullable().optional(),
-  metric: billingMetricSchema,
+  metric: z.string(),
   lago_metric_code: z.string(),
   layer: z.string(),
   // Optional so an older backend without the model/agent breakdown still

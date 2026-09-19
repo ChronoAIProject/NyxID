@@ -1,3 +1,4 @@
+import { billingTargetLabel } from "@/lib/billing-targets";
 import { AlertTriangle, Trash2 } from "lucide-react";
 import type { AdminCreditGrant } from "@/schemas/billing-credits";
 import { Badge } from "@/components/ui/badge";
@@ -69,6 +70,12 @@ export function CreditGrantsTable({
                   {grant.recipient_display_name && grant.recipient_email ? (
                     <div className="text-[11px] text-muted-foreground">
                       {grant.recipient_email}
+                    </div>
+                  ) : null}
+                  {grant.target_kind === "org_members" ||
+                  grant.target_kind === "groups" ? (
+                    <div className="text-[11px] text-muted-foreground">
+                      {billingTargetLabel(grant)}
                     </div>
                   ) : null}
                   {!grant.recipient_billing_enabled ? <RolloutWarning /> : null}

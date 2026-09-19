@@ -586,6 +586,27 @@ impl NodeConfig {
         Ok(())
     }
 
+    pub fn add_ifttt_credential_via(
+        &mut self,
+        service_slug: &str,
+        key: &str,
+        target_url: Option<&str>,
+        backend: &SecretBackend,
+    ) -> Result<()> {
+        use nyxid_service_adapters::ifttt;
+        ifttt::validate_credential(key).map_err(|error| Error::Validation(error.to_string()))?;
+        let target = self
+            .resolve_target_url(service_slug, target_url)
+            .unwrap_or_else(|| ifttt::BASE_URL.to_string());
+        ifttt::validate_destination(&target)
+            .map_err(|error| Error::Validation(error.to_string()))?;
+        let encrypted = backend.store_credential_value(service_slug, key)?;
+        let mut config = CredentialConfig::new_header(String::new(), encrypted, Some(target));
+        config.injection_method = ifttt::AUTH_METHOD.to_string();
+        self.credentials.insert(service_slug.to_string(), config);
+        Ok(())
+    }
+
     /// Add a query-param credential using the configured secret backend.
     pub fn add_query_param_credential_via(
         &mut self,

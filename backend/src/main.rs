@@ -208,6 +208,7 @@ pub struct AppState {
     /// Vendor-neutral telemetry client. `None` when no DSN is configured
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
+    pub audit_event_types: Arc<services::admin_audit_service::EventTypeCache>,
 }
 
 impl AppState {
@@ -372,6 +373,7 @@ async fn main() {
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+    services::assistant_nyxagent::warn_at_startup(&db).await;
 
     // Load JWT signing keys early: DB-backed CLI subcommands may audit-log
     // before the server state is built, and the audit-chain key can fall back
@@ -547,11 +549,9 @@ async fn main() {
         .await
         .expect("Failed to backfill inference metadata");
 
-    // Seed the admin-managed platform vendor provisioning templates. Existing
-    // rows are never overwritten so operators can edit or disable templates.
-    services::platform_vendor_template_service::seed_default_templates(&db, "system")
+    services::retired_service_service::retire_legacy_vendors(&db)
         .await
-        .expect("Failed to seed platform vendor templates");
+        .expect("Failed to retire legacy vendor credential stores");
 
     // Materialize ServiceEndpoint rows for seeded catalog services from the
     // hosted overlay specs so /api/v1/mcp/config publishes concrete
@@ -581,6 +581,16 @@ async fn main() {
     services::user_service_service::backfill_stale_catalog_auth_snapshots(&db)
         .await
         .expect("Failed to backfill stale UserService auth_method snapshots");
+
+    // Remove org-owned public platform rows created by the pre-0.26.1
+    // provisioning bug. The sweep deletes orphan resources before each row so
+    // retries work on standalone MongoDB too. Personal rows, explicit bindings,
+    // and restricted grants are untouched; cleanup failures do not stop startup.
+    if let Err(error) =
+        services::user_service_service::cleanup_public_org_auto_provisions(&db).await
+    {
+        tracing::warn!(%error, "Failed to clean up stale public platform org auto-provisions");
+    }
 
     // Seed system roles for RBAC (idempotent)
     services::role_service::seed_system_roles(&db)
@@ -944,6 +954,7 @@ async fn main() {
         ),
         billing,
         telemetry: telemetry::TelemetryClient::from_config(&config),
+        audit_event_types: Arc::default(),
     };
 
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
@@ -1318,6 +1329,8 @@ async fn main() {
         trusted_proxies: Arc::new(state.config.trusted_proxy_ips.clone()),
     };
     let trusted_proxy_ranges = Arc::new(state.config.trusted_proxy_ips.clone());
+    let rate_limit_exempt_ips =
+        mw::rate_limit::RateLimitExemptIps(Arc::new(state.config.rate_limit_exempt_ips.clone()));
 
     // Global response-header policy (security headers + the SSE
     // anti-buffering mark) wraps the FULLY MERGED router, so every route
@@ -1352,6 +1365,7 @@ async fn main() {
     .layer(Extension(per_ip_rate_limiter))
     .layer(Extension(global_rate_limiter))
     .layer(Extension(trusted_proxy_ranges))
+    .layer(Extension(rate_limit_exempt_ips))
     .layer(TraceLayer::new_for_http());
 
     // Bind both listeners before serving. Internal routes never enter the

@@ -1,3 +1,14 @@
+import {
+  billingTargetLabel,
+  normalizedBillingTargets,
+} from "@/lib/billing-targets";
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+  normalizedSet,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Pencil, Plus } from "lucide-react";
@@ -66,6 +77,8 @@ const GRANT_DEFAULTS: IssueGrantForm = {
   amount_credits: 100,
   target_kind: "all_users",
   target_user_ids: [],
+  target_org_ids: [],
+  target_group_ids: [],
   all_services: true,
   service_refs: [],
   expires_at: "",
@@ -78,6 +91,8 @@ const ALLOWANCE_DEFAULTS: AllowanceForm = {
   recurrence: "monthly",
   target_kind: "all_users",
   target_user_ids: [],
+  target_org_ids: [],
+  target_group_ids: [],
 };
 
 const SCHEDULE_DEFAULTS: ScheduleForm = {
@@ -86,6 +101,8 @@ const SCHEDULE_DEFAULTS: ScheduleForm = {
   expiry: { kind: "end_of_period" },
   target_kind: "all_users",
   target_user_ids: [],
+  target_org_ids: [],
+  target_group_ids: [],
   all_services: true,
   service_refs: [],
   reason: "",
@@ -145,7 +162,7 @@ export function AdminCreditsPage() {
             quantity: allowance.quantity,
             recurrence: allowance.recurrence,
             target_kind: allowance.target_kind,
-            target_user_ids: allowance.target_user_ids,
+            ...normalizedBillingTargets(allowance),
           }
         : ALLOWANCE_DEFAULTS,
     );
@@ -161,7 +178,7 @@ export function AdminCreditsPage() {
             recurrence: schedule.recurrence,
             expiry: schedule.expiry,
             target_kind: schedule.target_kind,
-            target_user_ids: schedule.target_user_ids,
+            ...normalizedBillingTargets(schedule),
             all_services: schedule.scope.all_services,
             service_refs: schedule.scope.service_ids,
             reason: schedule.reason ?? "",
@@ -189,19 +206,98 @@ export function AdminCreditsPage() {
     }
   }
 
+  function allowanceProjection(row: UsageAllowance) {
+    return {
+      service_ref: row.service_id,
+      metric: row.metric,
+      quantity: row.quantity,
+      recurrence: row.recurrence,
+      target_kind: row.target_kind,
+      ...normalizedBillingTargets(row),
+      is_active: row.is_active,
+    };
+  }
+  function scheduleProjection(row: CreditSchedule) {
+    return {
+      amount_credits: row.amount_credits,
+      expiry: row.expiry,
+      target_kind: row.target_kind,
+      ...normalizedBillingTargets(row),
+      all_services: row.scope.all_services,
+      service_refs: row.scope.all_services
+        ? []
+        : normalizedSet(row.scope.service_ids),
+      reason: row.reason ?? "",
+      is_active: row.is_active,
+    };
+  }
+  const allowanceReview = useChangeReview<
+    Parameters<typeof updateAllowance.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...update }) => {
+      void _before;
+      await updateAllowance.mutateAsync(update);
+      toast.success("Allowance updated");
+      setAllowanceOpen(false);
+    },
+    (pending) => {
+      const live = allowancesQuery.data?.allowances.find(
+        (row) => row.id === pending.id,
+      );
+      return (
+        !live ||
+        hasFieldConflicts(
+          pending.before,
+          allowanceProjection(live),
+          pending.body,
+        )
+      );
+    },
+    editingAllowance?.id ?? "",
+  );
+  const scheduleReview = useChangeReview<
+    Parameters<typeof updateSchedule.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...update }) => {
+      void _before;
+      await updateSchedule.mutateAsync(update);
+      toast.success("Credit schedule updated");
+      setScheduleOpen(false);
+    },
+    (pending) => {
+      const live = schedulesQuery.data?.schedules.find(
+        (row) => row.id === pending.id,
+      );
+      return (
+        !live ||
+        hasFieldConflicts(
+          pending.before,
+          scheduleProjection(live),
+          pending.body,
+        )
+      );
+    },
+    editingSchedule?.id ?? "",
+  );
+
   async function submitAllowance(value: AllowanceForm) {
     try {
       const normalized = {
         ...value,
-        target_user_ids:
-          value.target_kind === "all_users" ? [] : value.target_user_ids,
+        ...normalizedBillingTargets(value),
       };
       if (editingAllowance) {
-        await updateAllowance.mutateAsync({
-          id: editingAllowance.id,
-          body: normalized,
-        });
-        toast.success("Allowance updated");
+        const defaults = allowanceForm.formState.defaultValues as AllowanceForm;
+        const before = {
+          ...defaults,
+          ...normalizedBillingTargets(defaults),
+        };
+        const body = changedFields(before, normalized);
+        allowanceReview.review(
+          { id: editingAllowance.id, body, before },
+          describeChanges(before, body),
+        );
+        return;
       } else {
         await createAllowance.mutateAsync(normalized);
         toast.success("Allowance created");
@@ -214,27 +310,32 @@ export function AdminCreditsPage() {
 
   async function submitSchedule(value: ScheduleForm) {
     try {
-      const targetUserIds =
-        value.target_kind === "all_users" ? [] : value.target_user_ids;
       const serviceRefs = value.all_services ? [] : value.service_refs;
       if (editingSchedule) {
-        await updateSchedule.mutateAsync({
-          id: editingSchedule.id,
-          body: {
-            amount_credits: value.amount_credits,
-            expiry: value.expiry,
-            target_kind: value.target_kind,
-            target_user_ids: targetUserIds,
-            all_services: value.all_services,
-            service_refs: serviceRefs,
-            reason: value.reason,
-          },
+        const normalize = (data: ScheduleForm) => ({
+          amount_credits: data.amount_credits,
+          expiry: data.expiry,
+          target_kind: data.target_kind,
+          ...normalizedBillingTargets(data),
+          all_services: data.all_services,
+          service_refs: data.all_services
+            ? []
+            : normalizedSet(data.service_refs),
+          reason: data.reason,
         });
-        toast.success("Credit schedule updated");
+        const before = normalize(
+          scheduleForm.formState.defaultValues as ScheduleForm,
+        );
+        const body = changedFields(before, normalize(value));
+        scheduleReview.review(
+          { id: editingSchedule.id, body, before },
+          describeChanges(before, body),
+        );
+        return;
       } else {
         await createSchedule.mutateAsync({
           ...value,
-          target_user_ids: targetUserIds,
+          ...normalizedBillingTargets(value),
           service_refs: serviceRefs,
         });
         toast.success("Credit schedule created");
@@ -256,38 +357,67 @@ export function AdminCreditsPage() {
     }
   }
 
-  async function toggleAllowance(allowance: UsageAllowance) {
-    try {
-      await updateAllowance.mutateAsync({
-        id: allowance.id,
-        body: { is_active: !allowance.is_active },
-      });
+  const statusReview = useChangeReview<{
+    kind: "allowance" | "schedule";
+    id: string;
+    wasActive: boolean;
+  }>(
+    async ({ kind, id, wasActive }) => {
+      const variables = { id, body: { is_active: !wasActive } };
+      if (kind === "allowance") await updateAllowance.mutateAsync(variables);
+      else await updateSchedule.mutateAsync(variables);
       toast.success(
-        allowance.is_active ? "Allowance disabled" : "Allowance enabled",
+        kind === "allowance"
+          ? wasActive
+            ? "Allowance disabled"
+            : "Allowance enabled"
+          : wasActive
+            ? "Schedule paused"
+            : "Schedule resumed",
       );
-    } catch (error) {
-      toast.error(errorMessage(error, "Failed to update allowance"));
-    }
+    },
+    ({ kind, id, wasActive }) => {
+      const rows =
+        kind === "allowance"
+          ? allowancesQuery.data?.allowances
+          : schedulesQuery.data?.schedules;
+      return rows?.find((row) => row.id === id)?.is_active !== wasActive;
+    },
+  );
+
+  function toggleAllowance(allowance: UsageAllowance) {
+    statusReview.review(
+      { kind: "allowance", id: allowance.id, wasActive: allowance.is_active },
+      [
+        {
+          field: `Allowance ${allowance.service_slug} (${allowance.id})`,
+          before: allowance.is_active ? "Enabled" : "Disabled",
+          after: allowance.is_active ? "Disabled" : "Enabled",
+        },
+      ],
+    );
   }
 
-  async function toggleSchedule(schedule: CreditSchedule) {
-    try {
-      await updateSchedule.mutateAsync({
-        id: schedule.id,
-        body: { is_active: !schedule.is_active },
-      });
-      toast.success(
-        schedule.is_active ? "Schedule paused" : "Schedule resumed",
-      );
-    } catch (error) {
-      toast.error(errorMessage(error, "Failed to update credit schedule"));
-    }
+  function toggleSchedule(schedule: CreditSchedule) {
+    statusReview.review(
+      { kind: "schedule", id: schedule.id, wasActive: schedule.is_active },
+      [
+        {
+          field: `Credit schedule ${schedule.id}`,
+          before: schedule.is_active ? "Active" : "Paused",
+          after: schedule.is_active ? "Paused" : "Active",
+        },
+      ],
+    );
   }
 
   const services = servicesQuery.data ?? [];
 
   return (
     <div className="space-y-6">
+      {allowanceReview.dialog}
+      {scheduleReview.dialog}
+      {statusReview.dialog}
       <PageHeader
         title="Credits"
         description="Manage promotional credit grants, recurring credit schedules, and free usage allowances."
@@ -407,11 +537,7 @@ export function AdminCreditsPage() {
                       <TableCell className="capitalize">
                         {allowance.recurrence.replace("_", " ")}
                       </TableCell>
-                      <TableCell>
-                        {allowance.target_kind === "all_users"
-                          ? "All owners"
-                          : `${String(allowance.target_user_ids.length)} selected`}
-                      </TableCell>
+                      <TableCell>{billingTargetLabel(allowance)}</TableCell>
                       <TableCell>
                         <Badge
                           variant={

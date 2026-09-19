@@ -160,6 +160,30 @@ pub async fn store_inbound_message(
     inbound: &InboundMessage,
     agent_api_key_id: &str,
 ) -> AppResult<ChannelMessage> {
+    store_inbound_message_with_id(
+        db,
+        channel_bot_id,
+        conversation_id,
+        user_id,
+        platform,
+        inbound,
+        agent_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn store_inbound_message_with_id(
+    db: &mongodb::Database,
+    channel_bot_id: &str,
+    conversation_id: &str,
+    user_id: &str,
+    platform: &str,
+    inbound: &InboundMessage,
+    agent_api_key_id: &str,
+    message_id: &str,
+) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
         attachments: inbound
             .attachments
@@ -175,7 +199,7 @@ pub async fn store_inbound_message(
                 size_bytes: a.size_bytes,
             })
             .collect(),
-        id: uuid::Uuid::new_v4().to_string(),
+        id: message_id.to_string(),
         channel_bot_id: Some(channel_bot_id.to_string()),
         conversation_id: conversation_id.to_string(),
         platform_conversation_id: Some(inbound.conversation_id.clone()),
@@ -1206,6 +1230,7 @@ mod tests {
             platform_service_rate_limit_per_second: 2,
             platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
+            rate_limit_exempt_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,

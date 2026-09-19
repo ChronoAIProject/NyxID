@@ -5,11 +5,11 @@ pub mod admin_groups;
 pub mod admin_helpers;
 pub mod admin_nodes;
 pub mod admin_platform_credentials;
-pub mod admin_platform_ops;
 pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
 pub mod admin_service_accounts;
+pub mod admin_usage;
 pub mod agent_bindings;
 pub mod api_keys;
 pub mod approvals;
@@ -80,7 +80,6 @@ pub mod oracle_worker_bundle;
 pub mod oracle_workers;
 pub mod org_role_scopes;
 pub mod orgs;
-pub mod platform_ops;
 pub mod providers;
 pub mod proxy;
 pub mod public_mcp;
@@ -106,4 +105,10 @@ pub mod user_tokens;
 pub mod users;
 pub mod webhooks;
 
+pub mod catalog_curation;
+
+pub mod assistant_nyxagent;
 pub mod channel_platforms;
+#[cfg(test)]
+mod curation_tests;
+pub mod options;

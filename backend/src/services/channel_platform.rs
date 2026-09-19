@@ -324,6 +324,7 @@ pub struct PreparedWebhook {
 /// dispatch processing in the background; inline adapters can verify challenges.
 pub enum WebhookPolicy {
     Inline,
+    RetryAwareInline,
     Immediate(Option<serde_json::Value>),
     Challenge(serde_json::Value),
 }
@@ -378,6 +379,66 @@ pub trait PlatformAdapter: Send + Sync {
         _cursor: Option<&str>,
     ) -> AppResult<PollOutcome> {
         Err(super::channel_managed::unavailable())
+    }
+
+    fn serializes_lifecycle(&self) -> bool {
+        false
+    }
+
+    fn persists_reply_attempt(&self) -> bool {
+        false
+    }
+
+    async fn retryable_webhook(
+        &self,
+        _context: &super::channel_retry_ingress::IngressContext<'_>,
+        _bot_id: &str,
+        _headers: &axum::http::HeaderMap,
+        _query: &std::collections::HashMap<String, String>,
+        _body: &[u8],
+    ) -> AppResult<Option<String>> {
+        Err(crate::errors::AppError::BadRequest(
+            "Unsupported webhook protocol".into(),
+        ))
+    }
+
+    async fn setup_bot_webhook(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        token: &str,
+        url: &str,
+        secret: &str,
+    ) -> AppResult<()> {
+        self.register_webhook(http, token, url, secret).await
+    }
+
+    async fn remove_bot_webhook(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        token: &str,
+    ) -> AppResult<()> {
+        self.register_webhook(http, token, "", "").await
+    }
+
+    // Preserve the legacy send arguments while supplying persisted bot/message
+    // authority to adapters that fence irreversible sends.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_bound_reply(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.send_reply(http, credentials, conversation_id, reply)
+            .await
     }
 
     fn platform_credentials(&self) -> Option<super::channel_managed::PlatformCredentialDescriptor> {

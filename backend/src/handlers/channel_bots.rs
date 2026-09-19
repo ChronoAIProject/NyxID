@@ -244,6 +244,11 @@ pub struct VerifyBotResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DeleteChannelBotResponse {
+    pub webhook_cleanup: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ManagedSetupResponse {
     pub subscription: String,
     pub webhook_override: String,
@@ -582,7 +587,9 @@ pub async fn create_bot(
 
     if let Err(e) = reg_result {
         // Webhook registration failed: mark the bot as failed and return error
-        let _ = channel_bot_service::mark_bot_failed(&state.db, &bot_id).await;
+        if !adapter.serializes_lifecycle() {
+            let _ = channel_bot_service::mark_bot_failed(&state.db, &bot_id).await;
+        }
         return Err(AppError::BadRequest(format!(
             "Webhook registration failed: {e}"
         )));
@@ -881,7 +888,13 @@ pub async fn delete_bot(
         })),
     );
 
-    Ok(StatusCode::NO_CONTENT)
+    if adapter.serializes_lifecycle() {
+        return Ok(Json(DeleteChannelBotResponse {
+            webhook_cleanup: managed_webhook_cleanup,
+        })
+        .into_response());
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// POST /api/v1/channel-bots/{id}/verify
@@ -906,6 +919,28 @@ pub async fn verify_bot(
         }
     }
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+
+    if adapter.serializes_lifecycle() {
+        let url = format!(
+            "{}/api/v1/webhooks/channel/{}/{}",
+            state.config.base_url, bot.platform, bot.id
+        );
+        let verified = channel_bot_service::verify_serialized_bot(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &bot.id,
+            &bot.user_id,
+            &url,
+        )
+        .await?;
+        return Ok(Json(VerifyBotResponse {
+            id: verified.id,
+            status: verified.status,
+            webhook_registered: verified.webhook_registered,
+        }));
+    }
 
     // Decrypt the token and verify it is still valid with the platform
     let bot_token = crate::services::channel_credentials::resolve_bot_token(

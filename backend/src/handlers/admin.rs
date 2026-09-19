@@ -999,26 +999,28 @@ pub async fn list_audit_log(
     // values (which are PII-adjacent). `None` when nothing was applied.
     let filter_marker = audit_log_filter_marker(&query);
 
-    let (entries, total) = admin_audit_service::list_entries(
-        &state.db,
-        admin_audit_service::AdminAuditLogListParams {
-            page,
-            per_page,
-            search: query.search.as_deref(),
-            search_filters: query.search_filters.as_deref(),
-            custom_filters: query.custom_filters.as_deref(),
-            event_type: query.event_type.as_deref(),
-            status: query.status.as_deref(),
-            actor: query.actor.as_deref(),
-            user_id: query.user_id.as_deref(),
-            api_key_id: query.api_key_id.as_deref(),
-            created_dates: query.created_dates.as_deref(),
-            created_from: query.created_from.as_deref(),
-            created_to: query.created_to.as_deref(),
-            sort,
-        },
-    )
-    .await?;
+    let ((entries, total), event_types) = tokio::try_join!(
+        admin_audit_service::list_entries(
+            &state.db,
+            admin_audit_service::AdminAuditLogListParams {
+                page,
+                per_page,
+                search: query.search.as_deref(),
+                search_filters: query.search_filters.as_deref(),
+                custom_filters: query.custom_filters.as_deref(),
+                event_type: query.event_type.as_deref(),
+                status: query.status.as_deref(),
+                actor: query.actor.as_deref(),
+                user_id: query.user_id.as_deref(),
+                api_key_id: query.api_key_id.as_deref(),
+                created_dates: query.created_dates.as_deref(),
+                created_from: query.created_from.as_deref(),
+                created_to: query.created_to.as_deref(),
+                sort,
+            },
+        ),
+        state.audit_event_types.get(&state.db)
+    )?;
 
     // Enrichment is best-effort display data: a lookup failure downgrades the
     // page to unenriched entries (fields are Option and simply stay absent)
@@ -1063,8 +1065,6 @@ pub async fn list_audit_log(
             }
         })
         .collect();
-
-    let event_types = admin_audit_service::distinct_event_types(&state.db).await?;
 
     emit_event(
         state.telemetry.as_deref(),
@@ -2300,6 +2300,8 @@ mod tests {
 
         let active_id = uuid::Uuid::new_v4().to_string();
         let active = DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: active_id.clone(),
             name: "OpenAI API".to_string(),
             slug: "openai".to_string(),
@@ -2309,6 +2311,8 @@ mod tests {
         // Deactivated services must still resolve: audit rows reference them
         // long after an admin retires the catalog entry.
         let inactive = DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Retired Service".to_string(),
             slug: "retired".to_string(),

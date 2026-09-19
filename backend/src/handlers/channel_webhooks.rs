@@ -32,6 +32,7 @@ use crate::services::channel_inbound_service::InboundDeps as WebhookHandlerDeps;
 pub async fn channel_webhook(
     State(state): State<AppState>,
     Path((platform, bot_id)): Path<(String, String)>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
@@ -44,6 +45,47 @@ pub async fn channel_webhook(
     }
     let empty_ack_is_text = adapter.registration().empty_ack_is_text;
     match adapter.webhook_policy(&body) {
+        WebhookPolicy::RetryAwareInline => {
+            let Ok(axum::extract::Query(query)) = axum::extract::Query::<
+                std::collections::HashMap<String, String>,
+            >::try_from_uri(&uri) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let context = crate::services::channel_retry_ingress::IngressContext {
+                db: &state.db,
+                config: &state.config,
+                jwt_keys: &state.jwt_keys,
+                encryption_keys: &state.encryption_keys,
+                http: &state.http_client,
+                rate_limiter: &state.per_channel_event_limiter,
+            };
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(25),
+                adapter.retryable_webhook(&context, &bot_id, &headers, &query, &body),
+            )
+            .await
+            .unwrap_or_else(|_| Err(crate::services::channel_retry_ingress::retry_later()))
+            {
+                Ok(Some(challenge)) => (
+                    [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                    challenge,
+                )
+                    .into_response(),
+                Ok(None) => StatusCode::OK.into_response(),
+                Err(error) => {
+                    // Never return 422: Aurinko interprets it as unsubscribe.
+                    let status = match error {
+                        crate::errors::AppError::ChannelWebhookVerificationFailed(_) => {
+                            StatusCode::UNAUTHORIZED
+                        }
+                        crate::errors::AppError::BadRequest(_)
+                        | crate::errors::AppError::ValidationError(_) => StatusCode::BAD_REQUEST,
+                        _ => StatusCode::SERVICE_UNAVAILABLE,
+                    };
+                    (status, [("retry-after", "10")]).into_response()
+                }
+            }
+        }
         WebhookPolicy::Challenge(response) => Json(response).into_response(),
         WebhookPolicy::Immediate(response) => {
             tokio::spawn(async move {
@@ -698,6 +740,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_post_challenges_ignore_aurinko_query_parameters() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let router = Router::new()
+            .route(
+                "/webhooks/channel/{platform}/{bot_id}",
+                post(channel_webhook),
+            )
+            .with_state(crate::test_utils::test_app_state_no_db().await);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/channel/slack/bot?validationToken=unrelated&extra=%FF")
+                    .body(Body::from(
+                        r#"{"type":"url_verification","challenge":"slack-challenge"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!({"challenge":"slack-challenge"})
+        );
+    }
+
+    #[tokio::test]
     async fn whatsapp_subscription_http_verifies_token_and_returns_raw_challenge() {
         use axum::body::{Body, to_bytes};
         use axum::http::Request;
@@ -855,6 +929,7 @@ mod tests {
             platform_service_rate_limit_per_second: 2,
             platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
+            rate_limit_exempt_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
@@ -1105,6 +1180,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: vec![],
             allow_all_services: true,
             allow_auto_connected_services: false,

@@ -53,7 +53,10 @@ import ApiFeishuIcon from "./api-feishu";
 import ApiFeishuBotIcon from "./api-feishu-bot";
 import ApiTelegramBotIcon from "./api-telegram-bot";
 import ApiElevenLabsIcon from "./api-elevenlabs";
+import ApiTelnyxIcon from "./api-telnyx";
 import ApiTwilioIcon from "./api-twilio";
+import ApiAurinkoIcon from "./api-aurinko";
+import ApiIftttIcon from "./api-ifttt";
 
 import AwsCostExplorerIcon from "./aws-cost-explorer";
 
@@ -101,7 +104,10 @@ export const SPEC_CATALOG_SLUGS = [
   "api-feishu-bot",
   "api-telegram-bot",
   "api-elevenlabs",
+  "api-telnyx",
   "api-twilio",
+  "api-aurinko",
+  "api-ifttt",
 
   "aws-cost-explorer",
 ] as const;
@@ -146,10 +152,16 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-feishu-bot": ApiFeishuBotIcon,
   "api-telegram-bot": ApiTelegramBotIcon,
   "api-elevenlabs": ApiElevenLabsIcon,
+  "api-telnyx": ApiTelnyxIcon,
+  telnyx: ApiTelnyxIcon,
+  "platform-telnyx": ApiTelnyxIcon,
   "api-twilio": ApiTwilioIcon,
+  "api-aurinko": ApiAurinkoIcon,
+  aurinko: ApiAurinkoIcon,
+  "api-ifttt": ApiIftttIcon,
 
   "aws-cost-explorer": AwsCostExplorerIcon,
-} satisfies Readonly<Record<Slug, IconComponent>>;
+} satisfies Readonly<Record<Slug | "telnyx" | "platform-telnyx" | "aurinko", IconComponent>>;
 
 // `data-fallback="true"` lets the test hook recognize fallbacks when an
 // unknown slug is rendered.

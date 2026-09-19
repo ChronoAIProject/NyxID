@@ -50,7 +50,11 @@ Service accounts differ from user accounts in several key ways:
 
 ### Creating a Service Account
 
-Admins create service accounts via the admin API:
+Global admins create personal service accounts via the admin API. Organization admins can create accounts for their organization with `target_org_id`.
+
+The scope field offers suggestions from [the options API](OPTIONS_API.md): supported code-defined scopes and scopes already configured on service accounts belonging to the authorized owner. Suggestions help prefill the field; they are not a complete permission vocabulary or an authorization grant. The field shows every selected scope as a full, wrapping pill with Edit and Remove controls. Click or keyboard-activate a pill to edit it in place; Enter finishes the replacement and Escape cancels. The dropdown hides selected values and loads all suggestion pages automatically. For colon-delimited configured values, choose prefixes to navigate to a complete scope; for example, previously configured `reports:finance:read` can be reached through `reports:` and `reports:finance:`. Prefix navigation does not grant or save an intermediate scope. Type a full custom scope and press Enter, or paste space-separated scopes. Typed custom values reach the form immediately, so Save includes an unfinished draft without changing the field layout during the click. Arrow keys explicitly select a suggestion; Enter without an active suggestion adds exactly what you typed. Custom entry remains available when suggestions cannot load. All admin, organization, shared edit, assistant, and CLI wizard forms use this picker.
+
+Scope strings remain free-form. Existing values stay editable, and custom scopes can be created or updated without appearing in suggestions. Adding an unknown name does not create a new permission check. The picker deduplicates tokens when you edit the selection; it preserves the original stored string until an edit.
 
 ```http
 POST /api/v1/admin/service-accounts HTTP/1.1
@@ -60,7 +64,7 @@ Content-Type: application/json
 {
   "name": "CI Pipeline Bot",
   "description": "Automated CI/CD pipeline that runs LLM evaluations",
-  "allowed_scopes": "llm:proxy llm:status proxy:*",
+  "allowed_scopes": "llm:proxy proxy:*",
   "role_ids": ["role-uuid-1"]
 }
 ```
@@ -74,7 +78,7 @@ Response:
   "client_secret": "sas_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "name": "CI Pipeline Bot",
   "description": "Automated CI/CD pipeline that runs LLM evaluations",
-  "allowed_scopes": "llm:proxy llm:status proxy:*",
+  "allowed_scopes": "llm:proxy proxy:*",
   "created_at": "2025-01-15T10:00:00Z"
 }
 ```
@@ -107,11 +111,11 @@ Content-Type: application/json
 
 {
   "name": "CI Pipeline Bot (Production)",
-  "allowed_scopes": "llm:proxy llm:status"
+  "allowed_scopes": "llm:proxy"
 }
 ```
 
-Scope changes take effect on the next token issuance. Existing tokens retain their original scopes until they expire or are revoked.
+Scope changes affect future token issuance. Curation additionally checks the live account scopes and grant on every request, so removing a curation scope immediately removes that authority from existing tokens.
 
 ### Rotating the Secret
 
@@ -134,7 +138,7 @@ Response:
 
 This immediately:
 1. Generates a new client secret
-2. **Revokes all existing tokens** for this service account
+2. Atomically advances `credential_generation` with the new secret hash, then **revokes all existing token rows** for this service account. A token issued late from an older validated secret is rejected even if its row was inserted after the revocation sweep.
 3. The old secret can no longer authenticate
 
 ### Deactivating and Deleting
@@ -326,7 +330,7 @@ Alternatively, the SA can connect providers using its own token:
 2. Authenticate as the SA to get a token:
    ```
    POST /oauth/token
-   grant_type=client_credentials&client_id=sa_...&client_secret=sas_...&scope=providers:write llm:proxy
+   grant_type=client_credentials&client_id=sa_...&client_secret=sas_...&scope=llm:proxy
    ```
 3. Use the SA token to connect providers:
    - **API key:** `POST /api/v1/providers/{provider_id}/connect/api-key`
@@ -390,7 +394,7 @@ GET /api/v1/proxy/<service_id>/items?query=test HTTP/1.1
 Authorization: Bearer <sa_access_token>
 ```
 
-Requires `proxy:*` or `proxy:<service_id>` scope.
+Requires `proxy` or its `proxy:*` alias. General service accounts resolve the effective owner's service connections; scope strings do not implement per-service grants. Curation accounts instead enforce the exact live Ornn target and dedicated credential boundary described below.
 
 ### Provider Management
 
@@ -411,7 +415,7 @@ Content-Type: application/json
 }
 ```
 
-Requires `providers:read` and `providers:write` scopes respectively.
+These routes use their existing authentication and ownership checks. The strings `providers:read` and `providers:write` are accepted as custom scope values but are not enforced permission gates for these operations.
 
 ---
 
@@ -483,31 +487,33 @@ class NyxIDClient:
 
 ## Scopes and Access Control
 
-### Available Scopes
+### Scope Suggestions and Existing Checks
 
-| Scope | Access |
-|-------|--------|
-| `proxy:*` | All proxy endpoints |
-| `proxy:<service_id>` | Specific service proxy only |
-| `llm:proxy` | LLM gateway proxy requests |
-| `llm:status` | LLM status endpoint |
-| `connections:read` | List service connections |
-| `connections:write` | Connect/disconnect services |
-| `providers:read` | List providers and tokens |
-| `providers:write` | Connect to providers, store API keys |
+| Value | Existing behavior |
+|-------|-------------------|
+| `proxy` | Passes the proxy scope check and the LLM gateway scope check; resource and owner checks still apply |
+| `proxy:*` | Existing alias of `proxy`; accepted as custom input and suggested when already configured |
+| `llm:proxy` | Passes the LLM gateway scope check, including status |
+| `roles` | Includes assigned roles and permissions in OAuth userinfo |
+| `catalog:skills:read` | Granted Curation discovery, skills, and history |
+| `catalog:skills:write` | Granted Curation recommendation changes and restore |
+| `groups` | Accepted as custom input; service accounts have no group memberships, so userinfo groups are empty |
+
+The default suggestion menu includes `proxy`, `llm:proxy`, and `roles`. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
+
+General account create/update continue storing free-form scope strings. Curation accounts restrict scopes to the grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation.
 
 ### Routes Accessible to Service Accounts
 
-| Endpoint | Required Scope |
-|----------|---------------|
-| `ANY /api/v1/llm/{provider}/v1/*` | `llm:proxy` |
-| `ANY /api/v1/llm/gateway/v1/*` | `llm:proxy` |
-| `GET /api/v1/llm/status` | `llm:status` |
-| `ANY /api/v1/proxy/{service_id}/*` | `proxy:*` or `proxy:{service_id}` |
-| `GET /api/v1/connections` | `connections:read` |
-| `POST /api/v1/connections` | `connections:write` |
-| `GET /api/v1/providers` | `providers:read` |
-| `POST /api/v1/providers/*/connect` | `providers:write` |
+The general route table below does not widen Curation access: that purpose permits only its catalog-curation routes and exact granted HTTP proxy target.
+
+| Endpoint | Existing scope check |
+|----------|----------------------|
+| `ANY /api/v1/llm/{provider}/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
+| `ANY /api/v1/llm/gateway/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
+| `GET /api/v1/llm/status` | `proxy`, `proxy:*`, or `llm:proxy` |
+| `ANY /api/v1/proxy/{service_id}/*` | `proxy` or `proxy:*`; Curation additionally requires the exact live Ornn target |
+| Connection/provider management | Existing route authentication and ownership checks; no separate connections/providers scope enforcement |
 
 ### Routes Blocked for Service Accounts
 
@@ -573,7 +579,7 @@ Expired tokens are automatically cleaned up by a MongoDB TTL index on the `servi
 - **RS256 signed** JWTs verified on every request
 - **Per-token revocation** via `jti` claim and `service_account_tokens` collection
 - **Active check** on every request -- deactivating a service account immediately blocks all requests
-- **Scope enforcement** -- tokens can only access resources within their granted scope
+- **Scope checks** -- proxy and LLM routes check recognized scope values alongside existing resource authorization; custom scope names do not add enforcement to other routes
 
 ### Rate Limiting
 
@@ -638,3 +644,174 @@ All service account operations are logged:
 |--------|------|-------------|
 | `POST` | `/oauth/token` | Authenticate (`grant_type=client_credentials`) |
 | `POST` | `/oauth/revoke` | Revoke a specific token |
+
+
+## Catalog skill curation
+
+A dedicated service account can autonomously assign, replace, remove, clear, and restore recommended skills for exact permitted catalog services. The account has one embedded live grant and a persisted write budget shared by all backend replicas. There is no per-change approval or semantic review gate.
+
+NyxID stores recommendation names and optional immutable references. **Ornn owns package content create/read/update and its retained immutable versions.** NyxID does not store, fetch, validate, publish, or delete package bytes. The companion [Ornn change #1247](https://github.com/ChronoAIProject/Ornn/issues/1247) adds content-only `ornn:skill:publish` alongside existing exact object write grants. The combined contract below supports content CRU and recommendation management; source implementation and local/CI checks do not establish deployed Ornn/Aevatar verification. Package and version deletion remain outside this identity's authority.
+
+### Upgrade order and rollback
+
+Upgrade **all backend replicas that authenticate tokens, proxy requests, or serve MCP** before issuing, enabling, or delivering any Curation credentials. Older replicas ignore purpose and credential generation: a proxy-scoped token can regain General account behavior on an old replica, and the rotation fence does not protect requests authenticated there. The additive recommendation fields and separate digest support consumer compatibility; they do not make mixed-version authorization safe.
+
+Before rolling back to a backend without these checks, disable the Curation accounts and revoke their tokens. Do not deliver or re-enable their credentials while any old replica remains. No live account provisioning or deployment is performed by the implementation itself.
+
+### Platform administration
+
+Create the account with `catalog:skills:read catalog:skills:write`. If it also needs Ornn content authoring, include `proxy` and configure exactly one Ornn catalog UUID when issuing the grant. The grant endpoint rejects other scopes and org-owned accounts. For an existing protected account with a live grant, scope updates must stay within this set. After revocation, metadata updates and disable remain available to platform admins.
+
+Use the existing Admin → Service Accounts detail page, or:
+
+```sh
+nyxid service-account curation-grant issue "$SA_ID" \
+  --service-id "$CATALOG_SERVICE_ID" \
+  --service-id "$SECOND_CATALOG_SERVICE_ID" \
+  --ornn-proxy-service-id "$ORNN_CATALOG_ID" \
+  --max-writes 100 --window-seconds 3600 \
+  --expires-at 2026-12-31T23:59:59Z
+nyxid service-account curation-grant show "$SA_ID"
+nyxid service-account curation-grant revoke "$SA_ID"
+```
+
+The dedicated routes are `POST` and `DELETE /api/v1/admin/service-accounts/{id}/curation-grant`; inspection uses the normal account detail `GET`. Issuance accepts `service_ids` (1–100 distinct existing catalog UUIDs), optional `ornn_proxy_service_id`, optional future `expires_at`, `max_writes` (1–10000), and `window_seconds` (60–86400). Issuing/replacing a grant starts a fresh budget window. Ordinary account create/update requests reject grant, purpose, protection, and generation fields.
+
+Issuance permanently sets `purpose=curation` and `platform_protected=true`. Revocation removes the live grant while both fields remain. Expiry and revocation fail closed for curation reads, writes, and Ornn proxy requests. Protected metadata, scope/role changes, disable, rotation, and provider/connection management require platform admin; direct owner or org-admin status is insufficient. Service-account role IDs stay under platform-admin control for downstream assertions and do not become NyxID platform-admin privileges.
+
+Grant and history responses contain no credentials or secret hashes. The original issuer's later demotion does not revoke a standing workload grant. During offboarding, rotate any client secret or Ornn credential a former administrator could retain, and revoke the grant or disable the account when the workload itself should stop.
+
+### Runtime confinement and token revocation
+
+A Curation bearer may use only `/api/v1/catalog-curation/...` and ordinary HTTP `/api/v1/proxy/{ornn_proxy_service_id}/...`. The grant and token/live scopes must authorize the request. Generic catalog/services listing, other proxy IDs, slug routing, `_nyxid_via` instance selection, WebSocket upgrades, MCP, LLM/OpenAI routes, provider/connection self-management, nodes, oracle, and triggers are unavailable.
+
+The Ornn proxy uses the granted catalog URL and the service account's own connection or delegated provider credential. It never inherits its creator's UserService, endpoint override, gateway URL, node, or broad credential, and does not fall back to a catalog master credential. Explicitly disconnecting the SA connection blocks execution. A platform admin attaches the separately scoped Ornn credential using the existing SA provider/connection management surface. General-purpose account routing keeps its existing behavior.
+
+Every SA access token must have a live token row matching its account, JWT ID, exact scope, expiry, revocation state, and current credential generation. SA JWTs carry `sgen`; missing legacy generations count as zero only while the current account is generation zero. Rotation advances generation atomically with replacing the secret, including when old-secret issuance finishes after rotation. MCP bearer authentication and OAuth introspection use the same validation. Curation cannot use a General-era MCP session as a fallback.
+
+### Separate Ornn identity and endpoint
+
+Before enabling content authoring, deploy the companion Ornn publish permission and
+complete the NyxID replica upgrade above. Assign the SA a downstream role containing
+only `ornn:skill:read` and `ornn:skill:publish`; use JWT or Both identity propagation.
+The assertion subject and permissions come from the SA, not its administrator.
+For existing skills an Ornn owner/admin grants the SA UUID exact write access once:
+`{"type":"user","id":"<SA UUID>","level":"write"}`. It can then upload new versions
+without further human review. For new readable skills, send a raw ZIP to
+`POST /api/v1/skills?public=true`; default creation remains private. Publish-only
+updates must omit `isPrivate`, including unchanged/null/multipart values.
+
+Use a **dedicated Ornn catalog service** so other clients retain their existing
+endpoint configuration. With `base_url=https://ornn.example` (origin only), configure
+this existing `proxy_operation_policy` on that catalog row:
+
+```json
+{"rules":[
+  {"method":"GET","path_template":"/api/v1/skill-search"},
+  {"method":"GET","path_template":"/api/v1/skill-format/rules"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/json"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/versions"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/versions/{version}/download"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/closure"},
+  {"method":"POST","path_template":"/api/v1/skills"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}"}
+]}
+```
+
+Paths are relative to the configured base URL. Queries such as `public=true` do not
+need another rule. This policy denies unlisted methods/paths with
+`404 Service operation not found` before execution,
+including Ornn's auth-only assistant/audit/account routes. It is required both when
+a grant selects the target and on every Curation resolution; removing it fails
+closed. An explicit empty policy is valid and denies all operations. General
+accounts keep the existing optional-policy behavior. The read/publish role by
+itself is not an execution-route allowlist. Do not grant broad create/update/delete,
+admin, build or playground permissions, and do not configure wildcard route rules.
+
+### Machine recommendation API
+
+Acquire a token through the existing client-credentials flow. For example, with the client secret already supplied by your secret store:
+
+```sh
+curl --fail-with-body "$NYXID_URL/oauth/token" \
+  --data-urlencode grant_type=client_credentials \
+  --data-urlencode "client_id=$NYXID_CLIENT_ID" \
+  --data-urlencode "client_secret=$NYXID_CLIENT_SECRET" \
+  --data-urlencode 'scope=catalog:skills:read catalog:skills:write'
+```
+
+Use the returned access token as `$CURATION_TOKEN`:
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
+  "$NYXID_URL/api/v1/catalog-curation/services"
+curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
+  "$NYXID_URL/api/v1/catalog-curation/services/$CATALOG_SERVICE_ID/skills"
+```
+
+Only grant-listed catalog services appear. Each skill response contains `service_id`, `recommended_skills`, optional `recommended_skill_refs`, `skills_revision`, and the separately versioned `skills_manifest_digest`. Disallowed service IDs return 404 without disclosing their content or history. API keys, delegated/relay tokens, and human session/access tokens cannot use this router.
+
+Replace the entire list with an observed revision and a fresh UUID `request_id`:
+
+```http
+PUT /api/v1/catalog-curation/services/{catalog_uuid}/skills
+Authorization: Bearer <curation_token>
+Content-Type: application/json
+
+{
+  "base_revision": 0,
+  "request_id": "f53bba8b-c55f-4b73-9eaf-e4aec599f6d7",
+  "recommended_skills": ["other-publisher/setup", "operations/manual"]
+}
+```
+
+The same operation assigns new defaults or reassigns existing ones. To unassign one recommendation, submit the remaining names; to clear all, submit `recommended_skills: []`. If refs are present (including an empty refs array), a name change requires replacement refs or `clear_refs: true`. Explicit clearing drops refs and keeps the supplied advisory names. Advisory names are not an assertion of immutable package contents.
+
+An immutable reference has this shape:
+
+```json
+{
+  "source": "ornn",
+  "skill_id": "immutable-skill-id",
+  "name": "operations/manual",
+  "version": "1.5",
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "dependencies": []
+}
+```
+
+`recommended_skill_refs` derives the legacy names in order; if names are also supplied, they must match. Exact versions use numeric release versions (two or three components, optional prerelease/build suffix), never `latest` or mutable tags. SHA-256 is 64 lowercase hex characters. Lists allow at most 50 distinct names/refs and 50 dependency pins per ref; source/ID/name fields are 1–256 bytes and version is at most 128 bytes. The skill input is capped at 64 KiB. Dependencies use the same pin fields. NyxID validates this shape without fetching package bytes or proving the claimed hash.
+
+A changed request atomically validates live authority, reserves persisted budget, changes the service, increments revision, and records history plus an actor/request receipt in one MongoDB transaction. Single-token revocation and live account/grant changes conflict with an in-flight writer. Transaction abort rolls back all effects. The history has no deletion route or short TTL.
+
+On a lost response, resend the identical entire request with the same ID. Committed replays resolve before budget checks, but always require current authorization. Reusing a committed ID with another target or different request returns 409. A stale base revision returns 409: fetch the current state and decide a new complete list, then submit it with a new ID and that revision. Do not automatically retry stale editor values. Exhausted budget returns 429 until the persisted window resets.
+
+A pure no-op at the current revision does not consume budget, increment revision, write history or a receipt, or trigger post-commit side effects. Its ID therefore makes no durable replay claim. Human mixed metadata/skills changes share this transaction path: changed metadata with identical skills receives a durable receipt but no skill revision/history. Full request semantics, including omitted versus explicitly cleared headers, determine retry identity. Legacy human skill updates that omit `skills_revision` mean expected revision zero. The admin editor sends its observed revision only when skills change.
+
+### History and recovery
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
+  "$NYXID_URL/api/v1/catalog-curation/services/$CATALOG_SERVICE_ID/skills/history?limit=20"
+```
+
+History is newest first. Follow `next_before_revision` using `before_revision`; `limit` is bounded to 1–100. Entries include before/after states, actor/grant/request attribution, revision, and timestamp. Restore with:
+
+```http
+POST /api/v1/catalog-curation/services/{catalog_uuid}/skills/restore
+Authorization: Bearer <curation_token>
+Content-Type: application/json
+
+{
+  "revision": 0,
+  "base_revision": 3,
+  "request_id": "9c5d004c-4c59-42b4-958f-016cb4b1f9a3"
+}
+```
+
+Revision zero restores the exact legacy baseline captured before the first edit, including absent refs. Restore appends a new revision under the same authority, budget, and compare-and-swap rules; it deletes neither history nor packages. Restoring instructions cannot undo external actions a consumer already executed.
+
+Catalog/MCP/key read surfaces expose optional refs and revision. An instance name override suppresses catalog refs, including when that override is an empty list. The existing name-based `catalog_digest` algorithm is unchanged; ref-only changes affect a separate `skills_manifest_digest` with a `v1:` prefix. Consumers see updates on their next fetch. Locally installed/copied skills do not update automatically.
+
+Human metadata side effects remain after commit. Idempotent retries complete OIDC redirect and billing work from the current committed desired state and re-dispatch eligible endpoint discovery, without reapplying older request values over later edits. Identity propagation uses its durable reconciliation marker; unresolved reconciliation returns a conflict directing a platform admin to identity resync.

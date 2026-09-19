@@ -584,14 +584,14 @@ async fn resolve_reply_token_message_context(
         return Err(AppError::DeviceChannelReplyNotAllowed);
     }
 
-    // Unlike the API-key branch we do NOT re-check
-    // `conversation.agent_api_key_id` against `claims.api_key_id`. The token
+    // Legacy chat tokens do not re-check conversation assignment. The token
     // was minted for this specific inbound message; allowing the agent who
     // received that callback to complete its reply — even if the
     // conversation has since been reassigned — avoids dropping in-flight
     // LLM responses. Scope narrowness is enforced by the token's other
     // bindings (conversation_id, inbound_message_id) and by the live
-    // `api_key.is_active` re-check below.
+    // `api_key.is_active` re-check below. Adapters with durable reply attempts
+    // additionally revalidate the current route before accepting a retry.
     let api_key = load_active_api_key(state, &claims.api_key_id).await?;
     let bot = load_active_bot(state, &original).await?;
     validate_message_bot_scope(&original, &conversation, &bot)?;
@@ -602,7 +602,16 @@ async fn resolve_reply_token_message_context(
         ));
     }
 
-    if consume {
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    if adapter.persists_reply_attempt() {
+        if original.agent_api_key_id.as_deref() != Some(&claims.api_key_id)
+            || conversation.agent_api_key_id != claims.api_key_id
+        {
+            return Err(AppError::Unauthorized(
+                "Email reply route has been reassigned".into(),
+            ));
+        }
+    } else if consume {
         consume_reply_token_use(state, &claims).await?;
     }
 
@@ -1244,8 +1253,11 @@ async fn deliver_async_reply(
         None
     };
     let platform_msg_id = adapter
-        .send_reply(
+        .send_bound_reply(
+            &state.db,
             &state.http_client,
+            &bot,
+            &original,
             &crate::services::channel_platform::BotCredentials {
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
@@ -3078,6 +3090,7 @@ mod tests {
             updated_at: Some(now),
             description: None,
             allowed_service_ids: vec![],
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: vec![],
             allow_all_services: true,
             allow_auto_connected_services: false,
@@ -4542,5 +4555,84 @@ mod tests {
             assert_eq!(response.status(), expected);
         }
         fixture.state.db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn aurinko_reply_auth_retries_preflight_and_rejects_old_route_authority() {
+        let mut fixture = setup_reply_token_fixture("aurinko_reply_auth")
+            .await
+            .expect("real Mongo required");
+        for (collection, id) in [
+            (crate::models::channel_bot::COLLECTION_NAME, &fixture.bot.id),
+            (
+                crate::models::channel_conversation::COLLECTION_NAME,
+                &fixture.conversation.id,
+            ),
+            (
+                crate::models::channel_message::COLLECTION_NAME,
+                &fixture.message.id,
+            ),
+        ] {
+            fixture
+                .state
+                .db
+                .collection::<bson::Document>(collection)
+                .update_one(
+                    doc! { "_id": id },
+                    doc! { "$set": { "platform": "aurinko" } },
+                )
+                .await
+                .unwrap();
+        }
+        fixture.bot.platform = "aurinko".into();
+        fixture.conversation.platform = "aurinko".into();
+        fixture.message.platform = "aurinko".into();
+        let token = valid_reply_token(&fixture);
+        let request = reply_request(&fixture.message.id);
+        for _ in 0..2 {
+            resolve_reply_token_context(&fixture.state, &token, &request)
+                .await
+                .unwrap();
+            resolve_api_key_reply_context(
+                &fixture.state,
+                &api_key_auth_user(&fixture.api_key),
+                &request,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            fixture
+                .state
+                .db
+                .collection::<ReplyTokenUse>(REPLY_TOKEN_USES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        fixture
+            .state
+            .db
+            .collection::<ChannelConversation>(CONVERSATIONS)
+            .update_one(
+                doc! { "_id": &fixture.conversation.id },
+                doc! { "$set": { "agent_api_key_id": Uuid::new_v4().to_string() } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            resolve_reply_token_context(&fixture.state, &token, &request)
+                .await
+                .is_err()
+        );
+        assert!(
+            resolve_api_key_reply_context(
+                &fixture.state,
+                &api_key_auth_user(&fixture.api_key),
+                &request
+            )
+            .await
+            .is_err()
+        );
     }
 }

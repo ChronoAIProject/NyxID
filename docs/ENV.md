@@ -88,6 +88,13 @@ host route. If route detection fails, NyxID falls back to `HOSTNAME` and then
 
 ## Assistant Diagnostics
 
+The default NyxAgent assistant introduces **no environment variable**. Its catalog
+slug `llm-nyx` and default-on feature flag `assistant:nyxagent-engine` are code-level
+configuration. The catalog row provides the upstream base URL. Readiness reports
+its required authentication settings; see [NyxAgent engine](chat/08-nyxagent-engine.md).
+Existing encryption-provider settings protect its per-conversation assistant credentials. Chat acknowledgements and access modes
+introduce no environment variables; permissions are stored per conversation.
+
 The Aevatar assistant chat wire-log diagnostic has no environment variable. It
 is gated by the `experimental:aevatar-chat-wire-log` runtime feature flag
 (default off), toggled platform-wide, per org cohort, or per user through the
@@ -164,6 +171,12 @@ Admins may set an exact `credits_per_unit` price in a catalog service's `billing
 
 Credit benefits use five collections. `credit_grants` stores one attributable row per recipient. `credit_schedules` stores recurring credit policy, and `credit_schedule_periods` stores derived walk progress. `usage_allowances` stores recurring free-unit definitions. `usage_allowance_periods` stores each owner's consumption and reservations for a UTC window. Platform admins manage grants, schedules, and allowances under `/api/v1/admin/credits`. Operators may read those admin endpoints but cannot mutate them. Flagged users read active balances from `GET /api/v1/billing/grants` and `GET /api/v1/billing/allowances`. An authorized organization member may pass `owner_id` to read the organization's benefits. Wallet mutations remain restricted to organization admins.
 
+All three benefits support four recipient kinds: `all_users` (all active person and organization wallets), `selected_users` with `target_user_ids` (specific person or organization wallets), `org_members` with `target_org_ids` (the personal wallets of active people with non-revoked membership in the selected organizations, including viewers), and `groups` with `target_group_ids` (active people's direct `User.group_ids` membership, without parent/child expansion). Organization-member and group-member benefits never fund an organization wallet. Select the organization under `selected_users` to fund its shared wallet instead. Exactly the matching list must be non-empty; all other lists must be empty. Each selected list accepts 1–500 unique ids; organizations must be active organization users and groups must exist. New org/group one-shot expansion is capped at 100,000 resolved recipients before any grants are written; use a schedule for larger populations. Overlapping organizations or groups produce one benefit per person. A kind change in a partial update must supply the matching list; omitted previous lists are cleared.
+
+One-shot grants snapshot recipients at issuance and retain the selected organization/group ids as provenance. Schedule periods freeze the kind and all target lists at claim time, then walk active recipients by user `_id`: organization memberships and users must have been created by the claim timestamp; group recipients use the user creation cutoff. Membership revocation and user deactivation ahead of the cursor take effect while walking. Direct group membership has no join timestamp, so changes to an existing person's groups can affect pages still ahead of the cursor; this is a policy/signup snapshot, not a historical copy of group membership. Allowances use live active organization membership and direct groups for both displayed balances and funding. Removal immediately prevents new matching, but existing `usage_allowance_periods` and already-admitted reservation settlement remain intact. An organization `owner_id` never matches either member kind.
+
+The new provenance vectors default to empty when absent. This is an additive wire/storage change for upgraded replicas; older replicas cannot deserialize the new enum values. Upgrade all readers and writers before enabling the new target kinds, and migrate every persisted new-kind row before rolling back to older binaries.
+
 An "all users" one-shot grant snapshots active person and organization owners at issuance. A recurring schedule takes that snapshot when it claims the UTC period. An "all users" allowance applies dynamically as each owner spends. A scheduled grant's UUID v5 `_id` is derived from the schedule ID, the period start, and the recipient ID. That `_id` is the disbursement identity. Period progress and leases do not decide whether NyxID paid a recipient. Retries converge on the same ordinary grant and the existing `grant-issued:{grant_id}` ledger key. Schedule catch-up opens only the current window and never backfills elapsed credits. A paused schedule finishes an open period but opens no later period.
 
 One-shot issuance journals at most 50 recipients inline to bound a platform-wide request. Scheduled walks use the reconcile sweep's recipient budget. Unjournaled grants remain unspendable until recovery confirms their issuance entries. Credit schedules use `BILLING_RECONCILE_INTERVAL_SECS`; they add no environment variable.
@@ -237,8 +250,24 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
 | `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | When true, a platform-credentialed catalog row with no `proxy_operation_policy` is refused on actor-addressed paths (`/proxy/s/{slug}`, `/llm/*`). Ships **disabled** so deploying changes no existing behaviour; enable per environment once every such row either carries a policy or is confirmed to receive no actor-addressed traffic. Server-chosen surfaces (the assistant) are unaffected either way — they cannot name an operation, so a policy has no meaning there. |
 | `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` (IPv4) or `/128` (IPv6); IPv4-mapped IPv6 addresses are normalized to IPv4. **Only list proxies configured to overwrite client-supplied forwarded headers.** From an allowlisted peer, resolution prefers `CF-Connecting-IP`, then scans `X-Forwarded-For` right-to-left while skipping trusted proxy hops, then uses `X-Real-IP`, then the TCP peer. `CF-Connecting-IP` is the primary Cloudflare path because it does not depend on a complete proxy-hop list. The XFF fallback requires every hop to be listed, including Cloudflare's published IPv4 and IPv6 ranges when Cloudflare is in front; otherwise the rightmost unlisted Cloudflare edge becomes the apparent client and rate-limit key. From an untrusted peer, strict public/device-login paths ignore all forwarded headers. The global limiter and node WebSocket attribution retain their legacy XFF-first behavior only while this setting is empty, then switch to the trusted resolver when configured. Invalid entries are dropped with a warning. Until this is set behind an internal ingress, requester IP and country are unavailable and strict public per-IP buckets can collapse to the ingress peer. |
+| `RATE_LIMIT_EXEMPT_IPS` | *(empty)* | Comma-separated client IPv4/IPv6 addresses or CIDRs exempt from the general per-IP and cluster-wide global request budgets. Matching requests consume neither budget and are admitted even when the global budget is exhausted. Invalid entries are dropped with a warning. This does not exempt authentication, account, API-key/agent, platform-service, public-proxy, device/login, or other dedicated protocol limits, nor connection capacity limits. |
 
 Deploy the resolver code before changing `TRUSTED_PROXY_IPS`. The code-only deploy is backward compatible for the global limiter and node WebSocket path. Setting the variable is the activation step: Cloudflare client attribution becomes verified, auth-device request/poll/preview limits key by the actual client, and the global/WS paths stop accepting forwarded headers from peers outside the allowlist.
+
+`TRUSTED_PROXY_IPS` authenticates forwarding hops; it never grants a rate-limit
+exemption by itself. To exempt an operator-controlled client, set
+`RATE_LIMIT_EXEMPT_IPS=192.0.2.25,2001:db8:1234::/48` with that client's actual
+addresses. Behind ingress, also configure `TRUSTED_PROXY_IPS` with the sanitized
+forwarding hops. Do not use a shared ingress/NAT address as a client exemption
+unless every client represented by that address is intended to be exempt.
+
+Exemptions always use the TCP peer trust boundary, even when the general bucket
+key still uses legacy forwarded-header behavior with `TRUSTED_PROXY_IPS` empty.
+An untrusted peer cannot claim an exempt address in a forwarding header. A
+trusted proxy must supply a usable client header: missing/malformed headers do
+not fall back to exempting the proxy itself, and malformed intervening XFF hops
+are not skipped to find an exempt prefix. Missing peer information never becomes
+an exempt loopback address. IPv4-mapped IPv6 addresses normalize to IPv4.
 
 Before enabling trusted proxy attribution in production:
 

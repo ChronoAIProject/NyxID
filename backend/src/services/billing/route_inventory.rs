@@ -148,6 +148,21 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),
     },
     BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::turns",
+        route: "/api/v1/assistant/nyxagent/turns",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::models",
+        route: "/api/v1/assistant/nyxagent/models",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::delete",
+        route: "/api/v1/assistant/nyxagent/conversations/{id}",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::assistant_direct::completions",
         route: "/api/v1/assistant/direct/completions",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),

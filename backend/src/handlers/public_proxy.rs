@@ -277,6 +277,8 @@ mod tests {
 
     fn service() -> DownstreamService {
         DownstreamService {
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "svc-1".to_string(),
             name: "Public".to_string(),
             slug: "public".to_string(),
@@ -410,6 +412,8 @@ mod tests {
         /// single enabled `GET /public/**` anonymous rule with `daily_quota`.
         fn public_service(slug: &str, base_url: &str, daily_quota: u32) -> DownstreamService {
             DownstreamService {
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 name: "Public".to_string(),
                 slug: slug.to_string(),
@@ -773,6 +777,7 @@ mod tests {
                 platform_key_pricing: None,
                 byok_pricing_cleanup_metric_code: None,
                 platform_key_pricing_cleanup_metric_code: None,
+                component_cleanup_metric_codes: Vec::new(),
                 resale_billable: true,
                 resale_metric: BillingMetric::Tokens,
                 lago_resale_metric_code: Some("resale_tokens".to_string()),
