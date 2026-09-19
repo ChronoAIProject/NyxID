@@ -10,6 +10,7 @@ import {
   useDeleteChannelBot,
   useUpdateChannelBot,
   useVerifyChannelBot,
+  channelBotsQueryKeys,
 } from "./use-channel-bots";
 
 const { mockDelete, mockGet, mockPatch, mockPost } = vi.hoisted(() => ({
@@ -125,11 +126,64 @@ describe("channel bot mutations", () => {
   });
 
   it("useVerifyChannelBot POSTs to the verify endpoint", async () => {
-    mockPost.mockResolvedValue(undefined);
+    const response = {
+      id: "bot-1",
+      status: "active",
+      webhook_registered: true,
+    };
+    mockPost.mockResolvedValue(response);
     const { result } = renderHook(() => useVerifyChannelBot(), {
       wrapper: createWrapper(),
     });
-    await result.current.mutateAsync("bot-1");
+    await expect(result.current.mutateAsync("bot-1")).resolves.toEqual(
+      response,
+    );
     expect(mockPost).toHaveBeenCalledWith("/channel-bots/bot-1/verify");
+  });
+
+  it("refreshes manager readiness and the list after failed verification", async () => {
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: Infinity },
+        mutations: { retry: false },
+      },
+    });
+    const initial = {
+      id: "bot-1",
+      credential_source: "telegram_manager",
+      status: "active",
+      error: null,
+    };
+    const failed = {
+      ...initial,
+      status: "failed",
+      error: "Manager is not ready",
+    };
+    client.setQueryData(channelBotsQueryKeys.detail("bot-1"), initial);
+    client.setQueryData(channelBotsQueryKeys.list(null), [initial]);
+    mockGet.mockImplementation(async (path: string) =>
+      path === "/channel-bots" ? { bots: [failed] } : failed,
+    );
+    mockPost.mockRejectedValue(new Error("Manager is not ready"));
+    const { result } = renderHook(
+      () => ({
+        detail: useChannelBot("bot-1"),
+        list: useChannelBots(),
+        verify: useVerifyChannelBot(),
+      }),
+      {
+        wrapper: ({ children }: PropsWithChildren) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      },
+    );
+    await expect(result.current.verify.mutateAsync("bot-1")).rejects.toThrow(
+      "Manager is not ready",
+    );
+    await waitFor(() => {
+      expect(result.current.detail.data).toEqual(failed);
+      expect(result.current.list.data).toEqual([failed]);
+    });
+    client.clear();
   });
 });

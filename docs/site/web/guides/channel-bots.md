@@ -23,7 +23,7 @@ Before registering a bot, you need an Agent Key with a `callback_url` configured
 
 1. Create a bot with `@BotFather` on Telegram. Copy the bot token (`123456:ABCdef...`).
 2. In NyxID, go to **Channel Bots → Register bot**.
-3. Select **Platform: Telegram**.
+3. Select **Platform: Telegram bot token**.
 4. Enter a label (e.g. `support-bot`).
 5. Paste the bot token.
 6. Click **Register**.
@@ -33,6 +33,14 @@ NyxID calls `/getMe` to verify the token, registers the webhook automatically, a
 :::tip
 If the bot status stays at `pending_webhook`, check that the bot token is correct and that your NyxID instance is reachable from the public internet (or that Telegram can reach it). Self-hosted instances behind NAT need a public URL.
 :::
+
+## Use the Telegram manager as a public bot
+
+An existing manager configured in **Admin → Platform Credentials → Telegram — bot creation** can use the same **Telegram bot token** registration flow. NyxID keeps the manager webhook and shares its live token. Assign a dedicated Agent Key as the **default agent** to answer public messages, or an exact conversation route for selected chats.
+
+Manager-channel callbacks receive a message-bound reply token, but no owner access token. Telegram senders are not signed in to the channel owner's NyxID account. Scope credentials held directly by the agent separately. A plain `/start` offers chat and bot creation; setup links, `/recover`, and callback buttons stay in the manager workflow.
+
+**Verify Bot** checks the live manager webhook without replacing it. If configuration needs repair, save the manager in Platform Credentials and verify again. Token rotation there updates replies automatically. Deleting the channel disables its routes and preserves bot creation. The current limit is 32 concurrent background deliveries per backend process; excess messages are dropped, and restarts or failures may lose messages. Delivery can be duplicated or finish out of order.
 
 ## Register a Discord bot
 

@@ -366,7 +366,7 @@ fn build_edit_message_body(
 
 #[cfg(test)]
 impl TelegramAdapter {
-    pub(super) fn media_test_adapter(base: &str) -> Self {
+    pub(crate) fn media_test_adapter(base: &str) -> Self {
         Self {
             base_url: format!("{base}/bot"),
             file_base_url: format!("{base}/file/bot"),

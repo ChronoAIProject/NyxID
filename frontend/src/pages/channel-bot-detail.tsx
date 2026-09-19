@@ -24,7 +24,7 @@ import {
   type UpdateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { editableChannelFields } from "@/lib/channel-platforms";
+import { editableChannelFields, TELEGRAM_MANAGER_DELETION_NOTE } from "@/lib/channel-platforms";
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
@@ -175,6 +175,7 @@ function ConversationsSection({
   botId,
   apiKeyNames,
   ownerOrgId,
+  isTelegramManager,
 }: {
   readonly botId: string;
   readonly apiKeyNames: ReadonlyMap<string, string>;
@@ -182,6 +183,7 @@ function ConversationsSection({
    *  scope the conversation list and pre-fill `target_org_id` on create.
    *  `null` means personal. */
   readonly ownerOrgId: string | null;
+  readonly isTelegramManager: boolean;
 }) {
   const { data: conversations, isLoading } = useChannelConversations({
     botId,
@@ -297,6 +299,7 @@ function ConversationsSection({
         onOpenChange={setAddOpen}
         botId={botId}
         ownerOrgId={ownerOrgId}
+        isTelegramManager={isTelegramManager}
       />
       <DeleteRouteDialog
         routeId={deleteTarget}
@@ -311,6 +314,7 @@ function AddRouteDialog({
   onOpenChange,
   botId,
   ownerOrgId,
+  isTelegramManager,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -318,6 +322,7 @@ function AddRouteDialog({
   /** Bot's owner scope. When non-null, the conversation is created under
    *  that org and only org-owned agent keys from the same org are shown. */
   readonly ownerOrgId: string | null;
+  readonly isTelegramManager: boolean;
 }) {
   const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
   const createConversation = useCreateChannelConversation();
@@ -326,6 +331,7 @@ function AddRouteDialog({
     register,
     handleSubmit,
     setValue,
+    setError,
     watch,
     reset,
     formState: { errors },
@@ -350,12 +356,35 @@ function AddRouteDialog({
   }
 
   function onSubmit(data: CreateChannelConversationFormData) {
+    const conversationId = data.platform_conversation_id?.trim();
+    if (
+      isTelegramManager &&
+      !data.default_agent &&
+      (!conversationId || conversationId === "*")
+    ) {
+      setError("platform_conversation_id", {
+        message:
+          "Enter an exact Telegram chat ID or enable the public default route.",
+      });
+      return;
+    }
     // Backend enforces that channel_bot.user_id, agent_api_key.user_id
     // and target_org_id all match. The dialog is already scoped to the
     // bot's owner so just forward the ownerOrgId explicitly.
     createConversation.mutate(
       {
         ...data,
+        ...(isTelegramManager
+          ? {
+              platform_conversation_id: data.default_agent
+                ? undefined
+                : conversationId,
+              platform_conversation_type: data.default_agent
+                ? undefined
+                : data.platform_conversation_type,
+              platform_sender_id: undefined,
+            }
+          : {}),
         target_org_id: ownerOrgId ?? undefined,
       },
       {
@@ -391,17 +420,36 @@ function AddRouteDialog({
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <input type="hidden" {...register("channel_bot_id")} />
 
+          {isTelegramManager && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="public_default_route"
+                  checked={watch("default_agent") ?? false}
+                  onCheckedChange={(value) => setValue("default_agent", value)}
+                />
+                <Label htmlFor="public_default_route">
+                  Use a public default route
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {watch("default_agent")
+                  ? "Receives ordinary messages from anyone contacting this bot when no exact route matches. Choose a dedicated agent with restricted permissions for public use."
+                  : "Enter an exact Telegram chat ID to route only that conversation. Turn on the public default route to handle unmatched chats."}
+              </p>
+            </div>
+          )}
+
           <div className="space-y-2">
             <Label htmlFor="agent_api_key_id">Agent (API Key)</Label>
             {keysWithCallback.length === 0 && activeApiKeys.length > 0 ? (
               <div className="rounded-lg border border-border bg-muted/50 p-3">
                 <p className="text-[12px] text-muted-foreground">
-                  None of your agent keys have a callback URL set.
-                  Go to{" "}
+                  None of your agent keys have a callback URL set. Go to{" "}
                   <a href="/keys?tab=nyxid" className="text-primary underline">
                     Agent Keys
-                  </a>
-                  {" "}and set a Callback URL on the key you want to use as an agent.
+                  </a>{" "}
+                  and set a Callback URL on the key you want to use as an agent.
                 </p>
               </div>
             ) : (
@@ -409,7 +457,7 @@ function AddRouteDialog({
                 value={watch("agent_api_key_id") ?? ""}
                 onValueChange={(value) => setValue("agent_api_key_id", value)}
               >
-                <SelectTrigger>
+                <SelectTrigger id="agent_api_key_id">
                   <SelectValue placeholder="Select an API key" />
                 </SelectTrigger>
                 <SelectContent>
@@ -434,58 +482,74 @@ function AddRouteDialog({
             )}
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="platform_conversation_id">
-              Conversation ID (optional)
-            </Label>
-            <Input
-              id="platform_conversation_id"
-              placeholder="Leave empty for default route"
-              {...register("platform_conversation_id")}
-            />
-            <p className="text-xs text-muted-foreground">
-              Platform-specific chat/channel ID. Leave empty to create a default
-              route for all unmatched conversations.
-            </p>
-            {errors.platform_conversation_id && (
-              <p className="text-xs text-destructive">
-                {errors.platform_conversation_id.message}
-              </p>
-            )}
-          </div>
+          {(!isTelegramManager || !watch("default_agent")) && (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="platform_conversation_id">
+                  {isTelegramManager
+                    ? "Telegram chat ID"
+                    : "Conversation ID (optional)"}
+                </Label>
+                <Input
+                  id="platform_conversation_id"
+                  aria-required={isTelegramManager || undefined}
+                  placeholder={
+                    isTelegramManager
+                      ? "Exact Telegram chat ID"
+                      : "Leave empty for default route"
+                  }
+                  {...register("platform_conversation_id")}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {isTelegramManager
+                    ? "Only messages from this chat will use this route."
+                    : "Platform-specific chat/channel ID. Leave empty to create a default route for all unmatched conversations."}
+                </p>
+                {errors.platform_conversation_id && (
+                  <p className="text-xs text-destructive">
+                    {errors.platform_conversation_id.message}
+                  </p>
+                )}
+              </div>
 
-          <div className="space-y-2">
-            <Label>Conversation Type</Label>
-            <Select
-              value={watch("platform_conversation_type") ?? ""}
-              onValueChange={(value) =>
-                setValue(
-                  "platform_conversation_type",
-                  value as "private" | "group" | "channel",
-                )
-              }
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Select type (optional)" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="private">Private</SelectItem>
-                <SelectItem value="group">Group</SelectItem>
-                <SelectItem value="channel">Channel</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+              <div className="space-y-2">
+                <Label htmlFor="platform_conversation_type">
+                  Conversation Type
+                </Label>
+                <Select
+                  value={watch("platform_conversation_type") ?? ""}
+                  onValueChange={(value) =>
+                    setValue(
+                      "platform_conversation_type",
+                      value as "private" | "group" | "channel",
+                    )
+                  }
+                >
+                  <SelectTrigger id="platform_conversation_type">
+                    <SelectValue placeholder="Select type (optional)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="private">Private</SelectItem>
+                    <SelectItem value="group">Group</SelectItem>
+                    <SelectItem value="channel">Channel</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
+          )}
 
-          <div className="flex items-center gap-3">
-            <Switch
-              id="default_agent"
-              checked={watch("default_agent") ?? false}
-              onCheckedChange={(v) => setValue("default_agent", v)}
-            />
-            <Label htmlFor="default_agent" className="text-[12px]">
-              Set as default agent for this bot
-            </Label>
-          </div>
+          {!isTelegramManager && (
+            <div className="flex items-center gap-3">
+              <Switch
+                id="default_agent"
+                checked={watch("default_agent") ?? false}
+                onCheckedChange={(v) => setValue("default_agent", v)}
+              />
+              <Label htmlFor="default_agent" className="text-[12px]">
+                Set as default agent for this bot
+              </Label>
+            </div>
+          )}
 
           <DialogFooter>
             <Button
@@ -495,7 +559,18 @@ function AddRouteDialog({
             >
               Cancel
             </Button>
-            <Button variant="primary" type="submit" disabled={createConversation.isPending}>
+            <Button
+              variant="primary"
+              type="submit"
+              disabled={
+                createConversation.isPending ||
+                !watch("agent_api_key_id") ||
+                (isTelegramManager &&
+                  !watch("default_agent") &&
+                  (!watch("platform_conversation_id")?.trim() ||
+                    watch("platform_conversation_id")?.trim() === "*"))
+              }
+            >
               {createConversation.isPending ? "Adding..." : "Add Route"}
             </Button>
           </DialogFooter>
@@ -1015,8 +1090,8 @@ export function ChannelBotDetailPage() {
 
   async function handleVerify() {
     try {
-      await verifyMutation.mutateAsync(botId);
-      toast.success("Bot verification initiated");
+      const result = await verifyMutation.mutateAsync(botId);
+      if (result.status === "active") toast.success("Bot verified successfully");
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to verify bot",
@@ -1076,7 +1151,17 @@ export function ChannelBotDetailPage() {
         }
       />
 
-      {bot.status === "pending_webhook" && (bot.credential_source === "platform" ? <p role="status" className="text-xs text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? "Managed setup needs attention. Review the setup status below." : "Waiting for the first verified inbound message."}</p> : <WebhookSetupChecklist bot={bot} />)}
+      {verifyMutation.variables === botId && verifyMutation.isError ? (
+        <div role="alert"><ErrorBanner message={verifyMutation.error instanceof ApiError ? verifyMutation.error.message : "Failed to verify bot"} /></div>
+      ) : bot.credential_source === "telegram_manager" && bot.error ? (
+        <div role="alert"><ErrorBanner message={bot.error} /></div>
+      ) : verifyMutation.variables === botId && verifyMutation.isSuccess && (
+        <p role="status" className="text-xs text-muted-foreground">
+          Verification complete. Status: {statusLabel(verifyMutation.data.status)}.
+        </p>
+      )}
+
+      {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-xs text-muted-foreground">Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.</p> : bot.credential_source === "platform" ? <p role="status" className="text-xs text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? "Managed setup needs attention. Review the setup status below." : "Waiting for the first verified inbound message."}</p> : <WebhookSetupChecklist bot={bot} />)}
 
       {/* Bot Information */}
       <DetailSection
@@ -1089,7 +1174,7 @@ export function ChannelBotDetailPage() {
         }
       >
         <DetailRow label="Bot name" value={bot.label} />
-        <DetailRow label="Credential source" value={bot.credential_source === "connection" ? getPlatform(bot.platform).connectedLabel ?? "Connected account" : bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
+        <DetailRow label="Credential source" value={bot.credential_source === "telegram_manager" ? "Telegram manager" : bot.credential_source === "connection" ? getPlatform(bot.platform).connectedLabel ?? "Connected account" : bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
         <DetailRow
           label="Platform"
           value={getPlatform(bot.platform).label}
@@ -1122,7 +1207,37 @@ export function ChannelBotDetailPage() {
       )}
       {bot.permission_setup_url && <LarkPermissionSetupSection bot={bot} />}
       {bot.platform === "telegram-new" && <TelegramNewSetupSection bot={bot} />}
+      {bot.credential_source === "telegram_manager" && (
+        <DetailSection title="Telegram manager routing">
+          <div className="space-y-3 p-5 text-xs text-muted-foreground">
+            <p>
+              This manager can also act as a public channel bot. Add a public default
+              route for ordinary messages from anyone contacting it, using a dedicated
+              agent with restricted permissions. To handle one chat, add its exact
+              Telegram chat ID with the public default route off. Exact routes take
+              priority over the default.
+            </p>
+            <p>
+              All manager chat callbacks carry signed callback authentication and a
+              reply token only. They do not carry the owner's X-NyxID-User-Token.
+              Telegram senders are not mapped to NyxID identities, including on exact
+              chat routes.
+            </p>
+            <p>
+              /start, /recover, and all callback queries remain reserved for bot
+              creation and recovery. Ordinary chat delivery is capped at 32 concurrent
+              requests per backend process. Messages arriving at capacity are dropped.
+            </p>
+            <p>
+              Rotate the manager token in Admin → Platform Credentials → Telegram —
+              bot creation. Deleting this channel connection keeps the manager and
+              bot creation available.
+            </p>
+          </div>
+        </DetailSection>
+      )}
       {(() => {
+        if (bot.credential_source === "telegram_manager") return null;
         const flow = getPlatform(bot.platform).managedFlow;
         const ManagedDetail = flow ? MANAGED_FLOW_COMPONENTS[flow].Detail : undefined;
         return bot.credential_source !== "user" && bot.credential_source && ManagedDetail ? <ManagedDetail bot={bot} orgId={ownerOrgId} /> : editableChannelFields(getPlatform(bot.platform)).length > 0 && <EditVerificationSection bot={bot} />;
@@ -1133,6 +1248,7 @@ export function ChannelBotDetailPage() {
         botId={botId}
         apiKeyNames={apiKeyNames}
         ownerOrgId={ownerOrgId}
+        isTelegramManager={bot.credential_source === "telegram_manager"}
       />
 
       {showEditNameDialog && (
@@ -1140,7 +1256,7 @@ export function ChannelBotDetailPage() {
       )}
       {/* Delete Confirmation */}
       <DeleteBotDialog
-        deletionNote={bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined}
+        deletionNote={bot.credential_source === "telegram_manager" ? TELEGRAM_MANAGER_DELETION_NOTE : bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined}
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}
         onConfirm={() => void handleDelete()}
