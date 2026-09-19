@@ -12,6 +12,12 @@ Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can w
 
 For Telegram's optional native bot creation, see [Telegram bot creation](TELEGRAM_NEW.md). The **Telegram** option uses the separate `telegram-new` adapter; **Telegram bot token** uses the existing `telegram` adapter and token setup. These are display labels; platform identifiers and existing connections remain unchanged.
 
+## Telegram manager channels
+
+A configured Telegram bot-creation manager can also be registered using its existing token as a `telegram` channel. It reports `credential_source: "telegram_manager"` and retains the manager's single webhook. Manager setup events stay in the creation workflow; ordinary messages use the channel's exact or default conversation routes. See [Telegram manager setup and limitations](TELEGRAM_NEW.md#using-the-manager-as-a-channel-bot).
+
+These callbacks deliberately omit `X-NyxID-User-Token` for every route: a public Telegram sender does not authorize access to the channel owner's services. The signed callback and message-bound reply token remain available, allowing the agent to send asynchronous replies as the manager. This exception does not change other channel bots' scoped owner-token behavior. The manager path retains its 32 concurrent deliveries per backend process, drop-on-full, transient delivery, and possible duplicates.
+
 ## X DM Accounts
 
 X is managed-only: users connect their own X account with OAuth and provide no developer credentials. NyxID uses the account's user-context token to subscribe to incoming unencrypted DMs through the X Activity API and deliver the routed agent's asynchronous reply. Existing polling connections can switch through Verify or Reconnect after an admin configures the webhook credentials. With `BILLING_ENABLED=false`, connections without those credentials retain the existing polling path. Billing-enabled X channels require webhooks and never fall back to paid DM polling. App-only bearer tokens cannot access private DMs. Although X also supports legacy OAuth 1.0a user-context credentials, a BYO path would require users to supply and maintain developer credentials, so this channel deliberately does not expose one.

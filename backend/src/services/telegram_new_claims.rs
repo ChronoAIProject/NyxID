@@ -50,6 +50,95 @@ fn code_hash(code: &str) -> AppResult<String> {
     Ok(hash(&normalized))
 }
 
+pub(super) const CLAIM_CODE_REDACTED: &str = "[claim code removed]";
+
+fn is_code_byte(byte: u8) -> bool {
+    CODE_ALPHABET.contains(&byte.to_ascii_uppercase())
+}
+
+/// A single token the normalizer above would accept as a whole code.
+fn token_is_code(token: &str) -> bool {
+    code_hash(token).is_ok()
+}
+
+/// One uppercase group of a code typed with spaces.
+fn token_is_uppercase_group(token: &str) -> bool {
+    token.len() == 5
+        && token
+            .bytes()
+            .all(|byte| !byte.is_ascii_lowercase() && is_code_byte(byte))
+}
+
+/// Replaces claim-shaped codes in relayed chat text with [`CLAIM_CODE_REDACTED`].
+/// Matches only the exact shapes the normalizer accepts: twenty code characters
+/// optionally hyphenated, or four uppercase five-character groups separated by
+/// whitespace. Returns `None` when nothing was replaced.
+pub(super) fn scrub_claim_codes(text: &str) -> Option<String> {
+    // A link may percent-encode the code, so redact the entire bearer query
+    // value before scanning visible code shapes.
+    static CLAIM_QUERY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let query = CLAIM_QUERY.get_or_init(|| {
+        regex::Regex::new(r#"([?&])([^=&#\s<>"']+)=([^&#\s<>"']+)"#)
+            .expect("claim query expression is valid")
+    });
+    let query_redacted = query.replace_all(text, |capture: &regex::Captures<'_>| {
+        if urlencoding::decode(&capture[2]).is_ok_and(|name| name.eq_ignore_ascii_case("claim")) {
+            format!("{}{}={}", &capture[1], &capture[2], CLAIM_CODE_REDACTED)
+        } else {
+            capture[0].to_string()
+        }
+    });
+    let query_changed = query_redacted != text;
+    let text = query_redacted.as_ref();
+    let mut cores = Vec::new();
+    let mut start = None;
+    for (index, ch) in text.char_indices() {
+        // URL query separators and Markdown punctuation delimit a pasted code
+        // just like whitespace; underscores remain part of opaque identifiers.
+        if ch.is_alphanumeric() || matches!(ch, '-' | '_') {
+            start.get_or_insert(index);
+        } else if let Some(begin) = start.take() {
+            cores.push((begin, index));
+        }
+    }
+    if let Some(begin) = start {
+        cores.push((begin, text.len()));
+    }
+    let core = |index: usize| &text[cores[index].0..cores[index].1];
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < cores.len() {
+        if token_is_code(core(index)) {
+            spans.push(cores[index]);
+            index += 1;
+        } else if index + 4 <= cores.len()
+            && (index..index + 4).all(|group| token_is_uppercase_group(core(group)))
+            && (index..index + 3).all(|group| {
+                text[cores[group].1..cores[group + 1].0]
+                    .chars()
+                    .all(char::is_whitespace)
+            })
+        {
+            spans.push((cores[index].0, cores[index + 3].1));
+            index += 4;
+        } else {
+            index += 1;
+        }
+    }
+    if spans.is_empty() {
+        return query_changed.then(|| text.to_string());
+    }
+    let mut scrubbed = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (begin, end) in spans {
+        scrubbed.push_str(&text[cursor..begin]);
+        scrubbed.push_str(CLAIM_CODE_REDACTED);
+        cursor = end;
+    }
+    scrubbed.push_str(&text[cursor..]);
+    Some(scrubbed)
+}
+
 pub(super) async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
     for (keys, options) in [
         (
@@ -197,6 +286,8 @@ impl TelegramNewService<'_> {
             "text": format!("@{} is ready to connect. Open NyxID, choose an account, and tap Connect.\n\nClaim code: {}\nValid until {} UTC. Only enter or share this code with NyxID; anyone with it can claim this bot.\n\nIf the button opens a different browser, open {} in your signed-in browser and enter the code.\n\nTo replace an expired code, send /recover @{}.", claim.bot_username, code.as_str(), expires_at.format("%H:%M"), bare_url, claim.bot_username),
             "reply_markup": {"inline_keyboard": [[{"text": "Connect in NyxID", "url": url}]]},
             "link_preview_options": {"is_disabled": true},
+            // The code is bearer proof; keep Telegram from forwarding or saving the message.
+            "protect_content": true,
         })).await?;
         claims
             .update_one(

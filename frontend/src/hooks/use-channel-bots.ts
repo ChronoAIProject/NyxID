@@ -128,8 +128,8 @@ export function useVerifyChannelBot() {
     mutationFn: async (id: string): Promise<VerifyChannelBotResponse> => {
       return api.post<VerifyChannelBotResponse>(`/channel-bots/${id}/verify`);
     },
-    onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
+    onSettled: () => {
+      return queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
   });
 }

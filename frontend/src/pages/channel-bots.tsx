@@ -21,7 +21,7 @@ import {
   type CreateDeviceConversationFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { channelBotRegistrationPayload, managedConnectPlatform } from "@/lib/channel-platforms";
+import { channelBotRegistrationPayload, managedConnectPlatform, TELEGRAM_MANAGER_DELETION_NOTE } from "@/lib/channel-platforms";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -133,6 +133,7 @@ function BotRow({
           variant="ghost"
           size="icon"
           className="h-8 w-8"
+          aria-label={`Delete ${bot.label}`}
           onClick={(e) => {
             e.stopPropagation();
             onDelete(bot.id);
@@ -169,6 +170,7 @@ function BotCard({
           variant="ghost"
           size="icon"
           className="h-7 w-7"
+          aria-label={`Delete ${bot.label}`}
           onClick={() => onDelete(bot.id)}
         >
           <Trash2 className="h-3.5 w-3.5 text-destructive" />
@@ -362,9 +364,12 @@ function CreateBotDialog({
           return;
         }
         toast.success(
-          `Bot "${result.platform_bot_username}" created successfully`,
+          result.credential_source === "telegram_manager"
+            ? `Telegram manager "${result.platform_bot_username}" connected`
+            : `Bot "${result.platform_bot_username}" created successfully`,
         );
         reset();
+        createBot.reset();
         onOpenChange(false);
         // Auto-navigate to the detail page so the user actually FINDS the
         // webhook URL + setup checklist (Wave B item B.1). Mirrors B.7's
@@ -485,6 +490,13 @@ function CreateBotDialog({
               </>
             )}
           >
+            {platform === "telegram" && (
+              <p className="text-xs text-muted-foreground">
+                To connect an existing Telegram manager, enter its bot token here.
+                NyxID keeps its bot creation webhook and adds conversation routing.
+                You can then choose a public default agent or an exact chat route.
+              </p>
+            )}
             {setupNote && (
               <div className="space-y-1 rounded-lg border border-border/70 bg-muted/30 p-4">
                 <p className="text-[12px] font-medium">{setupNote.title}</p>
@@ -1119,7 +1131,7 @@ function ChannelBotsList() {
         onOpenChange={setCreateDeviceOpen}
         defaultOrgId={scopeOrgId}
       />
-      <DeleteBotDialog botId={deleteTarget} deletionNote={(() => { const bot = bots?.find((bot) => bot.id === deleteTarget); return bot && bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined; })()} onClose={() => setDeleteTarget(null)} />
+      <DeleteBotDialog botId={deleteTarget} deletionNote={(() => { const bot = bots?.find((bot) => bot.id === deleteTarget); return bot?.credential_source === "telegram_manager" ? TELEGRAM_MANAGER_DELETION_NOTE : bot && bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined; })()} onClose={() => setDeleteTarget(null)} />
     </div>
   );
 }

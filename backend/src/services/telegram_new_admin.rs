@@ -9,6 +9,32 @@ use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::{COLLECTION_NAME as BOTS, ChannelBot};
 use crate::models::platform_credential::{COLLECTION_NAME as CREDENTIALS, PlatformCredential};
 
+pub(super) const MANAGER_WEBHOOK_ERROR: &str = "The Telegram manager webhook is unavailable. Ask an administrator to save its Platform Credentials configuration again.";
+
+pub(super) const MANAGER_ALLOWED_UPDATES: [&str; 5] = [
+    "message",
+    "edited_message",
+    "channel_post",
+    "callback_query",
+    "managed_bot",
+];
+
+pub(super) fn validate_manager_webhook(
+    webhook: &serde_json::Value,
+    callback: &str,
+) -> AppResult<()> {
+    if webhook["url"] != callback
+        || !MANAGER_ALLOWED_UPDATES.iter().all(|kind| {
+            webhook["allowed_updates"]
+                .as_array()
+                .is_some_and(|types| types.iter().any(|value| value == kind))
+        })
+    {
+        return Err(AppError::ChannelPlatformError(MANAGER_WEBHOOK_ERROR.into()));
+    }
+    Ok(())
+}
+
 impl TelegramNewService<'_> {
     pub async fn configure_manager(
         &self,
@@ -87,7 +113,7 @@ impl TelegramNewService<'_> {
                 "The notification bot cannot also be the Telegram bot creation manager.".into(),
             ));
         }
-        if self.db.collection::<ChannelBot>(BOTS).find_one(doc! {"platform": {"$in": ["telegram", PLATFORM]}, "platform_bot_id": id.to_string(), "is_active": true}).await?.is_some() {
+        if self.db.collection::<ChannelBot>(BOTS).find_one(doc! {"platform": {"$in": ["telegram", PLATFORM]}, "platform_bot_id": id.to_string(), "is_active": true, "credential_source": {"$ne": "telegram_manager"}}).await?.is_some() {
             return Err(AppError::Conflict("A registered channel bot cannot also be the manager.".into()));
         }
         let callback = self.manager_callback();
@@ -120,19 +146,9 @@ impl TelegramNewService<'_> {
         let secret = saved
             .get(credentials::VERIFY_TOKEN_FIELD)
             .ok_or_else(|| AppError::Internal("Manager webhook secret is missing".into()))?;
-        self.api.call(token, "setWebhook", json!({"url": callback, "secret_token": secret, "allowed_updates": ["message", "callback_query", "managed_bot"], "max_connections": 1})).await?;
+        self.api.call(token, "setWebhook", json!({"url": callback, "secret_token": secret, "allowed_updates": MANAGER_ALLOWED_UPDATES, "max_connections": 1})).await?;
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
-        if webhook["url"] != callback
-            || !["message", "callback_query", "managed_bot"]
-                .iter()
-                .all(|kind| {
-                    webhook["allowed_updates"]
-                        .as_array()
-                        .is_some_and(|types| types.iter().any(|value| value == kind))
-                })
-        {
-            return Err(AppError::ChannelPlatformError("Telegram manager webhook verification failed. Save the configuration again to retry.".into()));
-        }
+        validate_manager_webhook(&webhook, &callback)?;
         self.db
             .collection::<PlatformCredential>(CREDENTIALS)
             .update_one(
@@ -162,7 +178,34 @@ impl TelegramNewService<'_> {
     }
 
     async fn clear_manager_inner(&self) -> AppResult<()> {
+        let row = credentials::load(self.db, &credential_descriptor()).await?;
+        let id = row
+            .as_ref()
+            .and_then(|row| row.fields.get("manager_bot_id"));
+        if let Some(id) = id {
+            return super::telegram_new_service::with_operation(
+                self.db,
+                &format!("telegram-manager-identity:{id}"),
+                self.clear_manager_configuration(),
+            )
+            .await;
+        }
+        self.clear_manager_configuration().await
+    }
+
+    async fn clear_manager_configuration(&self) -> AppResult<()> {
         self.expire().await?;
+        if self
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {
+                "credential_source": "telegram_manager", "is_active": true,
+            })
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Conflict("Delete the manager's channel connection before clearing the Telegram manager configuration. Its channel routes depend on this configuration.".into()));
+        }
         if self
             .db
             .collection::<ChannelBot>(BOTS)

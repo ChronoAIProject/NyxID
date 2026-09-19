@@ -1798,6 +1798,32 @@ mod tests {
         .expect("show table should succeed");
     }
 
+    #[tokio::test]
+    async fn show_accepts_telegram_manager_credentials_and_readiness_in_both_formats() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/manager-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "manager-1", "platform": "telegram", "label": "Public manager",
+                "credential_source": "telegram_manager", "status": "failed",
+                "platform_bot_username": "ManagerBot", "webhook_registered": false,
+                "is_active": true, "conversations_count": 1,
+                "error": "Telegram manager is not ready. Check Admin Platform Credentials."
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        for output in [OutputFormat::Json, OutputFormat::Table] {
+            run(ChannelBotCommands::Show {
+                id: "manager-1".to_string(),
+                auth: mock_auth_with_output(server.uri(), output),
+            })
+            .await
+            .expect("show should accept manager credentials and readiness without secrets");
+        }
+    }
+
     // --- Verify table output ---
 
     #[tokio::test]

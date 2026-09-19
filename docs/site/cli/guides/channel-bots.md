@@ -25,6 +25,10 @@ nyxid channel-bot register \
 
 Add `--org <id|slug|name>` to register an org-owned bot.
 
+For a bot already configured as NyxID's Telegram bot-creation manager, use the same token-registration command. NyxID preserves its manager webhook and reports `credential_source: "telegram_manager"` in `channel-bot show`. Configure the manager in Admin → Platform Credentials before registration. Verify checks the existing webhook; deleting the channel leaves bot creation available.
+
+A manager may use a default route for public help. Its callbacks include a reply token but omit the owner's `X-NyxID-User-Token`, including on exact routes. Use a dedicated public agent and scope any credentials held by that agent separately. `/start`, `/recover`, and button callbacks remain reserved for setup. The manager channel currently allows 32 simultaneous background deliveries per backend process; excess messages are dropped, and delivery has no durable replay or ordering guarantee.
+
 ## 2. Create the agent that will answer
 
 Messages are relayed to an agent identified by a NyxID API key that carries a callback URL. Create one (or reuse an existing key) — see [Create scoped agent keys](/docs/cli/guides/scoped-agent-keys):

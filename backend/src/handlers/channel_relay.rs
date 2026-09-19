@@ -1466,6 +1466,17 @@ async fn deliver_async_reply(
     }))
 }
 
+#[cfg(test)]
+pub(crate) async fn async_reply_with_test_adapter(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: AsyncReplyRequest,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<Json<AsyncReplyResponse>> {
+    let context = resolve_reply_request_context(state, headers, None, &body).await?;
+    deliver_async_reply(state, headers, context, body, adapter).await
+}
+
 /// POST /api/v1/channel-relay/reply/update
 ///
 /// Edit a previously-sent asynchronous reply by its upstream platform message

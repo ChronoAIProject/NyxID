@@ -33,7 +33,7 @@ export type ContentType =
   | "unknown";
 
 export interface ChannelBotItem {
-  readonly credential_source?: "user" | "platform" | "connection";
+  readonly credential_source?: "user" | "platform" | "connection" | "telegram_manager";
   readonly managed_setup?: ManagedBotSetup | null;
   readonly id: string;
   readonly platform: ChannelPlatform;
@@ -132,7 +132,7 @@ export interface UpdateChannelBotRequest {
 }
 
 export interface CreateChannelBotResponse {
-  readonly credential_source?: "user" | "platform" | "connection";
+  readonly credential_source?: "user" | "platform" | "connection" | "telegram_manager";
   readonly webhook_ingestion?: boolean;
   readonly connection_id?: string | null;
   readonly managed_setup?: ManagedBotSetup | null;

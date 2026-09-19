@@ -34,6 +34,7 @@ it("loads the bot owner's keys and disables submission with no eligible keys", (
       botId="bot"
       ownerOrgId="org-1"
       ownerLabel="ChronoAI"
+      isTelegramManager={false}
     />,
   );
   expect(apiKeys).toHaveBeenCalledWith({ orgId: "org-1" });
@@ -51,6 +52,7 @@ it("has a working retry control when key loading fails", () => {
       botId="bot"
       ownerOrgId="org-1"
       ownerLabel="ChronoAI"
+      isTelegramManager={false}
     />,
   );
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
