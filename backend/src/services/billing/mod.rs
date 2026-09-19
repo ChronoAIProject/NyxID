@@ -238,24 +238,72 @@ impl BillingService {
     }
 
     pub async fn open(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
+        self.open_with_requirement(ctx, false).await
+    }
+
+    /// Paid push channels cannot fall back to uncharged provider activity when
+    /// billing is enabled but its catalog price, wallet, or provider is missing.
+    pub async fn open_required(&self, ctx: &BillingRouteContext) -> AppResult<MeteredProxyContext> {
+        self.open_with_requirement(ctx, true).await
+    }
+
+    async fn open_with_requirement(
+        &self,
+        ctx: &BillingRouteContext,
+        required: bool,
+    ) -> AppResult<MeteredProxyContext> {
+        if required
+            && self.config.billing_enabled
+            && (!ctx.service_platform_billable || self.lago.is_none())
+        {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Configure the channel service price and billing provider before enabling paid channels".into(),
+            ));
+        }
         let ctx = if self.config.billing_enabled {
             // Staged rollout: charging applies only to owners covered by the
             // billing feature flag. Everyone else is metered for
             // observability but never charged on either layer.
-            let rollout_enabled = crate::services::feature_flag_service::billing_rollout_enabled(
-                &self.db,
-                &ctx.billing_owner_id,
-                &ctx.actor_user_id,
-            )
-            .await?;
+            let rollout_enabled = if required {
+                // Autonomous channels have a persisted owner but no acting
+                // organization member. Use the owner's rollout baseline.
+                let owner = self
+                    .db
+                    .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                    .find_one(doc! {"_id": &ctx.billing_owner_id})
+                    .await?
+                    .ok_or_else(|| {
+                        crate::errors::AppError::BillingNotConfigured(
+                            "Channel billing owner is unavailable".into(),
+                        )
+                    })?;
+                crate::services::feature_flag_service::billing_recipient_rollout_enabled(
+                    &self.db, &owner,
+                )
+                .await?
+            } else {
+                crate::services::feature_flag_service::billing_rollout_enabled(
+                    &self.db,
+                    &ctx.billing_owner_id,
+                    &ctx.actor_user_id,
+                )
+                .await?
+            };
             // Platform charging is an admin opt-in per service: services
             // without billing.platform_billable stay free (metered only),
             // so BYOK and unconfigured services never draw from wallets.
             let platform_billable = if rollout_enabled && ctx.service_platform_billable {
                 self.ensure_wallet_for_charging(&ctx.billing_owner_id)
                     .await?;
-                self.owner_has_chargeable_wallet(&ctx.billing_owner_id)
-                    .await?
+                let chargeable = self
+                    .owner_has_chargeable_wallet(&ctx.billing_owner_id)
+                    .await?;
+                if required && !chargeable {
+                    return Err(crate::errors::AppError::BillingNotConfigured(
+                        "A billing wallet and subscription are required for this channel".into(),
+                    ));
+                }
+                chargeable
             } else {
                 false
             };
@@ -288,6 +336,15 @@ impl BillingService {
         } else {
             None
         };
+        if required
+            && self.config.billing_enabled
+            && ctx.has_billable_layers()
+            && reservation.is_none()
+        {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Channel billing could not reserve funding".into(),
+            ));
+        }
         match meter::open(&self.db, &ctx, reservation.as_ref()).await {
             Ok(metered) => Ok(metered),
             Err(error) => {

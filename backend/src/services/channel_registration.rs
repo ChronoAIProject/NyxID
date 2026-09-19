@@ -265,6 +265,7 @@ pub struct BotCredentials<'a> {
     pub token: &'a str,
     pub platform_bot_id: Option<&'a str>,
     pub platform_secrets: Option<&'a super::channel_platform::PlatformVerifySecrets>,
+    pub billing: Option<&'a super::channel_billing_service::ChannelBilling>,
 }
 
 impl std::fmt::Debug for BotCredentials<'_> {
@@ -282,6 +283,7 @@ impl<'a> From<&'a str> for BotCredentials<'a> {
             token,
             platform_bot_id: None,
             platform_secrets: None,
+            billing: None,
         }
     }
 }
