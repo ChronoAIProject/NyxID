@@ -2109,6 +2109,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::channel_webhooks::channel_webhook),
         )
         .route(
+            "/api/v1/webhooks/channel/{platform}/platform",
+            get(handlers::channel_webhooks::platform_subscription)
+                .post(handlers::channel_webhooks::platform_webhook),
+        )
+        .route(
             "/webhooks/channel/{platform}/platform",
             get(handlers::channel_webhooks::platform_subscription)
                 .post(handlers::channel_webhooks::platform_webhook),

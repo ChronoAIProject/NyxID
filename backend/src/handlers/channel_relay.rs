@@ -1044,6 +1044,12 @@ async fn deliver_initiated_message(
         None
     };
 
+    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        bot,
+        auth_user.api_key_id.as_deref(),
+    );
     let send_result = async {
         let attachments = channel_media_service::materialize(
             &body.message.attachments,
@@ -1074,6 +1080,7 @@ async fn deliver_initiated_message(
             .send_reply_outcome(
                 &state.http_client,
                 &crate::services::channel_platform::BotCredentials {
+                    billing: billing.as_ref(),
                     token: &token,
                     platform_bot_id: Some(&bot.platform_bot_id),
                     platform_secrets: platform_secrets.as_ref(),
@@ -1092,7 +1099,22 @@ async fn deliver_initiated_message(
     let mut outcome = match send_result {
         Ok(outcome) => outcome,
         Err(error) => {
-            if let Some(claim) = &claim {
+            if crate::services::channel_billing_service::blocks_channel(&error)
+                && crate::services::channel_billing_service::suspend(
+                    &crate::services::channel_inbound_service::InboundDeps::from(state),
+                    bot,
+                    adapter,
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
+            }
+            if let Some(claim) = &claim
+                && !billing
+                    .as_ref()
+                    .is_some_and(|context| context.has_forwarded())
+            {
                 channel_send_service::release_send(&state.db, claim).await?;
             }
             return Err(error);
@@ -1312,13 +1334,20 @@ async fn deliver_async_reply(
     } else {
         None
     };
-    let mut outcome = adapter
+    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        Some(&attributed_api_key_id),
+    );
+    let send_result = adapter
         .send_bound_reply_outcome(
             &state.db,
             &state.http_client,
             &bot,
             &original,
             &crate::services::channel_platform::BotCredentials {
+                billing: billing.as_ref(),
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: platform_secrets.as_ref(),
@@ -1326,7 +1355,25 @@ async fn deliver_async_reply(
             platform_conversation_id,
             &outbound,
         )
-        .await?;
+        .await;
+    let mut outcome = match send_result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if billing.is_some()
+                && crate::services::channel_billing_service::blocks_channel(&error)
+                && crate::services::channel_billing_service::suspend(
+                    &crate::services::channel_inbound_service::InboundDeps::from(state),
+                    &bot,
+                    adapter,
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
+            }
+            return Err(error);
+        }
+    };
 
     if let Some(observation) = &mut outcome.observation {
         observation.waba_id = bot.app_id.clone();
@@ -1529,6 +1576,7 @@ async fn edit_resolved_reply(
         .edit_reply(
             &state.http_client,
             &crate::services::channel_platform::BotCredentials {
+                billing: None,
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: platform_secrets.as_ref(),
@@ -1656,6 +1704,7 @@ async fn fetch_resolved_attachment(
         .fetch_attachment(
             &state.http_client,
             &crate::services::channel_platform::BotCredentials {
+                billing: None,
                 token: &token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: secrets.as_ref(),
@@ -1843,6 +1892,7 @@ mod tests {
         media: bool,
         recorded_media: std::sync::Mutex<Vec<bytes::Bytes>>,
         fail: std::sync::atomic::AtomicBool,
+        billing_error: bool,
         /// Select the native edit contract to record when enabled.
         edit_platform: Option<&'static str>,
         edit_calls: std::sync::Mutex<Vec<(String, String)>>,
@@ -1972,6 +2022,9 @@ mod tests {
                 .unwrap()
                 .extend(reply.attachments.iter().map(|a| a.bytes.clone()));
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.billing_error {
+                return Err(AppError::InsufficientCredits);
+            }
             if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(AppError::ChannelPlatformError(
                     "Simulated upstream failure".into(),
@@ -4587,6 +4640,64 @@ mod tests {
                 mime_type: Some("application/pdf".into()),
                 caption: Some("private caption".into()),
             }],
+        }
+    }
+
+    #[tokio::test]
+    async fn x_async_reply_suspends_on_billing_failure_but_not_transient_provider_failure() {
+        for billing_error in [true, false] {
+            let mut fixture = setup_reply_token_fixture("x_reply_billing_failure")
+                .await
+                .expect("MongoDB required");
+            fixture.bot.platform = "x".into();
+            fixture.bot.webhook_registered = false;
+            fixture.conversation.platform = "x".into();
+            fixture.message.platform = "x".into();
+            fixture
+                .state
+                .db
+                .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+                .replace_one(doc! {"_id": &fixture.bot.id}, &fixture.bot)
+                .await
+                .unwrap();
+            let adapter = RecordingSendAdapter {
+                media: true,
+                edit_platform: Some("x"),
+                billing_error,
+                fail: std::sync::atomic::AtomicBool::new(true),
+                ..Default::default()
+            };
+            let context = ReplyRequestContext {
+                original: fixture.message.clone(),
+                conversation: fixture.conversation.clone(),
+                attributed_api_key_id: fixture.api_key.id.clone(),
+                validated_bot: Some(fixture.bot.clone()),
+            };
+            let result = deliver_async_reply(
+                &fixture.state,
+                &HeaderMap::new(),
+                context,
+                AsyncReplyRequest {
+                    message_id: fixture.message.id.clone(),
+                    reply: body(Some("reply"), None),
+                },
+                &adapter,
+            )
+            .await;
+            if billing_error {
+                assert!(matches!(result, Err(AppError::InsufficientCredits)));
+            } else {
+                assert!(matches!(result, Err(AppError::ChannelPlatformError(_))));
+            }
+            assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let current = channel_bot_service::get_bot(&fixture.state.db, &fixture.bot.id)
+                .await
+                .unwrap();
+            assert_eq!(
+                current.status,
+                if billing_error { "failed" } else { "active" }
+            );
+            fixture.state.db.drop().await.unwrap();
         }
     }
 

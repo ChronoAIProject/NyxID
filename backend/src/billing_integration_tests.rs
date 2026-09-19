@@ -185,6 +185,18 @@ const COVERAGE_CASES: &[CoverageCase] = &[
         node_intent: NodeIntent::Node,
         metric: BillingMetric::Bytes,
     },
+    CoverageCase {
+        ingress: BillingIngress::ChannelInbound,
+        scenario: "x-webhook",
+        node_intent: NodeIntent::Direct,
+        metric: BillingMetric::Requests,
+    },
+    CoverageCase {
+        ingress: BillingIngress::ChannelOutbound,
+        scenario: "x-dm-send",
+        node_intent: NodeIntent::Direct,
+        metric: BillingMetric::Requests,
+    },
 ];
 
 #[derive(Default)]

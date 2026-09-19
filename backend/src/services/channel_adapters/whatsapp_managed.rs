@@ -206,6 +206,7 @@ pub async fn complete(
         return Err(AppError::ValidationError("Meta token does not authorize this app and WhatsApp Business Account with both required permissions".to_string()));
     }
     let credentials = BotCredentials {
+        billing: None,
         token: &token,
         platform_bot_id: None,
         platform_secrets: Some(platform),

@@ -1695,6 +1695,7 @@ mod media_tests {
         let server = MockServer::start().await;
         let http = reqwest::Client::new();
         let credentials = BotCredentials {
+            billing: None,
             token: "token",
             platform_bot_id: Some("123"),
             platform_secrets: None,
@@ -1805,6 +1806,7 @@ mod verification_tests {
         let server = MockServer::start().await;
         let http = reqwest::Client::new();
         let credentials = BotCredentials {
+            billing: None,
             token: "fake-access-token",
             platform_bot_id: Some("123"),
             platform_secrets: None,
@@ -1968,6 +1970,7 @@ mod delivery_tests {
     };
     fn credentials() -> BotCredentials<'static> {
         BotCredentials {
+            billing: None,
             token: "token",
             platform_bot_id: Some("123"),
             platform_secrets: None,

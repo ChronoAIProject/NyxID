@@ -9,6 +9,7 @@ use crate::telemetry::{
 pub(crate) struct InboundDeps<'a> {
     pub(crate) db: &'a crate::db::DbHandle,
     pub(crate) config: &'a crate::config::AppConfig,
+    pub(crate) billing: &'a super::billing::BillingService,
     pub(crate) jwt_keys: &'a crate::crypto::jwt::JwtKeys,
     pub(crate) http_client: &'a reqwest::Client,
     pub(crate) encryption_keys: &'a crate::crypto::aes::EncryptionKeys,
@@ -22,6 +23,7 @@ impl<'a> From<&'a AppState> for InboundDeps<'a> {
         Self {
             db: &value.db,
             config: &value.config,
+            billing: &value.billing,
             jwt_keys: &value.jwt_keys,
             http_client: &value.http_client,
             encryption_keys: value.encryption_keys.as_ref(),
@@ -62,6 +64,22 @@ pub(crate) async fn process_inbound_messages(
 
     let mut complete = true;
     for inbound in messages {
+        if let Some(billing) = super::channel_billing_service::ChannelBilling::for_bot(
+            state.db,
+            state.billing,
+            bot,
+            None,
+        ) && let Err(error) = billing.received(&inbound.platform_message_id).await
+        {
+            if super::channel_billing_service::blocks_channel(&error)
+                && super::channel_billing_service::suspend(&state, bot, adapter)
+                    .await
+                    .is_err()
+            {
+                tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
+            }
+            return Err(Box::new(error));
+        }
         if adapter.dedup_inbound_by_platform_message_id()
             && !adapter.atomic_inbound_admission()
             && channel_relay_service::inbound_platform_message_exists(

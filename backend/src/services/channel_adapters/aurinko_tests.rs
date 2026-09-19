@@ -312,6 +312,7 @@ impl Fixture {
                 &self.bot,
                 original,
                 &BotCredentials {
+                    billing: None,
                     token: TOKEN,
                     platform_bot_id: Some("42"),
                     platform_secrets: None,
@@ -544,6 +545,7 @@ async fn aurinko_reply_is_sender_only_and_incomplete_submission_is_never_retried
                 &f.bot,
                 &original,
                 &BotCredentials {
+                    billing: None,
                     token: TOKEN,
                     platform_bot_id: Some("42"),
                     platform_secrets: None,

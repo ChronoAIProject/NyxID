@@ -380,3 +380,100 @@ it("renders Aurinko's three application fields and reviews a signing-only clear 
     }),
   );
 });
+
+function xProvider(): PlatformCredentials {
+  return {
+    provider: "x",
+    platform: "x",
+    label: "X (Twitter)",
+    available: true,
+    backing: { type: "provider_oauth", provider_slug: "twitter" },
+    fields: [
+      ["app_bearer_token", "App bearer token"],
+      ["consumer_secret", "API key secret"],
+      ["client_id", "Client ID"],
+      ["client_secret", "Client Secret"],
+    ].map(([name, label]) => ({
+      name: name!,
+      label: label!,
+      secret: true,
+      required: name === "client_id" || name === "client_secret",
+      numeric: false,
+      configured: true,
+      help: "From the X app",
+    })),
+    setup_checklist: ["Fund the shared app."],
+    callback_url: null,
+    webhook_verify_token: null,
+    updated_at: "v1",
+  };
+}
+
+it.each([
+  ["API key secret", "consumer_secret", "stops verified DM webhook delivery"],
+  [
+    "App bearer token",
+    "app_bearer_token",
+    "stops subscription setup and cleanup",
+  ],
+])("explains the impact of clearing the X %s", async (label, field, impact) => {
+  mock.data = [xProvider()];
+  const user = userEvent.setup();
+  render(<AdminPlatformCredentialsPage />);
+  await user.click(screen.getByRole("button", { name: `Clear ${label}` }));
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  const review = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(review).toHaveTextContent("X webhook credentials");
+  expect(review).toHaveTextContent(impact);
+  if (field === "app_bearer_token") {
+    expect(review).not.toHaveTextContent("stops verified DM webhook delivery");
+    expect(review).toHaveTextContent("continue delivering billable events");
+  }
+  expect(review).toHaveTextContent("do not fall back to polling");
+  expect(review).toHaveTextContent("OAuth connections and logins are retained");
+  expect(review).not.toHaveTextContent("stops all of the twitter provider's");
+  await user.click(
+    within(review).getByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mock.update).toHaveBeenCalledWith({
+      fields: { [field]: null },
+    }),
+  );
+});
+
+it("keeps the shared OAuth impact for X OAuth field clears and the whole provider", async () => {
+  mock.data = [xProvider()];
+  const user = userEvent.setup();
+  render(<AdminPlatformCredentialsPage />);
+  await user.click(screen.getByRole("button", { name: "Clear provider" }));
+  const clear = await screen.findByRole("dialog", {
+    name: "Clear platform credentials",
+  });
+  expect(clear).toHaveTextContent(
+    "shared with the twitter provider. Clearing them stops all of its OAuth connections and logins",
+  );
+  await user.click(within(clear).getByRole("button", { name: "Cancel" }));
+  await user.click(screen.getByRole("button", { name: "Clear Client Secret" }));
+  await user.click(
+    screen.getByRole("button", { name: "Clear App bearer token" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  const review = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(review).toHaveTextContent("Shared OAuth credentials");
+  expect(review).toHaveTextContent(
+    "stops all of the twitter provider's OAuth connections and logins",
+  );
+  expect(review).toHaveTextContent("stops subscription setup and cleanup");
+  expect(review).not.toHaveTextContent(
+    "OAuth connections and logins are retained",
+  );
+  await user.click(
+    within(review).getByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mock.update).toHaveBeenCalledWith({
+      fields: { client_secret: null, app_bearer_token: null },
+    }),
+  );
+});

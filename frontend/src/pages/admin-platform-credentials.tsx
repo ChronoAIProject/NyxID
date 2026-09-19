@@ -35,6 +35,55 @@ import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { ApiError } from "@/lib/api-client";
 import { ServiceIcon } from "@/components/service-icon";
 
+/**
+ * Describes what a per-field clear on a shared OAuth backing interrupts. X keeps
+ * its OAuth app credentials in the shared provider, while its webhook secrets
+ * only affect DM webhook delivery, subscription setup and cleanup.
+ */
+function sharedClearImpact(
+  providerId: string,
+  sharedProvider: string,
+  fields: Record<string, string | null>,
+): { field: string; after: string } {
+  const clearsOAuth =
+    fields.client_id === null || fields.client_secret === null;
+  if (providerId === "aurinko") {
+    return {
+      field: "Shared OAuth credentials",
+      after: clearsOAuth
+        ? "Clearing application credentials prevents new mailbox authorizations and reconnects until restored. Clearing the webhook signing secret stops managed bot webhook verification. Manual connections keep their own credentials."
+        : "Clearing the webhook signing secret stops managed bot webhook verification until restored. Application credentials and AI Service mailbox tokens are retained.",
+    };
+  }
+  const oauthImpact = `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.`;
+  const clearsWebhook =
+    providerId === "x" &&
+    (fields.app_bearer_token === null || fields.consumer_secret === null);
+  if (!clearsWebhook) {
+    return { field: "Shared OAuth credentials", after: oauthImpact };
+  }
+  const webhookImpact = [
+    fields.consumer_secret === null
+      ? "Clearing the X API key secret stops verified DM webhook delivery and webhook setup until restored."
+      : "",
+    fields.app_bearer_token === null
+      ? "Clearing the X app bearer token stops subscription setup and cleanup until restored. Existing subscriptions can continue delivering billable events."
+      : "",
+    "Registered channels do not fall back to polling; restore the credentials and select Verify on each channel.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return clearsOAuth
+    ? {
+        field: "Shared OAuth credentials",
+        after: `${oauthImpact} ${webhookImpact}`,
+      }
+    : {
+        field: "X webhook credentials",
+        after: `${webhookImpact} OAuth connections and logins are retained.`,
+      };
+}
+
 function CredentialForm({
   provider: source,
   onRefresh,
@@ -105,14 +154,8 @@ function CredentialForm({
       ...(sharedProvider && Object.values(fields).includes(null)
         ? [
             {
-              field: "Shared OAuth credentials",
               before: sharedProvider,
-              after:
-                provider.provider === "aurinko"
-                  ? fields.client_id === null || fields.client_secret === null
-                    ? "Clearing application credentials prevents new mailbox authorizations and reconnects until restored. Clearing the webhook signing secret stops managed bot webhook verification. Manual connections keep their own credentials."
-                    : "Clearing the webhook signing secret stops managed bot webhook verification until restored. Application credentials and AI Service mailbox tokens are retained."
-                  : `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.`,
+              ...sharedClearImpact(provider.provider, sharedProvider, fields),
             },
           ]
         : []),

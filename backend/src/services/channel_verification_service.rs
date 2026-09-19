@@ -294,6 +294,7 @@ pub async fn verify(
             .verify_bot_token(
                 http,
                 &BotCredentials {
+                    billing: None,
                     token: &token,
                     platform_bot_id: Some(&snapshot.bot.platform_bot_id),
                     platform_secrets: secrets.as_ref(),

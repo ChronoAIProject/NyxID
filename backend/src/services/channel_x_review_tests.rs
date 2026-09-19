@@ -152,6 +152,7 @@ async fn reconnect_relays_dms_received_while_failed_once() {
     assert!(server.received_requests().await.unwrap().is_empty());
     channel_bot_service::reconnect_bot(
         &state.db,
+        &state.billing,
         &state.encryption_keys,
         &state.http_client,
         &adapter,
@@ -226,6 +227,7 @@ async fn reconnect_initializes_only_missing_cursors() {
         .await;
     channel_bot_service::reconnect_bot(
         &state.db,
+        &state.billing,
         &state.encryption_keys,
         &state.http_client,
         &adapter,

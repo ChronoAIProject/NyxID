@@ -206,7 +206,7 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
         );
         assert_eq!(
             adapter.platform_webhook(),
-            adapter.platform_id() == "whatsapp"
+            matches!(adapter.platform_id(), "whatsapp" | "x")
         );
     }
     let all = credentials::descriptors(&cache);
