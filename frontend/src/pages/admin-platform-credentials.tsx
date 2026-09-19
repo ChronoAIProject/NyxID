@@ -150,7 +150,7 @@ function CredentialForm({
                 title={`Clear ${field.label}`}
                 aria-label={`Clear ${field.label}`}
                 disabled={pending || !field.configured}
-                onClick={() => sharedProvider
+                onClick={() => sharedProvider && ["client_id", "client_secret"].includes(field.name)
                   ? setConfirm({ field: field.name })
                   : form.setValue(`fields.${field.name}`, null)}
               >
@@ -229,7 +229,7 @@ function CredentialForm({
             <DialogDescription>
               {confirm !== "regenerate"
                 ? sharedProvider
-                  ? `These credentials are shared with the ${sharedProvider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored.`
+                  ? `The OAuth client credentials are shared with the ${sharedProvider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored.`
                   : "Managed onboarding and managed bot authentication will be unavailable until credentials are restored."
                 : `Update ${provider.label}'s webhook verification settings with the replacement token.`}
             </DialogDescription>

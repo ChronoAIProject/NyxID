@@ -1,4 +1,10 @@
-//! X user-context Direct Messages. All X protocol and product descriptors live here.
+//! X user-context Direct Messages with X Activity webhook delivery.
+
+#[cfg(test)]
+#[path = "x_webhook_tests.rs"]
+mod webhook_tests;
+#[path = "x_webhooks.rs"]
+mod webhooks;
 
 const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "recipient cannot receive",
@@ -319,13 +325,13 @@ impl PlatformAdapter for XAdapter {
 
     fn registration(&self) -> RegistrationDescriptor {
         RegistrationDescriptor {
-            documentation_url: Some("https://docs.x.com/x-api/direct-messages/lookup/introduction"),
+            documentation_url: Some("https://docs.x.com/x-api/activity/introduction"),
             fields: &[],
             extra_fields: &[],
             token_fields: &[],
             managed_only: true,
             managed_only_message: "X accounts are connected through Connect X account; developer credentials are not accepted",
-            webhook_ingestion: false,
+            webhook_ingestion: true,
             preserve_subscription_on_verify: true,
             ..Default::default()
         }
@@ -339,6 +345,22 @@ impl PlatformAdapter for XAdapter {
                 provider_slug: "twitter",
             },
             fields: &[
+                PlatformCredentialField {
+                    name: "app_bearer_token",
+                    label: "App bearer token",
+                    secret: true,
+                    required: false,
+                    numeric: false,
+                    help: "X Developer Console > Keys & Tokens > Bearer Token. Configure with the API secret to enable automatic DM webhooks billed to this app.",
+                },
+                PlatformCredentialField {
+                    name: "consumer_secret",
+                    label: "API key secret",
+                    secret: true,
+                    required: false,
+                    numeric: false,
+                    help: "The same X app's API Key Secret, used to verify webhook signatures. This is different from the OAuth 2.0 Client Secret.",
+                },
                 PlatformCredentialField {
                     name: "client_id",
                     label: "Client ID",
@@ -359,8 +381,10 @@ impl PlatformAdapter for XAdapter {
             webhook_secret_field: None,
             setup_checklist: &[
                 "Enable OAuth 2.0 user authentication with a confidential Web App and PKCE in the X Developer Console. Use the OAuth callback URL below.",
-                "Allow tweet.read users.read dm.read dm.write offline.access. Existing accounts must consent again to grant DM access.",
+                "Allow tweet.read users.read dm.read dm.write media.write offline.access. Existing accounts must consent again to grant DM access.",
                 "Fund NyxID's app with paid API credits. All customers' DM traffic consumes this app's credits and limits. Current pricing: https://docs.x.com/x-api/getting-started/pricing (pay-per-usage replaces Basic/Pro subscriptions).",
+                "Set the app bearer token and API key secret from this same app to enable X Activity DM webhooks. NyxID registers the shared HTTPS webhook and per-account subscriptions automatically. Existing connections switch when verified or reconnected; without these fields they keep polling.",
+                "This channel supports unencrypted DMs (dm.received). Encrypted X Chat messages require a separate encryption integration.",
                 "Automated replies require an inbound DM and user consent. NyxID never initiates DM conversations. Publish an opt-out policy for your agent.",
             ],
         })
@@ -667,20 +691,90 @@ impl PlatformAdapter for XAdapter {
         Ok(last)
     }
 
+    fn platform_webhook(&self) -> bool {
+        true
+    }
+
+    fn platform_subscription_content_type(&self) -> &'static str {
+        "application/json"
+    }
+
+    fn webhook_policy(&self, _body: &[u8]) -> crate::services::channel_platform::WebhookPolicy {
+        crate::services::channel_platform::WebhookPolicy::Immediate(None)
+    }
+
+    fn validate_platform_subscription(
+        &self,
+        query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<()> {
+        webhooks::crc_token(query).map(|_| ())
+    }
+
+    fn platform_subscription_handshake(
+        &self,
+        credentials: &PlatformVerifySecrets,
+        query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<String> {
+        webhooks::handshake(credentials, query)
+    }
+
+    fn connection_webhook_configured(&self, credentials: &PlatformVerifySecrets) -> bool {
+        ["app_bearer_token", "consumer_secret"]
+            .iter()
+            .all(|field| credentials.get(field).is_some_and(|s| !s.is_empty()))
+    }
+
+    async fn setup_connection_webhook(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        bot_id: &str,
+        webhook_url: &str,
+    ) -> AppResult<()> {
+        webhooks::setup(self, http, credentials, bot_id, webhook_url).await
+    }
+
+    async fn remove_connection_webhook(
+        &self,
+        http: &reqwest::Client,
+        credentials: &PlatformVerifySecrets,
+        bot_id: &str,
+    ) -> AppResult<()> {
+        webhooks::remove(self, http, credentials, bot_id).await
+    }
+
+    async fn platform_webhook_targets(
+        &self,
+        credentials: &PlatformVerifySecrets,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> AppResult<Vec<String>> {
+        webhooks::verify(credentials, headers, body)?;
+        Ok(webhooks::target(body)?.into_iter().collect())
+    }
+
     async fn verify_webhook(
         &self,
-        _bot: &ChannelBot,
-        _secrets: Option<&PlatformVerifySecrets>,
-        _headers: &HeaderMap,
-        _body: &[u8],
+        bot: &ChannelBot,
+        secrets: Option<&PlatformVerifySecrets>,
+        headers: &HeaderMap,
+        body: &[u8],
     ) -> AppResult<()> {
-        Err(AppError::ChannelWebhookVerificationFailed(
-            "This channel uses polling".to_string(),
-        ))
+        webhooks::verify(
+            secrets.ok_or_else(webhooks::verification_error)?,
+            headers,
+            body,
+        )?;
+        if webhooks::target(body)?.as_deref() != Some(bot.platform_bot_id.as_str()) {
+            return Err(webhooks::verification_error());
+        }
+        Ok(())
     }
-    async fn parse_inbound(&self, _body: &[u8]) -> AppResult<Vec<InboundMessage>> {
-        Err(protocol_error())
+
+    async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>> {
+        webhooks::parse(body)
     }
+
     async fn register_webhook(
         &self,
         _http: &reqwest::Client,

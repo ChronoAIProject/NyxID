@@ -116,7 +116,7 @@ pub async fn platform_subscription(
             StatusCode::OK,
             [(
                 axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
+                adapter.platform_subscription_content_type(),
             )],
             challenge,
         )
@@ -166,9 +166,15 @@ pub(super) async fn dispatch_platform_webhook(
     let targets = adapter
         .platform_webhook_targets(&credentials, headers, body)
         .await?;
+    let source = if crate::services::channel_connection_webhook_service::supports(adapter.as_ref())
+    {
+        "connection"
+    } else {
+        "platform"
+    };
     for target in targets {
         let bot = state.db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-            .find_one(doc! { "platform": platform, "credential_source": "platform", "platform_bot_id": &target, "is_active": true, "status": { "$in": ["active", "pending_webhook"] } }).await?;
+            .find_one(doc! { "platform": platform, "credential_source": source, "platform_bot_id": &target, "is_active": true, "status": { "$in": ["active", "pending_webhook"] } }).await?;
         let Some(bot) = bot else {
             tracing::debug!(platform, platform_bot_id = %target, "platform webhook for unknown number");
             continue;
@@ -331,6 +337,19 @@ async fn handle_webhook_inner_with_deps(
         return Ok(Some(challenge_response));
     }
 
+    if bot.credential_source == "connection" {
+        if !bot.webhook_registered {
+            return Ok(None);
+        }
+        crate::services::channel_credentials::resolve_bot_token(
+            state.db,
+            state.encryption_keys,
+            adapter.as_ref(),
+            &bot,
+        )
+        .await?;
+    }
+
     // Auto-promote pending_webhook bots AFTER successful signature verification.
     // This proves the user correctly configured the webhook URL on the platform.
     if is_pending_webhook {
@@ -379,6 +398,174 @@ mod tests {
     use mongodb::bson::doc;
     use tokio::sync::{Mutex, oneshot};
     use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn x_signed_delivery_is_account_bound_deduplicated_and_requires_live_connection() {
+        use crate::services::{channel_adapters::x::REQUIRED_SCOPES, platform_credential_service};
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let db = crate::test_utils::connect_transaction_test_database("x_webhook_delivery").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new(
+            [2u8; 32],
+        ));
+        let owner = uuid::Uuid::new_v4().to_string();
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let connection = uuid::Uuid::new_v4().to_string();
+        let provider = uuid::Uuid::new_v4().to_string();
+        let agent = uuid::Uuid::new_v4().to_string();
+        let (callback_url, received, shutdown) = spawn_mock_callback_server().await;
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &provider, "slug": "twitter", "name": "X", "provider_type": "oauth2", "is_active": true,
+                "credential_mode": "user", "supports_pkce": true, "created_by": &owner,
+                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            }).await.unwrap();
+        let token = state.encryption_keys.encrypt(b"user-token").await.unwrap();
+        db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &connection, "user_id": &owner, "label": "X", "credential_type": "oauth2",
+                "credential_source": "platform", "provider_config_id": &provider, "status": "active",
+                "token_scopes": REQUIRED_SCOPES.join(" "),
+                "access_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: token },
+                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            }).await.unwrap();
+        let adapter = resolve_adapter("x", &state.token_exchange_cache).unwrap();
+        platform_credential_service::update(
+            &db,
+            &state.encryption_keys,
+            &adapter.platform_credentials().unwrap(),
+            &owner,
+            &[(
+                "consumer_secret".into(),
+                Some(zeroize::Zeroizing::new("api-secret".into())),
+            )]
+            .into(),
+            false,
+        )
+        .await
+        .unwrap();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &bot_id, "user_id": &owner, "platform": "x", "label": "Support",
+                "credential_source": "connection", "connection_id": &connection,
+                "platform_bot_id": "10", "platform_bot_username": "support", "webhook_registered": true,
+                "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
+                "webhook_secret_hash": "", "status": "active", "is_active": true,
+                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            }).await.unwrap();
+        db.collection::<bson::Document>(API_KEYS)
+            .insert_one(doc! {
+                "_id": &agent, "user_id": &owner, "name": "agent", "key_prefix": "nyxid_ag",
+                "key_hash": "deadbeef".repeat(8), "scopes": "read write", "is_active": true,
+                "callback_url": callback_url, "created_at": bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(), "user_id": &owner, "channel_bot_id": &bot_id,
+                "platform": "x", "platform_conversation_id": "2-10", "platform_conversation_type": "private",
+                "agent_api_key_id": &agent, "default_agent": false, "is_active": true,
+                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            }).await.unwrap();
+        let payload = |id: &str, target: &str, recipient: &str| {
+            serde_json::to_vec(&serde_json::json!({
+            "data": {"event_type": "dm.received", "filter": {"user_id": target}, "payload": {
+                "direct_message_events": [{"id": id, "type": "message_create", "message_create": {
+                    "sender_id": "2", "target": {"recipient_id": recipient},
+                    "message_data": {"text": "private webhook message"}
+                }}]
+            }}
+        })).unwrap()
+        };
+        let sign = |body: &[u8]| {
+            let mut mac = Hmac::<Sha256>::new_from_slice(b"api-secret").unwrap();
+            mac.update(body);
+            HeaderMap::from_iter([(
+                "x-twitter-webhooks-signature".parse().unwrap(),
+                format!("sha256={}", STANDARD.encode(mac.finalize().into_bytes()))
+                    .parse()
+                    .unwrap(),
+            )])
+        };
+        let body = payload("500", "10", "10");
+        assert!(
+            dispatch_platform_webhook(&state, "x", &HeaderMap::new(), &body)
+                .await
+                .is_err()
+        );
+        let mut tampered = body.clone();
+        tampered.push(b' ');
+        assert!(
+            dispatch_platform_webhook(&state, "x", &sign(&body), &tampered)
+                .await
+                .is_err()
+        );
+        for _ in 0..2 {
+            dispatch_platform_webhook(&state, "x", &sign(&body), &body)
+                .await
+                .unwrap();
+        }
+        for body in [payload("501", "11", "10"), payload("502", "10", "11")] {
+            dispatch_platform_webhook(&state, "x", &sign(&body), &body)
+                .await
+                .unwrap();
+        }
+        assert_eq!(received.lock().await.len(), 1);
+        assert!(
+            received.lock().await[0]
+                .to_string()
+                .contains("private webhook message")
+        );
+        let messages =
+            db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
+        assert_eq!(messages.count_documents(doc! {}).await.unwrap(), 1);
+        let stored = messages.find_one(doc! {}).await.unwrap().unwrap();
+        assert!(!stored.to_string().contains("private webhook message"));
+        assert!(!stored.contains_key("raw_data"));
+        for deleted in [false, true] {
+            let keys =
+                db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME);
+            if deleted {
+                keys.delete_one(doc! {"_id": &connection}).await.unwrap();
+            } else {
+                keys.update_one(
+                    doc! {"_id": &connection},
+                    doc! {"$set": {"status": "revoked"}},
+                )
+                .await
+                .unwrap();
+            }
+            db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                .update_one(doc! {"_id": &bot_id}, doc! {"$set": {"status": "active"}})
+                .await
+                .unwrap();
+            let body = payload(if deleted { "504" } else { "503" }, "10", "10");
+            dispatch_platform_webhook(&state, "x", &sign(&body), &body)
+                .await
+                .unwrap();
+            assert_eq!(
+                channel_bot_service::get_bot(&db, &bot_id)
+                    .await
+                    .unwrap()
+                    .status,
+                "failed"
+            );
+        }
+        assert_eq!(received.lock().await.len(), 1);
+        assert_eq!(messages.count_documents(doc! {}).await.unwrap(), 1);
+        let _ = shutdown.send(());
+    }
 
     async fn assert_duplicate_delivery_counts(platform: &str, expected_count: u64) {
         use hmac::{Hmac, Mac};

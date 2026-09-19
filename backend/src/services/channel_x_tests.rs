@@ -180,7 +180,7 @@ fn descriptors_keep_all_previous_adapters_on_stored_webhook_defaults() {
                 }
             );
             assert!(adapter.registration().managed_only);
-            assert!(!adapter.registration().webhook_ingestion);
+            assert!(adapter.registration().webhook_ingestion);
             assert!(adapter.registration().fields.is_empty());
             assert!(adapter.dedup_inbound_by_platform_message_id());
             assert_eq!(
@@ -617,7 +617,7 @@ async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config()
         updated
             .fields
             .iter()
-            .all(|f| f.configured && f.value.is_none())
+            .all(|f| (!f.descriptor.required || f.configured) && f.value.is_none())
     );
     assert!(updated.webhook_verify_token.is_none());
     assert!(
@@ -754,3 +754,6 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
 
 #[path = "channel_x_review_tests.rs"]
 mod review;
+
+#[path = "channel_x_webhook_tests.rs"]
+mod webhooks;

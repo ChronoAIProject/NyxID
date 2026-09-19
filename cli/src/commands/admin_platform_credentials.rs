@@ -149,7 +149,12 @@ pub async fn run(command: AdminPlatformCredentialsCommands) -> Result<()> {
         } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let descriptor = descriptor(&mut api, &provider).await?;
-            if let Some(shared) = shared_provider(&descriptor) {
+            if let Some(shared) = shared_provider(&descriptor).filter(|_| {
+                fields.is_empty()
+                    || fields
+                        .iter()
+                        .any(|name| matches!(name.as_str(), "client_id" | "client_secret"))
+            }) {
                 let warning = shared_clear_warning(shared);
                 eprintln!("{warning}");
                 if !confirm_shared_provider {
@@ -336,9 +341,9 @@ mod tests {
             .and(path("/api/v1/admin/platform-credentials"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
                 "provider": "x", "backing": {"type": "provider_oauth", "provider_slug": "twitter"},
-                "fields": [{"name": "client_secret", "secret": true}]
+                "fields": [{"name": "client_secret", "secret": true}, {"name": "consumer_secret", "secret": true}]
             }])))
-            .expect(4)
+            .expect(5)
             .mount(&server)
             .await;
         Mock::given(method("PATCH"))
@@ -366,6 +371,21 @@ mod tests {
             assert!(error.contains("--confirm-shared-provider"));
             run(command(true)).await.unwrap();
         }
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/admin/platform-credentials/x"))
+            .and(body_json(json!({"fields": {"consumer_secret": null}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(AdminPlatformCredentialsCommands::Clear {
+            provider: "x".into(),
+            fields: vec!["consumer_secret".into()],
+            confirm_shared_provider: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

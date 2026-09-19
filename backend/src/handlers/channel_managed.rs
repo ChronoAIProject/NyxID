@@ -357,6 +357,16 @@ pub async fn reconnect(
         &body.connection_id,
     )
     .await?;
+    let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    crate::services::channel_connection_webhook_service::configure(
+        &state.db,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter.as_ref(),
+        &current,
+        &state.config.base_url,
+    )
+    .await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth,

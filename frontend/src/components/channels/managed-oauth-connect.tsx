@@ -190,6 +190,8 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         value={bot.connection_id ?? "Missing"}
         copyable
       />
+      <DetailRow label="Message delivery" value={bot.webhook_registered ? "Real-time webhooks" : "Polling"} />
+      {!bot.webhook_registered && <>
       <DetailRow
         label="Last polled"
         value={bot.last_polled_at ?? "Not yet polled"}
@@ -204,8 +206,9 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         label="Consecutive errors"
         value={String(bot.poll_error_count ?? 0)}
       />
+      </>}
       <div className="space-y-3 py-3">
-        {bot.last_poll_notice && (
+        {!bot.webhook_registered && bot.last_poll_notice && (
           <p role="status" className="text-xs text-warning">{bot.last_poll_notice}</p>
         )}
         {bot.error && <ErrorBanner message={bot.error} />}

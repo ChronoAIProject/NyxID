@@ -64,7 +64,7 @@ fn due_filter(
 ) -> bson::Document {
     let now_bson = bson::DateTime::from_chrono(now);
     doc! {
-        "platform": platform, "is_active": true, "status": "active",
+        "platform": platform, "is_active": true, "status": "active", "webhook_registered": { "$ne": true },
         "$and": [
             { "$or": [{ "poll_lease_until": null }, { "poll_lease_until": { "$lte": now_bson } }] },
             { "$or": [{ "poll_backoff_until": null }, { "poll_backoff_until": { "$lte": now_bson } }] },

@@ -46,29 +46,37 @@ pub async fn load(
             )
             .find_one(doc! { "slug": provider_slug })
             .await?;
-        return Ok(row.map(|row| PlatformCredential {
-            id: row.id,
-            provider: descriptor.provider.to_string(),
-            fields: BTreeMap::new(),
-            secrets: [
+        let mut extra = db
+            .collection::<PlatformCredential>(COLLECTION_NAME)
+            .find_one(doc! { "provider": descriptor.provider })
+            .await?;
+        return Ok(row.map(|row| {
+            let mut credential = extra.take().unwrap_or_else(|| PlatformCredential {
+                id: row.id.clone(),
+                provider: descriptor.provider.to_string(),
+                fields: BTreeMap::new(),
+                secrets: BTreeMap::new(),
+                updated_by: row.created_by.clone(),
+                updated_at: row.updated_at,
+            });
+            credential.secrets.remove("client_id");
+            credential.secrets.remove("client_secret");
+            for (name, bytes) in [
                 ("client_id", row.client_id_encrypted),
                 ("client_secret", row.client_secret_encrypted),
-            ]
-            .into_iter()
-            .filter_map(|(name, bytes)| {
-                bytes.map(|bytes| {
-                    (
-                        name.to_string(),
+            ] {
+                if let Some(bytes) = bytes {
+                    credential.secrets.insert(
+                        name.into(),
                         bson::Binary {
                             subtype: bson::spec::BinarySubtype::Generic,
                             bytes,
                         },
-                    )
-                })
-            })
-            .collect(),
-            updated_by: row.created_by,
-            updated_at: row.updated_at,
+                    );
+                }
+            }
+            credential.updated_at = credential.updated_at.max(row.updated_at);
+            credential
         }));
     }
     Ok(db
@@ -125,17 +133,56 @@ pub async fn update(
     fields: &BTreeMap<String, Option<Zeroizing<String>>>,
     regenerate_verify_token: bool,
 ) -> AppResult<()> {
-    if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
-        return update_provider_oauth(
-            db,
-            keys,
-            descriptor,
-            provider_slug,
-            fields,
-            regenerate_verify_token,
-        )
-        .await;
+    // Validate the whole patch before writing either credential backing.
+    for (name, value) in fields {
+        let field = descriptor
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .ok_or_else(|| AppError::ValidationError("Unknown platform credential field".into()))?;
+        if let Some(value) = value {
+            let value = value.trim();
+            if value.is_empty()
+                || value.len() > 4096
+                || (field.numeric
+                    && (value.len() > 32 || !value.bytes().all(|b| b.is_ascii_digit())))
+            {
+                return Err(AppError::ValidationError(format!(
+                    "Invalid {}",
+                    field.label
+                )));
+            }
+        }
     }
+    let stored_fields;
+    let fields =
+        if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
+            let oauth_fields = fields
+                .iter()
+                .filter(|(name, _)| matches!(name.as_str(), "client_id" | "client_secret"))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            update_provider_oauth(
+                db,
+                keys,
+                descriptor,
+                provider_slug,
+                &oauth_fields,
+                regenerate_verify_token,
+            )
+            .await?;
+            stored_fields = fields
+                .iter()
+                .filter(|(name, _)| !matches!(name.as_str(), "client_id" | "client_secret"))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<BTreeMap<_, _>>();
+            if stored_fields.is_empty() {
+                return Ok(());
+            }
+            &stored_fields
+        } else {
+            fields
+        };
     let mut set = doc! { "updated_by": actor, "updated_at": bson::DateTime::now() };
     let mut unset = doc! {};
     for (name, value) in fields {
@@ -187,7 +234,7 @@ pub async fn update(
         .is_some_and(|field| fields.get(field).is_some_and(Option::is_some));
     if regenerate_verify_token && descriptor.webhook_secret_field.is_none() {
         return Err(AppError::ValidationError(
-            "Platform webhooks are not supported".to_string(),
+            "This platform does not support generating a verification token".to_string(),
         ));
     }
     // A pipeline atomically preserves an existing verify token during rotation.
@@ -242,7 +289,6 @@ pub async fn delete(
                 },
             )
             .await?;
-        return Ok(());
     }
     db.collection::<PlatformCredential>(COLLECTION_NAME)
         .delete_one(doc! { "provider": descriptor.provider })
@@ -260,7 +306,7 @@ async fn update_provider_oauth(
 ) -> AppResult<()> {
     if regenerate_verify_token {
         return Err(AppError::ValidationError(
-            "Platform webhooks are not supported".to_string(),
+            "This platform does not support generating a verification token".to_string(),
         ));
     }
     let mut set = doc! { "updated_at": bson::DateTime::now() };

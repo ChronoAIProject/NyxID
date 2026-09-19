@@ -392,6 +392,33 @@ pub trait PlatformAdapter: Send + Sync {
         false
     }
 
+    fn platform_subscription_content_type(&self) -> &'static str {
+        "text/plain; charset=utf-8"
+    }
+
+    fn connection_webhook_configured(&self, _credentials: &PlatformVerifySecrets) -> bool {
+        false
+    }
+
+    async fn setup_connection_webhook(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _bot_id: &str,
+        _webhook_url: &str,
+    ) -> AppResult<()> {
+        Err(super::channel_managed::unavailable())
+    }
+
+    async fn remove_connection_webhook(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &PlatformVerifySecrets,
+        _bot_id: &str,
+    ) -> AppResult<()> {
+        Err(super::channel_managed::unavailable())
+    }
+
     fn platform_subscription_handshake(
         &self,
         _credentials: &PlatformVerifySecrets,
