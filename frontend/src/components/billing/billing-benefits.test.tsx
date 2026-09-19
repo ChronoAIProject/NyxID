@@ -56,3 +56,46 @@ describe("BillingBenefits", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 });
+
+it.each(["org_members", "groups"] as const)(
+  "renders personal balances received through %s",
+  (kind) => {
+    const targets = {
+      target_kind: kind,
+      target_org_ids: kind === "org_members" ? ["org"] : [],
+      target_group_ids: kind === "groups" ? ["group"] : [],
+    };
+    mocks.grants.mockReturnValue({
+      ...query(null),
+      data: {
+        grants: [
+          {
+            ...targets,
+            id: "grant",
+            scope: { all_services: true },
+            remaining_micros: 2_000_000,
+          },
+        ],
+      },
+    });
+    mocks.allowances.mockReturnValue({
+      ...query(null),
+      data: {
+        allowances: [
+          {
+            allowance: {
+              ...targets,
+              id: "allowance",
+              service_slug: "service",
+              metric: "requests",
+            },
+            remaining_quantity: 80,
+          },
+        ],
+      },
+    });
+    render(<BillingBenefits />);
+    expect(screen.getByText("2 credits")).toBeInTheDocument();
+    expect(screen.getByText("80 left")).toBeInTheDocument();
+  },
+);

@@ -2617,6 +2617,7 @@ async fn execute_proxy_inner(
         }
     }
 
+    let billing_ctx = billing_ctx.with_request_body(body.as_deref());
     let metered = state.billing.open(&billing_ctx).await?;
 
     let durable_reservation = if let Some(api_key_id) = scheduled_api_key_id {
@@ -2979,10 +2980,12 @@ async fn execute_proxy_inner(
                         ProxyResponseType::Complete(node_response) => {
                             let response_len = node_response.body.len() as i64;
                             let request_len = request_body_len;
+                            let usage = (node_response.body.len() <= USAGE_CAPTURE_MAX_BYTES && should_capture_llm_usage(&target.service, platform_metric))
+                                .then(|| llm_usage_service::usage_from_body(&node_response.body, path, (200..300).contains(&node_response.status))).flatten();
                             settle_meter_async(
                                 state.billing.clone(),
                                 metered.clone(),
-                                llm_platform_usage(None, request_len + response_len),
+                                llm_platform_usage(usage.as_ref(), request_len + response_len),
                                 None,
                                 None,
                             )
@@ -3090,16 +3093,25 @@ async fn execute_proxy_inner(
                             let stream_billing = state.billing.clone();
                             let stream_metered = metered.clone();
                             let request_len = request_body_len;
+                            let usage_path = path.to_string();
+                            let capture_usage = should_capture_llm_usage(&target.service, platform_metric);
 
                             // Convert the mpsc receiver into a streaming body.
                             let mut exchange_diagnostics =
                                 ProxyStreamDiagnostics::new(stream_diagnostics);
                             let stream = async_stream::stream! {
                                 let mut response_len: i64 = 0;
+                                let mut captured = (capture_usage && !node_is_sse).then(Vec::new);
+                                let mut usage_events = llm_usage_service::BoundedUsageEvents::default();
                                 loop {
                                     match tokio::time::timeout(idle_timeout, rx.recv()).await {
                                         Ok(Some(StreamChunk::Data(bytes))) => {
                                             response_len += bytes.len() as i64;
+                                            if capture_usage && node_is_sse { usage_events.push(&bytes); }
+                                            if let Some(buffer) = captured.as_mut() {
+                                                if buffer.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES { buffer.extend_from_slice(&bytes); }
+                                                else { captured = None; }
+                                            }
                                             yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
                                         }
                                         Ok(Some(StreamChunk::End)) => {
@@ -3138,10 +3150,12 @@ async fn execute_proxy_inner(
                                         }
                                     }
                                 }
+                                let mut usage = if node_is_sse { usage_events.finalize_success((200..300).contains(&status)) } else { captured.as_deref().and_then(|b| llm_usage_service::usage_from_body(b, &usage_path, (200..300).contains(&status))) };
+                                if !(200..300).contains(&status) && let Some(usage) = usage.as_mut() { usage.images = 0; }
                                 settle_meter_async(
                                     stream_billing,
                                     stream_metered,
-                                    llm_platform_usage(None, request_len + response_len),
+                                    llm_platform_usage(usage.as_ref(), request_len + response_len),
                                     None,
                                     None,
                                 )
@@ -3841,12 +3855,15 @@ async fn execute_proxy_inner(
                             response_len += bytes.len() as i64;
                             sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
                             while let Some(event) = parse_sse_event(&mut sse_buffer) {
-                                if let Some((usage, mode)) =
+                                if let Some((mut usage, mode)) =
                                     llm_usage_service::extract_reported_usage_from_sse_event(
                                         event.event_type.as_deref(),
                                         &event.data,
                                     )
                                 {
+                                    if !status.is_success() {
+                                        usage.images = 0;
+                                    }
                                     usage_accumulator.observe(usage, mode);
                                 }
                             }
@@ -4058,7 +4075,7 @@ async fn execute_proxy_inner(
                 if let Some(ctx) = stream_usage_context
                     && let Some(buf) = captured
                     && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&buf)
-                    && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+                    && let Some(usage) = llm_usage_service::extract_reported_usage_for_path(&json, &ctx.path, status.is_success())
                 {
                     model = ctx.model.clone();
                     llm_usage_service::log_reported_usage_async(ctx, usage.clone());
@@ -4127,7 +4144,11 @@ async fn execute_proxy_inner(
         let mut model = None;
         if let Some(nonstream_usage_context) = usage_context
             && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
-            && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+            && let Some(usage) = llm_usage_service::extract_reported_usage_for_path(
+                &json,
+                &nonstream_usage_context.path,
+                status.is_success(),
+            )
         {
             model = nonstream_usage_context.model.clone();
             llm_usage_service::log_reported_usage_async(nonstream_usage_context, usage.clone());
@@ -4235,10 +4256,6 @@ fn should_enforce_runtime_approval(
 }
 
 /// Convenience alias so existing call-sites compile without renaming.
-fn parse_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
-    sse_parser::parse_next_event(buffer)
-}
-
 fn final_credential_class(
     resolved_user_service_id: Option<&str>,
     node_route_active: bool,
@@ -4285,12 +4302,16 @@ fn platform_metric_for_target(
     )
 }
 
+fn parse_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
+    sse_parser::parse_next_event(buffer)
+}
+
 fn should_capture_llm_usage(
     service: &crate::models::downstream_service::DownstreamService,
     platform_metric: BillingMetric,
 ) -> bool {
-    platform_metric == BillingMetric::Tokens
-        || crate::services::billing::metric_resolution::captures_tokens(service)
+    platform_metric.is_token_family()
+        || crate::services::billing::metric_resolution::captures_usage(service)
 }
 
 fn resale_usage_from_optional_reported(
@@ -4311,6 +4332,7 @@ fn resale_usage_from_optional_reported(
             metric,
             quantity: fallback_bytes.max(0),
         }),
+        _ => None,
     }
 }
 
@@ -4318,38 +4340,32 @@ pub(crate) fn llm_platform_usage(
     usage: Option<&llm_usage_service::ReportedLlmUsage>,
     fallback_bytes: i64,
 ) -> PlatformUsage {
-    PlatformUsage::llm_completion(
-        fallback_bytes,
-        llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
-    )
-    .with_token_breakdown(usage.map(llm_usage_service::ReportedLlmUsage::token_breakdown))
+    llm_usage_service::platform_usage(usage, fallback_bytes, true)
 }
 
 fn websocket_realtime_usage_enabled(
     catalog_service_slug: Option<&str>,
     metered: &crate::services::billing::MeteredProxyContext,
 ) -> bool {
-    catalog_service_slug == Some("llm-openai")
-        && metered
-            .route
-            .as_ref()
-            .and_then(|route| route.resale.as_ref())
-            .is_some_and(|resale| resale.metric == BillingMetric::Tokens)
+    metered.route.as_ref().is_some_and(|route| {
+        route.capture_tokens
+            || (catalog_service_slug == Some("llm-openai")
+                && route
+                    .resale
+                    .as_ref()
+                    .is_some_and(|r| r.metric.is_token_family()))
+    })
 }
 
 fn websocket_platform_usage(stats: &ConnectionUsageStats) -> PlatformUsage {
     if stats.realtime_llm_usage.collection_enabled {
-        PlatformUsage::llm_completion(
+        let mut usage = llm_usage_service::platform_usage(
+            stats.realtime_llm_usage.reported_usage.as_ref(),
             stats.total_bytes(),
-            stats.realtime_llm_usage.token_quantity(),
-        )
-        .with_token_breakdown(
-            stats
-                .realtime_llm_usage
-                .reported_usage
-                .as_ref()
-                .map(llm_usage_service::ReportedLlmUsage::token_breakdown),
-        )
+            false,
+        );
+        usage.tokens = stats.realtime_llm_usage.token_quantity();
+        usage
     } else {
         llm_platform_usage(None, stats.total_bytes())
     }
@@ -4397,6 +4413,7 @@ fn websocket_resale_usage(
         BillingMetric::Tokens => llm_usage_service::estimate_tokens_from_bytes(stats.total_bytes()),
         BillingMetric::Requests => 1,
         BillingMetric::Bytes => stats.total_bytes().max(0),
+        _ => 0,
     };
 
     Some(ResaleUsage { metric, quantity })
@@ -6380,6 +6397,7 @@ mod tests {
             platform_key_pricing: None,
             byok_pricing_cleanup_metric_code: None,
             platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -6437,9 +6455,11 @@ mod tests {
                     prompt_tokens: 20,
                     completion_tokens: 10,
                     total_tokens: 30,
-                    cached_tokens: 0,
+                    cached_tokens: 5,
                     cache_creation_tokens: 0,
                     reported_cost: None,
+                    cached_tokens_included_in_prompt: true,
+                    ..Default::default()
                 }),
                 uncovered_bytes: 20,
                 reported_response_count: 1,
@@ -6451,6 +6471,15 @@ mod tests {
         let resale = websocket_resale_usage(&metered, &stats).expect("resale usage");
         assert_eq!(resale.metric, BillingMetric::Tokens);
         assert_eq!(resale.quantity, 35);
+        let platform = super::websocket_platform_usage(&stats);
+        assert_eq!(
+            (
+                platform.input_tokens,
+                platform.output_tokens,
+                platform.cache_read_tokens
+            ),
+            (15, 10, 5)
+        );
 
         let mut event = serde_json::json!({});
         add_websocket_usage_provenance(&mut event, &stats);
@@ -7056,6 +7085,8 @@ mod tests {
                 recurrence: crate::models::usage_allowance::AllowanceRecurrence::Monthly,
                 target_kind: crate::models::billing_target::BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 created_by: "admin-1".to_string(),
             },
         )

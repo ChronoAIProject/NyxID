@@ -5,6 +5,7 @@ pub mod api_key;
 pub mod approval;
 pub mod auth_flows;
 pub mod billing;
+pub mod billing_units;
 pub mod catalog;
 pub mod channel_bot;
 pub mod channel_event;

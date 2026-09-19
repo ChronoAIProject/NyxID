@@ -144,3 +144,20 @@ it.each([
     expect(screen.getByText(`Shared credential: ${label}`)).toBeInTheDocument();
   },
 );
+
+it("adds and removes component prices while keeping the lane editable", async () => {
+  render(<Harness />);
+  const user = userEvent.setup();
+  await user.click(screen.getAllByRole("switch", { name: "Free" })[0]!);
+  await user.click(screen.getByRole("button", { name: "Add component" }));
+  const price = screen.getByRole("textbox", { name: "Component 1 price" });
+  await user.clear(price);
+  await user.type(price, "0.000000250001");
+  expect(price).toHaveValue("0.000000250001");
+  expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "Remove component" }));
+  expect(
+    screen.queryByRole("textbox", { name: "Component 1 price" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Credits per unit")).toBeInTheDocument();
+});

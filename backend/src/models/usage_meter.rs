@@ -78,6 +78,8 @@ pub struct UsageFunding {
     /// temporarily unavailable. Model-specific rates still win at settlement.
     #[serde(default)]
     pub credits_per_unit_micros: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits_per_unit_pico: Option<i64>,
     #[serde(default)]
     pub allowance_reservations: Vec<AllowanceReservationAllocation>,
     #[serde(default)]
@@ -151,6 +153,9 @@ pub struct UsageMeterRow {
     pub quantity: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_resale_quantity: Option<i64>,
+    /// Crash-recoverable final quantities for all platform components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_platform_usage: Option<crate::models::service_billing::PlatformUsage>,
     pub status: UsageStatus,
     pub forwarded: bool,
     pub released: bool,

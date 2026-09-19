@@ -38,7 +38,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { ServicePicker, UserPicker } from "./credit-pickers";
+import { ServicePicker } from "./credit-pickers";
+import { RecipientTargetFields } from "./recipient-targets";
 
 type GrantFormApi = UseFormReturn<IssueGrantForm>;
 type AllowanceFormApi = UseFormReturn<AllowanceForm>;
@@ -58,7 +59,6 @@ export function GrantDialog({
   readonly pending: boolean;
   readonly onSubmit: (value: IssueGrantForm) => Promise<void>;
 }) {
-  const targetKind = form.watch("target_kind");
   const allServices = form.watch("all_services");
 
   return (
@@ -115,7 +115,10 @@ export function GrantDialog({
                     )}
                   />
                 </div>
-                <GrantTargetFields form={form} targetKind={targetKind} />
+                <RecipientTargetFields />
+                <p className="text-[11px] text-muted-foreground">
+                  Recipients are captured when credits are issued.
+                </p>
                 <FormField
                   control={form.control}
                   name="all_services"
@@ -216,7 +219,6 @@ export function AllowanceDialog({
   readonly editingAllowance: UsageAllowance | null;
   readonly onSubmit: (value: AllowanceForm) => Promise<void>;
 }) {
-  const targetKind = form.watch("target_kind");
   const serviceRef = form.watch("service_ref");
   const quantity = form.watch("quantity");
   const recurrence = form.watch("recurrence");
@@ -224,17 +226,24 @@ export function AllowanceDialog({
     (service) => service.id === serviceRef || service.slug === serviceRef,
   );
   const chosenMetric = form.watch("metric");
-  const laneMetrics = [...new Set([
-    selectedService?.billing?.byok_pricing?.metric,
-    selectedService?.billing?.platform_key_pricing?.metric,
-  ].filter((m) => m !== undefined))];
-  const metric = chosenMetric ?? (
-    selectedService
+  const laneMetrics = [
+    ...new Set(
+      [
+        ...(selectedService?.allowance_metrics ??
+          (selectedService ? [selectedService.effective_platform_metric] : [])),
+        ...(editingAllowance?.service_id === selectedService?.id
+          ? [editingAllowance?.metric]
+          : []),
+      ].filter((m) => m !== undefined),
+    ),
+  ];
+  const metric =
+    chosenMetric ??
+    (selectedService
       ? resolveServiceBillingMetric(selectedService)
       : editingAllowance?.service_id === serviceRef
         ? editingAllowance.metric
-        : null
-  );
+        : null);
   const preview = metric
     ? formatAllowancePreview(quantity, metric, recurrence)
     : null;
@@ -285,13 +294,26 @@ export function AllowanceDialog({
                       render={({ field }) => (
                         <FormItem>
                           <FormLabel>Allowance unit</FormLabel>
-                          <Select value={field.value ?? metric ?? undefined} onValueChange={field.onChange}>
-                            <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                          <Select
+                            value={field.value ?? metric ?? undefined}
+                            onValueChange={field.onChange}
+                          >
+                            <FormControl>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                            </FormControl>
                             <SelectContent>
-                              {laneMetrics.map((unit) => <SelectItem key={unit} value={unit}>{unit}</SelectItem>)}
+                              {laneMetrics.map((unit) => (
+                                <SelectItem key={unit} value={unit}>
+                                  {billingMetricLabel(unit)}
+                                </SelectItem>
+                              ))}
                             </SelectContent>
                           </Select>
-                          <FormDescription>Applies only to requests charged in this unit.</FormDescription>
+                          <FormDescription>
+                            Applies only to requests charged in this unit.
+                          </FormDescription>
                         </FormItem>
                       )}
                     />
@@ -356,7 +378,11 @@ export function AllowanceDialog({
                     )}
                   />
                 </div>
-                <AllowanceTargetFields form={form} targetKind={targetKind} />
+                <RecipientTargetFields />
+                <p className="text-[11px] text-muted-foreground">
+                  Organization and group allowances follow live membership.
+                  People who leave stop receiving new free usage.
+                </p>
               </div>
             </DialogBody>
             <DialogFooter className="pt-4 md:pt-4">
@@ -375,115 +401,5 @@ export function AllowanceDialog({
         </Form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function GrantTargetFields({
-  form,
-  targetKind,
-}: {
-  readonly form: GrantFormApi;
-  readonly targetKind: "all_users" | "selected_users";
-}) {
-  return (
-    <>
-      <FormField
-        control={form.control}
-        name="target_kind"
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>Recipients</FormLabel>
-            <Select
-              value={field.value}
-              onValueChange={(value) => {
-                field.onChange(value);
-                if (value === "all_users") form.setValue("target_user_ids", []);
-              }}
-            >
-              <FormControl>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-              </FormControl>
-              <SelectContent>
-                <SelectItem value="all_users">All billing owners</SelectItem>
-                <SelectItem value="selected_users">Selected owners</SelectItem>
-              </SelectContent>
-            </Select>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
-      {targetKind === "selected_users" ? (
-        <FormField
-          control={form.control}
-          name="target_user_ids"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Owners</FormLabel>
-              <FormControl>
-                <UserPicker selected={field.value} onChange={field.onChange} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-      ) : null}
-    </>
-  );
-}
-
-function AllowanceTargetFields({
-  form,
-  targetKind,
-}: {
-  readonly form: AllowanceFormApi;
-  readonly targetKind: "all_users" | "selected_users";
-}) {
-  return (
-    <>
-      <FormField
-        control={form.control}
-        name="target_kind"
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>Recipients</FormLabel>
-            <Select
-              value={field.value}
-              onValueChange={(value) => {
-                field.onChange(value);
-                if (value === "all_users") form.setValue("target_user_ids", []);
-              }}
-            >
-              <FormControl>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-              </FormControl>
-              <SelectContent>
-                <SelectItem value="all_users">All billing owners</SelectItem>
-                <SelectItem value="selected_users">Selected owners</SelectItem>
-              </SelectContent>
-            </Select>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
-      {targetKind === "selected_users" ? (
-        <FormField
-          control={form.control}
-          name="target_user_ids"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Owners</FormLabel>
-              <FormControl>
-                <UserPicker selected={field.value} onChange={field.onChange} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-      ) : null}
-    </>
   );
 }

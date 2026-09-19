@@ -262,6 +262,7 @@ pub async fn service_to_response_with_viewer(
         s.platform_key.is_none() && crate::services::platform_key_service::legacy_public_master(&s);
     let effective_platform_metric =
         crate::services::billing::metric_resolution::effective_platform_metric(&s);
+    let allowance_metrics = crate::services::billing::metric_resolution::allowance_metrics(&s);
     ServiceResponse {
         provider_config_id: s.provider_config_id.clone(),
         credential_configured: match inspection_keys {
@@ -313,6 +314,7 @@ pub async fn service_to_response_with_viewer(
         inference: s.inference,
         platform_key: s.platform_key,
         effective_platform_metric,
+        allowance_metrics,
         legacy_public_master,
         auth_notes: s.auth_notes,
         known_limitations: s.known_limitations,

@@ -728,6 +728,8 @@ fn test_db_heartbeat_loop(uri: String, run_id: String, started_at_secs: u64, sto
         match stop.recv_timeout(TEST_DB_RUN_HEARTBEAT_INTERVAL) {
             Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Construct the timer inside the runtime; constructing timeout
+                // on this std thread panics on the first 60-second heartbeat.
                 let _ = runtime.block_on(async {
                     tokio::time::timeout(
                         STALE_TEST_DB_METADATA_TIMEOUT,
@@ -2157,6 +2159,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             crate::services::cloud_response_cache::CloudResponseCache::new(0),
         ),
         billing,
+        audit_event_types: Arc::default(),
         telemetry: None,
     }
 }

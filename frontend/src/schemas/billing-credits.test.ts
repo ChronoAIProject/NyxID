@@ -229,3 +229,76 @@ describe("billing credit schemas", () => {
     expect(grantList.grants[0]?.schedule_id).toBe("schedule-1");
   });
 });
+
+const memberBase = {
+  amount_credits: 10,
+  all_services: true,
+  service_refs: [],
+  expires_at: "",
+  reason: "",
+  service_ref: "service",
+  quantity: 100,
+  recurrence: "monthly",
+  expiry: { kind: "never" },
+  target_kind: "all_users",
+  target_user_ids: [],
+  target_org_ids: [],
+  target_group_ids: [],
+};
+
+describe.each([
+  ["grant", issueGrantFormSchema],
+  ["schedule", scheduleFormSchema],
+  ["allowance", allowanceFormSchema],
+] as const)("%s recipient policy", (_name, schema) => {
+  it.each([
+    ["all_users", -1],
+    ["selected_users", 0],
+    ["org_members", 1],
+    ["groups", 2],
+  ] as const)("requires exactly the matching list for %s", (kind, matching) => {
+    const fields = ["target_user_ids", "target_org_ids", "target_group_ids"];
+    for (let mask = 0; mask < 8; mask++) {
+      const value = {
+        ...memberBase,
+        target_kind: kind,
+        ...Object.fromEntries(
+          fields.map((field, i) => [field, mask & (1 << i) ? ["id"] : []]),
+        ),
+      };
+      expect(schema.safeParse(value).success).toBe(
+        mask === (matching < 0 ? 0 : 1 << matching),
+      );
+    }
+  });
+  it.each([
+    ["selected_users", "target_user_ids"],
+    ["org_members", "target_org_ids"],
+    ["groups", "target_group_ids"],
+  ] as const)(
+    "enforces uniqueness, non-empty ids and the cap for %s",
+    (kind, field) => {
+      for (const values of [
+        ["same", "same"],
+        [""],
+        ["   "],
+        Array.from({ length: 501 }, (_, i) => `id-${String(i)}`),
+      ]) {
+        expect(
+          schema.safeParse({
+            ...memberBase,
+            target_kind: kind,
+            [field]: values,
+          }).success,
+        ).toBe(false);
+      }
+      expect(
+        schema.safeParse({
+          ...memberBase,
+          target_kind: kind,
+          [field]: Array.from({ length: 500 }, (_, i) => `id-${String(i)}`),
+        }).success,
+      ).toBe(true);
+    },
+  );
+});

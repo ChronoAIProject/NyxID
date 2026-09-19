@@ -872,18 +872,30 @@ pub struct CatalogServiceArgs {
     /// Remove an owner UUID or organization slug/display name (repeatable)
     #[arg(long, num_args = 1..)]
     pub platform_key_deny: Vec<String>,
-    #[arg(long, value_parser = ["tokens", "requests", "bytes"])]
+    #[arg(long, value_parser = crate::commands::billing_units::METRICS)]
     pub byok_metric: Option<String>,
-    #[arg(long, conflicts_with = "byok_free")]
+    #[arg(long, conflicts_with = "byok_free", value_parser = crate::commands::billing_units::price)]
     pub byok_price: Option<String>,
     #[arg(long)]
     pub byok_free: bool,
-    #[arg(long, value_parser = ["tokens", "requests", "bytes"])]
+    #[arg(long, value_parser = crate::commands::billing_units::METRICS)]
     pub platform_key_metric: Option<String>,
-    #[arg(long, conflicts_with = "platform_key_free")]
+    #[arg(long, conflicts_with = "platform_key_free", value_parser = crate::commands::billing_units::price)]
     pub platform_key_price: Option<String>,
     #[arg(long)]
     pub platform_key_free: bool,
+    /// Additional BYOK component price, repeatable (<metric>=<price>); replaces that unit's price
+    #[arg(long, value_parser = crate::commands::billing_units::component, conflicts_with_all = ["byok_free", "byok_clear_components"])]
+    pub byok_component: Vec<String>,
+    /// Remove all additional BYOK components, preserving the primary price
+    #[arg(long, conflicts_with = "byok_free")]
+    pub byok_clear_components: bool,
+    /// Additional platform-key component price, repeatable (<metric>=<price>)
+    #[arg(long, value_parser = crate::commands::billing_units::component, conflicts_with_all = ["platform_key_free", "platform_key_clear_components"])]
+    pub platform_key_component: Vec<String>,
+    /// Remove all additional platform-key components, preserving the primary price
+    #[arg(long, conflicts_with = "platform_key_free")]
+    pub platform_key_clear_components: bool,
 }
 
 #[derive(Subcommand)]

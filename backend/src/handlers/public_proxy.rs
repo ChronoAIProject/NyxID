@@ -779,6 +779,7 @@ mod tests {
                 platform_key_pricing: None,
                 byok_pricing_cleanup_metric_code: None,
                 platform_key_pricing_cleanup_metric_code: None,
+                component_cleanup_metric_codes: Vec::new(),
                 resale_billable: true,
                 resale_metric: BillingMetric::Tokens,
                 lago_resale_metric_code: Some("resale_tokens".to_string()),

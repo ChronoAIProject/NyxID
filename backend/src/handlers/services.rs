@@ -192,6 +192,8 @@ pub struct ServiceResponse {
     /// Default allowance/display unit: BYOK lane, then platform-key lane,
     /// then legacy override or protocol/slug heuristic. Requests use their lane.
     pub effective_platform_metric: BillingMetric,
+    /// Accepted allowance units, computed from current lane/fallback configuration.
+    pub allowance_metrics: Vec<BillingMetric>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -273,6 +275,10 @@ pub struct BillingUpdate {
     #[serde(skip)]
     byok_present: bool,
     #[serde(skip)]
+    byok_components_present: bool,
+    #[serde(skip)]
+    platform_components_present: bool,
+    #[serde(skip)]
     platform_present: bool,
     #[serde(skip)]
     present_fields: std::collections::HashSet<String>,
@@ -293,6 +299,18 @@ fn serialize_billing_update<S: serde::Serializer>(
             fields.entry(key.clone()).or_insert(serde_json::Value::Null);
         }
     }
+    for (field, present) in [
+        ("byok_pricing", billing.byok_components_present),
+        ("platform_key_pricing", billing.platform_components_present),
+    ] {
+        if !present
+            && let Some(lane) = value
+                .get_mut(field)
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            lane.remove("components");
+        }
+    }
     value.serialize(serializer)
 }
 
@@ -304,6 +322,8 @@ impl<'de> Deserialize<'de> for BillingUpdate {
                 .as_object()
                 .map(|fields| fields.keys().cloned().collect())
                 .unwrap_or_default(),
+            byok_components_present: raw.pointer("/byok_pricing/components").is_some(),
+            platform_components_present: raw.pointer("/platform_key_pricing/components").is_some(),
             byok_present: raw.get("byok_pricing").is_some(),
             platform_present: raw.get("platform_key_pricing").is_some(),
             value: serde_json::from_value(raw).map_err(serde::de::Error::custom)?,
@@ -327,6 +347,22 @@ impl BillingUpdate {
         }
         if !self.platform_present {
             self.value.platform_key_pricing = current.platform_key_pricing.clone();
+        }
+        for (requested, previous, present) in [
+            (
+                &mut self.value.byok_pricing,
+                current.byok_pricing.as_ref(),
+                self.byok_components_present,
+            ),
+            (
+                &mut self.value.platform_key_pricing,
+                current.platform_key_pricing.as_ref(),
+                self.platform_components_present,
+            ),
+        ] {
+            if !present && let (Some(requested), Some(previous)) = (requested, previous) {
+                requested.components = previous.components.clone();
+            }
         }
         // A new lane-only payload must retain its rollout fallback and resale.
         // Legacy payloads keep the historical full-block update semantics.
@@ -2228,6 +2264,7 @@ pub async fn update_service(
                 || billing.platform_key_pricing.is_some()
                 || billing.byok_pricing_cleanup_metric_code.is_some()
                 || billing.platform_key_pricing_cleanup_metric_code.is_some()
+                || !billing.component_cleanup_metric_codes.is_empty()
                 || billing.resale_billable
                 || billing.lago_resale_metric_code.is_some()
         });
@@ -3707,6 +3744,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_response_exposes_computed_allowance_metrics_without_storing_them() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.billing = Some(serde_json::from_value(serde_json::json!({
+            "byok_pricing": {"metric": "input_tokens", "credits_per_unit": "1",
+                "sync_status": "synced", "components": [
+                    {"metric": "output_tokens", "credits_per_unit": "1", "sync_status": "pending"}
+                ]}
+        })).unwrap());
+        assert!(
+            !bson::to_document(&service)
+                .unwrap()
+                .contains_key("allowance_metrics")
+        );
+        let response = crate::handlers::services_helpers::service_to_response_with_viewer(
+            None,
+            service.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.effective_platform_metric,
+            BillingMetric::InputTokens
+        );
+        assert_eq!(
+            serde_json::to_value(&response).unwrap()["allowance_metrics"],
+            serde_json::json!(["input_tokens", "output_tokens"])
+        );
+        service
+            .billing
+            .as_mut()
+            .unwrap()
+            .byok_pricing
+            .as_mut()
+            .unwrap()
+            .sync_status = crate::models::service_billing::PricingSyncStatus::Pending;
+        let response =
+            crate::handlers::services_helpers::service_to_response_with_viewer(None, service, None)
+                .await;
+        assert_eq!(
+            response.allowance_metrics,
+            vec![
+                BillingMetric::InputTokens,
+                BillingMetric::OutputTokens,
+                BillingMetric::Requests
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn create_service_allows_admin() {
         let Some(db) = connect_test_database("h_services_create_admin").await else {
             eprintln!("skipping create_service admin test: no local MongoDB available");
@@ -3735,6 +3821,7 @@ mod tests {
         assert_eq!(response.slug, "admin-service");
         assert_eq!(response.visibility, "public");
         assert_eq!(response.effective_platform_metric, BillingMetric::Requests);
+        assert_eq!(response.allowance_metrics, vec![BillingMetric::Requests]);
         let service_count = db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .count_documents(doc! { "_id": &response.id })
@@ -3815,6 +3902,7 @@ mod tests {
                 lago_metric_code: metric_code.to_string(),
                 model: None,
                 credits_per_unit_micros: 125_000,
+                credits_per_unit_pico: None,
                 synced_at: chrono::Utc::now(),
             })
             .await
@@ -4906,6 +4994,53 @@ mod platform_key_request_tests {
             BillingMetric::Tokens
         );
     }
+    #[test]
+    fn component_updates_preserve_omissions_clear_explicit_values_and_validate_units() {
+        let current: ServiceBilling = serde_json::from_value(serde_json::json!({"byok_pricing": {
+            "metric":"input_tokens","credits_per_unit":"0.000000250001", "components":[
+                {"metric":"output_tokens","credits_per_unit":"0.000001000001"}
+            ]
+        }}))
+        .unwrap();
+        for value in [
+            serde_json::json!({"metric":"input_tokens","credits_per_unit":"0.000000250001"}),
+            serde_json::json!({"metric":"input_tokens","credits_per_unit":"0.000000250001","components":null}),
+            serde_json::json!({"metric":"input_tokens","credits_per_unit":"0.000000250001","components":[]}),
+        ] {
+            let clear = value.get("components").is_some();
+            let mut request: UpdateServiceRequest =
+                serde_json::from_value(serde_json::json!({"billing":{"byok_pricing":value}}))
+                    .unwrap();
+            let billing = request.billing.as_mut().unwrap();
+            billing.preserve_omitted_fields(Some(&current));
+            crate::services::billing::pricing::normalize_lane_pricing(
+                "test",
+                Some(&current),
+                billing,
+            )
+            .unwrap();
+            assert_eq!(
+                billing.byok_pricing.as_ref().unwrap().components.len(),
+                usize::from(!clear)
+            );
+        }
+        for value in [
+            serde_json::json!({"platform_metric":"images"}),
+            serde_json::json!({"resale_metric":"input_tokens"}),
+            serde_json::json!({"byok_pricing":{"metric":"images","credits_per_unit":"1","components":[{"metric":"images","credits_per_unit":"2"}]}}),
+        ] {
+            let mut billing: ServiceBilling = serde_json::from_value(value).unwrap();
+            assert!(matches!(
+                crate::services::billing::pricing::normalize_lane_pricing(
+                    "test",
+                    None,
+                    &mut billing
+                ),
+                Err(AppError::ValidationError(_))
+            ));
+        }
+    }
+
     #[test]
     fn lane_only_update_preserves_legacy_fallback_and_resale() {
         let current = ServiceBilling {
