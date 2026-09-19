@@ -29,10 +29,9 @@ pub struct ProfileConfigResponse {
 pub struct UserCapabilitiesResponse {
     pub billing_available: bool,
     /// Feature-flag keys enabled for this user on personal (non-org)
-    /// surfaces, resolved server-side. Grant-union: personal per-user
-    /// override wins; otherwise (global > code default) OR any active org
-    /// membership's grant. Org-scoped pages still use
-    /// `OrgResponse.enabled_features` for that org's own context.
+    /// surfaces, resolved server-side with specificity precedence:
+    /// default -> global -> matching org -> user. Org-scoped pages
+    /// still use `OrgResponse.enabled_features` for that org's own context.
     pub enabled_features: Vec<String>,
 }
 
@@ -134,8 +133,9 @@ pub async fn get_me(
     let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
     let role = platform_role.as_str().to_string();
     let (is_admin, is_operator) = platform_role.legacy_flags();
-    // Personal-surface feature-flag resolution: org-aware grant-union, so an
-    // org-wide enable reaches its members here (sidebar, /assistant guard).
+    // Personal-surface feature-flag resolution: org-aware specificity, so an
+    // org override can override the global baseline for its members
+    // (sidebar, /assistant guard).
     let enabled_features =
         crate::services::feature_flag_service::resolve_personal_features(&state.db, &user_id)
             .await?;
@@ -434,6 +434,146 @@ mod tests {
             .expect("get profile");
 
         assert!(!response.0.capabilities.billing_available);
+    }
+
+    #[tokio::test]
+    async fn get_me_billing_follows_org_and_user_precedence() {
+        use crate::handlers::billing::ensure_billing_rollout;
+        use crate::models::org_membership::{
+            COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole,
+        };
+        use crate::services::feature_flag_service::{self as flags, BILLING_FLAG_KEY, FlagTarget};
+        use crate::test_utils::{test_app_config, test_app_state_with_config, test_membership};
+
+        let db = connect_test_database("users_me_billing_precedence")
+            .await
+            .unwrap();
+        role_service::seed_system_roles(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&user_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        let membership = test_membership(&org_id, &user_id, OrgRole::Member, None);
+        db.collection::<OrgMembership>(MEMBERSHIPS)
+            .insert_one(&membership)
+            .await
+            .unwrap();
+        let lago = wiremock::MockServer::start().await;
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        config.lago_api_url = Some(lago.uri());
+        config.lago_api_key = Some("test-key".to_string());
+        let state = test_app_state_with_config(db.clone(), config);
+        flags::set_platform_override(&db, BILLING_FLAG_KEY, &FlagTarget::Global, true, &user_id)
+            .await
+            .unwrap();
+
+        for (case, org_value, user_value, active_member, expected) in [
+            (
+                "org disable beats global enable",
+                Some(false),
+                None,
+                true,
+                false,
+            ),
+            (
+                "user enable beats org disable",
+                Some(false),
+                Some(true),
+                true,
+                true,
+            ),
+            (
+                "cleared user inherits org disable",
+                Some(false),
+                None,
+                true,
+                false,
+            ),
+            ("cleared org inherits global enable", None, None, true, true),
+            (
+                "user disable beats org enable",
+                Some(true),
+                Some(false),
+                true,
+                false,
+            ),
+            (
+                "revoked membership ignores org disable",
+                Some(false),
+                None,
+                false,
+                true,
+            ),
+        ] {
+            if let Some(value) = org_value {
+                flags::set_platform_org_override(&db, &org_id, BILLING_FLAG_KEY, value, &user_id)
+                    .await
+                    .unwrap();
+            } else {
+                flags::clear_platform_org_override(&db, &org_id, BILLING_FLAG_KEY)
+                    .await
+                    .unwrap();
+            }
+            let user_target = FlagTarget::User(user_id.clone());
+            if let Some(value) = user_value {
+                flags::set_platform_override(&db, BILLING_FLAG_KEY, &user_target, value, &user_id)
+                    .await
+                    .unwrap();
+            } else {
+                flags::clear_platform_override(&db, BILLING_FLAG_KEY, &user_target)
+                    .await
+                    .unwrap();
+            }
+            let revoked_at = if active_member {
+                bson::Bson::Null
+            } else {
+                bson::Bson::DateTime(bson::DateTime::now())
+            };
+            db.collection::<OrgMembership>(MEMBERSHIPS)
+                .update_one(
+                    doc! { "_id": &membership.id },
+                    doc! { "$set": { "revoked_at": revoked_at } },
+                )
+                .await
+                .unwrap();
+
+            let response = get_me(State(state.clone()), test_auth_user(&user_id))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(response.capabilities.billing_available, expected, "{case}");
+            assert_eq!(
+                response
+                    .capabilities
+                    .enabled_features
+                    .iter()
+                    .any(|key| key == BILLING_FLAG_KEY),
+                expected,
+                "{case}"
+            );
+            let gate = ensure_billing_rollout(&state, &user_id, &user_id).await;
+            if expected {
+                gate.expect(case);
+            } else {
+                assert!(matches!(gate, Err(AppError::Forbidden(_))), "{case}");
+            }
+            if active_member {
+                assert_eq!(
+                    flags::billing_rollout_enabled(&db, &org_id, &user_id)
+                        .await
+                        .unwrap(),
+                    expected,
+                    "{case}"
+                );
+            }
+        }
+        db.drop().await.unwrap();
     }
 
     // --- Serialization tests: UserProfileResponse ---
