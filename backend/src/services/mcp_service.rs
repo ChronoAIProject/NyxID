@@ -4153,6 +4153,7 @@ pub async fn execute_tool_resolved(
             has_server_credential,
         )
         .await?;
+    let billing_ctx = billing_ctx.with_request_body(body.as_deref());
     let metered = billing.open(&billing_ctx).await?;
     let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
 
@@ -4246,7 +4247,13 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            mcp_platform_usage(&resp.body, request_len, &target.service),
+                            mcp_platform_usage_for_path(
+                                &resp.body,
+                                request_len,
+                                &target.service,
+                                &path,
+                                resp.status,
+                            ),
                             None,
                             None,
                         )
@@ -4264,7 +4271,13 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            mcp_platform_usage(&body_buf, request_len, &target.service),
+                            mcp_platform_usage_for_path(
+                                &body_buf,
+                                request_len,
+                                &target.service,
+                                &path,
+                                status,
+                            ),
                             None,
                             None,
                         )
@@ -4366,7 +4379,13 @@ pub async fn execute_tool_resolved(
     billing
         .settle(
             &metered,
-            mcp_platform_usage(body_text.as_bytes(), request_len, &target.service),
+            mcp_platform_usage_for_path(
+                body_text.as_bytes(),
+                request_len,
+                &target.service,
+                &path,
+                status,
+            ),
             None,
             None,
         )
@@ -4375,34 +4394,27 @@ pub async fn execute_tool_resolved(
     Ok(McpToolExecutionOutcome::Response((status, body_text)))
 }
 
+#[cfg(test)]
 fn mcp_platform_usage(body: &[u8], request_len: i64, service: &DownstreamService) -> PlatformUsage {
+    mcp_platform_usage_for_path(body, request_len, service, "", 200)
+}
+
+fn mcp_platform_usage_for_path(
+    body: &[u8],
+    request_len: i64,
+    service: &DownstreamService,
+    path: &str,
+    status: u16,
+) -> PlatformUsage {
     use crate::services::llm_usage_service;
-    let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
-    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
-        if let Some(usage) = llm_usage_service::extract_reported_usage(&value) {
-            accumulator.observe_snapshot(usage);
-        }
-    } else {
-        let mut buffer = String::from_utf8_lossy(body).into_owned();
-        while let Some(event) = super::sse_parser::parse_next_event(&mut buffer) {
-            if let Some((usage, mode)) = llm_usage_service::extract_reported_usage_from_sse_event(
-                event.event_type.as_deref(),
-                &event.data,
-            ) {
-                accumulator.observe(usage, mode);
-            }
-        }
-    }
-    let usage = accumulator.finalize();
-    let bytes = request_len.saturating_add(body.len() as i64);
-    if usage.is_none() && !crate::services::billing::metric_resolution::captures_tokens(service) {
-        return PlatformUsage::single_request(bytes);
-    }
-    PlatformUsage::llm_completion(
-        bytes,
-        llm_usage_service::token_quantity_or_estimate(usage.as_ref(), bytes),
+    // Reuse the already-read response and existing MCP transport limits. A
+    // smaller proxy-specific cap would change legacy MCP token accounting.
+    let usage = llm_usage_service::usage_from_body(body, path, (200..300).contains(&status));
+    llm_usage_service::platform_usage(
+        usage.as_ref(),
+        request_len.saturating_add(body.len() as i64),
+        crate::services::billing::metric_resolution::captures_tokens(service),
     )
-    .with_token_breakdown(usage.as_ref().map(|usage| usage.token_breakdown()))
 }
 
 fn direct_transport_failure_is_pre_dispatch(error: &reqwest::Error) -> bool {
@@ -4979,6 +4991,33 @@ mod tests {
             .unwrap()
             .metric = BillingMetric::Requests;
         assert_eq!(super::mcp_platform_usage(body, 12, &service).tokens, 0);
+        service
+            .billing
+            .as_mut()
+            .unwrap()
+            .platform_key_pricing
+            .as_mut()
+            .unwrap()
+            .components = vec![
+            serde_json::from_value(
+                serde_json::json!({"metric":"input_tokens", "credits_per_unit":"0.000000250001"}),
+            )
+            .unwrap(),
+        ];
+        assert!(super::mcp_platform_usage(body, 12, &service).tokens > 0);
+        let images = super::mcp_platform_usage_for_path(
+            br#"{"data":[{"url":"image"}],"usage":{"input_tokens":120,"output_tokens":20,"input_tokens_details":{"cached_tokens":100}}}"#,
+            12, &service, "/v1/images/generations", 200,
+        );
+        assert_eq!(
+            (
+                images.input_tokens,
+                images.output_tokens,
+                images.cache_read_tokens,
+                images.images
+            ),
+            (20, 20, 100, 1)
+        );
     }
 
     use super::*;

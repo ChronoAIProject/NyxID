@@ -19,6 +19,10 @@ impl CatalogServiceArgs {
             || self.byok_metric.is_some()
             || self.byok_price.is_some()
             || self.byok_free
+            || !self.byok_component.is_empty()
+            || self.byok_clear_components
+            || !self.platform_key_component.is_empty()
+            || self.platform_key_clear_components
             || self.platform_key_metric.is_some()
             || self.platform_key_price.is_some()
             || self.platform_key_free
@@ -97,24 +101,32 @@ impl CatalogServiceArgs {
             billing = json!({});
         }
         let mut changed = false;
-        for (field, metric, price, free) in [
+        for (field, metric, price, free, components, clear_components) in [
             (
                 "byok_pricing",
                 &self.byok_metric,
                 &self.byok_price,
                 self.byok_free,
+                &self.byok_component,
+                self.byok_clear_components,
             ),
             (
                 "platform_key_pricing",
                 &self.platform_key_metric,
                 &self.platform_key_price,
                 self.platform_key_free,
+                &self.platform_key_component,
+                self.platform_key_clear_components,
             ),
         ] {
             if free {
                 billing[field] = Value::Null;
                 changed = true;
-            } else if metric.is_some() || price.is_some() {
+            } else if metric.is_some()
+                || price.is_some()
+                || !components.is_empty()
+                || clear_components
+            {
                 let mut lane = billing[field].clone();
                 if !lane.is_object() {
                     lane = json!({"metric":"requests"});
@@ -127,6 +139,39 @@ impl CatalogServiceArgs {
                 }
                 if !lane["credits_per_unit"].is_string() {
                     bail!("A lane price is required when enabling charging");
+                }
+                if clear_components {
+                    lane["components"] = json!([]);
+                }
+                if !components.is_empty() {
+                    let mut values = lane["components"].as_array().cloned().unwrap_or_default();
+                    let mut seen = std::collections::HashSet::new();
+                    for component in components {
+                        let (unit, amount) = component
+                            .split_once('=')
+                            .ok_or_else(|| anyhow::anyhow!("Use <metric>=<price>"))?;
+                        if !seen.insert(unit) || lane["metric"] == unit {
+                            bail!("Billing metrics must be unique within each lane");
+                        }
+                        let price = json!({"metric":unit, "credits_per_unit":amount});
+                        if let Some(existing) = values.iter_mut().find(|v| v["metric"] == unit) {
+                            *existing = price;
+                        } else {
+                            values.push(price);
+                        }
+                    }
+                    lane["components"] = json!(values);
+                }
+                // Only editable price fields are sent; all sync state is server-owned.
+                for key in ["lago_metric_code", "sync_status", "sync_error"] {
+                    lane.as_object_mut().unwrap().remove(key);
+                }
+                if let Some(components) = lane["components"].as_array_mut() {
+                    for component in components {
+                        if let Some(object) = component.as_object_mut() {
+                            object.retain(|key, _| key == "metric" || key == "credits_per_unit");
+                        }
+                    }
                 }
                 billing[field] = lane;
                 changed = true;
@@ -229,17 +274,21 @@ pub(crate) fn lane_price_label(value: Option<&Value>) -> String {
     let Some(amount) = value["credits_per_unit"].as_str() else {
         return "free".into();
     };
-    let unit = match value["metric"].as_str() {
-        Some("tokens") => "token",
-        Some("requests") => "request",
-        Some("bytes") => "byte",
-        _ => "unit",
-    };
+    let unit =
+        crate::commands::billing_units::label(value["metric"].as_str().unwrap_or("unit"), true);
     let status = match value["sync_status"].as_str() {
         Some("synced") | None => "",
         _ => " (price pending; current billing applies)",
     };
-    format!("{amount} credits / {unit}{status}")
+    let mut prices = vec![format!("{amount} credits / {unit}{status}")];
+    if let Some(components) = value["components"].as_array() {
+        prices.extend(
+            components
+                .iter()
+                .map(|component| lane_price_label(Some(component))),
+        );
+    }
+    prices.join(" + ")
 }
 
 pub(crate) fn platform_config_label(value: &Value) -> String {
@@ -378,6 +427,87 @@ mod tests {
             matches!(cli.command, Commands::Service { command: ServiceCommands::Update { catalog, .. } } if catalog.is_requested() && catalog.byok_free)
         );
     }
+    #[tokio::test]
+    async fn component_flags_update_preserve_and_clear_prices() {
+        let parse = |flags: &[&str]| {
+            let mut argv = vec!["nyxid", "service", "update", "id"];
+            argv.extend_from_slice(flags);
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Commands::Service {
+                command: ServiceCommands::Update { catalog, .. },
+            } = cli.command
+            else {
+                panic!("update expected")
+            };
+            catalog
+        };
+        let args = parse(&[
+            "--byok-component",
+            "output_tokens=0.000000250001",
+            "--byok-component",
+            "images=2",
+        ]);
+        assert!(args.is_requested());
+        let mut api = ApiClient::new("http://127.0.0.1:1", "test".into()).unwrap();
+        let current = json!({"billing": {"resale_billable": true, "byok_pricing": {
+            "metric": "input_tokens", "credits_per_unit": "0.000000000001", "sync_status": "synced", "lago_metric_code": "primary",
+            "components": [{"metric": "cache_read_tokens", "credits_per_unit": "0.000000000002", "sync_status": "synced", "lago_metric_code": "cache"}]
+        }}});
+        let mut body = json!({});
+        args.apply_update(&mut api, &current, &mut body)
+            .await
+            .unwrap();
+        let lane = &body["billing"]["byok_pricing"];
+        assert_eq!(lane["components"].as_array().unwrap().len(), 3);
+        assert_eq!(lane["components"][1]["credits_per_unit"], "0.000000250001");
+        assert_eq!(
+            lane["components"][0],
+            json!({"metric": "cache_read_tokens", "credits_per_unit": "0.000000000002"})
+        );
+        assert!(lane.get("sync_status").is_none());
+        assert!(lane_price_label(Some(lane)).contains("0.000000250001 credits / output token"));
+        assert_eq!(body["billing"]["resale_billable"], true);
+        let mut cleared = json!({});
+        parse(&["--byok-clear-components"])
+            .apply_update(&mut api, &body, &mut cleared)
+            .await
+            .unwrap();
+        assert_eq!(cleared["billing"]["byok_pricing"]["components"], json!([]));
+        assert_eq!(
+            cleared["billing"]["byok_pricing"]["credits_per_unit"],
+            "0.000000000001"
+        );
+        let duplicate = parse(&[
+            "--byok-component",
+            "images=1",
+            "--byok-component",
+            "images=2",
+        ]);
+        assert!(
+            duplicate
+                .apply_update(&mut api, &current, &mut json!({}))
+                .await
+                .is_err()
+        );
+        for value in [
+            "images=0.0000000000001",
+            "unknown=1",
+            "images=1000000.000000000001",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "nyxid",
+                    "service",
+                    "update",
+                    "id",
+                    "--byok-component",
+                    value
+                ])
+                .is_err()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn platform_connection_uses_only_unified_provisioning() {
         let server = MockServer::start().await;

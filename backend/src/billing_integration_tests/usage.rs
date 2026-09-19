@@ -28,6 +28,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         funding: None,
         quantity: Some(quantity),
         pending_resale_quantity: None,
+        pending_platform_usage: None,
         status: UsageStatus::Finalized,
         forwarded: true,
         released: false,
@@ -61,6 +62,7 @@ async fn rate(db: &mongodb::Database, model: Option<&str>, micros: i64) {
             lago_metric_code: "platform_tokens".into(),
             model: model.map(str::to_string),
             credits_per_unit_micros: micros,
+            credits_per_unit_pico: None,
             synced_at: Utc::now(),
         })
         .await
@@ -200,6 +202,7 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
         let mut row = meter(&owner, 2440);
         row.funding = Some(UsageFunding {
             credits_per_unit_micros: 90,
+            credits_per_unit_pico: None,
             ..Default::default()
         });
         db.collection::<UsageMeterRow>(USAGE_METER)

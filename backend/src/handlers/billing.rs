@@ -307,7 +307,12 @@ pub async fn get_usage(
         let rate = if billable && legacy_quantity > 0 {
             find_rate(&state.db, &lago_metric_code, model.as_deref())
                 .await?
-                .map(|rate| rate.credits_per_unit_micros.max(0))
+                .map(|rate| {
+                    crate::services::billing::amounts::rate_pico(
+                        rate.credits_per_unit_pico,
+                        rate.credits_per_unit_micros,
+                    )
+                })
         } else {
             Some(0)
         };
@@ -856,12 +861,9 @@ async fn resolve_api_key_names(
 }
 
 fn parse_metric(value: &str) -> Option<BillingMetric> {
-    match value {
-        "tokens" => Some(BillingMetric::Tokens),
-        "requests" => Some(BillingMetric::Requests),
-        "bytes" => Some(BillingMetric::Bytes),
-        _ => None,
-    }
+    BillingMetric::ALL
+        .into_iter()
+        .find(|metric| metric.as_str() == value)
 }
 
 /// Summed token-class breakdown for one aggregation group; None when every
@@ -894,7 +896,7 @@ struct UsageCosts {
     allowance: Option<i64>,
 }
 
-fn usage_costs(doc: &Document, billable: bool, rate: Option<i64>) -> UsageCosts {
+fn usage_costs(doc: &Document, billable: bool, rate: Option<i128>) -> UsageCosts {
     if !billable {
         return UsageCosts {
             total: Some(0),
@@ -913,11 +915,14 @@ fn usage_costs(doc: &Document, billable: bool, rate: Option<i64>) -> UsageCosts 
             allowance: None,
         };
     }
-    let legacy_cost = rate.map(|rate| rate.saturating_mul(value("legacy_quantity")));
+    let legacy_cost = rate
+        .map(|rate| crate::services::billing::amounts::cost_micros(rate, value("legacy_quantity")));
     let legacy_allowance = if value("legacy_allowance_quantity") == 0 {
         Some(0)
     } else {
-        rate.map(|rate| rate.saturating_mul(value("legacy_allowance_quantity")))
+        rate.map(|rate| {
+            crate::services::billing::amounts::cost_micros(rate, value("legacy_allowance_quantity"))
+        })
     };
     let legacy_grant = value("legacy_grant_micros");
     let legacy_wallet = legacy_cost.zip(legacy_allowance).map(|(total, allowance)| {

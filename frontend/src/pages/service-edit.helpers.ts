@@ -1,4 +1,5 @@
 import type { DownstreamService, UpdateServicePayload } from "@/types/api";
+import type { LanePricingView } from "@/schemas/platform-keys";
 import type { UpdateServiceFormData } from "@/schemas/services";
 import { changedFields, normalizedSet, sameValue } from "@/lib/form-changes";
 import { inferSshAuthMode } from "@/lib/ssh-auth-mode";
@@ -202,9 +203,26 @@ export function serviceFormPayload(
       };
 }
 
-function laneValues(lane: UpdateServiceFormData["byok_pricing"]) {
+function laneValues(lane: LanePricingView | null | undefined) {
   return lane
-    ? { metric: lane.metric, credits_per_unit: lane.credits_per_unit }
+    ? {
+        metric: lane.metric as NonNullable<
+          UpdateServiceFormData["byok_pricing"]
+        >["metric"],
+        credits_per_unit: lane.credits_per_unit,
+        ...(lane.components
+          ? {
+              components: lane.components.map(
+                ({ metric, credits_per_unit }) => ({
+                  metric: metric as NonNullable<
+                    UpdateServiceFormData["byok_pricing"]
+                  >["metric"],
+                  credits_per_unit,
+                }),
+              ),
+            }
+          : {}),
+      }
     : null;
 }
 

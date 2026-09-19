@@ -23,6 +23,13 @@ pub struct LanePricingView {
     pub metric: BillingMetric,
     pub credits_per_unit: String,
     pub sync_status: PricingSyncStatus,
+    pub components: Vec<LaneComponentView>,
+}
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct LaneComponentView {
+    pub metric: BillingMetric,
+    pub credits_per_unit: String,
+    pub sync_status: PricingSyncStatus,
 }
 impl From<&LanePricing> for LanePricingView {
     fn from(price: &LanePricing) -> Self {
@@ -30,6 +37,15 @@ impl From<&LanePricing> for LanePricingView {
             metric: price.metric,
             credits_per_unit: price.credits_per_unit.clone(),
             sync_status: price.sync_status,
+            components: price
+                .components
+                .iter()
+                .map(|component| LaneComponentView {
+                    metric: component.metric,
+                    credits_per_unit: component.credits_per_unit.clone(),
+                    sync_status: component.sync_status,
+                })
+                .collect(),
         }
     }
 }

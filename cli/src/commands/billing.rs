@@ -369,7 +369,7 @@ fn format_usage(usage: &serde_json::Value, output: OutputFormat) -> Result<Strin
             row.model.as_deref().unwrap_or("-").to_string(),
             row.api_key_name.as_deref().unwrap_or("-").to_string(),
             row.layer.clone(),
-            row.metric.clone(),
+            super::billing_units::label(&row.metric, false).to_string(),
             row.quantity.to_string(),
             row.events.to_string(),
             if row.billable {
@@ -408,7 +408,11 @@ fn format_usage_funding(row: &BillingUsageRow) -> String {
     }
     if allowances {
         let units = if row.allowance_quantity > 0 {
-            format!(" ({} {})", row.allowance_quantity, row.metric)
+            format!(
+                " ({} {})",
+                row.allowance_quantity,
+                super::billing_units::label(&row.metric, false)
+            )
         } else {
             String::new()
         };

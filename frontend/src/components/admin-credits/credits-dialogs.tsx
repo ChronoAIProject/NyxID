@@ -229,8 +229,11 @@ export function AllowanceDialog({
   const laneMetrics = [
     ...new Set(
       [
-        selectedService?.billing?.byok_pricing?.metric,
-        selectedService?.billing?.platform_key_pricing?.metric,
+        ...(selectedService?.allowance_metrics ??
+          (selectedService ? [selectedService.effective_platform_metric] : [])),
+        ...(editingAllowance?.service_id === selectedService?.id
+          ? [editingAllowance?.metric]
+          : []),
       ].filter((m) => m !== undefined),
     ),
   ];
@@ -303,7 +306,7 @@ export function AllowanceDialog({
                             <SelectContent>
                               {laneMetrics.map((unit) => (
                                 <SelectItem key={unit} value={unit}>
-                                  {unit}
+                                  {billingMetricLabel(unit)}
                                 </SelectItem>
                               ))}
                             </SelectContent>
