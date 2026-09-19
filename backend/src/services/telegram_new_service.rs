@@ -29,6 +29,114 @@ pub struct TelegramNewService<'a> {
     pub api: TelegramApi<'a>,
 }
 
+/// Splits a setup command from its payload. A command addressed to the
+/// configured manager (`/start@Manager`) is normalized to the bare command;
+/// one addressed to another bot is ignored by the manager.
+fn manager_command<'a>(text: &'a str, manager_username: &str) -> Option<(&'static str, &'a str)> {
+    let text = text.trim_start();
+    let first = text.split_whitespace().next()?;
+    let (command, addressee) = match first.split_once('@') {
+        Some((command, addressee)) => (command, Some(addressee)),
+        None => (first, None),
+    };
+    let command = match command {
+        "/start" => "/start",
+        "/recover" => "/recover",
+        _ => return None,
+    };
+    if addressee.is_some_and(|name| !name.eq_ignore_ascii_case(manager_username)) {
+        return None;
+    }
+    Some((command, text[first.len()..].trim()))
+}
+
+// Setup payloads can contain private challenges and claims; never relay them.
+fn is_manager_update(update: &Value) -> bool {
+    if update.get("managed_bot").is_some() || update.get("callback_query").is_some() {
+        return true;
+    }
+    ["message", "edited_message", "channel_post"]
+        .iter()
+        .any(|kind| {
+            let message = &update[kind];
+            message.get("managed_bot_created").is_some()
+                || message["text"]
+                    .as_str()
+                    .and_then(|text| text.split_whitespace().next())
+                    .and_then(|command| command.split('@').next())
+                    .is_some_and(|command| matches!(command, "/start" | "/recover"))
+        })
+}
+
+fn public_welcome() -> &'static str {
+    "<b>Welcome</b>\n\nSend a message here to chat.\n\nWant your own Telegram bot? Tap <b>Create bot</b> and finish Telegram's name and username form. Then use the private claim code to choose an account in NyxID and connect your bot.\n\nAlready created a bot? Send /recover @YourBotUsername for a new claim code."
+}
+
+/// Removes claim-shaped codes from relayed chat text. Returns the number of
+/// redactions; the message text and entities are rewritten in place.
+fn scrub_relayed_message(message: &mut serde_json::Map<String, Value>) -> usize {
+    let mut redacted = 0;
+    for (field, entities) in [("text", "entities"), ("caption", "caption_entities")] {
+        let Some(scrubbed) = message
+            .get(field)
+            .and_then(Value::as_str)
+            .and_then(super::telegram_new_claims::scrub_claim_codes)
+        else {
+            continue;
+        };
+        message.insert(field.into(), Value::String(scrubbed));
+        // Entity offsets no longer match the rewritten text.
+        message.remove(entities);
+        redacted += 1;
+    }
+    // Telegram text links and inline URL buttons live outside visible text.
+    // Scrub them too before raw_platform_data can reach a callback.
+    for field in [
+        "entities",
+        "caption_entities",
+        "reply_markup",
+        "link_preview_options",
+    ] {
+        if let Some(value) = message.get_mut(field) {
+            redacted += scrub_relayed_links(value);
+        }
+    }
+    redacted
+}
+
+fn scrub_relayed_links(value: &mut Value) -> usize {
+    match value {
+        Value::String(text) => {
+            if let Some(scrubbed) = super::telegram_new_claims::scrub_claim_codes(text) {
+                *text = scrubbed;
+                1
+            } else {
+                0
+            }
+        }
+        Value::Array(values) => values.iter_mut().map(scrub_relayed_links).sum(),
+        Value::Object(values) => values.values_mut().map(scrub_relayed_links).sum(),
+        _ => 0,
+    }
+}
+
+fn strip_embedded_messages(value: &mut Value) {
+    match value {
+        Value::Object(fields) if fields.contains_key("message_id") => {
+            *value = json!({"message_id": fields["message_id"]});
+        }
+        Value::Object(fields) => {
+            fields.remove("external_reply");
+            fields.remove("quote");
+            for field in fields.values_mut() {
+                strip_embedded_messages(field);
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(strip_embedded_messages),
+        _ => {}
+    }
+}
+
 pub fn hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
@@ -503,14 +611,18 @@ impl TelegramNewService<'_> {
         Ok(())
     }
 
-    pub async fn webhook(&self, headers: &axum::http::HeaderMap, body: &[u8]) -> AppResult<()> {
+    pub async fn webhook(
+        &self,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+    ) -> AppResult<Option<(ChannelBot, Value)>> {
         if body.len() > 256 * 1024 {
             return Err(AppError::RequestBodyTooLarge {
                 max_bytes: 256 * 1024,
                 context: "Telegram manager webhook".into(),
             });
         }
-        let (manager_id, _, values) = self.manager().await?;
+        let (manager_id, manager_username, values) = self.manager().await?;
         let provided = headers
             .get("x-telegram-bot-api-secret-token")
             .and_then(|h| h.to_str().ok())
@@ -523,8 +635,43 @@ impl TelegramNewService<'_> {
                 "Invalid manager webhook secret".into(),
             ));
         }
-        let update: Value = serde_json::from_slice(body)
+        let mut update: Value = serde_json::from_slice(body)
             .map_err(|_| AppError::BadRequest("Invalid Telegram update".into()))?;
+        if !is_manager_update(&update) {
+            let bot = match self.manager_channel(manager_id).await {
+                Ok(bot) => bot,
+                Err(_) => {
+                    tracing::warn!(
+                        manager_id,
+                        "Telegram manager channel lookup failed; ordinary update dropped"
+                    );
+                    return Ok(None);
+                }
+            };
+            // Telegram embeds quoted messages in ordinary replies, including private setup codes.
+            for kind in ["message", "edited_message", "channel_post"] {
+                if let Some(message) = update.get_mut(kind).and_then(Value::as_object_mut) {
+                    for value in message.values_mut() {
+                        // Replies, pins and nested service messages can embed
+                        // the manager's private setup messages.
+                        strip_embedded_messages(value);
+                    }
+                    message.remove("external_reply");
+                    message.remove("quote");
+                    // A pasted or forwarded claim code is bearer proof of a creation.
+                    let redacted = scrub_relayed_message(message);
+                    if redacted > 0 {
+                        tracing::info!(
+                            manager_id,
+                            kind,
+                            redacted,
+                            "claim-shaped text removed from relayed Telegram message"
+                        );
+                    }
+                }
+            }
+            return Ok(bot.map(|bot| (bot, update)));
+        }
         let token = values
             .get(MANAGER_TOKEN)
             .ok_or_else(|| conflict("Manager token is unavailable"))?;
@@ -553,24 +700,27 @@ impl TelegramNewService<'_> {
                         .await?;
                 }
             }
-            return Ok(());
+            return Ok(None);
         }
         if let Some(callback) = update.get("callback_query") {
-            return self.consent_callback(manager_id, token, callback).await;
+            return self
+                .consent_callback(manager_id, token, callback)
+                .await
+                .map(|()| None);
         }
         let Some(message) = update.get("message") else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(user_id) = private_sender(message) else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(update_id) = update["update_id"].as_i64().filter(|id| *id >= 0) else {
             return Err(AppError::BadRequest("Invalid Telegram update ID".into()));
         };
-        if message["text"]
+        let command = message["text"]
             .as_str()
-            .is_some_and(|text| text.trim() == "/start")
-        {
+            .and_then(|text| manager_command(text, &manager_username));
+        if let Some(("/start", "")) = command {
             let pending = self
                 .db
                 .collection::<TelegramBotRequest>(REQUESTS)
@@ -584,15 +734,13 @@ impl TelegramNewService<'_> {
                 _ => None,
             };
             return self
-                .send_creation_prompt(token, user_id, pending.as_ref())
-                .await;
+                .send_creation_prompt(manager_id, token, user_id, pending.as_ref())
+                .await
+                .map(|()| None);
         }
-        if let Some(challenge) = message["text"]
-            .as_str()
-            .and_then(|t| t.strip_prefix("/start "))
-        {
+        if let Some(("/start", challenge)) = command {
             if challenge.len() != 48 || !challenge.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Ok(());
+                return Ok(None);
             }
             let request = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
                 doc! {"manager_bot_id": manager_id, "challenge_hash": hash(challenge), "active": true, "expires_at": {"$gt": bson::DateTime::now()}, "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent"]}, "$or": [{"telegram_user_id": null}, {"telegram_user_id": user_id}]},
@@ -606,13 +754,13 @@ impl TelegramNewService<'_> {
                 Ok(request) => request,
                 Err(error) if is_duplicate_key_error(&error) => {
                     self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": "Your Telegram account already has an active creation request. Finish or cancel that request in NyxID, then reopen this setup link."})).await?;
-                    return Ok(());
+                    return Ok(None);
                 }
                 Err(error) => return Err(error.into()),
             };
             if let Some(request) = request {
                 if !self.owner_still_authorized(&request).await? {
-                    return Ok(());
+                    return Ok(None);
                 }
                 if request.status == Status::WaitingConsent {
                     self.send_consent(token, &request).await?;
@@ -624,11 +772,11 @@ impl TelegramNewService<'_> {
                             doc! {"$set": {"status": "waiting_bot"}},
                         )
                         .await?;
-                    self.send_creation_prompt(token, user_id, Some(&request))
+                    self.send_creation_prompt(manager_id, token, user_id, Some(&request))
                         .await?;
                 }
             }
-            return Ok(());
+            return Ok(None);
         }
         let creation = message
             .get("managed_bot_created")
@@ -651,32 +799,30 @@ impl TelegramNewService<'_> {
                     && *date <= Utc::now() + Duration::seconds(30)
             }) else {
                 self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": "This creation is too old or has no verifiable creation time. Create a new bot from the current setup request, or use the Telegram bot token option with its current token."})).await?;
-                return Ok(());
+                return Ok(None);
             };
             let events = self.db.collection::<ManagedBotEvents>(MANAGED_BOTS);
             events.update_one(doc! {"manager_bot_id": manager_id, "telegram_bot_id": bot_id}, doc! {"$setOnInsert": {"_id": uuid::Uuid::new_v4().to_string(), "manager_bot_id": manager_id, "telegram_bot_id": bot_id, "telegram_user_id": user_id, "revision": 0_i64, "update_ids": []}}).upsert(true).await?;
             // Provenance is immutable, including across reconfiguration and redelivery.
             events.update_one(doc! {"manager_bot_id": manager_id, "telegram_bot_id": bot_id, "created_by": null, "retired": {"$ne": true}, "revision": {"$lte": 1_i64}}, doc! {"$set": {"created_by": user_id, "bot_username": &username, "created_at": bson::DateTime::from_chrono(created_at), "observation_id": observation_id}}).await?;
             (bot_id, username)
-        } else if let Some(name) = message["text"]
-            .as_str()
-            .and_then(|text| text.strip_prefix("/recover "))
-            .map(|name| name.trim().trim_start_matches('@'))
+        } else if let Some(("/recover", name)) =
+            command.map(|(command, payload)| (command, payload.trim_start_matches('@')))
         {
             let Some(candidate) = self.db.collection::<ManagedBotEvents>(MANAGED_BOTS).find_one(doc! {"manager_bot_id": manager_id, "created_by": user_id, "bot_username": name, "observation_id": observation_id, "created_at": {"$gt": bson::DateTime::from_chrono(Utc::now() - Duration::minutes(CREATION_RECOVERY_MINUTES))}}).await? else {
                 self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": "No recent, unconnected bot creation was recorded for your Telegram account. Recovery is available for 60 minutes after creation. Create a new bot or use the Telegram bot token option with its current token."})).await?;
-                return Ok(());
+                return Ok(None);
             };
             if candidate.retired {
                 self.send_connection_progress(token, user_id).await?;
-                return Ok(());
+                return Ok(None);
             }
             (
                 candidate.telegram_bot_id,
                 candidate.bot_username.unwrap_or_default(),
             )
         } else {
-            return Ok(());
+            return Ok(None);
         };
         let pending = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(
             doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id, "active": true, "status": "waiting_bot", "expires_at": {"$gt": bson::DateTime::now()}},
@@ -686,7 +832,7 @@ impl TelegramNewService<'_> {
             // Recovery and an earlier Telegram update cannot consume that authorization.
             if !is_creation {
                 self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": "This setup connects a newly created bot. Tap Create bot to continue, or connect your existing bot from NyxID using the Telegram bot token option."})).await?;
-                return Ok(());
+                return Ok(None);
             }
             if pending
                 .start_update_id
@@ -696,7 +842,7 @@ impl TelegramNewService<'_> {
                     .is_none_or(|date| date < pending.created_at.timestamp())
                 || !self.owner_still_authorized(&pending).await?
             {
-                return Ok(());
+                return Ok(None);
             }
             let result = self.db.collection::<TelegramBotRequest>(REQUESTS).update_one(
                 doc! {"_id": &pending.id, "revision": pending.revision, "status": "waiting_bot", "active": true},
@@ -707,13 +853,13 @@ impl TelegramNewService<'_> {
                     "The creation request changed while recording the bot",
                 ));
             }
-            return Ok(());
+            return Ok(None);
         }
         if self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(
             doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id, "telegram_bot_id": bot_id, "auto_connect": true, "status": {"$in": ["ready", "provisioning", "connected"]}},
         ).await?.is_some() {
             if !is_creation { self.send_connection_progress(token, user_id).await?; }
-            return Ok(());
+            return Ok(None);
         }
         let request = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one_and_update(
             doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id, "auto_connect": {"$ne": true}, "active": true, "status": "waiting_bot", "expires_at": {"$gt": bson::DateTime::now()}},
@@ -725,17 +871,31 @@ impl TelegramNewService<'_> {
         } else {
             self.send_claim(manager_id, bot_id, user_id, token, !is_creation).await?;
         }
-        Ok(())
+        Ok(None)
+    }
+
+    /// The manager's own active channel connection, when it also serves ordinary chat.
+    pub(super) async fn manager_channel(&self, manager_id: i64) -> AppResult<Option<ChannelBot>> {
+        Ok(self
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {
+                "platform": "telegram", "platform_bot_id": manager_id.to_string(),
+                "credential_source": "telegram_manager", "is_active": true, "status": "active",
+            })
+            .await?)
     }
 
     async fn send_creation_prompt(
         &self,
+        manager_id: i64,
         token: &str,
         user: i64,
         request: Option<&TelegramBotRequest>,
     ) -> AppResult<()> {
         let text = match request {
             Some(request) => creation_message(request),
+            None if self.manager_channel(manager_id).await?.is_some() => public_welcome().into(),
             None => "<b>Create your Telegram bot</b>\n\nTap <b>Create bot</b> and finish Telegram's name and username form. Then use the private claim code to choose an account in NyxID and connect your bot.\n\nAlready created a bot? Send /recover @YourBotUsername for a new claim code.".into(),
         };
         self.api.call(token, "sendMessage", json!({

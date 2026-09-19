@@ -28,7 +28,7 @@ The normal customer path does not use BotFather or require copying a token. The 
 
 ## Administrator setup
 
-Use a dedicated manager per environment. Do not reuse the NyxID notification/approval bot or a bot already registered as a channel.
+Use a dedicated manager per environment. Do not reuse the NyxID notification/approval bot. Configure the manager before connecting it as a channel; an existing ordinary channel bot cannot be promoted to manager in place.
 
 1. In BotFather, create or select the platform's manager bot and enable management of other bots. Its Bot API `getMe` response must contain `can_manage_bots: true`.
 2. Confirm that `BASE_URL` is the externally reachable HTTPS backend origin and `FRONTEND_URL` is the browser application origin. Telegram must be able to POST to the backend. The customer return link must reach the frontend.
@@ -41,7 +41,7 @@ Use a dedicated manager per environment. Do not reuse the NyxID notification/app
 
 5. Run the staging checks below before enabling this configuration for customers.
 
-The manager webhook subscribes to `message`, `callback_query`, and `managed_bot`, with one concurrent delivery connection. Configuration does not discard pending Telegram updates. A manager pointing at a different webhook is rejected.
+The manager webhook subscribes to `message`, `edited_message`, `channel_post`, `callback_query`, and `managed_bot`, with one concurrent delivery connection. Configuration does not discard pending Telegram updates. A manager pointing at a different webhook is rejected.
 
 Rotating the manager token for the same bot preserves the webhook verification secret. This version rejects explicit webhook-secret regeneration. To change manager identity, delete the saved managed channel connections and finish or cancel active creation requests, then clear the configuration and save the new manager. Clearing permanently deletes NyxID's saved manager token, identity, webhook secret, and observation period. It also attempts to remove the manager's own webhook, preserving any webhook belonging to another application. A Telegram API failure is logged and does not prevent local deletion, including when the manager was already deleted in BotFather or its token was revoked. It does not delete child bots from Telegram.
 
@@ -53,6 +53,26 @@ Deleting and recreating a manager in BotFather gives it a new numeric bot ID and
 4. Start a fresh creation request and use its new **Open Telegram** link. Previous setup requests and links do not transfer to the replacement manager.
 
 This clears NyxID's saved configuration. If the public Telegram profile shows the replacement but a Telegram client still opens "Deleted Account", check the username in another Telegram client; clearing NyxID cannot reset Telegram's own username resolution or chat history.
+
+## Using the manager as a channel bot
+
+After configuring the manager, connect the same bot through **Channel Bots → Add Channel Bot → Telegram bot token**, supplying its current token and choosing the channel's personal or organization owner. The ordinary CLI token-registration path works too. Possession of the valid bot token and write access to the selected NyxID owner are required; the remote bot can have only one active channel connection. A channel bot that has not yet been configured as the manager must first be disconnected, configured in Platform Credentials, and connected again.
+
+Verification of a deleted channel is rejected, and repeating its deletion cannot change the manager webhook. If another operation on the same Telegram bot is still running, NyxID returns a conflict; retry after that operation finishes. Before changing an ordinary channel's webhook, NyxID verifies that its token belongs to the recorded Telegram bot. A mismatched stored token cannot change another bot's webhook.
+
+NyxID keeps the manager webhook and its verification secret. Ordinary private, group, and channel messages flow through the channel's conversation routes. For public help, assign a dedicated Agent Key with a callback URL as the **default agent**; unmatched senders then reach that agent. An exact conversation route can choose a different agent for a particular chat. For personal-only conversations, use your private Telegram chat ID (your numeric Telegram user ID) and leave the default agent off. Telegram's group privacy mode still controls which group messages Telegram delivers; use appropriate bot/admin permissions or disable privacy mode in BotFather if the bot should receive ordinary group messages.
+
+**Every manager-channel callback carries only delivery authentication and a message-bound reply token.** NyxID never adds `X-NyxID-User-Token` for this credential source, including explicit conversation and sender routes. The receiving agent can reply through `POST /api/v1/channel-relay/reply`, but an inbound Telegram message does not delegate the channel owner's NyxID service permissions. Other channel bots retain their existing scoped owner-token behavior. Scope any credentials held directly by the public agent separately. Telegram senders are not automatically mapped to NyxID accounts; account-specific operations require a separate authenticated workflow.
+
+A plain `/start` welcomes chat users and offers **Create bot** when the manager channel is active. Payload-bearing setup links and `/recover` keep their existing workflow, including commands addressed to the configured manager username. Creation events, manager commands, and callback queries remain reserved and are never forwarded to the agent. Generic agent inline-button callbacks are not supported. Ordinary replies retain the referenced message ID but omit quoted message content. Recognizable claim codes are removed from ordinary text, captions, and supported link metadata before relay; claim messages use Telegram's protected-content option. This reduces accidental disclosure, but is not a general secret detector: users must still enter claim codes only in NyxID. Neither raw updates nor message bodies are persisted by NyxID.
+
+After authentication and classification, ordinary messages are acknowledged without waiting for the agent callback. Ordinary lookup, parsing, and callback failures are logged with metadata and dropped. Authentication and management-event failures still return errors so Telegram can retry them. Each backend process allows **32 concurrent background deliveries**, each bounded by the existing callback timeout plus ten seconds for other work. At capacity, NyxID acknowledges and drops the ordinary message with a metadata-only warning. This limit is deliberately retained in this version. Deliveries can complete out of order; a process shutdown or callback failure can lose a reply, with no durable queue or automatic replay. Telegram may redeliver if it does not receive the acknowledgement, so agents must also tolerate duplicates. Telegram's shared pending-update and delivery-error checks still apply to creation: heavy ingress or a shared outage can delay or prevent automatic connection. With a remote KMS, per-request credential decryption also adds network work; no production throughput guarantee is implied.
+
+The channel reports `credential_source: "telegram_manager"`. Replies and media operations resolve the current manager token from Platform Credentials, so token rotation there takes effect without editing the channel. Rotation does not revoke this channel binding. The channel does not retain a second token or expose the shared webhook secret. **Verify Bot** checks the live Telegram webhook URL and all five required update subscriptions without changing them; a mismatch reports an error directing the operator to Platform Credentials. Existing managers saved before this support need an administrator to save Platform Credentials again to subscribe to edited messages and channel posts. Saving credentials temporarily marks the manager unready; a failed save keeps both roles unavailable, and channel responses show that configuration problem. Save successfully and use Verify Bot if the channel needs reactivation.
+
+Deleting the channel disables its routes and leaves bot creation available. Clearing or replacing the manager requires deleting this channel connection first, in addition to completing the existing managed-child/request cleanup. Upgrade **all backend replicas before registering the manager channel**: older replicas drop ordinary manager messages and do not understand its shared credential source.
+
+The implementation acceptance plan and verification record are in [TELEGRAM_MANAGER_CHANNEL_PLAN.md](TELEGRAM_MANAGER_CHANNEL_PLAN.md).
 
 ## Returning and recovering
 
@@ -135,6 +155,33 @@ Local verification uses real MongoDB transactions and a simulated Telegram API. 
 No real manager token was configured, no live Telegram bot was created, and no production deployment was performed as part of local implementation.
 
 ## Local verification record
+
+Manager public-channel validation on 2026-09-20:
+
+- All 59 Telegram-focused backend tests passed with an isolated MongoDB replica
+  set and simulated Telegram/agent endpoints. A real local HTTP ingress/reply
+  test interleaves private/group chat, exact/default routing, asynchronous
+  replies, and bot creation. Regressions cover no owner delegation, reply-token
+  isolation, reserved commands, claim redaction, nested setup content, live
+  webhook verification, token rotation, failed readiness, and deletion.
+- All 479 broader channel backend tests passed; none were ignored. This run
+  overlaps the focused suite and checks existing adapters, routing, and replies.
+- All 55 focused frontend tests and all three CLI channel-show tests passed.
+  Desktop and mobile browser flows passed at 1440×1000 and 390×844, including
+  registration, exact/public routing, wildcard rejection, Verify failure across
+  reload, recovery, and deletion. TypeScript, the production frontend build,
+  and changed-file ESLint passed. Full frontend lint retained 27 existing
+  warnings outside the changed files and had no errors.
+- Workspace Clippy passed for all targets with warnings denied; Rust formatting
+  and diff whitespace checks passed.
+- Fable was consulted on the design. Independent Astra review at xhigh closed
+  all four findings after fixes and re-review: nested setup content, encoded
+  claim links, stale health after token failure, and implicit wildcard routing.
+  The final review reported no unresolved findings against the agreed spec.
+
+These checks use simulated Telegram and browser API fixtures, not live Telegram
+credentials. See [the implementation and acceptance record](TELEGRAM_MANAGER_CHANNEL_PLAN.md)
+for the validation boundary and final completion status.
 
 Inline-modal validation on 2026-09-16:
 

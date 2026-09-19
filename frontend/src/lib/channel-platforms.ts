@@ -1,5 +1,7 @@
 import type { ChannelBotDetail, ChannelPlatform, ChannelPlatformDescriptor, ChannelRegistrationField, CreateChannelBotRequest } from "@/types/channels";
 
+export const TELEGRAM_MANAGER_DELETION_NOTE = "Bot creation and the manager webhook will remain available. The manager token stays in Admin → Platform Credentials → Telegram — bot creation.";
+
 export type ChannelCredentialField = Exclude<Extract<keyof CreateChannelBotRequest, string>, "platform" | "label" | "target_org_id">;
 export type ManagedFlow = "meta_embedded_signup" | "oauth_connection";
 export interface ChannelFieldDescriptor extends Omit<ChannelRegistrationField, "name"> {

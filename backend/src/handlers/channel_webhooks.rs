@@ -337,6 +337,11 @@ async fn handle_webhook_inner_with_deps(
         return Ok(None);
     }
 
+    // The manager ingress authenticates its shared secret and consumes setup events.
+    if bot.credential_source == "telegram_manager" {
+        return Ok(None);
+    }
+
     // Reject if bot is inactive
     if !bot.is_active {
         tracing::debug!(bot_id = %bot_id, status = %bot.status, "webhook for inactive bot");

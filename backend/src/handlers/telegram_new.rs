@@ -5,6 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 use crate::models::telegram_bot_request::{TelegramBotRequest, TelegramRequestStatus as Status};
@@ -16,6 +17,9 @@ use crate::{
     errors::{AppError, AppResult},
     mw::auth::{AuthMethod, AuthUser},
 };
+
+// Chat delivery must not occupy Telegram's single manager webhook connection.
+static MANAGER_CHANNEL_DELIVERIES: Semaphore = Semaphore::const_new(32);
 
 pub(crate) fn service(state: &AppState) -> TelegramNewService<'_> {
     TelegramNewService {
@@ -326,8 +330,75 @@ pub async fn webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<StatusCode> {
-    service(&state).webhook(&headers, &body).await?;
+    webhook_with_service(&state, &service(&state), &headers, &body).await
+}
+
+pub(crate) async fn webhook_with_service(
+    state: &AppState,
+    service: &TelegramNewService<'_>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> AppResult<StatusCode> {
+    if let Some((bot, update)) = service.webhook(headers, body).await? {
+        relay_manager_channel(state.clone(), bot, update).await;
+    }
     Ok(StatusCode::OK)
+}
+
+pub(crate) async fn relay_manager_channel(
+    state: AppState,
+    bot: crate::models::channel_bot::ChannelBot,
+    update: serde_json::Value,
+) {
+    let prepared: AppResult<_> = async {
+        let adapter =
+            super::channel_bots::resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+        let channel_body = serde_json::to_vec(&update).map_err(|_| {
+            AppError::Internal("Unable to serialize Telegram channel update".into())
+        })?;
+        let messages = adapter.parse_inbound(&channel_body).await?;
+        Ok((adapter, messages))
+    }
+    .await;
+    let (adapter, messages) = match prepared {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            tracing::warn!(bot_id = %bot.id, "Telegram manager channel parsing failed; ordinary update dropped");
+            return;
+        }
+    };
+    if messages.is_empty() {
+        return;
+    }
+    let Ok(permit) = MANAGER_CHANNEL_DELIVERIES.try_acquire() else {
+        tracing::warn!(bot_id = %bot.id, "Telegram manager channel delivery capacity reached; message dropped");
+        return;
+    };
+    let deadline = std::time::Duration::from_secs(
+        u64::from(state.config.channel_relay_callback_timeout_secs) + 10,
+    );
+    tokio::spawn(async move {
+        let _permit = permit;
+        match tokio::time::timeout(
+            deadline,
+            crate::services::channel_inbound_service::process_inbound_messages(
+                (&state).into(),
+                &bot,
+                adapter.as_ref(),
+                &messages,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {
+                tracing::warn!(bot_id = %bot.id, "Telegram manager channel relay failed");
+            }
+            Err(_) => {
+                tracing::warn!(bot_id = %bot.id, "Telegram manager channel delivery deadline exceeded");
+            }
+        }
+    });
 }
 
 #[cfg(test)]

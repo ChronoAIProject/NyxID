@@ -118,6 +118,28 @@ pub async fn resolve_bot_token(
     adapter: &dyn PlatformAdapter,
     bot: &ChannelBot,
 ) -> AppResult<Zeroizing<String>> {
+    if bot.credential_source == "telegram_manager" {
+        let values = super::platform_credential_service::load_decrypted(
+            db,
+            keys,
+            &super::channel_adapters::telegram_new::credential_descriptor(),
+        )
+        .await?;
+        if bot.platform != "telegram"
+            || values.get("manager_bot_id") != Some(bot.platform_bot_id.as_str())
+            || values.get("webhook_ready") != Some("true")
+        {
+            return Err(AppError::Conflict(
+                "The Telegram manager configuration is unavailable.".into(),
+            ));
+        }
+        return values
+            .get(super::channel_adapters::telegram_new::MANAGER_TOKEN)
+            .map(|token| Zeroizing::new(token.to_owned()))
+            .ok_or_else(|| {
+                AppError::Conflict("The Telegram manager token is unavailable.".into())
+            });
+    }
     let CredentialResolution::OAuthConnection {
         provider_slug,
         required_scopes,

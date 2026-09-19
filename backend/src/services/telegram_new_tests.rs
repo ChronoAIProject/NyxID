@@ -65,7 +65,7 @@ async fn fixture() -> (crate::AppState, String, MockServer) {
             .mount(&server)
             .await;
     }
-    Mock::given(method("POST")).and(path(format!("/bot{MANAGER}/getWebhookInfo"))).respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": {"url": "https://api.nyxid.test/api/v1/webhooks/channel/telegram-new/manager", "pending_update_count": 0}}))).with_priority(10).mount(&server).await;
+    Mock::given(method("POST")).and(path(format!("/bot{MANAGER}/getWebhookInfo"))).respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": {"url": "https://api.nyxid.test/api/v1/webhooks/channel/telegram-new/manager", "pending_update_count": 0, "allowed_updates": ["message", "edited_message", "channel_post", "callback_query", "managed_bot"]}}))).with_priority(10).mount(&server).await;
     (state, actor, server)
 }
 
@@ -818,21 +818,23 @@ async fn telegram_new_manual_identity_and_quota_writers_are_serialized() {
             .is_err()
     );
     manual.platform_bot_id = "100".into();
+    manual.credential_source = "user".into();
     assert!(
         super::channel_bot_service::insert_registered_bot(&state.db, &manual, 20, None)
             .await
-            .is_err()
+            .is_ok()
     );
     // Exercise the transaction fence (non-Telegram writers do not take the manager lease).
     let mut left = manual.clone();
+    left.id = uuid::Uuid::new_v4().to_string();
     left.platform = "discord".into();
     left.platform_bot_id = "901".into();
     let mut right = left.clone();
     right.id = uuid::Uuid::new_v4().to_string();
     right.platform_bot_id = "902".into();
     let (a, b) = tokio::join!(
-        super::channel_bot_service::insert_registered_bot(&state.db, &left, 2, None),
-        super::channel_bot_service::insert_registered_bot(&state.db, &right, 2, None)
+        super::channel_bot_service::insert_registered_bot(&state.db, &left, 3, None),
+        super::channel_bot_service::insert_registered_bot(&state.db, &right, 3, None)
     );
     assert_ne!(a.is_ok(), b.is_ok());
     assert!(matches!(
@@ -846,7 +848,7 @@ async fn telegram_new_manual_identity_and_quota_writers_are_serialized() {
             .count_documents(doc! {"is_active": true})
             .await
             .unwrap(),
-        2
+        3
     );
 }
 
@@ -948,7 +950,7 @@ async fn telegram_new_clear_deleted_manager_allows_recreated_username() {
         .and(path(format!("/bot{replacement}/getWebhookInfo")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
-            "result": {"url": service.manager_callback(), "allowed_updates": ["message", "callback_query", "managed_bot"]}
+            "result": {"url": service.manager_callback(), "allowed_updates": ["message", "edited_message", "channel_post", "callback_query", "managed_bot"]}
         })))
         .mount(&server)
         .await;
@@ -1022,7 +1024,7 @@ async fn telegram_new_manager_configuration_preserves_secret_and_validates_webho
     Mock::given(method("POST")).and(path(format!("/bot{MANAGER}/getMe")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": {"id": 100, "username": "NyxSetupBot", "is_bot": true, "can_manage_bots": true}}))).mount(&server).await;
     Mock::given(method("POST")).and(path(format!("/bot{MANAGER}/getWebhookInfo")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": {"url": service.manager_callback(), "allowed_updates": ["message", "callback_query", "managed_bot"]}}))).mount(&server).await;
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": {"url": service.manager_callback(), "allowed_updates": ["message", "edited_message", "channel_post", "callback_query", "managed_bot"]}}))).mount(&server).await;
     Mock::given(method("POST"))
         .and(path(format!("/bot{MANAGER}/setWebhook")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": true})))
@@ -1043,7 +1045,13 @@ async fn telegram_new_manager_configuration_preserves_secret_and_validates_webho
     assert_eq!(setup["max_connections"], 1);
     assert_eq!(
         setup["allowed_updates"],
-        json!(["message", "callback_query", "managed_bot"])
+        json!([
+            "message",
+            "edited_message",
+            "channel_post",
+            "callback_query",
+            "managed_bot"
+        ])
     );
     assert!(setup.get("drop_pending_updates").is_none());
     service
@@ -2270,3 +2278,381 @@ mod claims {
         state.db.drop().await.unwrap();
     }
 }
+
+async fn register_manager_channel(
+    state: &crate::AppState,
+    actor: &str,
+    server: &MockServer,
+) -> ChannelBot {
+    use super::channel_adapters::telegram::TelegramAdapter;
+    use super::channel_platform::RegistrationValues;
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{MANAGER}/getMe")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true, "result": {"id": 100, "username": "NyxSetupBot", "is_bot": true}
+        })))
+        .mount(server)
+        .await;
+    let adapter = TelegramAdapter::media_test_adapter(&server.uri());
+    let created = super::channel_bot_service::create_bot(
+        &state.db,
+        &state.config,
+        &state.encryption_keys,
+        &state.http_client,
+        &adapter,
+        actor,
+        "Manager channel",
+        &RegistrationValues([("bot_token", MANAGER)].into()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.bot.credential_source, "telegram_manager");
+    assert!(created.bot.bot_token_encrypted.is_empty());
+    assert!(created.bot.webhook_secret_hash.is_empty());
+    assert!(created.webhook_secret.is_empty());
+    let callback = super::channel_bot_service::webhook_url(&state.config.base_url, &created.bot);
+    assert_eq!(callback, service(state, &server.uri()).manager_callback());
+    super::channel_bot_service::register_webhook_with_telegram_api(
+        &state.db,
+        &service(state, &server.uri()).api,
+        &adapter,
+        &created.bot.id,
+        MANAGER,
+        &callback,
+        &created.webhook_secret,
+    )
+    .await
+    .unwrap();
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| { !request.url.path().ends_with("/setWebhook") })
+    );
+    super::channel_bot_service::get_bot(&state.db, &created.bot.id)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn telegram_new_manager_channel_preserves_webhook_and_configuration_lifecycle() {
+    let (state, actor, server) = fixture().await;
+    let channel = register_manager_channel(&state, &actor, &server).await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    assert_eq!(channel.status, "active");
+    assert!(channel.webhook_registered);
+    // A second owner cannot claim the same remote identity.
+    let mut duplicate = channel.clone();
+    duplicate.id = uuid::Uuid::new_v4().to_string();
+    duplicate.user_id = uuid::Uuid::new_v4().to_string();
+    assert!(
+        super::channel_bot_service::insert_registered_bot(&state.db, &duplicate, 20, None)
+            .await
+            .is_err()
+    );
+    assert!(service.clear_manager().await.is_err());
+    assert!(service.manager().await.is_ok());
+    let adapter = super::channel_adapters::telegram::TelegramAdapter::media_test_adapter(&base);
+    assert!(
+        super::channel_bot_service::update_bot(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &channel.id,
+            &actor,
+            super::channel_bot_service::UpdateBotParams {
+                bot_token: Some(CHILD),
+                label: None,
+                verification_token: None,
+                encrypt_key: super::channel_bot_service::SecretPatch::Unchanged,
+                app_id: None,
+                app_secret: None,
+            },
+        )
+        .await
+        .is_err()
+    );
+    server.reset().await;
+    super::channel_bot_service::delete_bot(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        &state.encryption_keys,
+        &adapter,
+        &channel.id,
+        &actor,
+    )
+    .await
+    .unwrap();
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(service.manager().await.is_ok());
+    assert!(
+        service
+            .webhook(
+                &headers(&state).await,
+                &serde_json::to_vec(&message(json!({"text": "hello"}))).unwrap()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    service.clear_manager().await.unwrap();
+    assert!(service.manager().await.is_err());
+}
+
+#[tokio::test]
+async fn telegram_new_manager_channel_uses_rotated_token_without_copying_it() {
+    use super::channel_adapters::telegram::TelegramAdapter;
+    let (state, actor, server) = fixture().await;
+    let channel = register_manager_channel(&state, &actor, &server).await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let before = headers(&state).await;
+    let rotated = "100:rotated-test-secret";
+    for (endpoint, result) in [
+        (
+            "getMe",
+            json!({"id": 100, "username": "NyxSetupBot", "is_bot": true, "can_manage_bots": true}),
+        ),
+        (
+            "getWebhookInfo",
+            json!({"url": service.manager_callback(), "allowed_updates": ["message", "edited_message", "channel_post", "callback_query", "managed_bot"]}),
+        ),
+        ("setWebhook", json!(true)),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{rotated}/{endpoint}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": result})),
+            )
+            .mount(&server)
+            .await;
+    }
+    service
+        .configure_manager(
+            &actor,
+            &[(
+                "manager_bot_token".into(),
+                Some(Zeroizing::new(rotated.into())),
+            )]
+            .into(),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(before, headers(&state).await);
+    let token = super::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        &TelegramAdapter::default(),
+        &channel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(token.as_str(), rotated);
+    let saved = super::channel_bot_service::get_bot(&state.db, &channel.id)
+        .await
+        .unwrap();
+    assert!(saved.bot_token_encrypted.is_empty());
+    state
+        .db
+        .collection::<PlatformCredential>(CREDENTIALS)
+        .update_one(
+            doc! {"provider": "telegram-new"},
+            doc! {"$set": {"fields.manager_bot_id": "200"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        super::channel_credentials::resolve_bot_token(
+            &state.db,
+            &state.encryption_keys,
+            &TelegramAdapter::default(),
+            &channel,
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn telegram_new_manager_channel_filters_setup_and_authenticates_before_routing() {
+    let (state, actor, server) = fixture().await;
+    let channel = register_manager_channel(&state, &actor, &server).await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let headers = headers(&state).await;
+    let ordinary = serde_json::to_vec(&message(json!({"text": "hello"}))).unwrap();
+    assert!(service.webhook(&HeaderMap::new(), &ordinary).await.is_err());
+    assert_eq!(
+        service
+            .webhook(&headers, &ordinary)
+            .await
+            .unwrap()
+            .unwrap()
+            .0
+            .id,
+        channel.id
+    );
+    for update in [
+        message(json!({"text": "/start"})),
+        message(json!({"text": "/start private-challenge"})),
+        message(json!({"text": "/start@NyxSetupBot private-challenge"})),
+        message(json!({"text": "/recover @CustomerBot"})),
+        message(json!({"managed_bot_created": {"bot": {}}})),
+        json!({"managed_bot": {}}),
+        json!({"callback_query": {"data": "ok:private-consent"}}),
+        json!({"edited_message": {"text": "/start private-challenge"}}),
+    ] {
+        assert!(
+            service
+                .webhook(&headers, &serde_json::to_vec(&update).unwrap())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    for (kind, message) in [
+        (
+            "message",
+            json!({"chat": {"id": -100, "type": "group"}, "text": "hello group"}),
+        ),
+        ("edited_message", json!({"text": "updated hello"})),
+        ("channel_post", json!({"text": "hello channel"})),
+    ] {
+        let update = json!({kind: message});
+        assert_eq!(
+            service
+                .webhook(&headers, &serde_json::to_vec(&update).unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+                .id,
+            channel.id
+        );
+    }
+}
+
+#[tokio::test]
+async fn telegram_new_manager_channel_acknowledges_before_callback_and_routes_only_selected_chat() {
+    let (state, actor, server) = fixture().await;
+    let channel = register_manager_channel(&state, &actor, &server).await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+    state.db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {
+        "_id": &agent_id, "user_id": &actor, "name": "Manager agent", "key_prefix": "nyxid_ag",
+        "key_hash": "00".repeat(32), "scopes": "read write", "is_active": true,
+        "callback_url": format!("{}/agent-callback", server.uri()), "created_at": bson::DateTime::now(),
+    }).await.unwrap();
+    super::channel_routing_service::create_conversation(
+        &state.db,
+        &actor,
+        Some(&channel.id),
+        "telegram",
+        "700",
+        "private",
+        None,
+        &agent_id,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/agent-callback"))
+        .respond_with(ResponseTemplate::new(202).set_delay(std::time::Duration::from_secs(3)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::handlers::telegram_new::webhook(
+            axum::extract::State(state.clone()),
+            headers(&state).await,
+            axum::body::Bytes::from(
+                serde_json::to_vec(&message(json!({
+                    "text": "hello agent",
+                    "reply_to_message": {"message_id": 9, "text": "private-claim-code"},
+                    "quote": {"text": "private-claim-code"},
+                    "external_reply": {"text": "private-claim-code"},
+                })))
+                .unwrap(),
+            ),
+        ),
+    )
+    .await
+    .expect("Telegram acknowledgement must not wait for the slow agent")
+    .unwrap();
+    assert_eq!(result, axum::http::StatusCode::OK);
+    let mut unmatched = message(json!({"text": "unmatched chat"}));
+    unmatched["message"]["chat"]["id"] = json!(701);
+    unmatched["message"]["from"]["id"] = json!(701);
+    unmatched["message"]["message_id"] = json!(11);
+    let auth_headers = headers(&state).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        crate::handlers::telegram_new::webhook(
+            axum::extract::State(state.clone()),
+            auth_headers.clone(),
+            axum::body::Bytes::from(serde_json::to_vec(&unmatched).unwrap()),
+        )
+        .await
+        .unwrap();
+        crate::handlers::telegram_new::webhook(
+            axum::extract::State(state.clone()),
+            auth_headers,
+            axum::body::Bytes::from(serde_json::to_vec(&json!({"managed_bot": {}})).unwrap()),
+        )
+        .await
+        .unwrap();
+    })
+    .await
+    .expect("Other chats and manager updates must remain responsive");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if state
+                .db
+                .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+                .find_one(doc! {"channel_bot_id": &channel.id, "callback_status": "delivered"})
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Selected chat must reach its assigned agent");
+    let requests = server.received_requests().await.unwrap();
+    let payload = requests
+        .iter()
+        .find(|request| request.url.path() == "/agent-callback")
+        .unwrap()
+        .body_json::<Value>()
+        .unwrap();
+    assert!(payload.to_string().contains("hello agent"));
+    assert!(!payload.to_string().contains("private-claim-code"));
+    let messages = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .find_one(doc! {"channel_bot_id": &channel.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(messages.get_str("agent_api_key_id").unwrap(), agent_id);
+    assert!(!messages.to_string().contains("hello agent"));
+}
+
+#[path = "telegram_manager_public_tests.rs"]
+mod manager_public;
+
+#[path = "telegram_manager_channel_tests.rs"]
+mod manager_channel;
+
+#[path = "telegram_manager_e2e_tests.rs"]
+mod manager_e2e;

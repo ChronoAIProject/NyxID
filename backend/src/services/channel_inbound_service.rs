@@ -193,10 +193,11 @@ pub(crate) async fn process_inbound_messages(
             }
         };
 
-        // Generate a relay token scoped to this agent key's permissions.
-        // The token carries the bot owner's identity but inherits the agent
-        // key's service/node scope restrictions.
-        let user_access_token = {
+        // A manager is a public setup interface, not proof of the sender's
+        // NyxID identity. Its agent receives reply authority only.
+        let user_access_token = if bot.credential_source == "telegram_manager" {
+            None
+        } else {
             let scope = crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES;
             let rbac_data =
                 crate::services::rbac_helpers::build_rbac_claim_data(state.db, &bot.user_id, scope)
