@@ -1,4 +1,5 @@
 pub mod allowances;
+pub mod amounts;
 pub mod funding;
 pub mod grants;
 pub mod lago_client;
@@ -133,15 +134,34 @@ impl BillingService {
                 ),
             ] {
                 if let Some(lane) = lane {
-                    self.db.collection::<crate::models::downstream_service::DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
-                        .update_one(mongodb::bson::doc! { "_id": &service.id,
-                            format!("billing.{field}.lago_metric_code"): &lane.lago_metric_code,
-                            format!("billing.{field}.credits_per_unit"): &lane.credits_per_unit,
-                            format!("billing.{field}.metric"): mongodb::bson::to_bson(&lane.metric).expect("metric serialization"),
-                        }, mongodb::bson::doc! { "$set": {
-                            format!("billing.{field}.sync_status"): "failed",
-                            format!("billing.{field}.sync_error"): "Lago is not configured; the reconcile sweep will retry",
-                        } }).await?;
+                    let paths =
+                        std::iter::once((
+                            format!("billing.{field}"),
+                            lane.metric,
+                            &lane.credits_per_unit,
+                            &lane.lago_metric_code,
+                        ))
+                        .chain(lane.components.iter().enumerate().map(
+                            |(index, component)| {
+                                (
+                                    format!("billing.{field}.components.{index}"),
+                                    component.metric,
+                                    &component.credits_per_unit,
+                                    &component.lago_metric_code,
+                                )
+                            },
+                        ));
+                    for (path, metric, price, code) in paths {
+                        self.db.collection::<crate::models::downstream_service::DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+                            .update_one(mongodb::bson::doc! { "_id": &service.id,
+                                format!("{path}.lago_metric_code"): code,
+                                format!("{path}.credits_per_unit"): price,
+                                format!("{path}.metric"): mongodb::bson::to_bson(&metric).expect("metric serialization"),
+                            }, mongodb::bson::doc! { "$set": {
+                                format!("{path}.sync_status"): "failed",
+                                format!("{path}.sync_error"): "Lago is not configured; the reconcile sweep will retry",
+                            } }).await?;
+                    }
                 }
             }
             return Ok(false);
@@ -400,6 +420,7 @@ mod tests {
             platform_key_pricing: None,
             byok_pricing_cleanup_metric_code: None,
             platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: Some("resale_requests".to_string()),
@@ -850,6 +871,7 @@ mod tests {
         catalog.id = Uuid::new_v4().to_string();
         catalog.slug = "service-one".into();
         let lane = |metric| LanePricing {
+            components: Vec::new(),
             metric,
             credits_per_unit: "01.250000".into(),
             lago_metric_code: "untrusted".into(),
@@ -1095,6 +1117,7 @@ mod tests {
         catalog.id = Uuid::new_v4().to_string();
         catalog.slug = "service-one".into();
         let lane = |metric| LanePricing {
+            components: Vec::new(),
             metric,
             credits_per_unit: "0.01".into(),
             lago_metric_code: String::new(),
@@ -1194,6 +1217,11 @@ mod tests {
                 .settle(
                     &metered,
                     PlatformUsage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                        images: 0,
                         requests: 5,
                         bytes: 100,
                         tokens: 7,
@@ -1233,6 +1261,329 @@ mod tests {
         db.drop().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn component_precision_funding_recovery_and_cleanup() {
+        use crate::models::billing_target::BillingTargetKind;
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as CATALOG, DownstreamService, test_helpers::dummy_service,
+        };
+        use crate::models::service_billing::{PlatformUsage, PricingSyncStatus};
+        use crate::models::usage_allowance::AllowanceRecurrence;
+        use crate::services::billing::{allowances, grants, ledger, meter, pricing};
+        use futures::TryStreamExt;
+        let db = crate::test_utils::connect_transaction_test_database("component_precision").await;
+        ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+            ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+        ));
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        insert_wallet(&db, &owner).await;
+        let mut catalog = dummy_service();
+        catalog.id = Uuid::new_v4().to_string();
+        catalog.slug = "service-one".into();
+        // The admin DTO is the actual API input shape, including 12-digit prices.
+        let request: crate::handlers::services::UpdateServiceRequest = serde_json::from_value(serde_json::json!({"billing": {
+            "byok_pricing":{"metric":"input_tokens","credits_per_unit":"0.000000250001","components":[
+                {"metric":"output_tokens","credits_per_unit":"0.000001500001"},
+                {"metric":"cache_read_tokens","credits_per_unit":"0.000000250001"},
+                {"metric":"images","credits_per_unit":"0.25"}
+            ]}
+        }})).unwrap();
+        let mut prices = request.billing.unwrap().value;
+        pricing::normalize_lane_pricing(&catalog.slug, None, &mut prices).unwrap();
+        catalog.billing = Some(prices);
+        db.collection::<DownstreamService>(CATALOG)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let lago = Arc::new(FakeLago::default());
+        pricing::sync_service_price(&db, lago.as_ref(), "standard", &catalog)
+            .await
+            .unwrap();
+        catalog = db
+            .collection::<DownstreamService>(CATALOG)
+            .find_one(doc! {"_id": &catalog.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let lane = catalog
+            .billing
+            .as_ref()
+            .unwrap()
+            .byok_pricing
+            .as_ref()
+            .unwrap();
+        assert_eq!(lane.sync_status, PricingSyncStatus::Synced);
+        assert_eq!(lane.components.len(), 3);
+        assert!(
+            lago.prices
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|price| price.credits_per_unit == "0.000000250001")
+        );
+        let rate = db
+            .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .find_one(doc! { "lago_metric_code": &lane.lago_metric_code })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rate.credits_per_unit_micros, 0);
+        assert_eq!(rate.credits_per_unit_pico, Some(250001));
+        allowances::create_allowance(
+            &db,
+            allowances::CreateAllowanceInput {
+                service_ref: catalog.id.clone(),
+                metric: Some(BillingMetric::InputTokens),
+                quantity: 4_000_000,
+                recurrence: AllowanceRecurrence::Monthly,
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: vec![],
+                created_by: owner.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        grants::issue_grants(
+            &db,
+            grants::IssueCreditGrantInput {
+                amount_credits: 1,
+                target_kind: BillingTargetKind::SelectedUsers,
+                target_user_ids: vec![owner.clone()],
+                all_services: true,
+                service_refs: vec![],
+                expires_at: None,
+                reason: None,
+                granted_by: owner.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        let billing = BillingService::new_with_lago(db.clone(), Arc::new(config), lago.clone());
+        let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
+            Uuid::new_v4().to_string(),
+            owner.clone(),
+            owner.clone(),
+            None,
+            None,
+            Some(catalog.id.clone()),
+            Some(catalog.slug.clone()),
+            NodeIntent::Direct,
+            "bearer".into(),
+            CredentialClass::UserOwned,
+            BillingMetric::Requests,
+            catalog.billing.as_ref(),
+            false,
+        )
+        .with_request_body(Some(br#"{"n":3}"#));
+        let mut failed_ctx = ctx.clone();
+        failed_ctx.billing_request_id = Uuid::new_v4().to_string();
+        let failed_meter = billing.open(&failed_ctx).await.unwrap();
+        billing
+            .fail(&failed_meter, "pre-dispatch failure")
+            .await
+            .unwrap();
+        for (name, field) in [
+            (
+                crate::models::billing_wallet::COLLECTION_NAME,
+                "reserved_credits",
+            ),
+            (
+                crate::models::credit_grant::COLLECTION_NAME,
+                "reserved_micros",
+            ),
+            (
+                crate::models::usage_allowance_period::COLLECTION_NAME,
+                "reserved_quantity",
+            ),
+        ] {
+            assert_eq!(
+                db.collection::<mongodb::bson::Document>(name)
+                    .count_documents(doc! { field: { "$gt": 0 } })
+                    .await
+                    .unwrap(),
+                0,
+                "{name} holds leaked after failure"
+            );
+        }
+        let metered = billing.open(&ctx).await.unwrap();
+        // An open retry must retain exactly one reservation per component.
+        billing.open(&ctx).await.unwrap();
+        let collection =
+            db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME);
+        assert_eq!(
+            collection
+                .count_documents(doc! { "billing_request_id": &ctx.billing_request_id })
+                .await
+                .unwrap(),
+            4
+        );
+        billing.mark_forwarded(&metered).await.unwrap();
+        let usage = PlatformUsage {
+            requests: 1,
+            input_tokens: 4_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 4_000_000,
+            images: 0,
+            ..Default::default()
+        };
+        // Simulate a crash immediately after the coordinator has stored all quantities.
+        collection.update_one(doc! { "transaction_id": meter::transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None) },
+            doc! { "$set": { "pending_platform_usage": mongodb::bson::to_bson(&usage).unwrap() } }).await.unwrap();
+        meter::recover_pending_resale_intents(&db).await.unwrap();
+        billing.settle(&metered, usage, None, None).await.unwrap();
+        let rows: Vec<UsageMeterRow> = collection
+            .find(doc! {"billing_request_id": &ctx.billing_request_id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row.released && row.funding.as_ref().unwrap().settled)
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| &row.transaction_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
+        for (metric, gross) in [
+            (BillingMetric::InputTokens, 1_000_004),
+            (BillingMetric::OutputTokens, 1_500_001),
+            (BillingMetric::CacheReadTokens, 1_000_004),
+            (BillingMetric::Images, 0),
+        ] {
+            let row = rows.iter().find(|row| row.metric == metric).unwrap();
+            let funding = row.funding.as_ref().unwrap();
+            assert_eq!(funding.total_charge_micros, Some(gross));
+            assert_eq!(
+                funding.allowance_funded_micros.unwrap_or(0)
+                    + funding.grant_funded_micros.unwrap_or(0)
+                    + funding.wallet_funded_micros.unwrap_or(0),
+                gross
+            );
+            if metric == BillingMetric::InputTokens {
+                assert_eq!(funding.allowance_funded_quantity, Some(4_000_000));
+            } else {
+                assert_eq!(funding.allowance_funded_quantity, Some(0));
+            }
+            if metric == BillingMetric::Images {
+                assert_eq!(funding.lago_billable_quantity_micros, Some(0));
+                assert_eq!(funding.wallet_charge_credits, Some(0));
+            }
+        }
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.funding.as_ref().unwrap().grant_funded_micros.unwrap_or(0))
+                .sum::<i64>(),
+            1_000_000
+        );
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! {"owner_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(wallet.pending_lago_debits, 3);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if db
+                    .collection::<mongodb::bson::Document>(
+                        crate::models::billing_ledger::COLLECTION_NAME,
+                    )
+                    .count_documents(doc! {"event_type":"usage_settled"})
+                    .await
+                    .unwrap()
+                    == 2
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("component ledger entries durable");
+        let entries: Vec<crate::models::billing_ledger::BillingLedgerEntry> = db
+            .collection(crate::models::billing_ledger::COLLECTION_NAME)
+            .find(doc! { "event_type": "usage_settled" })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        for entry in entries {
+            let row = rows
+                .iter()
+                .find(|row| row.id == entry.reference_id)
+                .unwrap();
+            assert_eq!(entry.metric, Some(row.metric));
+            assert_eq!(
+                entry.amount_credits,
+                row.funding.as_ref().unwrap().wallet_charge_credits
+            );
+        }
+        let grant_entries: Vec<crate::models::billing_ledger::BillingLedgerEntry> = db
+            .collection(crate::models::billing_ledger::COLLECTION_NAME)
+            .find(doc! { "event_type": "grant_consumed" })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            grant_entries
+                .iter()
+                .map(|entry| entry.amount_micros.unwrap_or(0))
+                .sum::<i64>(),
+            1_000_000
+        );
+        let report =
+            ledger::verify_chain(&db, &ledger::TEST_BILLING_LEDGER_HMAC_KEY, None, None, None)
+                .await
+                .unwrap();
+        assert!(report.break_info.is_none());
+        let stale = catalog.clone();
+        let mut cleared = ServiceBilling::default();
+        pricing::normalize_lane_pricing(&catalog.slug, catalog.billing.as_ref(), &mut cleared)
+            .unwrap();
+        assert_eq!(cleared.component_cleanup_metric_codes.len(), 3);
+        catalog.billing = Some(cleared);
+        db.collection::<DownstreamService>(CATALOG)
+            .replace_one(doc! {"_id":&catalog.id}, &catalog)
+            .await
+            .unwrap();
+        pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
+            .await
+            .unwrap();
+        pricing::sync_service_price(&db, lago.as_ref(), "standard", &stale)
+            .await
+            .unwrap();
+        pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
     async fn insert_platform_rate(db: &mongodb::Database, credits: i64) {
         db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
             .insert_one(BillingRateCache {
@@ -1240,6 +1591,7 @@ mod tests {
                 lago_metric_code: "platform_requests".to_string(),
                 model: None,
                 credits_per_unit_micros: credits * 1_000_000,
+                credits_per_unit_pico: None,
                 synced_at: Utc::now(),
             })
             .await
@@ -1248,6 +1600,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeLago {
+        prices: std::sync::Mutex<Vec<crate::services::billing::lago_client::ServicePriceSync>>,
         wallet_creates: AtomicUsize,
         fail_price_sync: std::sync::atomic::AtomicBool,
         price_syncs: AtomicUsize,
@@ -1266,6 +1619,7 @@ mod tests {
                     "test unavailable".into(),
                 ));
             }
+            self.prices.lock().unwrap().push(_input.clone());
             self.price_syncs.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }

@@ -224,17 +224,51 @@ export function AllowanceDialog({
     (service) => service.id === serviceRef || service.slug === serviceRef,
   );
   const chosenMetric = form.watch("metric");
-  const laneMetrics = [...new Set([
-    selectedService?.billing?.byok_pricing?.metric,
-    selectedService?.billing?.platform_key_pricing?.metric,
-  ].filter((m) => m !== undefined))];
-  const metric = chosenMetric ?? (
-    selectedService
+  const laneMetrics = [
+    ...new Set(
+      [
+        selectedService?.billing?.byok_pricing?.metric,
+        ...(selectedService?.billing?.byok_pricing?.components ?? []).map(
+          (component) => component.metric,
+        ),
+        ...(
+          selectedService?.billing?.platform_key_pricing?.components ?? []
+        ).map((component) => component.metric),
+        selectedService?.billing?.platform_key_pricing?.metric,
+        ...(selectedService &&
+        [
+          selectedService.billing?.byok_pricing,
+          selectedService.billing?.platform_key_pricing,
+        ].some(
+          (lane) =>
+            lane &&
+            (lane.sync_status !== "synced" ||
+              lane.components?.some(
+                (component) => component.sync_status !== "synced",
+              )),
+        )
+          ? [
+              selectedService.billing?.platform_metric ??
+                (selectedService.service_type === "ssh"
+                  ? "bytes"
+                  : selectedService.slug.startsWith("llm-")
+                    ? "tokens"
+                    : "requests"),
+            ]
+          : []),
+        ...(editingAllowance?.service_id === selectedService?.id
+          ? [editingAllowance?.metric]
+          : []),
+      ].filter((m) => m !== undefined),
+    ),
+  ];
+  const metric =
+    chosenMetric ??
+    (selectedService
       ? resolveServiceBillingMetric(selectedService)
       : editingAllowance?.service_id === serviceRef
         ? editingAllowance.metric
-        : null
-  );
+        : null);
   const preview = metric
     ? formatAllowancePreview(quantity, metric, recurrence)
     : null;
@@ -285,13 +319,26 @@ export function AllowanceDialog({
                       render={({ field }) => (
                         <FormItem>
                           <FormLabel>Allowance unit</FormLabel>
-                          <Select value={field.value ?? metric ?? undefined} onValueChange={field.onChange}>
-                            <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                          <Select
+                            value={field.value ?? metric ?? undefined}
+                            onValueChange={field.onChange}
+                          >
+                            <FormControl>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                            </FormControl>
                             <SelectContent>
-                              {laneMetrics.map((unit) => <SelectItem key={unit} value={unit}>{unit}</SelectItem>)}
+                              {laneMetrics.map((unit) => (
+                                <SelectItem key={unit} value={unit}>
+                                  {billingMetricLabel(unit)}
+                                </SelectItem>
+                              ))}
                             </SelectContent>
                           </Select>
-                          <FormDescription>Applies only to requests charged in this unit.</FormDescription>
+                          <FormDescription>
+                            Applies only to requests charged in this unit.
+                          </FormDescription>
                         </FormItem>
                       )}
                     />

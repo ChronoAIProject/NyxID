@@ -21,6 +21,9 @@ pub struct ReportedLlmUsage {
     /// Cache-write tokens (Anthropic `cache_creation_input_tokens`).
     pub cache_creation_tokens: u64,
     pub reported_cost: Option<f64>,
+    pub cached_tokens_included_in_prompt: bool,
+    pub images: u64,
+    pub completed_image_index: Option<u64>,
 }
 
 impl ReportedLlmUsage {
@@ -31,6 +34,26 @@ impl ReportedLlmUsage {
             && self.cached_tokens == 0
             && self.cache_creation_tokens == 0
             && self.reported_cost.is_none()
+            && self.images == 0
+    }
+
+    pub fn apply_to(
+        &self,
+        mut usage: crate::models::service_billing::PlatformUsage,
+    ) -> crate::models::service_billing::PlatformUsage {
+        let clamp = |value: u64| value.min(i64::MAX as u64) as i64;
+        usage.input_tokens = clamp(if self.cached_tokens_included_in_prompt {
+            self.prompt_tokens
+                .saturating_sub(self.cached_tokens)
+                .saturating_sub(self.cache_creation_tokens)
+        } else {
+            self.prompt_tokens
+        });
+        usage.output_tokens = clamp(self.completion_tokens);
+        usage.cache_read_tokens = clamp(self.cached_tokens);
+        usage.cache_write_tokens = clamp(self.cache_creation_tokens);
+        usage.images = clamp(self.images);
+        usage.with_token_breakdown(Some(self.token_breakdown()))
     }
 
     /// Per-class breakdown for the usage meter row, following each
@@ -56,6 +79,9 @@ pub struct ReportedLlmUsageAccumulator {
     cached_tokens: u64,
     cache_creation_tokens: u64,
     reported_cost: Option<f64>,
+    cached_tokens_included_in_prompt: bool,
+    images: u64,
+    seen_image_indexes: HashSet<u64>,
 }
 
 const MAX_REALTIME_RESPONSE_ID_LEN: usize = 256;
@@ -220,6 +246,15 @@ const FALLBACK_BYTES_PER_TOKEN: i64 = 4;
 
 impl ReportedLlmUsageAccumulator {
     pub fn observe_snapshot(&mut self, usage: ReportedLlmUsage) {
+        self.cached_tokens_included_in_prompt |= usage.cached_tokens_included_in_prompt;
+        if let Some(index) = usage.completed_image_index {
+            if !self.seen_image_indexes.insert(index) {
+                return;
+            }
+            self.images = self.images.saturating_add(usage.images);
+        } else {
+            self.images = self.images.max(usage.images);
+        }
         self.prompt_tokens = self.prompt_tokens.max(usage.prompt_tokens);
         self.completion_tokens = self.completion_tokens.max(usage.completion_tokens);
         self.total_tokens = self.total_tokens.max(usage.total_tokens);
@@ -236,6 +271,15 @@ impl ReportedLlmUsageAccumulator {
     }
 
     pub fn observe_delta(&mut self, usage: ReportedLlmUsage) {
+        self.cached_tokens_included_in_prompt |= usage.cached_tokens_included_in_prompt;
+        if let Some(index) = usage.completed_image_index {
+            if !self.seen_image_indexes.insert(index) {
+                return;
+            }
+            self.images = self.images.saturating_add(usage.images);
+        } else {
+            self.images = self.images.max(usage.images);
+        }
         self.prompt_tokens = self.prompt_tokens.saturating_add(usage.prompt_tokens);
         self.completion_tokens = self
             .completion_tokens
@@ -262,7 +306,7 @@ impl ReportedLlmUsageAccumulator {
         let total_tokens = if self.total_tokens > 0 {
             self.total_tokens
         } else {
-            self.prompt_tokens + self.completion_tokens
+            self.prompt_tokens.saturating_add(self.completion_tokens)
         };
 
         let usage = ReportedLlmUsage {
@@ -272,6 +316,9 @@ impl ReportedLlmUsageAccumulator {
             cached_tokens: self.cached_tokens,
             cache_creation_tokens: self.cache_creation_tokens,
             reported_cost: self.reported_cost,
+            cached_tokens_included_in_prompt: self.cached_tokens_included_in_prompt,
+            images: self.images,
+            completed_image_index: None,
         };
 
         (!usage.is_empty()).then_some(usage)
@@ -351,16 +398,19 @@ fn number_at(value: &serde_json::Value, pointer: &str) -> Option<f64> {
 }
 
 fn token_at(value: &serde_json::Value, pointers: &[&str]) -> Option<u64> {
-    pointers
-        .iter()
-        .find_map(|pointer| number_at(value, pointer))
-        .map(|value| value.max(0.0) as u64)
+    pointers.iter().find_map(|pointer| {
+        value.pointer(pointer).and_then(|raw| {
+            raw.as_u64()
+                .or_else(|| raw.as_str().and_then(|text| text.parse::<u64>().ok()))
+        })
+    })
 }
 
 pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUsage> {
     let prompt_tokens = token_at(
         value,
         &[
+            "/usageMetadata/promptTokenCount",
             "/prompt_tokens",
             "/usage/prompt_tokens",
             "/usage/input_tokens",
@@ -376,6 +426,7 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
     let completion_tokens = token_at(
         value,
         &[
+            "/usageMetadata/candidatesTokenCount",
             "/completion_tokens",
             "/usage/completion_tokens",
             "/usage/output_tokens",
@@ -391,19 +442,26 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
     let total_tokens = token_at(
         value,
         &[
+            "/usageMetadata/totalTokenCount",
             "/total_tokens",
             "/usage/total_tokens",
             "/response/usage/total_tokens",
             "/message/usage/total_tokens",
         ],
     )
-    .unwrap_or_else(|| prompt_tokens + completion_tokens);
+    .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
 
     let cached_tokens = token_at(
         value,
         &[
+            "/usageMetadata/cachedContentTokenCount",
+            "/prompt_tokens_details/cached_tokens",
+            "/input_tokens_details/cached_tokens",
             "/usage/prompt_tokens_details/cached_tokens",
             "/usage/input_tokens_details/cached_tokens",
+            "/input_token_details/cached_tokens",
+            "/usage/input_token_details/cached_tokens",
+            "/response/usage/input_token_details/cached_tokens",
             "/usage/cache_read_input_tokens",
             "/cache_read_input_tokens",
             "/response/usage/prompt_tokens_details/cached_tokens",
@@ -452,9 +510,140 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
         cached_tokens,
         cache_creation_tokens,
         reported_cost,
+        cached_tokens_included_in_prompt: [
+            "/prompt_tokens_details/cached_tokens",
+            "/input_tokens_details/cached_tokens",
+            "/input_token_details/cached_tokens",
+            "/usage/input_token_details/cached_tokens",
+            "/response/usage/input_token_details/cached_tokens",
+            "/usage/prompt_tokens_details/cached_tokens",
+            "/usage/input_tokens_details/cached_tokens",
+            "/response/usage/prompt_tokens_details/cached_tokens",
+            "/response/usage/input_tokens_details/cached_tokens",
+            "/usageMetadata/cachedContentTokenCount",
+        ]
+        .iter()
+        .any(|path| value.pointer(path).is_some()),
+        images: 0,
+        completed_image_index: None,
     };
 
     (!usage.is_empty()).then_some(usage)
+}
+
+pub fn is_image_generation_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    ["/images/generations", "/images/edits", "/images/variations"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
+pub fn extract_reported_usage_for_path(
+    value: &serde_json::Value,
+    path: &str,
+    successful: bool,
+) -> Option<ReportedLlmUsage> {
+    let mut usage = extract_reported_usage(value).unwrap_or_default();
+    if successful && is_image_generation_path(path) {
+        usage.images = value
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, |images| images.len() as u64);
+    }
+    (!usage.is_empty()).then_some(usage)
+}
+
+/// Incremental SSE usage observer with the same 512 KiB capture cap as proxy
+/// response capture. Oversized events are discarded through their separator.
+#[derive(Default)]
+pub struct BoundedUsageEvents {
+    buffer: Vec<u8>,
+    discarding: bool,
+    line_empty: bool,
+    accumulator: ReportedLlmUsageAccumulator,
+}
+impl BoundedUsageEvents {
+    pub fn push(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if self.discarding {
+                if byte == b'\n' {
+                    if self.line_empty {
+                        self.discarding = false;
+                        self.line_empty = false;
+                    } else {
+                        self.line_empty = true;
+                    }
+                } else if byte != b'\r' {
+                    self.line_empty = false;
+                }
+                continue;
+            }
+            self.buffer.push(byte);
+            if self.buffer.ends_with(b"\n\n") || self.buffer.ends_with(b"\r\n\r\n") {
+                // The shared parser consumes LF separators. Normalize complete
+                // CRLF events only after enforcing this observer's byte limit.
+                let mut text = String::from_utf8_lossy(&self.buffer).replace("\r\n", "\n");
+                if let Some(event) = super::sse_parser::parse_next_event(&mut text)
+                    && let Some((usage, mode)) = extract_reported_usage_from_sse_event(
+                        event.event_type.as_deref(),
+                        &event.data,
+                    )
+                {
+                    self.accumulator.observe(usage, mode);
+                }
+                self.buffer.clear();
+            } else if self.buffer.len() >= 512 * 1024 {
+                self.buffer.clear();
+                self.discarding = true;
+                self.line_empty = byte == b'\n';
+            }
+        }
+    }
+    pub fn finalize(self) -> Option<ReportedLlmUsage> {
+        self.accumulator.finalize()
+    }
+    pub fn finalize_success(self, successful: bool) -> Option<ReportedLlmUsage> {
+        self.finalize().map(|mut usage| {
+            if !successful {
+                usage.images = 0;
+            }
+            usage
+        })
+    }
+}
+
+/// Bounded callers supply already-captured bodies; no additional body reads.
+pub fn usage_from_body(body: &[u8], path: &str, successful: bool) -> Option<ReportedLlmUsage> {
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+        return extract_reported_usage_for_path(&value, path, successful);
+    }
+    let mut buffer = String::from_utf8_lossy(body).into_owned();
+    let mut accumulator = ReportedLlmUsageAccumulator::default();
+    while let Some(event) = super::sse_parser::parse_next_event(&mut buffer) {
+        if let Some((mut usage, mode)) =
+            extract_reported_usage_from_sse_event(event.event_type.as_deref(), &event.data)
+        {
+            if !successful {
+                usage.images = 0;
+            }
+            accumulator.observe(usage, mode);
+        }
+    }
+    accumulator.finalize()
+}
+
+pub fn platform_usage(
+    usage: Option<&ReportedLlmUsage>,
+    bytes: i64,
+    estimate: bool,
+) -> crate::models::service_billing::PlatformUsage {
+    let tokens = if estimate {
+        token_quantity_or_estimate(usage, bytes)
+    } else {
+        usage.map_or(0, |u| u.total_tokens.min(i64::MAX as u64) as i64)
+    };
+    let platform = crate::models::service_billing::PlatformUsage::llm_completion(bytes, tokens);
+    usage.map_or(platform.clone(), |u| u.apply_to(platform))
 }
 
 pub fn extract_realtime_response_done(value: &serde_json::Value) -> Option<RealtimeResponseDone> {
@@ -497,6 +686,22 @@ pub fn extract_reported_usage_from_sse_event(
     }
 
     let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    let image_event = event_type.or_else(|| value.get("type").and_then(serde_json::Value::as_str));
+    if matches!(
+        image_event,
+        Some("image_generation.completed" | "image_edit.completed")
+    ) {
+        let mut usage = extract_reported_usage(&value).unwrap_or_default();
+        usage.images = 1;
+        usage.completed_image_index = Some(
+            value
+                .get("image_index")
+                .or_else(|| value.get("index"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        );
+        return Some((usage, UsageAggregationMode::Delta));
+    }
     let usage = extract_reported_usage(&value)?;
 
     let mode = match event_type {
@@ -569,6 +774,7 @@ mod tests {
                 cached_tokens: 0,
                 cache_creation_tokens: 0,
                 reported_cost: Some(0.0042),
+                ..Default::default()
             }
         );
     }
@@ -734,6 +940,7 @@ mod tests {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             reported_cost: None,
+            ..Default::default()
         });
         accumulator.observe_snapshot(ReportedLlmUsage {
             prompt_tokens: 10,
@@ -742,6 +949,7 @@ mod tests {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             reported_cost: Some(0.012),
+            ..Default::default()
         });
 
         let usage = accumulator.finalize().expect("usage");
@@ -807,6 +1015,7 @@ mod tests {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             reported_cost: Some(0.001),
+            ..Default::default()
         });
         accumulator.observe_delta(ReportedLlmUsage {
             prompt_tokens: 3,
@@ -815,6 +1024,7 @@ mod tests {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             reported_cost: Some(0.002),
+            ..Default::default()
         });
 
         let usage = accumulator.finalize().expect("should have usage");
@@ -854,6 +1064,7 @@ mod tests {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             reported_cost: None,
+            ..Default::default()
         };
 
         assert_eq!(token_quantity_or_estimate(Some(&usage), 10_000), 30);
@@ -877,6 +1088,7 @@ mod tests {
             cached_tokens: 0,
             cache_creation_tokens: 0,
             reported_cost: Some(0.01),
+            ..Default::default()
         };
 
         assert_eq!(token_quantity_or_estimate(Some(&usage), 17), 5);
@@ -971,6 +1183,7 @@ mod tests {
             cached_tokens: 8,
             cache_creation_tokens: 2,
             reported_cost: None,
+            ..Default::default()
         });
         accumulator.observe_delta(ReportedLlmUsage {
             prompt_tokens: 4,
@@ -979,6 +1192,7 @@ mod tests {
             cached_tokens: 3,
             cache_creation_tokens: 0,
             reported_cost: None,
+            ..Default::default()
         });
 
         let usage = accumulator.finalize().expect("usage");
@@ -995,6 +1209,7 @@ mod tests {
             cached_tokens: 4,
             cache_creation_tokens: 5,
             reported_cost: None,
+            ..Default::default()
         };
         let breakdown = usage.token_breakdown();
         assert_eq!(breakdown.prompt_tokens, 1);
@@ -1002,5 +1217,106 @@ mod tests {
         assert_eq!(breakdown.cached_tokens, 4);
         assert_eq!(breakdown.cache_creation_tokens, 5);
         assert!(!breakdown.is_empty());
+    }
+    #[test]
+    fn bounded_sse_capture_handles_chunk_boundaries_limits_and_failed_images() {
+        let event = b"data: {\"type\":\"image_generation.completed\",\"image_index\":0,\"usage\":{\"input_tokens\":120,\"output_tokens\":40,\"input_tokens_details\":{\"cached_tokens\":100}}}\r\n\r\n";
+        for success in [true, false] {
+            let mut observer = super::BoundedUsageEvents::default();
+            observer.push(&vec![b'x'; 512 * 1024 + 20]);
+            observer.push(b"\n\n");
+            for chunk in event.chunks(7) {
+                observer.push(chunk);
+            }
+            observer.push(event); // A duplicate completion never bills a second image.
+            let usage = observer.finalize_success(success).unwrap();
+            let priced = usage.apply_to(crate::models::service_billing::PlatformUsage::default());
+            assert_eq!(
+                (
+                    priced.input_tokens,
+                    priced.output_tokens,
+                    priced.cache_read_tokens
+                ),
+                (20, 40, 100)
+            );
+            assert_eq!(priced.images, i64::from(success));
+        }
+    }
+
+    #[test]
+    fn priced_classes_preserve_provider_cache_accounting() {
+        let cases = [
+            (
+                serde_json::json!({"usage":{"prompt_tokens":120,"completion_tokens":40,"prompt_tokens_details":{"cached_tokens":100}}}),
+                [20, 40, 100, 0],
+            ),
+            (
+                serde_json::json!({"usage":{"input_tokens":25,"output_tokens":60,"cache_read_input_tokens":900,"cache_creation_input_tokens":300}}),
+                [25, 60, 900, 300],
+            ),
+            (
+                serde_json::json!({"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":40,"cachedContentTokenCount":100}}),
+                [20, 40, 100, 0],
+            ),
+            (
+                serde_json::json!({"usage":{"input_tokens":5,"input_tokens_details":{"cached_tokens":8}}}),
+                [0, 0, 8, 0],
+            ),
+        ];
+        for (value, expected) in cases {
+            let usage = extract_reported_usage(&value).unwrap();
+            let priced = usage.apply_to(crate::models::service_billing::PlatformUsage::default());
+            assert_eq!(
+                [
+                    priced.input_tokens,
+                    priced.output_tokens,
+                    priced.cache_read_tokens,
+                    priced.cache_write_tokens
+                ],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn images_count_successes_with_path_prefixes_and_stream_deduplication() {
+        let body = serde_json::json!({"data":[{"b64_json":"one"},{"url":"two"}],"usage":{"input_tokens":10,"output_tokens":30}});
+        for path in [
+            "/v1/images/generations",
+            "/api/v1/proxy/s/image-service/v1/images/edits",
+            "/api/v1/proxy/uuid/images/variations",
+        ] {
+            let usage = super::extract_reported_usage_for_path(&body, path, true).unwrap();
+            assert_eq!(usage.images, 2);
+            let priced = usage.apply_to(crate::models::service_billing::PlatformUsage::default());
+            assert_eq!((priced.input_tokens, priced.output_tokens), (10, 30));
+            assert_eq!(
+                super::extract_reported_usage_for_path(&body, path, false)
+                    .unwrap()
+                    .images,
+                0
+            );
+        }
+        assert_eq!(
+            super::extract_reported_usage_for_path(&body, "/models", true)
+                .unwrap()
+                .images,
+            0
+        );
+        let event = r#"{"type":"image_generation.completed","image_index":0,"usage":{"input_tokens":10,"output_tokens":30}}"#;
+        let mut accumulator = ReportedLlmUsageAccumulator::default();
+        for _ in 0..2 {
+            let (usage, mode) = extract_reported_usage_from_sse_event(None, event).unwrap();
+            accumulator.observe(usage, mode);
+        }
+        let usage = accumulator.finalize().unwrap();
+        assert_eq!(usage.images, 1);
+        assert!(
+            extract_reported_usage_from_sse_event(
+                Some("image_generation.partial_image"),
+                r#"{"b64_json":"partial"}"#
+            )
+            .is_none()
+        );
     }
 }

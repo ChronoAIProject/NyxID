@@ -223,10 +223,13 @@ describe("updateServiceSchema", () => {
   });
 
   it("rejects negative, over-precise, and excessive per-unit prices", () => {
-    for (const platform_price of ["-1", "0.0000001", "1000000.000001"]) {
+    for (const platform_price of [
+      "-1",
+      "0.0000000000001",
+      "1000000.000000000001",
+    ]) {
       expect(
-        updateServiceSchema.safeParse({ ...validData, platform_price })
-          .success,
+        updateServiceSchema.safeParse({ ...validData, platform_price }).success,
       ).toBe(false);
     }
   });
@@ -371,9 +374,22 @@ describe("redirectUriSchema", () => {
 
 it("endpoint rules validate UTF-8 byte limits and reject ambiguous paths", async () => {
   const { proxyOperationPolicySchema } = await import("./services");
-  const valid = (path_template: string) => proxyOperationPolicySchema.safeParse({ rules: [{ method: "GET", path_template }] }).success;
+  const valid = (path_template: string) =>
+    proxyOperationPolicySchema.safeParse({
+      rules: [{ method: "GET", path_template }],
+    }).success;
   expect(valid("/models/{id}")).toBe(true);
   expect(valid("/" + "é".repeat(1023))).toBe(true);
   expect(valid("/" + "é".repeat(1024))).toBe(false);
-  for (const path of ["/foo\u0001", "/foo\u007f", "/a//b", "/a/..", "/a?b", "/a%2fb", "/a*", "/a/"]) expect(valid(path)).toBe(false);
+  for (const path of [
+    "/foo\u0001",
+    "/foo\u007f",
+    "/a//b",
+    "/a/..",
+    "/a?b",
+    "/a%2fb",
+    "/a*",
+    "/a/",
+  ])
+    expect(valid(path)).toBe(false);
 });

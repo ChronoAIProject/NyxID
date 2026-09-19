@@ -8,6 +8,11 @@ pub enum BillingMetric {
     Tokens,
     Requests,
     Bytes,
+    InputTokens,
+    OutputTokens,
+    CacheReadTokens,
+    CacheWriteTokens,
+    Images,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -44,17 +49,64 @@ pub struct LanePricing {
     pub sync_status: PricingSyncStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_error: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_components")]
+    pub components: Vec<LanePriceComponent>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct LanePriceComponent {
+    pub metric: BillingMetric,
+    pub credits_per_unit: String,
+    #[serde(default)]
+    pub lago_metric_code: String,
+    #[serde(default)]
+    pub sync_status: PricingSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_error: Option<String>,
+}
+
+fn deserialize_components<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<LanePriceComponent>, D::Error> {
+    Ok(Option::<Vec<LanePriceComponent>>::deserialize(d)?.unwrap_or_default())
 }
 
 impl BillingMetric {
-    /// Stable serde-matching name; used in ledger canonical encoding, so
-    /// variant renames must not change these strings.
-    pub fn as_str(self) -> &'static str {
+    /// Stable names enter ledger canonical encoding. Never rename existing units.
+    pub const ALL: [Self; 8] = [
+        Self::Tokens,
+        Self::Requests,
+        Self::Bytes,
+        Self::InputTokens,
+        Self::OutputTokens,
+        Self::CacheReadTokens,
+        Self::CacheWriteTokens,
+        Self::Images,
+    ];
+
+    fn metadata(self) -> (&'static str, &'static str, bool) {
         match self {
-            Self::Tokens => "tokens",
-            Self::Requests => "requests",
-            Self::Bytes => "bytes",
+            Self::Tokens => ("tokens", "Tokens", true),
+            Self::Requests => ("requests", "Requests", false),
+            Self::Bytes => ("bytes", "Bytes", false),
+            Self::InputTokens => ("input_tokens", "Input tokens", true),
+            Self::OutputTokens => ("output_tokens", "Output tokens", true),
+            Self::CacheReadTokens => ("cache_read_tokens", "Cache-read tokens", true),
+            Self::CacheWriteTokens => ("cache_write_tokens", "Cache-write tokens", true),
+            Self::Images => ("images", "Images", false),
         }
+    }
+    pub fn as_str(self) -> &'static str {
+        self.metadata().0
+    }
+    pub fn label(self) -> &'static str {
+        self.metadata().1
+    }
+    pub fn is_token_family(self) -> bool {
+        self.metadata().2
+    }
+    pub fn is_legacy(self) -> bool {
+        matches!(self, Self::Tokens | Self::Requests | Self::Bytes)
     }
 }
 
@@ -94,6 +146,9 @@ pub struct ServiceBilling {
     pub platform_key_pricing_cleanup_metric_code: Option<String>,
     #[serde(default)]
     pub resale_billable: bool,
+    /// Durable cleanup for removed lane components; server-owned.
+    #[serde(default)]
+    pub component_cleanup_metric_codes: Vec<String>,
     #[serde(default)]
     pub resale_metric: BillingMetric,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +167,7 @@ impl Default for ServiceBilling {
             platform_key_pricing: None,
             byok_pricing_cleanup_metric_code: None,
             platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: false,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: None,
@@ -146,8 +202,8 @@ impl ServiceBilling {
 /// Provider-reported token classes for one LLM exchange. `prompt_tokens`
 /// follows each provider's own accounting: OpenAI includes cached tokens
 /// inside `prompt_tokens`, Anthropic reports cache reads and writes
-/// outside `input_tokens`. Observability only for now; billing still
-/// charges the single total-token quantity.
+/// outside `input_tokens`. The normalized PlatformUsage classes are priced;
+/// this breakdown preserves the provider accounting for observability.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct TokenBreakdown {
     pub prompt_tokens: i64,
@@ -170,12 +226,22 @@ impl TokenBreakdown {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PlatformUsage {
     pub requests: i64,
     pub bytes: i64,
     #[serde(default)]
     pub tokens: i64,
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub output_tokens: i64,
+    #[serde(default)]
+    pub cache_read_tokens: i64,
+    #[serde(default)]
+    pub cache_write_tokens: i64,
+    #[serde(default)]
+    pub images: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_breakdown: Option<TokenBreakdown>,
 }
@@ -187,6 +253,7 @@ impl PlatformUsage {
             bytes,
             tokens: 0,
             token_breakdown: None,
+            ..Default::default()
         }
     }
 
@@ -196,6 +263,7 @@ impl PlatformUsage {
             bytes,
             tokens,
             token_breakdown: None,
+            ..Default::default()
         }
     }
 
@@ -272,6 +340,7 @@ mod tests {
             platform_key_pricing: None,
             byok_pricing_cleanup_metric_code: None,
             platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: None,

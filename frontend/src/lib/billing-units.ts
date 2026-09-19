@@ -1,3 +1,4 @@
+import { metricLabel } from "@/schemas/billing-metrics";
 import type { BillingMetric } from "@/schemas/billing";
 import type { AllowanceForm } from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
@@ -21,19 +22,13 @@ export function resolveServiceBillingMetric(
   return service.effective_platform_metric;
 }
 
-export function billingMetricLabel(
-  metric: BillingMetric,
-  quantity?: number,
-): string {
-  if (quantity === 1) {
-    return metric === "bytes" ? "byte" : metric.slice(0, -1);
-  }
-  return metric;
+export function billingMetricLabel(metric: string, quantity?: number): string {
+  return metricLabel(metric, quantity);
 }
 
 export function formatAllowancePreview(
   quantity: number,
-  metric: BillingMetric,
+  metric: string,
   recurrence: AllowanceRecurrence,
   locale?: string,
 ): string | null {

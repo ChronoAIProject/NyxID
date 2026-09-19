@@ -14,7 +14,13 @@ const tokenService = {
   effective_platform_metric: "tokens",
 } as DownstreamService;
 
-function AllowanceHarness({ mixed = false, onSubmit = vi.fn() }: { readonly mixed?: boolean; readonly onSubmit?: (value: AllowanceForm) => Promise<void> }) {
+function AllowanceHarness({
+  mixed = false,
+  onSubmit = vi.fn(),
+}: {
+  readonly mixed?: boolean;
+  readonly onSubmit?: (value: AllowanceForm) => Promise<void>;
+}) {
   const form = useAppForm<AllowanceForm>({
     defaultValues: {
       service_ref: "",
@@ -30,7 +36,30 @@ function AllowanceHarness({ mixed = false, onSubmit = vi.fn() }: { readonly mixe
       open
       onOpenChange={vi.fn()}
       form={form}
-      services={[mixed ? { ...tokenService, billing: { byok_pricing: { metric: "requests", credits_per_unit: "1" }, platform_key_pricing: { metric: "tokens", credits_per_unit: "0.01" } } } as DownstreamService : tokenService]}
+      services={[
+        mixed
+          ? ({
+              ...tokenService,
+              billing: {
+                byok_pricing: {
+                  metric: "requests",
+                  credits_per_unit: "1",
+                  components: [
+                    {
+                      metric: "cache_read_tokens",
+                      credits_per_unit: "0.000000250001",
+                    },
+                    { metric: "images", credits_per_unit: "2" },
+                  ],
+                },
+                platform_key_pricing: {
+                  metric: "tokens",
+                  credits_per_unit: "0.01",
+                },
+              },
+            } as DownstreamService)
+          : tokenService,
+      ]}
       pending={false}
       editingAllowance={null}
       onSubmit={onSubmit}
@@ -91,9 +120,20 @@ it("selects the allowance unit for mixed credential lanes", async () => {
   const onSubmit = vi.fn().mockResolvedValue(undefined);
   render(<AllowanceHarness mixed onSubmit={onSubmit} />);
   await userEvent.click(screen.getByText("Token service"));
-  await userEvent.click(screen.getByRole("combobox", { name: "Allowance unit" }));
+  await userEvent.click(
+    screen.getByRole("combobox", { name: "Allowance unit" }),
+  );
+  expect(
+    screen.getByRole("option", { name: "cache-read tokens" }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "images" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("option", { name: "requests" }));
   expect(screen.getByText("Free requests")).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "Create allowance" }));
-  expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ metric: "requests" }), expect.anything());
+  await userEvent.click(
+    screen.getByRole("button", { name: "Create allowance" }),
+  );
+  expect(onSubmit).toHaveBeenCalledWith(
+    expect.objectContaining({ metric: "requests" }),
+    expect.anything(),
+  );
 });

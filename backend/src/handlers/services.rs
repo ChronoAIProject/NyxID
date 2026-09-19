@@ -272,6 +272,10 @@ pub struct BillingUpdate {
     #[serde(skip)]
     byok_present: bool,
     #[serde(skip)]
+    byok_components_present: bool,
+    #[serde(skip)]
+    platform_components_present: bool,
+    #[serde(skip)]
     platform_present: bool,
     #[serde(skip)]
     present_fields: std::collections::HashSet<String>,
@@ -292,6 +296,18 @@ fn serialize_billing_update<S: serde::Serializer>(
             fields.entry(key.clone()).or_insert(serde_json::Value::Null);
         }
     }
+    for (field, present) in [
+        ("byok_pricing", billing.byok_components_present),
+        ("platform_key_pricing", billing.platform_components_present),
+    ] {
+        if !present
+            && let Some(lane) = value
+                .get_mut(field)
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            lane.remove("components");
+        }
+    }
     value.serialize(serializer)
 }
 
@@ -303,6 +319,8 @@ impl<'de> Deserialize<'de> for BillingUpdate {
                 .as_object()
                 .map(|fields| fields.keys().cloned().collect())
                 .unwrap_or_default(),
+            byok_components_present: raw.pointer("/byok_pricing/components").is_some(),
+            platform_components_present: raw.pointer("/platform_key_pricing/components").is_some(),
             byok_present: raw.get("byok_pricing").is_some(),
             platform_present: raw.get("platform_key_pricing").is_some(),
             value: serde_json::from_value(raw).map_err(serde::de::Error::custom)?,
@@ -326,6 +344,22 @@ impl BillingUpdate {
         }
         if !self.platform_present {
             self.value.platform_key_pricing = current.platform_key_pricing.clone();
+        }
+        for (requested, previous, present) in [
+            (
+                &mut self.value.byok_pricing,
+                current.byok_pricing.as_ref(),
+                self.byok_components_present,
+            ),
+            (
+                &mut self.value.platform_key_pricing,
+                current.platform_key_pricing.as_ref(),
+                self.platform_components_present,
+            ),
+        ] {
+            if !present && let (Some(requested), Some(previous)) = (requested, previous) {
+                requested.components = previous.components.clone();
+            }
         }
         // A new lane-only payload must retain its rollout fallback and resale.
         // Legacy payloads keep the historical full-block update semantics.
@@ -2200,6 +2234,7 @@ pub async fn update_service(
                 || billing.platform_key_pricing.is_some()
                 || billing.byok_pricing_cleanup_metric_code.is_some()
                 || billing.platform_key_pricing_cleanup_metric_code.is_some()
+                || !billing.component_cleanup_metric_codes.is_empty()
                 || billing.resale_billable
                 || billing.lago_resale_metric_code.is_some()
         });
@@ -3787,6 +3822,7 @@ mod tests {
                 lago_metric_code: metric_code.to_string(),
                 model: None,
                 credits_per_unit_micros: 125_000,
+                credits_per_unit_pico: None,
                 synced_at: chrono::Utc::now(),
             })
             .await
@@ -4878,6 +4914,53 @@ mod platform_key_request_tests {
             BillingMetric::Tokens
         );
     }
+    #[test]
+    fn component_updates_preserve_omissions_clear_explicit_values_and_validate_units() {
+        let current: ServiceBilling = serde_json::from_value(serde_json::json!({"byok_pricing": {
+            "metric":"input_tokens","credits_per_unit":"0.000000250001", "components":[
+                {"metric":"output_tokens","credits_per_unit":"0.000001000001"}
+            ]
+        }}))
+        .unwrap();
+        for value in [
+            serde_json::json!({"metric":"input_tokens","credits_per_unit":"0.000000250001"}),
+            serde_json::json!({"metric":"input_tokens","credits_per_unit":"0.000000250001","components":null}),
+            serde_json::json!({"metric":"input_tokens","credits_per_unit":"0.000000250001","components":[]}),
+        ] {
+            let clear = value.get("components").is_some();
+            let mut request: UpdateServiceRequest =
+                serde_json::from_value(serde_json::json!({"billing":{"byok_pricing":value}}))
+                    .unwrap();
+            let billing = request.billing.as_mut().unwrap();
+            billing.preserve_omitted_fields(Some(&current));
+            crate::services::billing::pricing::normalize_lane_pricing(
+                "test",
+                Some(&current),
+                billing,
+            )
+            .unwrap();
+            assert_eq!(
+                billing.byok_pricing.as_ref().unwrap().components.len(),
+                usize::from(!clear)
+            );
+        }
+        for value in [
+            serde_json::json!({"platform_metric":"images"}),
+            serde_json::json!({"resale_metric":"input_tokens"}),
+            serde_json::json!({"byok_pricing":{"metric":"images","credits_per_unit":"1","components":[{"metric":"images","credits_per_unit":"2"}]}}),
+        ] {
+            let mut billing: ServiceBilling = serde_json::from_value(value).unwrap();
+            assert!(matches!(
+                crate::services::billing::pricing::normalize_lane_pricing(
+                    "test",
+                    None,
+                    &mut billing
+                ),
+                Err(AppError::ValidationError(_))
+            ));
+        }
+    }
+
     #[test]
     fn lane_only_update_preserves_legacy_fallback_and_resale() {
         let current = ServiceBilling {

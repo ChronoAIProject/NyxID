@@ -137,6 +137,7 @@ pub struct InvoiceSummary {
 pub struct PlanRate {
     pub lago_metric_code: String,
     pub credits_per_unit_micros: i64,
+    pub credits_per_unit_pico: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -888,21 +889,20 @@ impl LagoApi for LagoClient {
                 );
                 continue;
             }
-            let Some(micros) = charge
+            let amount = charge
                 .get("properties")
-                .and_then(|properties| value_string(properties, &["amount"]))
-                .as_deref()
-                .and_then(decimal_credits_to_micros)
-            else {
-                tracing::warn!(
-                    metric_code = %code,
-                    "Skipping Lago charge with unparseable amount in rate cache refresh"
-                );
+                .and_then(|properties| value_string(properties, &["amount"]));
+            let Some(micros) = amount.as_deref().and_then(decimal_credits_to_micros) else {
+                tracing::warn!(metric_code = %code, "Skipping Lago charge with unparseable amount in rate cache refresh");
                 continue;
             };
+            // Every NyxID-authored decimal fits the precise field. Retain the
+            // legacy mirror for external Lago amounts outside its numeric range.
+            let pico = amount.as_deref().and_then(super::amounts::decimal_to_pico);
             rates.push(PlanRate {
                 lago_metric_code: code,
                 credits_per_unit_micros: micros,
+                credits_per_unit_pico: pico,
             });
         }
         Ok(rates)
@@ -1922,7 +1922,7 @@ mod tests {
             assert!(charges[1].get("id").is_none());
             assert_eq!(charges[1]["billable_metric_id"], "metric-1");
             assert_eq!(charges[1]["charge_model"], "standard");
-            assert_eq!(charges[1]["properties"]["amount"], "0.125");
+            assert_eq!(charges[1]["properties"]["amount"], "0.000000250001");
             axum::Json(plan_response(Value::Array(charges.clone())))
         }
 
@@ -1944,8 +1944,12 @@ mod tests {
         .await;
         let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
 
+        let price = ServicePriceSync {
+            credits_per_unit: "0.000000250001".into(),
+            ..service_price_sync()
+        };
         client
-            .sync_standard_charge("standard", &service_price_sync())
+            .sync_standard_charge("standard", &price)
             .await
             .expect("sync service price");
     }
@@ -2320,6 +2324,7 @@ mod tests {
                             "charge_model": "standard",
                             "properties": { "amount": "0.01" }
                         },
+                        { "billable_metric_code": "platform_svc_image_byok_cache_read_tokens", "charge_model": "standard", "properties": { "amount": "0.000000250001" } },
                         {
                             "billable_metric_code": "resale_tokens",
                             "charge_model": "graduated",
@@ -2344,10 +2349,17 @@ mod tests {
                 PlanRate {
                     lago_metric_code: "platform_tokens".to_string(),
                     credits_per_unit_micros: 5,
+                    credits_per_unit_pico: Some(5_000_000),
                 },
                 PlanRate {
                     lago_metric_code: "platform_requests".to_string(),
                     credits_per_unit_micros: 10_000,
+                    credits_per_unit_pico: Some(10_000_000_000),
+                },
+                PlanRate {
+                    lago_metric_code: "platform_svc_image_byok_cache_read_tokens".into(),
+                    credits_per_unit_micros: 0,
+                    credits_per_unit_pico: Some(250001)
                 },
             ]
         );
@@ -3035,6 +3047,7 @@ mod tests {
             }),
             quantity: Some(1),
             pending_resale_quantity: None,
+            pending_platform_usage: None,
             status: crate::models::usage_meter::UsageStatus::Finalized,
             forwarded: true,
             released: true,

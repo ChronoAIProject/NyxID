@@ -26,6 +26,11 @@ pub struct BillingRouteContext {
     pub platform_metric: BillingMetric,
     pub platform_lago_metric_code: String,
     pub resale: Option<ResaleSpec>,
+    /// Additional platform rows, each with independent funding and Lago identity.
+    pub platform_components: Vec<ResaleSpec>,
+    pub capture_tokens: bool,
+    pub request_bytes: i64,
+    pub requested_images: i64,
     /// Admin opt-in from the service's billing config: only services
     /// explicitly marked platform_billable charge the platform layer.
     pub(crate) service_platform_billable: bool,
@@ -66,6 +71,12 @@ impl BillingRouteContext {
             .unwrap_or(legacy_metric_code)
             .to_string();
 
+        let legacy_spec = ResaleSpec {
+            metric: platform_metric,
+            lago_metric_code: platform_lago_metric_code.clone(),
+        };
+        let legacy_billable = service_platform_billable;
+        let mut platform_components = Vec::new();
         let mut platform_metric = platform_metric;
         if let Some(billing) =
             service_billing.filter(|b| b.byok_pricing.is_some() || b.platform_key_pricing.is_some())
@@ -79,17 +90,40 @@ impl BillingRouteContext {
                 CredentialClass::NyxidManagedMaster => billing.platform_key_pricing.as_ref(),
                 CredentialClass::NoAuth => None,
             };
-            match lane {
-                Some(lane)
-                    if lane.sync_status
-                        == crate::models::service_billing::PricingSyncStatus::Synced =>
-                {
-                    platform_metric = lane.metric;
-                    platform_lago_metric_code = lane.lago_metric_code.clone();
-                    service_platform_billable = true;
+            if let Some(lane) = lane {
+                use crate::models::service_billing::PricingSyncStatus;
+                let mut prices = Vec::new();
+                let mut needs_legacy = lane.sync_status != PricingSyncStatus::Synced;
+                if !needs_legacy {
+                    prices.push(ResaleSpec {
+                        metric: lane.metric,
+                        lago_metric_code: lane.lago_metric_code.clone(),
+                    });
                 }
-                None => service_platform_billable = false,
-                Some(_) => {} // Unsynchronized matching lane retains legacy charging.
+                for component in &lane.components {
+                    if component.sync_status == PricingSyncStatus::Synced {
+                        prices.push(ResaleSpec {
+                            metric: component.metric,
+                            lago_metric_code: component.lago_metric_code.clone(),
+                        });
+                    } else {
+                        needs_legacy = true;
+                    }
+                }
+                // The legacy fallback is a single charge per request, even when
+                // several components are awaiting synchronization.
+                if needs_legacy && legacy_billable {
+                    prices.push(legacy_spec);
+                }
+                service_platform_billable = !prices.is_empty();
+                if !prices.is_empty() {
+                    let primary = prices.remove(0);
+                    platform_metric = primary.metric;
+                    platform_lago_metric_code = primary.lago_metric_code;
+                    platform_components = prices;
+                }
+            } else {
+                service_platform_billable = false;
             }
         }
         // Apply the opt-in after lane selection so a BYOK lane cannot bypass it.
@@ -116,9 +150,61 @@ impl BillingRouteContext {
             platform_metric,
             platform_lago_metric_code,
             resale,
+            platform_components,
+            capture_tokens: platform_metric.is_token_family()
+                || platform_metric == BillingMetric::Images
+                || service_billing.is_some_and(|billing| {
+                    [
+                        billing.byok_pricing.as_ref(),
+                        billing.platform_key_pricing.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|lane| {
+                        lane.metric.is_token_family()
+                            || lane.metric == BillingMetric::Images
+                            || lane.components.iter().any(|c| {
+                                c.metric.is_token_family() || c.metric == BillingMetric::Images
+                            })
+                    })
+                }),
+            request_bytes: 0,
+            requested_images: 1,
             service_platform_billable,
             platform_metered: false,
             platform_billable: false,
+        }
+    }
+
+    pub fn with_request_body(mut self, body: Option<&[u8]>) -> Self {
+        self.request_bytes = body.map_or(0, |b| i64::try_from(b.len()).unwrap_or(i64::MAX));
+        self.requested_images = body
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+            .and_then(|value| value.get("n").and_then(serde_json::Value::as_i64))
+            .unwrap_or(1)
+            .max(1);
+        self
+    }
+
+    pub fn platform_specs(&self) -> impl Iterator<Item = (BillingMetric, &str)> {
+        std::iter::once((
+            self.platform_metric,
+            self.platform_lago_metric_code.as_str(),
+        ))
+        .chain(
+            self.platform_components
+                .iter()
+                .map(|c| (c.metric, c.lago_metric_code.as_str())),
+        )
+    }
+
+    pub fn estimated_quantity(&self, metric: BillingMetric) -> i64 {
+        if metric.is_token_family() {
+            crate::services::llm_usage_service::estimate_tokens_from_bytes(self.request_bytes)
+        } else if metric == BillingMetric::Images {
+            self.requested_images
+        } else {
+            1
         }
     }
 
@@ -159,6 +245,7 @@ mod tests {
             platform_key_pricing: None,
             byok_pricing_cleanup_metric_code: None,
             platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -185,6 +272,7 @@ mod tests {
     fn lane_selection_uses_final_credential_and_supersedes_legacy() {
         use crate::models::service_billing::{LanePricing, PricingSyncStatus};
         let lane = |metric, code: &str| LanePricing {
+            components: Vec::new(),
             metric,
             credits_per_unit: "0.125".into(),
             lago_metric_code: code.into(),
@@ -289,6 +377,62 @@ mod tests {
     }
 
     #[test]
+    fn components_charge_independently_with_only_one_unsynced_fallback() {
+        use crate::models::service_billing::{LanePricing, PricingSyncStatus};
+        let mut billing: ServiceBilling = serde_json::from_value(serde_json::json!({
+            "platform_billable": true,
+            "byok_pricing": {"metric":"input_tokens", "credits_per_unit":"0.01", "lago_metric_code":"primary", "sync_status":"synced", "components":[
+                {"metric":"output_tokens", "credits_per_unit":"0.02", "lago_metric_code":"output", "sync_status":"synced"},
+                {"metric":"images", "credits_per_unit":"1", "lago_metric_code":"images", "sync_status":"pending"},
+                {"metric":"cache_read_tokens", "credits_per_unit":"0.001", "lago_metric_code":"cache", "sync_status":"failed"}
+            ]}
+        })).unwrap();
+        let context = |billing: &ServiceBilling| {
+            BillingRouteContext::new(
+                BillingIngress::Proxy,
+                "request".into(),
+                "owner".into(),
+                "actor".into(),
+                None,
+                None,
+                None,
+                None,
+                NodeIntent::Direct,
+                "bearer".into(),
+                CredentialClass::UserOwned,
+                BillingMetric::Requests,
+                Some(billing),
+                false,
+            )
+            .with_request_body(Some(br#"{"n":3}"#))
+        };
+        let ctx = context(&billing);
+        assert_eq!(
+            ctx.platform_specs().collect::<Vec<_>>(),
+            vec![
+                (BillingMetric::InputTokens, "primary"),
+                (BillingMetric::OutputTokens, "output"),
+                (BillingMetric::Requests, "platform_requests")
+            ]
+        );
+        assert_eq!(ctx.estimated_quantity(BillingMetric::Images), 3);
+        assert!(ctx.estimated_quantity(BillingMetric::CacheReadTokens) > 0);
+        assert!(ctx.capture_tokens);
+        billing.platform_billable = false;
+        assert_eq!(context(&billing).platform_specs().count(), 2);
+        let LanePricing { components, .. } = billing.byok_pricing.as_mut().unwrap();
+        for component in components {
+            component.sync_status = PricingSyncStatus::Synced;
+        }
+        assert_eq!(context(&billing).platform_specs().count(), 4);
+        assert!(
+            context(&billing)
+                .platform_specs()
+                .all(|(metric, _)| metric != BillingMetric::Tokens)
+        );
+    }
+
+    #[test]
     fn platform_charge_restriction_is_opt_in_for_every_credential_class() {
         for platform_billable in [false, true] {
             for restricted in [false, true] {
@@ -369,6 +513,7 @@ mod tests {
             platform_key_pricing: None,
             byok_pricing_cleanup_metric_code: None,
             platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

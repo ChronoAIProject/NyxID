@@ -3,6 +3,7 @@ import {
   catalogInferenceSchema,
   inferenceViewSchema,
   lanePriceLabel,
+  lanePricingInputSchema,
   platformKeyConfigSchema,
 } from "./platform-keys";
 import { updateServiceSchema } from "./services";
@@ -68,5 +69,40 @@ describe("platform service contracts", () => {
       catalogServiceActionParamsSchema.parse({ serviceSlug: "llm-xai" })
         .use_platform_key,
     ).toBeUndefined();
+  });
+  it("validates component uniqueness and 12-digit prices and displays every component", () => {
+    const lane = {
+      metric: "input_tokens",
+      credits_per_unit: "0.000000250001",
+      components: [
+        { metric: "output_tokens", credits_per_unit: "0.000001000001" },
+        { metric: "images", credits_per_unit: "0.25" },
+      ],
+    };
+    expect(lanePricingInputSchema.safeParse(lane).success).toBe(true);
+    expect(lanePriceLabel(lane)).toBe(
+      "0.000000250001 credits / input token + 0.000001000001 credits / output token + 0.25 credits / image",
+    );
+    expect(
+      lanePricingInputSchema.safeParse({
+        ...lane,
+        components: [{ metric: "input_tokens", credits_per_unit: "1" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      lanePricingInputSchema.safeParse({
+        ...lane,
+        credits_per_unit: "0.0000000000001",
+      }).success,
+    ).toBe(false);
+    expect(
+      lanePricingInputSchema.safeParse({
+        ...lane,
+        credits_per_unit: "1000000.000000000001",
+      }).success,
+    ).toBe(false);
+    expect(
+      lanePriceLabel({ metric: "future_unit", credits_per_unit: "1" }),
+    ).toContain("future_unit");
   });
 });

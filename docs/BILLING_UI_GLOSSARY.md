@@ -23,7 +23,7 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 |---|---|
 | **Credit** | The billing unit. **1 credit = 1 USD.** NyxID creates every Lago wallet in USD with `rate_amount: "1"`, so credits are 1:1 with the wallet currency (`services/billing/lago_client.rs:93-95`, `:272-278`). Wallet amounts are always whole integers. |
 | **Credit micros** | One millionth of a credit — fixed-point, no floating point. Any field ending in `_credits_micros` is divided by 1,000,000 for display, with up to 6 decimals (`billing.tsx:584-591`). 4,200 micros → `0.0042 credits`. Usage costs and funding splits use micros; wallet balances and debits use whole credits. The wallet debit rounds its exact funded cost up to a whole credit, so the Usage cost is not the wallet balance change. |
-| **Layer** | Which of two independent charges produced a usage row. One request can produce one of each. |
+| **Layer** | Which of two independent charges produced a usage row. One request can produce several platform component rows and one resale row. |
 
 | Layer | What is being charged |
 |---|---|
@@ -33,11 +33,28 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 A **lane** selects the platform-layer price; it is not an extra billing layer.
 **Your own key** includes BYOK, agent credential overrides and node-managed keys.
 **NyxID platform key** means NyxID supplied the catalog master credential. The
-connect dialog and service detail show each lane's exact credits per token, request
-or byte. Pending/failed prices are labeled pending because legacy charging remains
-in force until sync succeeds. Resale may add its independent charge to platform-key
+connect dialog and service detail show every component's exact credits per unit,
+including input/output/cache-read/cache-write tokens and generated images. Each component
+has its own sync state. Synced prices charge independently; any pending/failed component
+adds at most one legacy fallback charge when configured, otherwise it is free. Resale may add its independent charge to platform-key
 traffic. Usage continues grouping by service/model/agent/layer; lane charges retain
 these dimensions and use the existing wallet/allowance/grant funding display.
+
+Unit prices allow 12 fractional digits (`PRICE_FRACTIONAL_DIGITS = 12`), with exact
+integer picocredit rates and truncated legacy micro rates for compatibility. Gross
+costs truncate to micros after multiplication; wallet debits ceil the exact remaining
+cost to whole credits. These are different amounts, even for a sub-microcredit cost.
+An allowance covers only rows with its exact component metric, before grants and wallet.
+Stable primary Lago codes remain `platform_svc_{slug}_{byok|pk}`; components append
+`_{metric}` and retain independent durable cleanup. Upgrade ALL replicas before
+configuring component prices, new-metric allowances, or prices beyond six decimals;
+old binaries cannot read those enums or charge picocredit rates.
+
+Priced input/cache classes do not overlap: OpenAI/Gemini caches are subtracted from
+input, while Anthropic's separate cache counts are not. The displayed provider token
+breakdown retains the original accounting. Successful image responses count generated
+images and may also carry token components. A zero component releases reservations
+and generates no Lago event. See [the lane contract](PLATFORM_KEYS_AND_INFERENCE.md#billing-lanes-and-durable-accounting).
 
 The admin service setting **Charge only NyxID-provided credentials**
 (`platform_charge_nyxid_credentials_only`, default off) restricts enabled platform
@@ -193,7 +210,7 @@ never sent to Lago, and render **Free** with **—** cost.
 | Label | Meaning |
 |---|---|
 | **Est. cost** | Sum of visible row costs in microcredits, displayed to 6 decimals. The same row costs are summed for each service. Missing estimates are skipped by `sum_optional`; a known zero counts, and all-unknown/empty costs show `-`. |
-| **Tokens / Requests / Bytes** | Quantities summed separately by metric. A token-metered LLM call contributes tokens, not a request count. |
+| **Tokens / Requests / Bytes / component units** | Quantities summed separately by metric. A token-metered LLM call contributes tokens, not a request count. |
 | **Funding line** | Appears when grants or allowances funded usage: **Funded by grants … · Funded by allowances … · Charged to wallet …**. These are exact pre-rounding costs for new settlements, not whole-credit wallet debits. |
 
 ### Table columns

@@ -23,8 +23,12 @@ pub fn configured_lane_metrics(service: &DownstreamService) -> Vec<BillingMetric
         .into_iter()
         .flatten()
         {
-            if !metrics.contains(&lane.metric) {
-                metrics.push(lane.metric);
+            for metric in
+                std::iter::once(lane.metric).chain(lane.components.iter().map(|c| c.metric))
+            {
+                if !metrics.contains(&metric) {
+                    metrics.push(metric);
+                }
             }
         }
     }
@@ -48,6 +52,10 @@ pub fn allowance_metric(
                 .flatten()
                 .any(|lane| {
                     lane.sync_status != crate::models::service_billing::PricingSyncStatus::Synced
+                        || lane.components.iter().any(|c| {
+                            c.sync_status
+                                != crate::models::service_billing::PricingSyncStatus::Synced
+                        })
                 })
         })
     {
@@ -68,11 +76,18 @@ pub fn allowance_metric(
 pub fn captures_tokens(service: &DownstreamService) -> bool {
     service.slug.starts_with("llm-")
         || resolve_platform_metric(service, false) == BillingMetric::Tokens
-        || configured_lane_metrics(service).contains(&BillingMetric::Tokens)
+        || configured_lane_metrics(service)
+            .iter()
+            .any(|metric| metric.is_token_family())
         || service
             .billing
             .as_ref()
             .is_some_and(|b| b.resale_billable && b.resale_metric == BillingMetric::Tokens)
+}
+
+/// Image-priced services also need bounded JSON/SSE usage capture.
+pub fn captures_usage(service: &DownstreamService) -> bool {
+    captures_tokens(service) || configured_lane_metrics(service).contains(&BillingMetric::Images)
 }
 
 /// Resolve the metric for one proxy request. Only an actual WebSocket
