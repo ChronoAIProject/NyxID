@@ -33,7 +33,7 @@ export function useOptions(optionSet: OptionSet, context: OptionsContext, search
       if (pageParam.version !== null && response.version !== pageParam.version) {
         throw new OptionsChangedError("Options changed. Reloading the current choices…");
       }
-      if (response.next_offset !== null && (response.next_offset <= pageParam.offset || response.next_offset > 10005)) {
+      if (response.next_offset !== null && (response.next_offset <= pageParam.offset || response.next_offset > 10007)) {
         throw new Error("Options returned invalid pagination. Reload and retry.");
       }
       return response;

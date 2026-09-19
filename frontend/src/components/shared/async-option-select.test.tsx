@@ -32,6 +32,31 @@ function nestedResponse(url: string) {
 }
 
 describe("editable async options selection", () => {
+  it("offers the proxy alias alongside proxy and preserves the selected scope strings", async () => {
+    fetchMock.mockImplementation(async (url) => {
+      const data = optionsResponse(String(url));
+      const search = new URL(String(url), "http://localhost").searchParams.get("search") ?? "";
+      data.items = [
+        ["proxy", "All services"],
+        ["proxy:*", "All services (proxy alias)"],
+        ["groups", "Group claims (empty for service accounts)"],
+      ].map(([value, label]) => ({ ...data.items[0]!, value: value!, label: label! }))
+        .filter((item) => item.value.includes(search));
+      data.total = data.items.length;
+      return new Response(JSON.stringify(data));
+    });
+    const user = userEvent.setup();
+    render(<Picker />, { wrapper: optionsWrapper() });
+    await user.click(screen.getByRole("combobox", { name: "Scopes" }));
+    await user.click(await screen.findByRole("option", { name: "proxy" }));
+    await user.click(await screen.findByRole("option", { name: "Explore proxy:" }));
+    expect(await screen.findByText("All services (proxy alias)")).toBeInTheDocument();
+    await user.click(await screen.findByRole("option", { name: "proxy:*" }));
+    expect(await screen.findByText("Group claims (empty for service accounts)")).toBeInTheDocument();
+    await user.click(await screen.findByRole("option", { name: "groups" }));
+    expect(screen.getByRole("status", { name: "Selected scopes" })).toHaveTextContent(/^proxy proxy:\* groups$/);
+  });
+
   it("selects both catalog skill scopes from options without submitting navigation prefixes", async () => {
     fetchMock.mockImplementation(async (url) => {
       const data = optionsResponse(String(url));

@@ -194,21 +194,10 @@ async fn service_scope_items(db: &Database, owner: &str) -> AppResult<Vec<Option
 }
 
 fn configured_item(value: &str, owner: &str) -> OptionItem {
-    let description = match value {
-        "proxy:*" => {
-            "Previously configured alias of proxy (All services). Existing authorization checks still apply."
-        }
-        "groups" => {
-            "Previously configured scope. Service accounts have no group memberships; userinfo returns an empty group list."
-        }
-        _ => {
-            "Custom scope previously configured for this owner. Its effect depends on the service handling it."
-        }
-    };
     OptionItem {
         value: value.into(),
         label: value.into(),
-        description: description.into(),
+        description: "Custom scope previously configured for this owner. Its effect depends on the service handling it.".into(),
         group: "Previously configured scopes".into(),
         source: "configured_scope".into(),
         owner_id: Some(owner.into()),

@@ -7,10 +7,10 @@ use serde::Deserialize;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::service_account::COLLECTION_NAME;
-use crate::mw::auth::{LLM_PROXY_SCOPE, PROXY_SCOPE};
+use crate::mw::auth::{LLM_PROXY_SCOPE, PROXY_SCOPE, WIDE_PROXY_SCOPE};
 use crate::services::curation_grant_service::{READ_SCOPE, WRITE_SCOPE};
 
-pub const DEFINITION_VERSION: &str = "service-account-suggestions-v2";
+pub const DEFINITION_VERSION: &str = "service-account-suggestions-v3";
 pub const MAX_OWNER_ACCOUNTS: i64 = 1_000;
 pub const MAX_CONFIGURED_SCOPES: usize = 10_000;
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -46,6 +46,16 @@ pub const DEFINITIONS: &[ScopeDefinition] = &[
         value: WRITE_SCOPE,
         label: "Manage catalog skills",
         description: "Assign, replace, remove, and restore skill recommendations for services permitted by a platform-admin-issued curation grant. This does not grant package editing or service execution.",
+    },
+    ScopeDefinition {
+        value: WIDE_PROXY_SCOPE,
+        label: "All services (proxy alias)",
+        description: "Existing alias of proxy with the same service and LLM gateway access. Resource and authorization checks still apply; it adds no access beyond proxy.",
+    },
+    ScopeDefinition {
+        value: "groups",
+        label: "Group claims (empty for service accounts)",
+        description: "Include groups in OAuth userinfo. Service accounts have no group memberships, so the group list is empty; this grants no access.",
     },
 ];
 
