@@ -110,3 +110,5 @@ pub mod assistant_conversation;
 pub mod assistant_message;
 pub mod catalog_skill_revision;
 pub mod channel_email;
+
+pub mod channel_delivery;

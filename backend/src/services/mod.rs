@@ -31,8 +31,10 @@ pub mod catalog_spec_registry;
 pub mod catalog_spec_sync;
 pub mod chain_verify_service;
 pub mod channel_adapters;
+pub mod channel_admission_service;
 pub mod channel_bot_service;
 pub mod channel_credentials;
+pub mod channel_delivery_service;
 pub mod channel_event_service;
 pub mod channel_inbound_service;
 pub mod channel_managed;
@@ -43,6 +45,7 @@ pub mod channel_registration;
 pub mod channel_relay_service;
 pub mod channel_routing_service;
 pub mod channel_send_service;
+pub mod channel_verification_service;
 #[cfg(test)]
 mod channel_x_tests;
 pub mod chatgpt_translator;

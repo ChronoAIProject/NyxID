@@ -7,6 +7,7 @@ import type {
   CreateChannelBotRequest,
   CreateChannelBotResponse,
   UpdateChannelBotRequest,
+  VerifyChannelBotResponse,
 } from "@/types/channels";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -58,6 +59,7 @@ export function useChannelBot(id: string) {
       return api.get<ChannelBotDetail>(`/channel-bots/${id}`);
     },
     enabled: Boolean(id),
+    refetchInterval: (query) => query.state.data?.last_verification?.status === "pending" ? 2000 : false,
   });
 }
 
@@ -123,14 +125,11 @@ export function useVerifyChannelBot() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (id: string): Promise<void> => {
-      return api.post<void>(`/channel-bots/${id}/verify`);
+    mutationFn: async (id: string): Promise<VerifyChannelBotResponse> => {
+      return api.post<VerifyChannelBotResponse>(`/channel-bots/${id}/verify`);
     },
-    onSuccess: (_data, id) => {
-      void queryClient.invalidateQueries({
-        queryKey: channelBotsQueryKeys.detail(id),
-      });
-      void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
   });
 }

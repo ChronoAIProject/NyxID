@@ -133,3 +133,14 @@ describe("channel bot mutations", () => {
     expect(mockPost).toHaveBeenCalledWith("/channel-bots/bot-1/verify");
   });
 });
+
+it("refreshes the current server observation once after a failed check", async () => {
+  mockGet.mockResolvedValue({ id: "bot-1", last_verification: null });
+  const { result } = renderHook(() => ({ bot: useChannelBot("bot-1"), verify: useVerifyChannelBot() }), { wrapper: createWrapper() });
+  await waitFor(() => expect(result.current.bot.isSuccess).toBe(true));
+  mockGet.mockResolvedValue({ id: "bot-1", last_verification: { id: "check", status: "failed" } });
+  mockPost.mockRejectedValue(new Error("verification failed"));
+  await expect(result.current.verify.mutateAsync("bot-1")).rejects.toThrow("verification failed");
+  await waitFor(() => expect(result.current.bot.data?.last_verification?.status).toBe("failed"));
+  expect(mockGet).toHaveBeenCalledTimes(2);
+});

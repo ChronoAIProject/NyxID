@@ -35,6 +35,8 @@ impl std::fmt::Debug for StoredAttachment {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    #[serde(default)]
+    pub platform_send: Option<super::channel_delivery::PlatformSendRecord>,
     #[serde(rename = "_id")]
     pub id: String,
     /// The bot that hosts this message's conversation. `None` for messages on
@@ -112,6 +114,7 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            platform_send: None,
             attachments: vec![],
             id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),

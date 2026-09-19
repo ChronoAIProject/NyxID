@@ -38,6 +38,8 @@ import type {
   CallbackStatus,
   ChannelConversationItem,
   ChannelMessageItem,
+  ChannelDelivery,
+  ChannelDeliveryStatus,
   ContentType,
   MessageDirection,
 } from "@/types/channels";
@@ -100,9 +102,43 @@ function directionLabel(dir: MessageDirection): string {
   return dir === "inbound" ? "Inbound" : "Outbound";
 }
 
+const receiptLabels: Record<ChannelDeliveryStatus, string> = {
+  accepted: "Platform accepted", sent: "Sent by WhatsApp", delivered: "Delivered",
+  read: "Read", played: "Played", failed: "Delivery failed", partial: "Partially accepted",
+  unknown: "Acceptance unknown", legacy_final_only: "Final part accepted",
+  recipient_only: "Recipient observations only",
+};
+
+function DeliveryDetails({ delivery }: { readonly delivery: ChannelDelivery }) {
+  const failed = delivery.status === "failed";
+  const uncertain = delivery.status === "partial" || delivery.status === "unknown";
+  return <div className="mt-2 min-w-0 space-y-2 text-[11px] text-muted-foreground">
+    <Badge variant={failed ? "destructive" : uncertain ? "warning" : "secondary"} className="max-w-full whitespace-normal text-[10px]">
+      {receiptLabels[delivery.status]}
+    </Badge>
+    {delivery.status === "legacy_final_only" && <p>Only the final component ID was recorded. Delivery of the whole reply cannot be confirmed.</p>}
+    {delivery.recipient_only && <p>These observations do not confirm delivery to every group participant.</p>}
+    {uncertain && <p>{delivery.status === "partial" ? "Only part of the reply was confirmed as accepted." : "WhatsApp acceptance could not be confirmed."} Check the conversation before sending again; some components may already have arrived.</p>}
+    {failed && <p>WhatsApp reported a failure. Review the component status and provider codes below.</p>}
+    {delivery.failure_code !== null && <p>Send error code (NyxID): {delivery.failure_code}</p>}
+    {delivery.expected_components !== null && <p>{delivery.components.length} of {delivery.expected_components} component IDs recorded.{delivery.status === "accepted" && " Acceptance does not confirm recipient delivery."}</p>}
+    {delivery.components.length > 0 && <details>
+      <summary className="cursor-pointer">Component receipts</summary>
+      <ol className="mt-2 space-y-3">
+        {delivery.components.map((part, index) => <li key={part.platform_message_id} className="min-w-0 break-words">
+          <p>Component {index + 1}: {receiptLabels[part.status]}</p>
+          <p className="break-all">{part.platform_message_id}</p>
+          {([ ["Sent", part.sent_at], ["Delivered", part.delivered_at], ["Read", part.read_at], ["Played", part.played_at], ["Failed", part.failed_at] ] as const).map(([label, time]) => time && <p key={label}>{label}: <time dateTime={time}>{time}</time></p>)}
+          {part.error_codes.length > 0 && <p>WhatsApp error codes: {part.error_codes.join(", ")}</p>}
+        </li>)}
+      </ol>
+    </details>}
+  </div>;
+}
+
 // -- Message Card --
 
-function MessageCard({ message }: { readonly message: ChannelMessageItem }) {
+export function MessageCard({ message }: { readonly message: ChannelMessageItem }) {
   const isInbound = message.direction === "inbound";
   const senderName =
     message.sender_display_name ?? message.sender_platform_id ?? "Unknown";
@@ -113,7 +149,7 @@ function MessageCard({ message }: { readonly message: ChannelMessageItem }) {
     >
       <div
         className={cn(
-          "max-w-[75%] rounded-xl px-4 py-3 shadow-sm",
+          "min-w-0 max-w-[90%] sm:max-w-[75%] rounded-xl px-4 py-3 shadow-sm",
           isInbound
             ? "bg-muted text-foreground"
             : "bg-white/[0.03] text-foreground",
@@ -148,18 +184,20 @@ function MessageCard({ message }: { readonly message: ChannelMessageItem }) {
         </p>
 
         {/* Footer */}
-        <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
           <span>{formatMessageTime(message.created_at)}</span>
-          {!isInbound && message.callback_status && (
+          {isInbound && message.callback_status && (
             <Badge
               variant={deliveryBadgeVariant(message.callback_status)}
               className="text-[10px]"
             >
-              {message.callback_status.charAt(0).toUpperCase() +
-                message.callback_status.slice(1)}
+              {message.callback_status === "delivered" ? "Callback accepted" : message.callback_status === "pending" ? "Callback pending" : message.callback_status === "timeout" ? "Callback timed out" : "Callback failed"}
             </Badge>
           )}
+          {!isInbound && !message.delivery && message.platform_message_id && <Badge variant="secondary" className="text-[10px]">Platform accepted</Badge>}
         </div>
+        {!isInbound && message.delivery && <DeliveryDetails delivery={message.delivery} />}
+        {!isInbound && !message.delivery && message.platform_message_id && <p className="mt-2 text-[11px] text-muted-foreground break-all">Platform message ID: {message.platform_message_id}. Acceptance does not confirm recipient delivery.</p>}
       </div>
     </div>
   );

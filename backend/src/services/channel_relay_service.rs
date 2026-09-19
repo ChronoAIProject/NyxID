@@ -184,7 +184,35 @@ pub async fn store_inbound_message_with_id(
     agent_api_key_id: &str,
     message_id: &str,
 ) -> AppResult<ChannelMessage> {
-    let message = ChannelMessage {
+    let message = inbound_metadata(
+        channel_bot_id,
+        conversation_id,
+        user_id,
+        platform,
+        inbound,
+        agent_api_key_id,
+        message_id,
+    );
+
+    db.collection::<ChannelMessage>(COLLECTION_NAME)
+        .insert_one(&message)
+        .await?;
+
+    Ok(message)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn inbound_metadata(
+    channel_bot_id: &str,
+    conversation_id: &str,
+    user_id: &str,
+    platform: &str,
+    inbound: &InboundMessage,
+    agent_api_key_id: &str,
+    message_id: &str,
+) -> ChannelMessage {
+    ChannelMessage {
+        platform_send: None,
         attachments: inbound
             .attachments
             .iter()
@@ -217,13 +245,7 @@ pub async fn store_inbound_message_with_id(
         platform_reply_message_id: None,
         created_at: Utc::now(),
         updated_at: None,
-    };
-
-    db.collection::<ChannelMessage>(COLLECTION_NAME)
-        .insert_one(&message)
-        .await?;
-
-    Ok(message)
+    }
 }
 
 /// Persist outbound-message metadata (agent -> platform direction).
@@ -243,9 +265,11 @@ pub async fn store_outbound_message(
     platform_message_id: Option<&str>,
     platform_conversation_id: Option<&str>,
     content_type: &str,
+    platform_send: Option<crate::models::channel_delivery::PlatformSendRecord>,
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
+        platform_send,
         attachments: vec![],
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: Some(channel_bot_id.to_string()),
@@ -309,6 +333,7 @@ pub async fn store_device_event_message(
     inherited_thread_id: Option<String>,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        platform_send: None,
         attachments: vec![],
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: channel_bot_id.map(String::from),
@@ -616,17 +641,19 @@ pub async fn update_outbound_message_timestamp(
 pub async fn list_messages(
     db: &mongodb::Database,
     conversation_id: &str,
+    owner_id: &str,
     page: u64,
     per_page: u64,
 ) -> AppResult<(Vec<ChannelMessage>, u64)> {
-    let filter = doc! { "conversation_id": conversation_id };
+    let filter = doc! { "conversation_id": conversation_id, "user_id": owner_id };
 
     let total = db
         .collection::<ChannelMessage>(COLLECTION_NAME)
         .count_documents(filter.clone())
         .await?;
 
-    let skip = (page.saturating_sub(1)) * per_page;
+    let per_page = per_page.clamp(1, 100);
+    let skip = (page.saturating_sub(1)).saturating_mul(per_page);
     let messages: Vec<ChannelMessage> = db
         .collection::<ChannelMessage>(COLLECTION_NAME)
         .find(filter)
@@ -838,6 +865,7 @@ mod tests {
             Some(platform_message_id),
             Some(&conversation.platform_conversation_id),
             "text",
+            None,
         )
         .await
         .expect("insert outbound message");
@@ -908,6 +936,7 @@ mod tests {
             Some(platform_message_id),
             Some(&conversation.platform_conversation_id),
             "text",
+            None,
         )
         .await
         .expect("insert first outbound message");
@@ -925,6 +954,7 @@ mod tests {
             Some(platform_message_id),
             Some(&conversation.platform_conversation_id),
             "text",
+            None,
         )
         .await
         .expect("insert duplicate outbound message");
@@ -1065,6 +1095,7 @@ mod tests {
     fn build_callback_payload_preserves_provider_attachment_handles() {
         let now = Utc::now();
         let message = ChannelMessage {
+            platform_send: None,
             attachments: vec![],
             id: "msg-attachment".to_string(),
             channel_bot_id: Some("bot-1".to_string()),
