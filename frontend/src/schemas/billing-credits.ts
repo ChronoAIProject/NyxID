@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { billingMetricSchema } from "@/schemas/billing";
 
-export const billingTargetKindSchema = z.enum(["all_users", "selected_users"]);
+export const billingTargetKindSchema = z.enum([
+  "all_users",
+  "selected_users",
+  "org_members",
+  "groups",
+]);
 export const creditGrantStatusSchema = z.enum([
   "active",
   "consumed",
@@ -45,6 +50,8 @@ export const creditGrantSchema = z.object({
   recipient_billing_enabled: z.boolean().optional(),
   activation_state: creditGrantActivationStateSchema,
   target_kind: billingTargetKindSchema,
+  target_org_ids: z.array(z.string()).optional(),
+  target_group_ids: z.array(z.string()).optional(),
   amount_credits: z.number().int().positive(),
   amount_micros: z.number().int().nonnegative(),
   remaining_micros: z.number().int().nonnegative(),
@@ -77,6 +84,10 @@ export const adminCreditGrantListSchema = creditGrantListSchema.extend({
 });
 
 export const creditSchedulePeriodSchema = z.object({
+  target_user_ids: z.array(z.string()).optional(),
+  target_kind: billingTargetKindSchema.optional(),
+  target_org_ids: z.array(z.string()).optional(),
+  target_group_ids: z.array(z.string()).optional(),
   start: z.string(),
   end: z.string(),
   status: z.enum(["disbursing", "complete"]),
@@ -100,6 +111,8 @@ export const creditScheduleSchema = z.object({
   recurrence: scheduleRecurrenceSchema,
   expiry: creditExpiryPolicySchema,
   target_kind: billingTargetKindSchema,
+  target_org_ids: z.array(z.string()).optional(),
+  target_group_ids: z.array(z.string()).optional(),
   target_user_ids: z.array(z.string()),
   scope: billingServiceScopeSchema,
   reason: z.string().nullable().optional(),
@@ -133,12 +146,15 @@ export const scheduleFormSchema = z
     recurrence: scheduleRecurrenceSchema,
     expiry: scheduleFormExpiryPolicySchema,
     target_kind: billingTargetKindSchema,
+    target_org_ids: z.array(z.string()).optional(),
+    target_group_ids: z.array(z.string()).optional(),
     target_user_ids: z.array(z.string()).max(500),
     all_services: z.boolean(),
     service_refs: z.array(z.string()).max(100),
     reason: z.string().trim().max(2_000),
   })
   .superRefine((value, ctx) => {
+    refineBillingTargets(value, ctx);
     if (
       value.expiry.kind === "after_days" &&
       (!Number.isInteger(value.expiry.days) ||
@@ -149,23 +165,6 @@ export const scheduleFormSchema = z
         code: "custom",
         path: ["expiry", "days"],
         message: "Enter 1 to 3,650 days",
-      });
-    }
-    if (
-      value.target_kind === "selected_users" &&
-      value.target_user_ids.length === 0
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["target_user_ids"],
-        message: "Select at least one owner",
-      });
-    }
-    if (value.target_kind === "all_users" && value.target_user_ids.length > 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["target_user_ids"],
-        message: "All-owner schedules cannot include selected owners",
       });
     }
     if (!value.all_services && value.service_refs.length === 0) {
@@ -188,6 +187,8 @@ export const issueGrantFormSchema = z
   .object({
     amount_credits: z.number().int().min(1).max(1_000_000),
     target_kind: billingTargetKindSchema,
+    target_org_ids: z.array(z.string()).optional(),
+    target_group_ids: z.array(z.string()).optional(),
     target_user_ids: z.array(z.string()).max(500),
     all_services: z.boolean(),
     service_refs: z.array(z.string()).max(100),
@@ -195,16 +196,7 @@ export const issueGrantFormSchema = z
     reason: z.string().trim().max(2_000),
   })
   .superRefine((value, ctx) => {
-    if (
-      value.target_kind === "selected_users" &&
-      value.target_user_ids.length === 0
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["target_user_ids"],
-        message: "Select at least one user",
-      });
-    }
+    refineBillingTargets(value, ctx);
     if (!value.all_services && value.service_refs.length === 0) {
       ctx.addIssue({
         code: "custom",
@@ -231,6 +223,9 @@ export const issueGrantFormSchema = z
   });
 
 export const issueGrantResponseSchema = z.object({
+  target_kind: billingTargetKindSchema.optional(),
+  target_org_ids: z.array(z.string()).optional(),
+  target_group_ids: z.array(z.string()).optional(),
   batch_id: z.string(),
   created_count: z.number().int().positive(),
   activated_count: z.number().int().nonnegative(),
@@ -252,6 +247,8 @@ export const usageAllowanceSchema = z.object({
   quantity: z.number().int().positive(),
   recurrence: allowanceRecurrenceSchema,
   target_kind: billingTargetKindSchema,
+  target_org_ids: z.array(z.string()).optional(),
+  target_group_ids: z.array(z.string()).optional(),
   target_user_ids: z.array(z.string()),
   is_active: z.boolean(),
   created_by: z.string(),
@@ -270,19 +267,12 @@ export const allowanceFormSchema = z
     quantity: z.number().int().min(1).max(1_000_000_000_000),
     recurrence: allowanceRecurrenceSchema,
     target_kind: billingTargetKindSchema,
+    target_org_ids: z.array(z.string()).optional(),
+    target_group_ids: z.array(z.string()).optional(),
     target_user_ids: z.array(z.string()).max(500),
   })
   .superRefine((value, ctx) => {
-    if (
-      value.target_kind === "selected_users" &&
-      value.target_user_ids.length === 0
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["target_user_ids"],
-        message: "Select at least one user",
-      });
-    }
+    refineBillingTargets(value, ctx);
   });
 
 export const userAllowanceBalanceSchema = z.object({
@@ -309,3 +299,48 @@ export type ScheduleForm = z.infer<typeof scheduleFormSchema>;
 export type UsageAllowance = z.infer<typeof usageAllowanceSchema>;
 export type AllowanceForm = z.infer<typeof allowanceFormSchema>;
 export type UserAllowanceBalance = z.infer<typeof userAllowanceBalanceSchema>;
+
+export type BillingTargetKind = z.infer<typeof billingTargetKindSchema>;
+
+function refineBillingTargets(
+  value: {
+    target_kind: BillingTargetKind;
+    target_user_ids: string[];
+    target_org_ids?: string[];
+    target_group_ids?: string[];
+  },
+  ctx: z.RefinementCtx,
+) {
+  for (const [kind, field, label] of [
+    ["selected_users", "target_user_ids", "owner"],
+    ["org_members", "target_org_ids", "organization"],
+    ["groups", "target_group_ids", "group"],
+  ] as const) {
+    const ids = value[field] ?? [];
+    if (kind === value.target_kind) {
+      if (ids.length === 0 || ids.length > 500) {
+        ctx.addIssue({
+          code: "custom",
+          path: [field],
+          message: `Select 1 to 500 ${label}s`,
+        });
+      }
+      if (
+        ids.some((id) => !id.trim() || id !== id.trim()) ||
+        new Set(ids).size !== ids.length
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: [field],
+          message: "Selections must be unique and non-empty",
+        });
+      }
+    } else if (ids.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: [field],
+        message: "Clear selections for other recipient kinds",
+      });
+    }
+  }
+}

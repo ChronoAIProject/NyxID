@@ -129,6 +129,23 @@ model at `models/billing_wallet.rs`).
 
 For mixed billing lanes, the allowance unit selector follows [the metering and allowance rules](USAGE_BILLING_LAGO_SPEC.md#40-metadata-only-route-context-r1).
 
+### Credit-benefit recipients
+
+The admin grant, credit schedule, and allowance dialogs share four choices:
+
+| Recipients | Wallet receiving the benefit |
+|---|---|
+| **All billing owners** (`all_users`) | Every active person's and organization's wallet. |
+| **Selected owners** (`selected_users`, `target_user_ids`) | Each selected person's or organization's wallet. Selecting an organization funds its shared wallet. |
+| **Organization members** (`org_members`, `target_org_ids`) | Each active person's personal wallet when they have a non-revoked membership in any selected organization, including viewers. The organization wallet receives nothing. |
+| **Group members** (`groups`, `target_group_ids`) | Each active person's personal wallet through direct group membership. Parent/child groups are not expanded; organization accounts are excluded. |
+
+Selected lists contain 1–500 unique ids, with only the list matching the recipient kind populated. Organizations must be active; groups must exist. Overlapping memberships pay a person once. One-shot org/group grants reject more than 100,000 resolved recipients; larger populations use schedules.
+
+Grants snapshot recipients when issued. Schedule periods freeze the recipient policy when claimed and page by person id, excluding later signups and later organization joins. Revocations/deactivation can remove people ahead of the cursor. Group membership has no join timestamp: existing people's group changes can affect an unfinished period, while later-created people wait for the next period. Allowances follow live membership in both the balance display and funding path. Removing membership stops new matching immediately; existing consumption-period rows are retained and reservations already admitted can settle. Reading with an organization `owner_id` never applies member benefits to its wallet.
+
+Old rows default the new id lists to empty. Older replicas do not understand the new enum values: upgrade all readers/writers before using member targets (rollback requires migrating every persisted new-kind row).
+
 ### Header
 
 | Label | Meaning | API field |

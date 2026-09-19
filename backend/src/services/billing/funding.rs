@@ -1283,6 +1283,8 @@ mod tests {
                 recurrence: AllowanceRecurrence::Daily,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 is_active: true,
                 created_by: "admin-1".to_string(),
                 created_at: now,
@@ -1313,6 +1315,8 @@ mod tests {
                 schedule_origin: None,
                 recipient_user_id: owner_id.to_string(),
                 target_kind: BillingTargetKind::SelectedUsers,
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 amount_credits: 2,
                 amount_micros: 2_000_000,
                 remaining_micros: 2_000_000,
@@ -1481,3 +1485,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod target_tests;

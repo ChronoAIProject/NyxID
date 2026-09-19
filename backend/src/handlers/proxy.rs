@@ -7079,6 +7079,8 @@ mod tests {
                 recurrence: crate::models::usage_allowance::AllowanceRecurrence::Monthly,
                 target_kind: crate::models::billing_target::BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 created_by: "admin-1".to_string(),
             },
         )
