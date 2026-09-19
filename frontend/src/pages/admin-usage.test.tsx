@@ -46,8 +46,13 @@ beforeEach(() => {
           display_name: "Alice",
           email: "alice@example.test",
         },
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          display_name: null,
+          email: "no-name@example.test",
+        },
       ],
-      total: 1,
+      total: 2,
     },
     isPending: false,
     isError: false,
@@ -74,6 +79,7 @@ it("writes period, service, user, ranking and pagination changes into URL state"
   await user.click(screen.getByRole("combobox", { name: "Usage period" }));
   await user.click(screen.getByRole("option", { name: "Last 7 days" }));
   expect(mocks.navigate).toHaveBeenLastCalledWith({
+    to: "/admin/usage",
     search: expect.objectContaining({ period: "7d", page: 1 }),
   });
   await user.click(screen.getByRole("combobox", { name: "Filter by service" }));
@@ -81,6 +87,7 @@ it("writes period, service, user, ranking and pagination changes into URL state"
     screen.getByRole("option", { name: "Example model · llm-example" }),
   );
   expect(mocks.navigate).toHaveBeenLastCalledWith({
+    to: "/admin/usage",
     search: expect.objectContaining({ service: "llm-example", page: 1 }),
   });
   await user.click(screen.getByRole("button", { name: "Filter by user" }));
@@ -97,6 +104,7 @@ it("writes period, service, user, ranking and pagination changes into URL state"
     screen.getByRole("button", { name: "Alice alice@example.test" }),
   );
   expect(mocks.navigate).toHaveBeenLastCalledWith({
+    to: "/admin/usage",
     search: expect.objectContaining({
       user: usageFixture().ranking[0]!.user.id,
     }),
@@ -104,10 +112,12 @@ it("writes period, service, user, ranking and pagination changes into URL state"
   await user.click(screen.getByRole("combobox", { name: "Ranking sort" }));
   await user.click(screen.getByRole("option", { name: "Gross cost" }));
   expect(mocks.navigate).toHaveBeenLastCalledWith({
+    to: "/admin/usage",
     search: expect.objectContaining({ sort: "cost" }),
   });
   await user.click(screen.getByRole("button", { name: "Next page" }));
   expect(mocks.navigate).toHaveBeenLastCalledWith({
+    to: "/admin/usage",
     search: expect.objectContaining({ page: 2 }),
   });
 });
@@ -175,4 +185,19 @@ it("keeps a future metric visible and exposes partial historical pricing", () =>
   renderPage();
   expect(screen.getByText("future_units")).toBeInTheDocument();
   expect(screen.getByText(/Costs are partial: 3/)).toBeInTheDocument();
+});
+
+it("shows an email as the label for a user with no display name", async () => {
+  renderPage();
+  await userEvent.click(screen.getByRole("button", { name: "Filter by user" }));
+  const option = screen.getByRole("button", {
+    name: "no-name@example.test no-name@example.test",
+  });
+  expect(option).toBeInTheDocument();
+  expect(screen.queryByText("Unnamed user")).not.toBeInTheDocument();
+  await userEvent.click(option);
+  expect(mocks.navigate).toHaveBeenLastCalledWith({
+    to: "/admin/usage",
+    search: expect.objectContaining({ user: "33333333-3333-4333-8333-333333333333" }),
+  });
 });

@@ -1,3 +1,13 @@
+import type { z } from "zod";
+import type { platformCredentialsSchema } from "@/schemas/admin-platform-credentials";
+import type {
+  adminUsageResponseSchema,
+  adminUsageSearchSchema,
+  usageStatsSchema,
+  usageIdentitySchema,
+  usageServiceSchema,
+  usageRankingSchema,
+} from "@/schemas/admin-usage";
 import type { PlatformRole } from "./api";
 import type {
   DataTableFilterField,
@@ -459,16 +469,16 @@ export interface UpdateInviteCodeRequest {
 export interface DeactivateInviteCodeResponse {
   readonly message: string;
 }
-export type PlatformCredentials = import("zod").infer<typeof import("@/schemas/admin-platform-credentials").platformCredentialsSchema>;
+export type PlatformCredentials = z.infer<typeof platformCredentialsSchema>;
 export interface PlatformCredentialsUpdate {
   readonly fields?: Record<string, string | null>;
   readonly regenerate_verify_token?: boolean;
 }
 
 // Dedicated admin usage API types are inferred from the receipt validators.
-export type AdminUsageResponse = import("zod").z.infer<typeof import("@/schemas/admin-usage").adminUsageResponseSchema>;
-export type AdminUsageSearch = import("zod").z.infer<typeof import("@/schemas/admin-usage").adminUsageSearchSchema>;
-export type AdminUsageStats = import("zod").z.infer<typeof import("@/schemas/admin-usage").usageStatsSchema>;
-export type AdminUsageIdentity = import("zod").z.infer<typeof import("@/schemas/admin-usage").usageIdentitySchema>;
-export type AdminUsageService = import("zod").z.infer<typeof import("@/schemas/admin-usage").usageServiceSchema>;
-export type AdminUsageRanking = import("zod").z.infer<typeof import("@/schemas/admin-usage").usageRankingSchema>;
+export type AdminUsageResponse = z.infer<typeof adminUsageResponseSchema>;
+export type AdminUsageSearch = z.infer<typeof adminUsageSearchSchema>;
+export type AdminUsageStats = z.infer<typeof usageStatsSchema>;
+export type AdminUsageIdentity = z.infer<typeof usageIdentitySchema>;
+export type AdminUsageService = z.infer<typeof usageServiceSchema>;
+export type AdminUsageRanking = z.infer<typeof usageRankingSchema>;

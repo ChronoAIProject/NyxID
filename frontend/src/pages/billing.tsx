@@ -1,3 +1,4 @@
+import { MetricBlock } from "@/components/shared/metric-block";
 import { formatCredits, formatNumber, formatEstimatedCredits } from "@/lib/billing-format";
 import { billingMetricLabel } from "@/lib/billing-units";
 import { Fragment, useMemo, useState } from "react";
@@ -692,23 +693,6 @@ function describeAgent(row: BillingUsageRow): string {
   if (row.api_key_name) return row.api_key_name;
   if (row.api_key_id) return "Unnamed key";
   return "No agent key";
-}
-
-function MetricBlock({
-  label,
-  value,
-}: {
-  readonly label: string;
-  readonly value: string;
-}) {
-  return (
-    <div className="rounded-lg border border-border/70 bg-overlay px-3 py-3">
-      <div className="text-[11px] text-muted-foreground">{label}</div>
-      <div className="mt-1 truncate text-[20px] font-semibold leading-tight">
-        {value}
-      </div>
-    </div>
-  );
 }
 
 function formatTokenBreakdown(

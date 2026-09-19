@@ -43,3 +43,17 @@ export function formatAllowancePreview(
 
   return `${formatted} ${billingMetricLabel(metric, quantity)}${compactSuffix} free ${RECURRENCE_PHRASES[recurrence]}`;
 }
+
+/** Credential labels for platform-wide reporting; preserve future classes. */
+const CREDENTIAL_CLASS_LABELS: Readonly<Record<string, string>> = {
+  nyxid_managed_master: "NyxID platform key",
+  user_owned: "User's own key (BYOK)",
+  agent_override_user_owned: "Own key · agent override",
+  node_managed: "Own key · node-managed",
+  nyxid_platform_oauth_app: "Shared OAuth app",
+  no_auth: "No authentication",
+};
+
+export function credentialClassLabel(credentialClass: string): string {
+  return CREDENTIAL_CLASS_LABELS[credentialClass] ?? credentialClass;
+}

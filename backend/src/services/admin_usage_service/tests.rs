@@ -97,6 +97,37 @@ async fn read(db: &mongodb::Database, query: AdminUsageQuery) -> AdminUsageRespo
 }
 
 #[tokio::test]
+async fn identities_without_display_names_use_email() {
+    let db = connect_test_database("admin_usage_identity_email")
+        .await
+        .expect("MongoDB required");
+    for display_name in [
+        Bson::Null,
+        Bson::String(String::new()),
+        Bson::String("  ".into()),
+    ] {
+        let actor = uuid::Uuid::new_v4().to_string();
+        let email = format!("{actor}@example.test");
+        db.collection::<Document>("users")
+            .insert_one(doc! { "_id": &actor, "display_name": display_name, "email": &email })
+            .await
+            .unwrap();
+        insert(&db, meter(&actor, &actor, "example", 1)).await;
+        let result = read(
+            &db,
+            AdminUsageQuery {
+                user: Some(actor),
+                ..query()
+            },
+        )
+        .await;
+        assert_eq!(result.ranking[0].user.display_name, email);
+        assert_eq!(result.selected_user.unwrap().display_name, email);
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn deduplicates_components_and_resale_and_attributes_org_usage() {
     let db = connect_test_database("admin_usage_dedupe")
         .await
@@ -675,6 +706,11 @@ async fn admin_query_execution_stats() {
             ];
             let mut count =
                 doc! { "aggregate": "audit_log", "pipeline": count_pipeline, "cursor": {} };
+            if phase == "after" && filter.is_empty() {
+                // estimated_document_count issues a count command without a
+                // query, allowing MongoDB's RECORD_STORE_FAST_COUNT plan.
+                count = doc! { "count": "audit_log" };
+            }
             if phase == "after"
                 && let Some(hint) = audit::admin_count_hint(&params, &filter)
             {

@@ -3,6 +3,8 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { ChevronDown, ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { useAdminUsage } from "@/hooks/use-admin-usage";
 import { useAdminUsers } from "@/hooks/use-admin";
+import { MetricBlock } from "@/components/shared/metric-block";
+import { credentialClassLabel } from "@/lib/billing-units";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { ArticleIcon } from "@/components/icons/empty-state";
@@ -60,14 +62,6 @@ const SORT_LABELS: Record<AdminUsageSearch["sort"], string> = {
   completion_tokens: "Output tokens",
   cached_tokens: "Cache-read tokens",
   cache_creation_tokens: "Cache-write tokens",
-};
-const CLASS_LABELS: Record<string, string> = {
-  nyxid_managed_master: "NyxID platform key",
-  user_owned: "Your own key",
-  agent_override_user_owned: "Own key · agent override",
-  node_managed: "Own key · node managed",
-  nyxid_platform_oauth_app: "Own key lane · shared OAuth app",
-  no_auth: "No authentication",
 };
 
 function Choice({
@@ -196,7 +190,7 @@ function UserPicker({
                 }}
               >
                 <span>
-                  {user.display_name || "Unnamed user"}
+                  {user.display_name || user.email}
                   <span className="block break-all text-[11px] text-muted-foreground">
                     {user.email}
                   </span>
@@ -282,7 +276,7 @@ function StatsTable({
 }) {
   return (
     <>
-      <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
+      <div className="hidden overflow-hidden rounded-lg border border-border bg-card md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -314,7 +308,7 @@ function StatsTable({
         {rows.map((row) => (
           <div
             key={row.key}
-            className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
+            className="space-y-3 rounded-lg border border-border bg-card p-4"
           >
             {row.label}
             <div className="font-mono text-[11px]">
@@ -342,7 +336,7 @@ function ServiceTable({ services }: { services: AdminUsageService[] }) {
             <DataTableBadgeCell>
               {service.by_credential_class.map((lane) => (
                 <Badge key={lane.credential_class} variant="secondary">
-                  {CLASS_LABELS[lane.credential_class] ?? lane.credential_class}
+                  {credentialClassLabel(lane.credential_class)}
                   :{" "}
                   <span className="font-mono">
                     {formatNumber(lane.requests)}
@@ -423,7 +417,7 @@ function RankingTable({
   );
   return (
     <>
-      <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
+      <div className="hidden overflow-hidden rounded-lg border border-border bg-card md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -468,7 +462,7 @@ function RankingTable({
         {rows.map((row) => (
           <div
             key={rowKey(row)}
-            className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
+            className="space-y-3 rounded-lg border border-border bg-card p-4"
           >
             {person(row)}
             <ServiceName service={row} />
@@ -484,27 +478,6 @@ function RankingTable({
         ))}
       </div>
     </>
-  );
-}
-function Stat({
-  label,
-  value,
-  detail,
-}: {
-  label: string;
-  value: string;
-  detail?: ReactNode;
-}) {
-  return (
-    <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
-      <div className="break-words font-mono text-[22px] tabular-nums">
-        {value}
-      </div>
-      <div className="mt-1 text-[11px] text-muted-foreground">{label}</div>
-      {detail && (
-        <div className="mt-2 text-[11px] text-muted-foreground">{detail}</div>
-      )}
-    </div>
   );
 }
 function localTime(value?: string) {
@@ -524,11 +497,11 @@ export function AdminUsagePage() {
   const search = normalizeAdminUsageSearch(
     useSearch({ from: "/dashboard/admin/usage" }),
   );
-  const navigate = useNavigate({ from: "/admin/usage" });
+  const navigate = useNavigate();
   const usage = useAdminUsage(search);
   const data = usage.data;
   const change = (patch: Partial<AdminUsageSearch>) =>
-    void navigate({ search: { ...search, page: 1, ...patch } });
+    void navigate({ to: "/admin/usage", search: { ...search, page: 1, ...patch } });
   const rangeError =
     search.period === "custom" ? usageRangeError(search.from, search.to) : null;
   const periodChange = (period: string) => {
@@ -619,7 +592,7 @@ export function AdminUsagePage() {
         <Button
           variant="ghost"
           onClick={() =>
-            void navigate({ search: normalizeAdminUsageSearch({}) })
+            void navigate({ to: "/admin/usage", search: normalizeAdminUsageSearch({}) })
           }
         >
           Reset filters
@@ -680,15 +653,15 @@ export function AdminUsagePage() {
               {formatNumber(data.totals.unique_services)} services
             </p>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <Stat
+              <MetricBlock
                 label="Requests"
                 value={formatNumber(data.totals.requests)}
               />
-              <Stat
+              <MetricBlock
                 label="Unique users"
                 value={formatNumber(data.totals.unique_users)}
               />
-              <Stat
+              <MetricBlock
                 label="Total tokens"
                 value={formatNumber(data.totals.total_tokens)}
                 detail={
@@ -701,12 +674,12 @@ export function AdminUsagePage() {
                   </span>
                 }
               />
-              <Stat
+              <MetricBlock
                 label="Gross cost"
                 value={formatEstimatedCredits(data.totals.gross_cost_micros)}
                 detail={`${formatNumber(data.totals.exact_cost_events)} exact events · ${formatNumber(data.totals.legacy_cost_events)} legacy events`}
               />
-              <Stat
+              <MetricBlock
                 label="Images"
                 value={formatNumber(data.totals.quantities.images ?? 0)}
               />
@@ -724,7 +697,7 @@ export function AdminUsagePage() {
                     ].includes(metric),
                 )
                 .map(([metric, quantity]) => (
-                  <Stat
+                  <MetricBlock
                     key={metric}
                     label={metricLabel(metric)}
                     value={formatNumber(quantity)}
@@ -776,8 +749,7 @@ export function AdminUsagePage() {
                       key: lane.credential_class,
                       label: (
                         <Badge variant="secondary">
-                          {CLASS_LABELS[lane.credential_class] ??
-                            lane.credential_class}
+                          {credentialClassLabel(lane.credential_class)}
                         </Badge>
                       ),
                       usage: lane,

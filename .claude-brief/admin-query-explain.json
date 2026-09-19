@@ -12,7 +12,7 @@
       "stats": {
         "docs_examined": 500000,
         "keys_examined": 0,
-        "execution_ms": 97,
+        "execution_ms": 108,
         "winning_plan": {
           "isCached": false,
           "queryPlan": {
@@ -27,7 +27,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s7 env: {  }",
-            "stages": "[2] project [s7 = newBsonObj(\"_id\", s5, \"n\", s6)] \n[2] project [s5 = 1, s6 = (convert ( s4, int32) ?: s4)] \n[2] group [] [s4 = count()] spillSlots[s3] mergingExprs[sum(s3)] \n[1] scan s1 s2 none none none none none none lowPriority [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" true false "
+            "stages": "[2] project [s7 = newBsonObj(\"_id\", s5, \"n\", s6)] \n[2] project [s5 = 1, s6 = (convert ( s4, int32) ?: s4)] \n[2] group [] [s4 = count()] spillSlots[s3] mergingExprs[sum(s3)] \n[1] scan s1 s2 none none none none none none lowPriority [] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" true false "
           }
         }
       }
@@ -124,7 +124,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s6 env: {  }",
-            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(3C6576656E742D303037000F0104) KS(3C6576656E742D30303700F5FE04) none s1 none none [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"event_type_1_created_at_-1\" true "
+            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(3C6576656E742D303037000F0104) KS(3C6576656E742D30303700F5FE04) none s1 none none [] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"event_type_1_created_at_-1\" true "
           }
         }
       }
@@ -183,7 +183,7 @@
       "stats": {
         "docs_examined": 0,
         "keys_examined": 3500000,
-        "execution_ms": 1723,
+        "execution_ms": 1784,
         "winning_plan": {
           "isCached": false,
           "queryPlan": {
@@ -471,7 +471,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s20 env: {  }",
-            "stages": "[9] project [s20 = newBsonObj(\"_id\", s18, \"n\", s19)] \n[9] project [s18 = 1, s19 = (convert ( s17, int32) ?: s17)] \n[9] group [] [s17 = count()] spillSlots[s16] mergingExprs[sum(s16)] \n[8] unique [s15] \n[8] union [s15] \n    branch0 [s2] \n        [1] filter {(((s1 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s1) ?: false))} \n        [1] ixscan_generic IndexBounds(\"field #0['_id']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i]\") none s2 none none lowPriority [s1 = 0] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"_id_\" true \n    branch1 [s4] \n        [2] filter {(((s3 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s3) ?: false))} \n        [2] ixscan_generic IndexBounds(\"field #0['user_id']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MaxKey, MinKey]\") none s4 none none lowPriority [s3 = 0] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"user_id_1_created_at_-1\" true \n    branch2 [s6] \n        [3] filter {(((s5 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s5) ?: false))} \n        [3] ixscan_generic IndexBounds(\"field #0['event_type']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MaxKey, MinKey]\") none s6 none none lowPriority [s5 = 0] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"event_type_1_created_at_-1\" true \n    branch3 [s8] \n        [4] filter {(((s7 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s7) ?: false))} \n        [4] ixscan_generic IndexBounds(\"field #0['api_key_id']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MaxKey, MinKey]\") none s8 none none lowPriority [s7 = 0] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"api_key_id_1_created_at_-1\" true \n    branch4 [s10] \n        [5] filter {(((s9 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s9) ?: false))} \n        [5] ixscan_generic IndexBounds(\"field #0['api_key_name']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MinKey, MaxKey], field #2['_id']: [MinK\"...) none s10 none none lowPriority [s9 = 0] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"audit_log_sort_api_key_name\" true \n    branch5 [s12] \n        [6] filter {(((s11 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s11) ?: false))} \n        [6] ixscan_generic IndexBounds(\"field #0['ip_address']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MinKey, MaxKey], field #2['_id']: [MinKey\"...) none s12 none none lowPriority [s11 = 0] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"audit_log_sort_ip_address\" true \n    branch6 [s14] \n        [7] filter {(((s13 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s13) ?: false))} \n        [7] ixscan_generic IndexBounds(\"field #0['user_agent']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MinKey, MaxKey], field #2['_id']: [MinKey\"...) none s14 none none lowPriority [s13 = 0] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"audit_log_sort_user_agent\" true \n"
+            "stages": "[9] project [s20 = newBsonObj(\"_id\", s18, \"n\", s19)] \n[9] project [s18 = 1, s19 = (convert ( s17, int32) ?: s17)] \n[9] group [] [s17 = count()] spillSlots[s16] mergingExprs[sum(s16)] \n[8] unique [s15] \n[8] union [s15] \n    branch0 [s2] \n        [1] filter {(((s1 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s1) ?: false))} \n        [1] ixscan_generic IndexBounds(\"field #0['_id']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i]\") none s2 none none lowPriority [s1 = 0] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"_id_\" true \n    branch1 [s4] \n        [2] filter {(((s3 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s3) ?: false))} \n        [2] ixscan_generic IndexBounds(\"field #0['user_id']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MaxKey, MinKey]\") none s4 none none lowPriority [s3 = 0] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"user_id_1_created_at_-1\" true \n    branch2 [s6] \n        [3] filter {(((s5 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s5) ?: false))} \n        [3] ixscan_generic IndexBounds(\"field #0['event_type']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MaxKey, MinKey]\") none s6 none none lowPriority [s5 = 0] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"event_type_1_created_at_-1\" true \n    branch3 [s8] \n        [4] filter {(((s7 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s7) ?: false))} \n        [4] ixscan_generic IndexBounds(\"field #0['api_key_id']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MaxKey, MinKey]\") none s8 none none lowPriority [s7 = 0] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"api_key_id_1_created_at_-1\" true \n    branch4 [s10] \n        [5] filter {(((s9 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s9) ?: false))} \n        [5] ixscan_generic IndexBounds(\"field #0['api_key_name']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MinKey, MaxKey], field #2['_id']: [MinK\"...) none s10 none none lowPriority [s9 = 0] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"audit_log_sort_api_key_name\" true \n    branch5 [s12] \n        [6] filter {(((s11 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s11) ?: false))} \n        [6] ixscan_generic IndexBounds(\"field #0['ip_address']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MinKey, MaxKey], field #2['_id']: [MinKey\"...) none s12 none none lowPriority [s11 = 0] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"audit_log_sort_ip_address\" true \n    branch6 [s14] \n        [7] filter {(((s13 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), s13) ?: false))} \n        [7] ixscan_generic IndexBounds(\"field #0['user_agent']: [CollationKey(0x), {}), [/benchmark\\-needle/i, /benchmark\\-needle/i], field #1['created_at']: [MinKey, MaxKey], field #2['_id']: [MinKey\"...) none s14 none none lowPriority [s13 = 0] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"audit_log_sort_user_agent\" true \n"
           }
         }
       }
@@ -482,7 +482,7 @@
       "stats": {
         "docs_examined": 10202,
         "keys_examined": 10202,
-        "execution_ms": 221,
+        "execution_ms": 421,
         "winning_plan": {
           "isCached": false,
           "stage": "SUBPLAN",
@@ -573,8 +573,8 @@
       "query": "audit.date.count",
       "stats": {
         "docs_examined": 0,
-        "keys_examined": 14505,
-        "execution_ms": 2,
+        "keys_examined": 14658,
+        "execution_ms": 1,
         "winning_plan": {
           "isCached": false,
           "queryPlan": {
@@ -625,7 +625,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s6 env: {  }",
-            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(78800001A0B1D018000A0104) KS(78800001A0BC1CD0000A0104) none s1 none none [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"audit_log_sort_created_at\" true "
+            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(78800001A0B1D018000A0104) KS(78800001A0BC1CD0000A0104) none s1 none none [] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"audit_log_sort_created_at\" true "
           }
         }
       }
@@ -677,9 +677,9 @@
       "phase": "before",
       "query": "audit.search_date.count",
       "stats": {
-        "docs_examined": 14505,
-        "keys_examined": 14505,
-        "execution_ms": 104,
+        "docs_examined": 14658,
+        "keys_examined": 14658,
+        "execution_ms": 107,
         "winning_plan": {
           "isCached": false,
           "queryPlan": {
@@ -765,7 +765,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s19 env: { s5 = {\"created_at\" : 1, \"_id\" : 1} }",
-            "stages": "[3] project [s19 = newBsonObj(\"_id\", s17, \"n\", s18)] \n[3] project [s17 = 1, s18 = (convert ( s16, int32) ?: s16)] \n[3] group [] [s16 = count()] spillSlots[s15] mergingExprs[sum(s15)] \n[2] filter {((traverseF(s8, lambda(l8.0) { (((l8.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l8.0) ?: false)) }, false) || (traverseF(s9, lambda(l9.0) { (((l9.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l9.0) ?: false)) }, false) || traverseF(s10, lambda(l10.0) { (((l10.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l10.0) ?: false)) }, false))) || ((traverseF(s11, lambda(l11.0) { (((l11.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l11.0) ?: false)) }, false) || traverseF(s12, lambda(l12.0) { (((l12.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l12.0) ?: false)) }, false)) || (traverseF(s13, lambda(l13.0) { (((l13.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l13.0) ?: false)) }, false) || traverseF(s14, lambda(l14.0) { (((l14.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l14.0) ?: false)) }, false))))} \n[2] nlj inner [] [s1, s2, s3, s4, s5] \n    left \n        [1] ixseek KS(78800001A0B1D018000A0104) KS(78800001A0BC1CD0000A0104) s4 s1 s2 s3 [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"audit_log_sort_created_at\" true \n    right \n        [2] limit 1ll \n        [2] seek s1 s6 s7 s2 s3 s4 s5 none none [s8 = _id, s9 = api_key_id, s10 = api_key_name, s11 = event_type, s12 = ip_address, s13 = user_agent, s14 = user_id] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" true false \n"
+            "stages": "[3] project [s19 = newBsonObj(\"_id\", s17, \"n\", s18)] \n[3] project [s17 = 1, s18 = (convert ( s16, int32) ?: s16)] \n[3] group [] [s16 = count()] spillSlots[s15] mergingExprs[sum(s15)] \n[2] filter {((traverseF(s8, lambda(l8.0) { (((l8.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l8.0) ?: false)) }, false) || (traverseF(s9, lambda(l9.0) { (((l9.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l9.0) ?: false)) }, false) || traverseF(s10, lambda(l10.0) { (((l10.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l10.0) ?: false)) }, false))) || ((traverseF(s11, lambda(l11.0) { (((l11.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l11.0) ?: false)) }, false) || traverseF(s12, lambda(l12.0) { (((l12.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l12.0) ?: false)) }, false)) || (traverseF(s13, lambda(l13.0) { (((l13.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l13.0) ?: false)) }, false) || traverseF(s14, lambda(l14.0) { (((l14.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l14.0) ?: false)) }, false))))} \n[2] nlj inner [] [s1, s2, s3, s4, s5] \n    left \n        [1] ixseek KS(78800001A0B1D018000A0104) KS(78800001A0BC1CD0000A0104) s4 s1 s2 s3 [] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"audit_log_sort_created_at\" true \n    right \n        [2] limit 1ll \n        [2] seek s1 s6 s7 s2 s3 s4 s5 none none [s8 = _id, s9 = api_key_id, s10 = api_key_name, s11 = event_type, s12 = ip_address, s13 = user_agent, s14 = user_id] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" true false \n"
           }
         }
       }
@@ -776,7 +776,7 @@
       "stats": {
         "docs_examined": 10202,
         "keys_examined": 10202,
-        "execution_ms": 63,
+        "execution_ms": 56,
         "winning_plan": {
           "isCached": false,
           "stage": "LIMIT",
@@ -916,7 +916,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s6 env: {  }",
-            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(2C03E80A0A0104) KS(2C04B00A0A0104) none s1 none none [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"audit_log_sort_event_data_response_status\" true "
+            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(2C03E80A0A0104) KS(2C04B00A0A0104) none s1 none none [] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"audit_log_sort_event_data_response_status\" true "
           }
         }
       }
@@ -1031,7 +1031,7 @@
                   "created_at": {
                     "$lt": {
                       "$date": {
-                        "$numberLong": "1789812884047"
+                        "$numberLong": "1789814191048"
                       }
                     }
                   }
@@ -1040,7 +1040,7 @@
                   "created_at": {
                     "$gte": {
                       "$date": {
-                        "$numberLong": "1789726484047"
+                        "$numberLong": "1789727791048"
                       }
                     }
                   }
@@ -1132,7 +1132,7 @@
       "stats": {
         "docs_examined": 200000,
         "keys_examined": 180000,
-        "execution_ms": 288,
+        "execution_ms": 258,
         "winning_plan": {
           "isCached": false,
           "stage": "PROJECTION_DEFAULT",
@@ -1179,7 +1179,7 @@
                   "created_at": {
                     "$lt": {
                       "$date": {
-                        "$numberLong": "1789812884047"
+                        "$numberLong": "1789814191048"
                       }
                     }
                   }
@@ -1188,7 +1188,7 @@
                   "created_at": {
                     "$gte": {
                       "$date": {
-                        "$numberLong": "1789726484047"
+                        "$numberLong": "1789727791048"
                       }
                     }
                   }
@@ -1279,45 +1279,11 @@
       "query": "audit.default.count",
       "stats": {
         "docs_examined": 0,
-        "keys_examined": 500000,
-        "execution_ms": 55,
+        "keys_examined": 0,
+        "execution_ms": 0,
         "winning_plan": {
           "isCached": false,
-          "queryPlan": {
-            "stage": "GROUP",
-            "planNodeId": 2,
-            "inputStage": {
-              "stage": "COUNT_SCAN",
-              "planNodeId": 1,
-              "keyPattern": {
-                "_id": 1
-              },
-              "indexName": "_id_",
-              "isMultiKey": false,
-              "isUnique": true,
-              "isSparse": false,
-              "isPartial": false,
-              "indexVersion": 2,
-              "indexBounds": {
-                "startKey": {
-                  "_id": {
-                    "$minKey": 1
-                  }
-                },
-                "startKeyInclusive": true,
-                "endKey": {
-                  "_id": {
-                    "$maxKey": 1
-                  }
-                },
-                "endKeyInclusive": true
-              }
-            }
-          },
-          "slotBasedPlan": {
-            "slots": "$$RESULT=s6 env: {  }",
-            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(0A0104) KS(F0FE04) none s1 none none [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"_id_\" true "
-          }
+          "stage": "RECORD_STORE_FAST_COUNT"
         }
       }
     },
@@ -1413,7 +1379,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s6 env: {  }",
-            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(3C6576656E742D303037000F0104) KS(3C6576656E742D30303700F5FE04) none s1 none none [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"event_type_1_created_at_-1\" true "
+            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(3C6576656E742D303037000F0104) KS(3C6576656E742D30303700F5FE04) none s1 none none [] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"event_type_1_created_at_-1\" true "
           }
         }
       }
@@ -1472,7 +1438,7 @@
       "stats": {
         "docs_examined": 500000,
         "keys_examined": 0,
-        "execution_ms": 581,
+        "execution_ms": 547,
         "winning_plan": {
           "isCached": false,
           "queryPlan": {
@@ -1532,7 +1498,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s14 env: {  }",
-            "stages": "[2] project [s14 = newBsonObj(\"_id\", s12, \"n\", s13)] \n[2] project [s12 = 1, s13 = (convert ( s11, int32) ?: s11)] \n[2] group [] [s11 = count()] spillSlots[s10] mergingExprs[sum(s10)] \n[1] filter {((traverseF(s1, lambda(l8.0) { (((l8.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l8.0) ?: false)) }, false) || (traverseF(s2, lambda(l9.0) { (((l9.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l9.0) ?: false)) }, false) || traverseF(s3, lambda(l10.0) { (((l10.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l10.0) ?: false)) }, false))) || ((traverseF(s4, lambda(l11.0) { (((l11.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l11.0) ?: false)) }, false) || traverseF(s5, lambda(l12.0) { (((l12.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l12.0) ?: false)) }, false)) || (traverseF(s6, lambda(l13.0) { (((l13.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l13.0) ?: false)) }, false) || traverseF(s7, lambda(l14.0) { (((l14.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l14.0) ?: false)) }, false))))} \n[1] scan s8 s9 none none none none none none lowPriority [s1 = _id, s2 = api_key_id, s3 = api_key_name, s4 = event_type, s5 = ip_address, s6 = user_agent, s7 = user_id] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" true false "
+            "stages": "[2] project [s14 = newBsonObj(\"_id\", s12, \"n\", s13)] \n[2] project [s12 = 1, s13 = (convert ( s11, int32) ?: s11)] \n[2] group [] [s11 = count()] spillSlots[s10] mergingExprs[sum(s10)] \n[1] filter {((traverseF(s1, lambda(l8.0) { (((l8.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l8.0) ?: false)) }, false) || (traverseF(s2, lambda(l9.0) { (((l9.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l9.0) ?: false)) }, false) || traverseF(s3, lambda(l10.0) { (((l10.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l10.0) ?: false)) }, false))) || ((traverseF(s4, lambda(l11.0) { (((l11.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l11.0) ?: false)) }, false) || traverseF(s5, lambda(l12.0) { (((l12.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l12.0) ?: false)) }, false)) || (traverseF(s6, lambda(l13.0) { (((l13.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l13.0) ?: false)) }, false) || traverseF(s7, lambda(l14.0) { (((l14.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l14.0) ?: false)) }, false))))} \n[1] scan s8 s9 none none none none none none lowPriority [s1 = _id, s2 = api_key_id, s3 = api_key_name, s4 = event_type, s5 = ip_address, s6 = user_agent, s7 = user_id] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" true false "
           }
         }
       }
@@ -1631,8 +1597,8 @@
       "query": "audit.date.count",
       "stats": {
         "docs_examined": 0,
-        "keys_examined": 14505,
-        "execution_ms": 2,
+        "keys_examined": 14658,
+        "execution_ms": 1,
         "winning_plan": {
           "isCached": false,
           "queryPlan": {
@@ -1683,7 +1649,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s6 env: {  }",
-            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(78800001A0B1D018000A0104) KS(78800001A0BC1CD0000A0104) none s1 none none [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"audit_log_sort_created_at\" true "
+            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(78800001A0B1D018000A0104) KS(78800001A0BC1CD0000A0104) none s1 none none [] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"audit_log_sort_created_at\" true "
           }
         }
       }
@@ -1735,9 +1701,9 @@
       "phase": "after",
       "query": "audit.search_date.count",
       "stats": {
-        "docs_examined": 14505,
-        "keys_examined": 14505,
-        "execution_ms": 100,
+        "docs_examined": 14658,
+        "keys_examined": 14658,
+        "execution_ms": 103,
         "winning_plan": {
           "isCached": false,
           "queryPlan": {
@@ -1823,7 +1789,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s19 env: { s5 = {\"created_at\" : 1, \"_id\" : 1} }",
-            "stages": "[3] project [s19 = newBsonObj(\"_id\", s17, \"n\", s18)] \n[3] project [s17 = 1, s18 = (convert ( s16, int32) ?: s16)] \n[3] group [] [s16 = count()] spillSlots[s15] mergingExprs[sum(s15)] \n[2] filter {((traverseF(s8, lambda(l8.0) { (((l8.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l8.0) ?: false)) }, false) || (traverseF(s9, lambda(l9.0) { (((l9.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l9.0) ?: false)) }, false) || traverseF(s10, lambda(l10.0) { (((l10.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l10.0) ?: false)) }, false))) || ((traverseF(s11, lambda(l11.0) { (((l11.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l11.0) ?: false)) }, false) || traverseF(s12, lambda(l12.0) { (((l12.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l12.0) ?: false)) }, false)) || (traverseF(s13, lambda(l13.0) { (((l13.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l13.0) ?: false)) }, false) || traverseF(s14, lambda(l14.0) { (((l14.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l14.0) ?: false)) }, false))))} \n[2] nlj inner [] [s1, s2, s3, s4, s5] \n    left \n        [1] ixseek KS(78800001A0B1D018000A0104) KS(78800001A0BC1CD0000A0104) s4 s1 s2 s3 [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"audit_log_sort_created_at\" true \n    right \n        [2] limit 1ll \n        [2] seek s1 s6 s7 s2 s3 s4 s5 none none [s8 = _id, s9 = api_key_id, s10 = api_key_name, s11 = event_type, s12 = ip_address, s13 = user_agent, s14 = user_id] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" true false \n"
+            "stages": "[3] project [s19 = newBsonObj(\"_id\", s17, \"n\", s18)] \n[3] project [s17 = 1, s18 = (convert ( s16, int32) ?: s16)] \n[3] group [] [s16 = count()] spillSlots[s15] mergingExprs[sum(s15)] \n[2] filter {((traverseF(s8, lambda(l8.0) { (((l8.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l8.0) ?: false)) }, false) || (traverseF(s9, lambda(l9.0) { (((l9.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l9.0) ?: false)) }, false) || traverseF(s10, lambda(l10.0) { (((l10.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l10.0) ?: false)) }, false))) || ((traverseF(s11, lambda(l11.0) { (((l11.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l11.0) ?: false)) }, false) || traverseF(s12, lambda(l12.0) { (((l12.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l12.0) ?: false)) }, false)) || (traverseF(s13, lambda(l13.0) { (((l13.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l13.0) ?: false)) }, false) || traverseF(s14, lambda(l14.0) { (((l14.0 == /benchmark\\-needle/i) ?: false) || (regexMatch(PcreRegex(/benchmark\\-needle/i), l14.0) ?: false)) }, false))))} \n[2] nlj inner [] [s1, s2, s3, s4, s5] \n    left \n        [1] ixseek KS(78800001A0B1D018000A0104) KS(78800001A0BC1CD0000A0104) s4 s1 s2 s3 [] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"audit_log_sort_created_at\" true \n    right \n        [2] limit 1ll \n        [2] seek s1 s6 s7 s2 s3 s4 s5 none none [s8 = _id, s9 = api_key_id, s10 = api_key_name, s11 = event_type, s12 = ip_address, s13 = user_agent, s14 = user_id] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" true false \n"
           }
         }
       }
@@ -1834,7 +1800,7 @@
       "stats": {
         "docs_examined": 10202,
         "keys_examined": 10202,
-        "execution_ms": 62,
+        "execution_ms": 58,
         "winning_plan": {
           "isCached": false,
           "stage": "LIMIT",
@@ -1974,7 +1940,7 @@
           },
           "slotBasedPlan": {
             "slots": "$$RESULT=s6 env: {  }",
-            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(2C03E80A0A0104) KS(2C04B00A0A0104) none s1 none none [] @\"571542e6-a158-4ce9-afe9-d3dc6eb1ca8d\" @\"audit_log_sort_event_data_response_status\" true "
+            "stages": "[2] project [s6 = newBsonObj(\"_id\", s4, \"n\", s5)] \n[2] project [s4 = 1, s5 = (convert ( s3, int32) ?: s3)] \n[2] group [] [s3 = count()] spillSlots[s2] mergingExprs[sum(s2)] \n[1] ixseek KS(2C03E80A0A0104) KS(2C04B00A0A0104) none s1 none none [] @\"118e3f03-8bb6-4cfc-b85f-9db80edc6a8a\" @\"audit_log_sort_event_data_response_status\" true "
           }
         }
       }
@@ -2042,7 +2008,7 @@
       "stats": {
         "docs_examined": 2831,
         "keys_examined": 2548,
-        "execution_ms": 74,
+        "execution_ms": 73,
         "winning_plan": {
           "isCached": false,
           "stage": "PROJECTION_DEFAULT",
@@ -2108,7 +2074,7 @@
                       "[\"finalized\", \"finalized\"]"
                     ],
                     "created_at": [
-                      "(new Date(1789812884047), new Date(1789726484047)]"
+                      "(new Date(1789814191048), new Date(1789727791048)]"
                     ]
                   }
                 },
@@ -2141,7 +2107,7 @@
                         "[\"dead_letter\", \"dead_letter\"]"
                       ],
                       "created_at": [
-                        "(new Date(1789812884047), new Date(1789726484047)]"
+                        "(new Date(1789814191048), new Date(1789727791048)]"
                       ]
                     }
                   }
@@ -2224,7 +2190,7 @@
                       "[\"finalized\", \"finalized\"]"
                     ],
                     "created_at": [
-                      "(new Date(1789812884047), new Date(1789726484047)]"
+                      "(new Date(1789814191048), new Date(1789727791048)]"
                     ]
                   }
                 },
@@ -2257,7 +2223,7 @@
                         "[\"dead_letter\", \"dead_letter\"]"
                       ],
                       "created_at": [
-                        "(new Date(1789812884047), new Date(1789726484047)]"
+                        "(new Date(1789814191048), new Date(1789727791048)]"
                       ]
                     }
                   }
@@ -3032,7 +2998,7 @@
       "stats": {
         "docs_examined": 67077,
         "keys_examined": 60369,
-        "execution_ms": 738,
+        "execution_ms": 739,
         "winning_plan": {
           "isCached": false,
           "stage": "PROJECTION_DEFAULT",
@@ -3098,7 +3064,7 @@
                       "[\"finalized\", \"finalized\"]"
                     ],
                     "created_at": [
-                      "(new Date(1789812884047), new Date(1787220884047)]"
+                      "(new Date(1789814191048), new Date(1787222191048)]"
                     ]
                   }
                 },
@@ -3131,7 +3097,7 @@
                         "[\"dead_letter\", \"dead_letter\"]"
                       ],
                       "created_at": [
-                        "(new Date(1789812884047), new Date(1787220884047)]"
+                        "(new Date(1789814191048), new Date(1787222191048)]"
                       ]
                     }
                   }
@@ -3253,7 +3219,7 @@
                   "[\"finalized\", \"finalized\"]"
                 ],
                 "created_at": [
-                  "(new Date(1789812884047), new Date(1789726484047)]"
+                  "(new Date(1789814191048), new Date(1789727791048)]"
                 ]
               }
             }
@@ -3267,7 +3233,7 @@
       "stats": {
         "docs_examined": 2548,
         "keys_examined": 2550,
-        "execution_ms": 31,
+        "execution_ms": 29,
         "winning_plan": {
           "isCached": false,
           "stage": "PROJECTION_DEFAULT",
@@ -3372,7 +3338,7 @@
                   "[\"finalized\", \"finalized\"]"
                 ],
                 "created_at": [
-                  "(new Date(1789812884047), new Date(1789726484047)]"
+                  "(new Date(1789814191048), new Date(1789727791048)]"
                 ]
               }
             }
@@ -3386,7 +3352,7 @@
       "stats": {
         "docs_examined": 2830,
         "keys_examined": 2830,
-        "execution_ms": 76,
+        "execution_ms": 71,
         "winning_plan": {
           "isCached": false,
           "stage": "PROJECTION_DEFAULT",
@@ -3479,7 +3445,7 @@
               "direction": "forward",
               "indexBounds": {
                 "created_at": [
-                  "(new Date(1789812884047), new Date(1789726484047)]"
+                  "(new Date(1789814191048), new Date(1789727791048)]"
                 ]
               }
             }
@@ -3493,7 +3459,7 @@
       "stats": {
         "docs_examined": 2831,
         "keys_examined": 2548,
-        "execution_ms": 70,
+        "execution_ms": 69,
         "winning_plan": {
           "isCached": false,
           "stage": "PROJECTION_DEFAULT",
@@ -3559,7 +3525,7 @@
                       "[\"finalized\", \"finalized\"]"
                     ],
                     "created_at": [
-                      "(new Date(1789812884047), new Date(1789726484047)]"
+                      "(new Date(1789814191048), new Date(1789727791048)]"
                     ]
                   }
                 },
@@ -3592,7 +3558,7 @@
                         "[\"dead_letter\", \"dead_letter\"]"
                       ],
                       "created_at": [
-                        "(new Date(1789812884047), new Date(1789726484047)]"
+                        "(new Date(1789814191048), new Date(1789727791048)]"
                       ]
                     }
                   }
@@ -3605,8 +3571,8 @@
     }
   ],
   "event_type_cache": {
-    "cold_ms": 1.648083,
-    "warm_ms": 0.0043749999999999995,
+    "cold_ms": 2.800083,
+    "warm_ms": 0.004333,
     "types": 120,
     "ttl_seconds": 30
   }

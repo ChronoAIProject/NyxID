@@ -585,6 +585,7 @@ async fn get_usage_inner(
             display_name: user
                 .and_then(|u| u.get_str("display_name").ok())
                 .filter(|s| !s.trim().is_empty())
+                .or_else(|| user.and_then(|u| u.get_str("email").ok()))
                 .unwrap_or(if user.is_some() {
                     "Unnamed user"
                 } else {
