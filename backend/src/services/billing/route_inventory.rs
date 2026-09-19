@@ -7,6 +7,8 @@ pub enum BillingIngress {
     SshExec,
     SshTunnel,
     SshWebTerminal,
+    ChannelInbound,
+    ChannelOutbound,
 }
 
 impl BillingIngress {
@@ -19,6 +21,8 @@ impl BillingIngress {
             Self::SshExec => "ssh_exec",
             Self::SshTunnel => "ssh_tunnel",
             Self::SshWebTerminal => "ssh_web_terminal",
+            Self::ChannelInbound => "channel_inbound",
+            Self::ChannelOutbound => "channel_outbound",
         }
     }
 }
@@ -32,6 +36,8 @@ pub const ALL_BILLING_INGRESSES: &[BillingIngress] = &[
     BillingIngress::SshExec,
     BillingIngress::SshTunnel,
     BillingIngress::SshWebTerminal,
+    BillingIngress::ChannelInbound,
+    BillingIngress::ChannelOutbound,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

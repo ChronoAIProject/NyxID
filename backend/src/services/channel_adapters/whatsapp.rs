@@ -1436,6 +1436,7 @@ mod media_tests {
         let server = MockServer::start().await;
         let http = reqwest::Client::new();
         let credentials = BotCredentials {
+            billing: None,
             token: "token",
             platform_bot_id: Some("123"),
             platform_secrets: None,
