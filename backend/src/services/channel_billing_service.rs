@@ -119,6 +119,9 @@ impl ChannelBilling {
     }
 
     pub async fn received(&self, event_id: &str) -> AppResult<()> {
+        if !self.billing.billing_enabled() {
+            return Ok(());
+        }
         let bot_id = self
             .bot_id
             .as_deref()
