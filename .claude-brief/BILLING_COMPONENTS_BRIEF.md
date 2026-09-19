@@ -1,6 +1,6 @@
 # Brief: per-component service pricing, per-component allowances, and high-precision unit prices
 
-Repository: NyxID (this worktree, branch `happy-brook`, based on main 81c0e5f4 / 0.25.3).
+Repository: NyxID (this worktree, branch `flexible-service-billing`, based on main 81c0e5f4 / 0.25.3).
 Read `CLAUDE.md` first (Critical Rules 3, 5 billing bullets, 8, 9) and then
 `docs/PLATFORM_KEYS_AND_INFERENCE.md` ("Billing lanes and durable accounting"),
 `docs/USAGE_BILLING_LAGO_SPEC.md`, `docs/BILLING_UI_GLOSSARY.md`, `docs/ADR-014-usage-billing-lago.md`.
@@ -207,7 +207,7 @@ cached token) need more precision.
   `npm --prefix frontend run build:wizard` and commit the regenerated
   `cli/src/wizard/bundle-meta/index.hash`; then `cargo test -p nyxid-cli --test wizard_bundle_freshness`.
 
-Commit your work on this branch (`happy-brook`) in conventional-commit style
+Commit your work on this branch (`flexible-service-billing`) in conventional-commit style
 (`feat(billing): ...`). Do not push. Do not create a PR. When finished, write a summary
 of design decisions, files touched, test results, and any known gaps (there should be
 none) to `.claude-brief/IMPLEMENTATION_REPORT.md`.
