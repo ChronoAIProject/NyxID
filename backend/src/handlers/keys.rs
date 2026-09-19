@@ -3089,6 +3089,7 @@ mod tests {
 
     fn make_blank_api_key() -> UserApiKey {
         UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),

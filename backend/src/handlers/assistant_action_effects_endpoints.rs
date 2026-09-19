@@ -953,6 +953,7 @@ mod tests {
 
     fn fixture_external_key(key_id: &str, user_id: &str, label: &str) -> UserApiKey {
         UserApiKey {
+            aurinko_account: None,
             credential_epoch: 1,
             credential_source: None,
             id: key_id.to_string(),

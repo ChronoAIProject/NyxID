@@ -161,7 +161,7 @@ async fn due(state: &AppState, bot: &ChannelBot) {
 }
 
 #[test]
-fn descriptors_keep_all_previous_adapters_on_stored_webhook_defaults() {
+fn descriptors_keep_managed_connections_and_stored_webhook_defaults() {
     let cache =
         std::sync::Arc::new(super::provider_token_exchange_service::TokenExchangeCache::new());
     for adapter in super::channel_adapters::registered_adapters(&cache) {
@@ -193,6 +193,28 @@ fn descriptors_keep_all_previous_adapters_on_stored_webhook_defaults() {
                     provider_slug: "twitter"
                 }
             ));
+        } else if adapter.platform_id() == "aurinko" {
+            assert_eq!(adapter.ingestion(), Ingestion::Webhook);
+            assert_eq!(
+                adapter.credential_resolution(),
+                CredentialResolution::OAuthConnection {
+                    provider_slug: "aurinko",
+                    required_scopes: &["Mail.Read", "Mail.Send"],
+                }
+            );
+            assert!(!adapter.registration().managed_only);
+            assert!(adapter.registration().webhook_ingestion);
+            assert!(!adapter.registration().fields.is_empty());
+            assert_eq!(
+                adapter.managed_onboarding().unwrap().flow,
+                "oauth_connection"
+            );
+            assert!(matches!(
+                adapter.platform_credentials().unwrap().backing,
+                PlatformCredentialBacking::ProviderOAuth {
+                    provider_slug: "aurinko"
+                }
+            ));
         } else {
             assert_eq!(adapter.ingestion(), Ingestion::Webhook);
             assert_eq!(
@@ -205,19 +227,10 @@ fn descriptors_keep_all_previous_adapters_on_stored_webhook_defaults() {
             );
             assert!(adapter.registration().webhook_ingestion);
             if let Some(descriptor) = adapter.platform_credentials() {
-                if adapter.platform_id() == "aurinko" {
-                    assert!(matches!(
-                        descriptor.backing,
-                        PlatformCredentialBacking::ProviderOAuth {
-                            provider_slug: "aurinko"
-                        }
-                    ));
-                } else {
-                    assert!(matches!(
-                        descriptor.backing,
-                        PlatformCredentialBacking::Stored
-                    ));
-                }
+                assert!(matches!(
+                    descriptor.backing,
+                    PlatformCredentialBacking::Stored
+                ));
             }
         }
     }

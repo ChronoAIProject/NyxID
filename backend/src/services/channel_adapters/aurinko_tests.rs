@@ -35,7 +35,7 @@ fn mail(id: &str) -> Value {
         "body": "Private message body", "internetHeaders": [], "omitted": []})
 }
 fn account(id: u64) -> Value {
-    json!({"id": id, "email": "mailbox@example.com", "tokenStatus": "active", "authScopes": ["Mail.Read", "Mail.Send"]})
+    json!({"id": id, "serviceType":"IMAP", "email": "mailbox@example.com", "tokenStatus": "active", "authScopes": ["Mail.Read", "Mail.Send"]})
 }
 
 struct Mock {
@@ -1538,4 +1538,211 @@ async fn aurinko_indexes_preserve_existing_platform_rows_and_are_repeatable() {
             Some(row)
         );
     }
+}
+
+impl Fixture {
+    async fn managed(&mut self) -> (String, String) {
+        use crate::models::{provider_config::ProviderConfig, user_api_key::UserApiKey};
+        let db = &self.state.db;
+        let keys = &self.state.encryption_keys;
+        let owner = &self.bot.user_id;
+        db.collection::<crate::models::user::User>("users")
+            .insert_one(crate::test_utils::test_user(
+                owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let now = bson::DateTime::now();
+        let binary = |bytes| bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes,
+        };
+        let provider:ProviderConfig=bson::from_document(doc! {"_id":"managed-aurinko","slug":"aurinko","name":"Aurinko","provider_type":"api_key","is_active":true,"created_by":"system","created_at":now,"updated_at":now,"client_id_encrypted":binary(keys.encrypt(b"client").await.unwrap()),"client_secret_encrypted":binary(keys.encrypt(b"secret").await.unwrap())}).unwrap();
+        db.collection::<ProviderConfig>("provider_configs")
+            .insert_one(provider)
+            .await
+            .unwrap();
+        db.collection::<bson::Document>("platform_credentials").insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"provider":"aurinko","secrets":{"signing_secret":binary(keys.encrypt(SECRET.as_bytes()).await.unwrap())},"updated_by":owner,"updated_at":now}).await.unwrap();
+        let key:UserApiKey=bson::from_document(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":owner,"label":"Mailbox","credential_type":"oauth2","credential_source":"platform","provider_config_id":"managed-aurinko","connection_id":uuid::Uuid::new_v4().to_string(),"status":"active","credential_epoch":1_i64,"created_at":now,"updated_at":now,"access_token_encrypted":binary(keys.encrypt(TOKEN.as_bytes()).await.unwrap()),"token_scopes":"Mail.Read Mail.Send Mail.Drafts","aurinko_account":{"account_id":"42","service_type":"IMAP","mailbox_address":"mailbox@example.com","application_id_hash":"app"}}).unwrap();
+        db.collection::<UserApiKey>("user_api_keys")
+            .insert_one(&key)
+            .await
+            .unwrap();
+        let endpoint = crate::test_utils::test_user_endpoint(
+            &uuid::Uuid::new_v4().to_string(),
+            owner,
+            "Mailbox",
+            "https://api.aurinko.io",
+            None,
+            None,
+        );
+        let mut service = crate::test_utils::test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            owner,
+            "mailbox",
+            &endpoint.id,
+            None,
+            None,
+        );
+        service.api_key_id = Some(key.id.clone());
+        service.auth_method = "bearer".into();
+        service.auth_key_name = "Authorization".into();
+        db.collection::<crate::models::user_endpoint::UserEndpoint>("user_endpoints")
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<crate::models::user_service::UserService>("user_services")
+            .insert_one(&service)
+            .await
+            .unwrap();
+        db.collection::<ChannelBot>("channel_bots").update_one(doc! {"_id":&self.bot.id},doc! {"$set":{"credential_source":"connection","connection_id":&key.id,"bot_token_encrypted":binary(Vec::new()),"app_secret_encrypted":null}}).await.unwrap();
+        self.bot = bots::get_bot(db, &self.bot.id).await.unwrap();
+        (key.id, service.id)
+    }
+}
+
+#[tokio::test]
+async fn managed_aurinko_verify_and_delete_after_service_disable_retain_shared_key() {
+    let mut f = Fixture::new().await;
+    let (key, service) = f.managed().await;
+    let verified = bots::verify_serialized_bot(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.state.http_client,
+        &f.adapter,
+        &f.bot.id,
+        &f.bot.user_id,
+        &f.url,
+    )
+    .await
+    .unwrap();
+    assert!(verified.webhook_registered);
+    assert_eq!(f.mock.lock().await.subscriptions.len(), 1);
+    assert!(verified.bot_token_encrypted.is_empty());
+    assert!(verified.app_secret_encrypted.is_none());
+    crate::services::user_service_service::update_user_service(
+        &f.state.db,
+        &f.bot.user_id,
+        &f.bot.user_id,
+        &service,
+        None,
+        None,
+        None,
+        None,
+        Some(false),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(f.event(&["disabled"]).await.is_err());
+    assert_eq!(
+        bots::delete_bot(
+            &f.state.db,
+            &f.state.config,
+            &f.state.http_client,
+            &f.state.encryption_keys,
+            &f.adapter,
+            &f.bot.id,
+            &f.bot.user_id
+        )
+        .await
+        .unwrap(),
+        Some("removed")
+    );
+    assert!(f.mock.lock().await.subscriptions.is_empty());
+    assert!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_api_keys")
+            .find_one(doc! {"_id":key,"status":"active"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn managed_aurinko_in_use_delete_is_rejected_before_service_mutation() {
+    use crate::services::unified_key_service::{
+        DisconnectOptions, DisconnectTarget, disconnect_credentials,
+    };
+    let mut f = Fixture::new().await;
+    let (_key, service) = f.managed().await;
+    // Pending and failed setup are still active consumers of the mailbox.
+    f.state
+        .db
+        .collection::<ChannelBot>("channel_bots")
+        .update_one(doc! {"_id":&f.bot.id}, doc! {"$set":{"status":"failed"}})
+        .await
+        .unwrap();
+    let actor = crate::services::audit_service::AuditActor {
+        user_id: f.bot.user_id.clone(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
+    assert!(matches!(
+        disconnect_credentials(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.bot.user_id,
+            &actor,
+            DisconnectTarget::UserService(&service),
+            DisconnectOptions::default()
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    assert!(
+        crate::services::user_service_service::get_user_service(
+            &f.state.db,
+            &f.bot.user_id,
+            &service
+        )
+        .await
+        .unwrap()
+        .is_active
+    );
+    assert_eq!(f.mock.lock().await.subscriptions.len(), 1);
+}
+
+#[tokio::test]
+async fn managed_signing_fingerprint_is_from_verifying_snapshot() {
+    let mut f = Fixture::new().await;
+    f.managed().await;
+    let (secrets, verified) = f
+        .adapter
+        .signing_verification(&f.state.db, &f.state.encryption_keys, &f.bot)
+        .await
+        .unwrap();
+    let ciphertext = f
+        .state
+        .encryption_keys
+        .encrypt(b"rotated-signing-secret")
+        .await
+        .unwrap();
+    f.state.db.collection::<bson::Document>("platform_credentials").update_one(doc! {"provider":"aurinko"},doc! {"$set":{"secrets.signing_secret":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext}}}).await.unwrap();
+    let body = b"challenge";
+    f.adapter
+        .verify_webhook(
+            &f.bot,
+            Some(&secrets),
+            &signed(body, Utc::now().timestamp()),
+            body,
+        )
+        .await
+        .unwrap();
+    let current = f
+        .adapter
+        .signing_fingerprint(&f.state.db, &f.bot)
+        .await
+        .unwrap();
+    assert_ne!(verified, current);
+    assert_eq!(secrets.get("app_secret"), Some(SECRET));
 }

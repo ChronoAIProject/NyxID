@@ -49,6 +49,9 @@ import {
 } from "@/schemas/connect-links";
 import { useAuthStore } from "@/stores/auth-store";
 import { cn } from "@/lib/utils";
+import { AurinkoProviderSelect } from "@/components/shared/aurinko-mailbox-connect";
+import { validateHttpAuthorizationUrl } from "@/schemas/oauth-popup";
+import { AURINKO_PROTOCOL, type AurinkoProvider } from "@/schemas/aurinko-mailboxes";
 
 const CLICK_THROTTLE_MS = 750;
 
@@ -66,6 +69,7 @@ export function ConnectLinkPage() {
   const [deviceChallenge, setDeviceChallenge] =
     useState<DeviceChallenge | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [aurinkoProvider, setAurinkoProvider] = useState<AurinkoProvider>("Google");
   const lastClickAtRef = useRef(0);
   const preview = usePreviewConnectLink();
   const [platformChoice, setPlatformChoice] = useState<boolean | null>(null);
@@ -115,6 +119,10 @@ export function ConnectLinkPage() {
 
   async function handleConnect() {
     if (!preview.data || actionPending || withinCooldown()) return;
+    if (preview.data.managed_onboarding === AURINKO_PROTOCOL && !usePlatformKey) {
+      await submitCompletion({ aurinko_provider: aurinkoProvider });
+      return;
+    }
     if (!usePlatformKey && connectLinkNeedsSetupForm(preview.data)) {
       setShowSetupForm(true);
       return;
@@ -128,6 +136,11 @@ export function ConnectLinkPage() {
       const selected = { use_platform_key: usePlatformKey };
       const result = await complete.mutateAsync({ token, values: usePlatformKey ? selected : { ...values, ...selected } });
       if (result.status === "oauth_required" && result.authorization_url) {
+        const authorizationUrl = validateHttpAuthorizationUrl(result.authorization_url);
+        if (!authorizationUrl || (preview.data?.managed_onboarding === AURINKO_PROTOCOL &&
+          (authorizationUrl.origin !== "https://api.aurinko.io" || authorizationUrl.pathname !== "/v1/auth/authorize"))) {
+          throw new Error("NyxID returned an invalid authorization URL.");
+        }
         sessionStorage.setItem(connectLinkStorageKey(result.id), token);
         window.location.assign(result.authorization_url);
         return;
@@ -245,6 +258,9 @@ export function ConnectLinkPage() {
             ) : (
               <>
                 <RequestDetails preview={preview.data} />
+                {preview.data.managed_onboarding === AURINKO_PROTOCOL && !usePlatformKey && !showSetupForm && (
+                  <AurinkoProviderSelect value={aurinkoProvider} onChange={setAurinkoProvider} disabled={actionPending} />
+                )}
                 {platformAvailable && catalog?.platform_key && preview.data.status === "pending" && (
                   <CredentialBindingChoice value={usePlatformKey} onChange={(value) => { setPlatformChoice(value); setShowSetupForm(false); }} platformPrice={catalog.platform_key.pricing} byokPrice={catalog.byok_pricing} legacyBillable={catalog.billing?.platform_billable} resaleBillable={catalog.billing?.resale_billable} disabled={actionPending} />
                 )}
@@ -254,7 +270,7 @@ export function ConnectLinkPage() {
                   />
                 ) : null}
                 {showSetupForm ? (
-                  preview.data.connect_method === "api_key" ? (
+                  preview.data.connect_method === "api_key" || preview.data.managed_onboarding === AURINKO_PROTOCOL ? (
                     <CredentialForm
                       preview={preview.data}
                       pending={actionPending}
@@ -284,6 +300,12 @@ export function ConnectLinkPage() {
                       Connect
                     </Button>
                   </div>
+                )}
+                {preview.data.managed_onboarding === AURINKO_PROTOCOL && !usePlatformKey && !showSetupForm && (
+                  <Button type="button" variant="ghost" disabled={actionPending} onClick={() => setShowSetupForm(true)}>Use an existing Aurinko account token</Button>
+                )}
+                {preview.data.managed_onboarding === AURINKO_PROTOCOL && showSetupForm && (
+                  <Button type="button" variant="ghost" disabled={actionPending} onClick={() => setShowSetupForm(false)}>Sign in to your mailbox instead</Button>
                 )}
                 {deviceChallenge ? (
                   <DeviceCodePanel

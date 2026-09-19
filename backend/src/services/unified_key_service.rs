@@ -1010,7 +1010,31 @@ async fn create_key_inner(
         } else {
             None
         };
-        let provider_type = provider.as_ref().map(|p| p.provider_type.as_str());
+        // Aurinko keeps its manual API-key contract. Only an empty, direct
+        // connection opts into its named managed account-code protocol.
+        let managed_aurinko = credential.is_empty()
+            && node_id.is_none()
+            && svc.slug == "api-aurinko"
+            && svc.base_url.trim_end_matches('/') == super::aurinko_oauth_service::ORIGIN
+            && provider
+                .as_ref()
+                .is_some_and(super::aurinko_oauth_service::available);
+        if managed_aurinko
+            && (endpoint_url
+                .is_some_and(|u| u.trim_end_matches('/') != super::aurinko_oauth_service::ORIGIN)
+                || auth_method.is_some_and(|m| m != "bearer")
+                || auth_key_name.is_some_and(|n| n != "Authorization"))
+        {
+            return Err(AppError::ValidationError(
+                "Managed mailboxes use the fixed Aurinko API destination and bearer authentication"
+                    .into(),
+            ));
+        }
+        let provider_type = if managed_aurinko {
+            Some("oauth2")
+        } else {
+            provider.as_ref().map(|p| p.provider_type.as_str())
+        };
         let provider_supports_byo = provider
             .as_ref()
             .is_some_and(crate::services::user_credentials_service::supports_user_credentials);
@@ -3337,6 +3361,7 @@ pub struct DisconnectResult {
 #[derive(Clone, PartialEq, Eq)]
 enum OAuthAppLineage {
     Platform,
+    AurinkoMailbox(String, String),
     Byo([u8; 32]),
     Unknown(String),
 }
@@ -3388,177 +3413,261 @@ pub async fn disconnect_credentials_with_expected_siblings(
     options: DisconnectOptions,
     expected_siblings: Option<&[(String, String, String)]>,
 ) -> AppResult<DisconnectResult> {
-    options.validate()?;
-    let mut plan = build_disconnect_plan(
-        db,
-        encryption_keys,
-        owner_id,
-        target,
-        &options,
-        expected_siblings,
-    )
-    .await?;
-    let excluded_service_ids: Vec<String> = plan
-        .services
-        .iter()
-        .map(|service| service.id.clone())
-        .collect();
-
-    for key in &plan.keys {
-        user_api_key_service::ensure_api_key_not_in_use(
+    Box::pin(async move {
+        options.validate()?;
+        let plan = build_disconnect_plan(
             db,
+            encryption_keys,
             owner_id,
-            &key.id,
-            &excluded_service_ids,
+            target,
+            &options,
+            expected_siblings,
         )
         .await?;
-    }
-
-    for service in &plan.services {
-        user_service_service::deactivate_user_service(db, owner_id, &actor.user_id, &service.id)
-            .await?;
-    }
-
-    let mut claimed_keys = Vec::new();
-    for key in &plan.keys {
-        match user_api_key_service::claim_api_key(db, owner_id, &key.id).await? {
-            Some(claimed) => claimed_keys.push(claimed),
-            None if plan.initiating_key_id.as_deref() == Some(key.id.as_str()) => {
-                return Err(AppError::NotFound("API key not found".to_string()));
+        let mut guarded = Vec::new();
+        for key in &plan.keys {
+            if super::aurinko_oauth_service::is_managed_key(db, key).await? {
+                guarded.push(key.id.clone());
             }
-            None => {}
         }
-    }
-    for key in &claimed_keys {
-        user_api_key_service::cleanup_claimed_api_key(db, owner_id, &key.id).await?;
-    }
-
-    let mut claimed_provider_token = if let Some(token) = plan.provider_token.take() {
-        match user_token_service::claim_provider_token_by_id_with_expected_state_version(
+        super::channel_retry_ingress::with_connections(
             db,
-            owner_id,
-            &token.id,
-            plan.expected_provider_token_state_version,
-        )
-        .await?
-        {
-            Some(claimed) => Some(claimed),
-            None if plan.initiating_provider_token_id.as_deref() == Some(token.id.as_str()) => {
-                return Err(AppError::NotFound(
-                    "No active token found for this provider".to_string(),
-                ));
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
-
-    if claimed_provider_token.is_none()
-        && plan.scope == oauth_revocation::RevocationScope::Token
-        && let Some(initiating_key) = claimed_keys.iter().find(|key| {
-            plan.initiating_key_id.as_deref() == Some(key.id.as_str())
-                && key.connection_id.is_none()
-        })
-        && let Some(provider_id) = initiating_key.provider_config_id.as_deref()
-    {
-        claimed_provider_token =
-            claim_legacy_provider_token_if_last_key(db, owner_id, provider_id).await?;
-    }
-
-    if let Some(token) = claimed_provider_token.as_ref() {
-        user_api_key_service::sync_provider_token_to_api_keys(
-            db,
-            owner_id,
-            &token.provider_config_id,
-        )
-        .await?;
-    }
-
-    let mut deleted_endpoints = HashSet::new();
-    for service in &plan.services {
-        if deleted_endpoints.insert(service.endpoint_id.clone()) {
-            user_endpoint_service::delete_endpoint(db, owner_id, &service.endpoint_id).await?;
-        }
-    }
-    for service in &plan.services {
-        node_service::sync_node_binding_for_user_service(
-            db,
-            owner_id,
-            &actor.user_id,
-            service.catalog_service_id.as_deref(),
-            None,
-            service.node_id.as_deref(),
-        )
-        .await?;
-    }
-
-    let deleted_services: Vec<DeletedKeyEvent> = plan
-        .services
-        .iter()
-        .map(|service| DeletedKeyEvent {
-            service_id: service.id.clone(),
-            source: if service.catalog_service_id.is_some() {
-                "catalog".to_string()
-            } else {
-                "custom".to_string()
-            },
-        })
-        .collect();
-    for event in &deleted_services {
-        audit_service::log_async(
-            db.clone(),
-            Some(actor.user_id.clone()),
-            "key_deleted".to_string(),
-            Some(serde_json::json!({
-                "owner_id": owner_id,
-                "user_service_id": event.service_id,
-                "source": event.source,
-                "cascade_grant": options.cascade_grant,
-            })),
-            actor.ip_address.clone(),
-            actor.user_agent.clone(),
-            actor.api_key_id.clone(),
-            actor.api_key_name.clone(),
-        );
-    }
-
-    let cascade_record_count = claimed_keys.len() + usize::from(claimed_provider_token.is_some());
-    let remote_source = if let Some(initiating_key_id) = plan.initiating_key_id.as_deref() {
-        let initiating_key = claimed_keys.iter().find(|key| key.id == initiating_key_id);
-        match initiating_key {
-            Some(key) if key.connection_id.is_some() => Some(RemoteCredentialSource::Key(key)),
-            Some(_) => claimed_provider_token
-                .as_ref()
-                .map(RemoteCredentialSource::ProviderToken),
-            None => None,
-        }
-    } else {
-        claimed_provider_token
-            .as_ref()
-            .map(RemoteCredentialSource::ProviderToken)
-    };
-    let upstream_revocation_scheduled =
-        if let (Some(provider), Some(source)) = (plan.provider, remote_source) {
-            hand_off_remote_revocation(
+            &guarded,
+            disconnect_with_connection_claims(
                 db,
                 encryption_keys,
                 owner_id,
                 actor,
-                provider,
-                plan.scope,
-                source,
-                cascade_record_count,
+                target,
+                options,
+                expected_siblings,
+                &guarded,
+            ),
+        )
+        .await
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn disconnect_with_connection_claims(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    owner_id: &str,
+    actor: &AuditActor,
+    target: DisconnectTarget<'_>,
+    options: DisconnectOptions,
+    expected_siblings: Option<&[(String, String, String)]>,
+    guarded: &[String],
+) -> AppResult<DisconnectResult> {
+    Box::pin(async move {
+        let mut plan = build_disconnect_plan(
+            db,
+            encryption_keys,
+            owner_id,
+            target,
+            &options,
+            expected_siblings,
+        )
+        .await?;
+        for key in &plan.keys {
+            if super::aurinko_oauth_service::is_managed_key(db, key).await?
+                && !guarded.contains(&key.id)
+            {
+                return Err(AppError::Conflict(
+                    "Mailbox grant changed; retry Delete".into(),
+                ));
+            }
+        }
+        let excluded_service_ids: Vec<String> = plan
+            .services
+            .iter()
+            .map(|service| service.id.clone())
+            .collect();
+
+        for key in &plan.keys {
+            user_api_key_service::ensure_api_key_not_in_use(
+                db,
+                owner_id,
+                &key.id,
+                &excluded_service_ids,
             )
-            .await
+            .await?;
+        }
+
+        for service in &plan.services {
+            if service
+                .api_key_id
+                .as_ref()
+                .is_some_and(|id| guarded.contains(id))
+            {
+                user_service_service::deactivate_with_connection_claim(
+                    db,
+                    owner_id,
+                    &actor.user_id,
+                    &service.id,
+                )
+                .await?;
+            } else {
+                user_service_service::deactivate_user_service(
+                    db,
+                    owner_id,
+                    &actor.user_id,
+                    &service.id,
+                )
+                .await?;
+            }
+        }
+
+        let mut claimed_keys = Vec::new();
+        for key in &plan.keys {
+            let claimed = if guarded.contains(&key.id) {
+                user_api_key_service::claim_api_key_with_connection_claim(db, owner_id, &key.id)
+                    .await?
+            } else {
+                user_api_key_service::claim_api_key(db, owner_id, &key.id).await?
+            };
+            match claimed {
+                Some(claimed) => claimed_keys.push(claimed),
+                None if plan.initiating_key_id.as_deref() == Some(key.id.as_str()) => {
+                    return Err(AppError::NotFound("API key not found".to_string()));
+                }
+                None => {}
+            }
+        }
+        for key in &claimed_keys {
+            user_api_key_service::cleanup_claimed_api_key(db, owner_id, &key.id).await?;
+        }
+
+        let mut claimed_provider_token = if let Some(token) = plan.provider_token.take() {
+            match user_token_service::claim_provider_token_by_id_with_expected_state_version(
+                db,
+                owner_id,
+                &token.id,
+                plan.expected_provider_token_state_version,
+            )
+            .await?
+            {
+                Some(claimed) => Some(claimed),
+                None if plan.initiating_provider_token_id.as_deref() == Some(token.id.as_str()) => {
+                    return Err(AppError::NotFound(
+                        "No active token found for this provider".to_string(),
+                    ));
+                }
+                None => None,
+            }
         } else {
-            false
+            None
         };
 
-    Ok(DisconnectResult {
-        upstream_revocation_scheduled,
-        deleted_services,
+        if claimed_provider_token.is_none()
+            && plan.scope == oauth_revocation::RevocationScope::Token
+            && let Some(initiating_key) = claimed_keys.iter().find(|key| {
+                plan.initiating_key_id.as_deref() == Some(key.id.as_str())
+                    && key.connection_id.is_none()
+            })
+            && let Some(provider_id) = initiating_key.provider_config_id.as_deref()
+        {
+            claimed_provider_token =
+                claim_legacy_provider_token_if_last_key(db, owner_id, provider_id).await?;
+        }
+
+        if let Some(token) = claimed_provider_token.as_ref() {
+            user_api_key_service::sync_provider_token_to_api_keys(
+                db,
+                owner_id,
+                &token.provider_config_id,
+            )
+            .await?;
+        }
+
+        let mut deleted_endpoints = HashSet::new();
+        for service in &plan.services {
+            if deleted_endpoints.insert(service.endpoint_id.clone()) {
+                user_endpoint_service::delete_endpoint(db, owner_id, &service.endpoint_id).await?;
+            }
+        }
+        for service in &plan.services {
+            node_service::sync_node_binding_for_user_service(
+                db,
+                owner_id,
+                &actor.user_id,
+                service.catalog_service_id.as_deref(),
+                None,
+                service.node_id.as_deref(),
+            )
+            .await?;
+        }
+
+        let deleted_services: Vec<DeletedKeyEvent> = plan
+            .services
+            .iter()
+            .map(|service| DeletedKeyEvent {
+                service_id: service.id.clone(),
+                source: if service.catalog_service_id.is_some() {
+                    "catalog".to_string()
+                } else {
+                    "custom".to_string()
+                },
+            })
+            .collect();
+        for event in &deleted_services {
+            audit_service::log_async(
+                db.clone(),
+                Some(actor.user_id.clone()),
+                "key_deleted".to_string(),
+                Some(serde_json::json!({
+                    "owner_id": owner_id,
+                    "user_service_id": event.service_id,
+                    "source": event.source,
+                    "cascade_grant": options.cascade_grant,
+                })),
+                actor.ip_address.clone(),
+                actor.user_agent.clone(),
+                actor.api_key_id.clone(),
+                actor.api_key_name.clone(),
+            );
+        }
+
+        let cascade_record_count =
+            claimed_keys.len() + usize::from(claimed_provider_token.is_some());
+        let remote_source = if let Some(initiating_key_id) = plan.initiating_key_id.as_deref() {
+            let initiating_key = claimed_keys.iter().find(|key| key.id == initiating_key_id);
+            match initiating_key {
+                Some(key) if key.connection_id.is_some() => Some(RemoteCredentialSource::Key(key)),
+                Some(_) => claimed_provider_token
+                    .as_ref()
+                    .map(RemoteCredentialSource::ProviderToken),
+                None => None,
+            }
+        } else {
+            claimed_provider_token
+                .as_ref()
+                .map(RemoteCredentialSource::ProviderToken)
+        };
+        let upstream_revocation_scheduled =
+            if let (Some(provider), Some(source)) = (plan.provider, remote_source) {
+                hand_off_remote_revocation(
+                    db,
+                    encryption_keys,
+                    owner_id,
+                    actor,
+                    provider,
+                    plan.scope,
+                    source,
+                    cascade_record_count,
+                )
+                .await
+            } else {
+                false
+            };
+
+        Ok(DisconnectResult {
+            upstream_revocation_scheduled,
+            deleted_services,
+        })
     })
+    .await
 }
 
 /// Build the destructive plan without applying it. This is intentionally
@@ -3824,7 +3933,9 @@ async fn build_disconnect_plan(
                 siblings,
                 unaffected_other_app,
                 token_scope_available: oauth_revocation::effective_revocation(&provider)
-                    .is_some_and(|config| config.style != "facebook_deauth"),
+                    .is_some_and(|config| {
+                        !matches!(config.style.as_str(), "facebook_deauth" | "aurinko_account")
+                    }),
             },
         )));
     }
@@ -3883,6 +3994,19 @@ async fn key_oauth_app_lineage(
     db: &mongodb::Database,
     provider: &ProviderConfig,
 ) -> OAuthAppLineage {
+    if provider.slug == "aurinko" {
+        return match key
+            .aurinko_account
+            .as_ref()
+            .filter(|a| !a.application_id_hash.is_empty())
+        {
+            Some(account) => OAuthAppLineage::AurinkoMailbox(
+                account.application_id_hash.clone(),
+                account.account_id.clone(),
+            ),
+            None => OAuthAppLineage::Unknown(key.id.clone()),
+        };
+    }
     if key.connection_id.is_none()
         && let Some(token) = legacy_token
     {
@@ -3920,6 +4044,9 @@ async fn provider_token_oauth_app_lineage(
     provider: &ProviderConfig,
     token: &UserProviderToken,
 ) -> OAuthAppLineage {
+    if provider.slug == "aurinko" {
+        return OAuthAppLineage::Unknown(token.id.clone());
+    }
     if token.credential_user_id.is_none() {
         return OAuthAppLineage::Platform;
     }
@@ -4149,6 +4276,12 @@ fn known_remote_skip_reason(
         "github" => None,
         "self_bearer" if !has_any_token => Some("skipped_no_token"),
         "self_bearer" => None,
+        "aurinko_account" if provider.slug != "aurinko" => Some("skipped_unsupported_style"),
+        "aurinko_account" if scope == oauth_revocation::RevocationScope::Token => {
+            Some("skipped_grant_only")
+        }
+        "aurinko_account" if access_token.is_none() => Some("skipped_no_token"),
+        "aurinko_account" => None,
         "facebook_deauth" if scope == oauth_revocation::RevocationScope::Token => {
             Some("skipped_grant_only")
         }
@@ -4260,6 +4393,7 @@ pub async fn revoke_key_if_pending(
     let Some(api_key) = user_api_key_service::find_api_key(db, user_id, ak_id).await? else {
         return Ok(false);
     };
+    let managed_aurinko = super::aurinko_oauth_service::is_managed_key(db, &api_key).await?;
     let api_key_provider_config_id = api_key.provider_config_id;
 
     // Atomic gate: flips pending_auth -> revoked in one write. If
@@ -4269,7 +4403,7 @@ pub async fn revoke_key_if_pending(
     if !flipped {
         return Ok(false);
     }
-    if let Some(provider_id) = api_key_provider_config_id.as_deref() {
+    if !managed_aurinko && let Some(provider_id) = api_key_provider_config_id.as_deref() {
         // Pending cleanup remains local-only. Claiming the legacy token here
         // preserves the previous last-copy cleanup without scheduling remote
         // work, while retaining the exact-row claim semantics.
@@ -4605,6 +4739,7 @@ mod tests {
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: "key-1".to_string(),
             user_id: "user-1".to_string(),
@@ -7838,6 +7973,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 credential_source: None,
                 id: stripped_key_id.clone(),
                 user_id: user_id.clone(),
@@ -10750,5 +10886,83 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(promoted_key.credential_type, "bearer");
+    }
+}
+
+#[cfg(test)]
+mod aurinko_grant_tests {
+    use super::*;
+    #[tokio::test]
+    async fn only_verified_same_mailbox_and_application_share_grant_lineage() {
+        let db = crate::test_utils::connect_test_database("aurinko_lineage")
+            .await
+            .expect("real MongoDB required");
+        let keys = crate::test_utils::test_encryption_keys();
+        let now = bson::DateTime::now();
+        let provider:ProviderConfig=bson::from_document(doc! {"_id":"provider","slug":"aurinko","name":"Aurinko","provider_type":"api_key","is_active":true,"created_by":"system","created_at":now,"updated_at":now}).unwrap();
+        let mut key:UserApiKey=bson::from_document(doc! {"_id":"pending","user_id":"owner","label":"Mailbox","credential_type":"oauth2","credential_source":"platform","provider_config_id":"provider","connection_id":"connection","status":"pending_auth","created_at":now,"updated_at":now}).unwrap();
+        let pending = key_oauth_app_lineage(&keys, &key, None, &db, &provider).await;
+        assert!(pending == OAuthAppLineage::Unknown("pending".into()));
+        key.id = "manual".into();
+        key.credential_type = "api_key".into();
+        key.connection_id = None;
+        assert!(
+            key_oauth_app_lineage(&keys, &key, None, &db, &provider).await
+                == OAuthAppLineage::Unknown("manual".into())
+        );
+        key.credential_type = "oauth2".into();
+        key.aurinko_account = Some(crate::models::user_api_key::AurinkoAccount {
+            account_id: "42".into(),
+            application_id_hash: "app-a".into(),
+            service_type: "IMAP".into(),
+            mailbox_address: "mail@example.com".into(),
+        });
+        let verified = key_oauth_app_lineage(&keys, &key, None, &db, &provider).await;
+        assert!(verified == OAuthAppLineage::AurinkoMailbox("app-a".into(), "42".into()));
+        key.aurinko_account.as_mut().unwrap().account_id = "43".into();
+        assert!(verified != key_oauth_app_lineage(&keys, &key, None, &db, &provider).await);
+        key.aurinko_account.as_mut().unwrap().account_id = "42".into();
+        key.aurinko_account.as_mut().unwrap().application_id_hash = "app-b".into();
+        assert!(verified != key_oauth_app_lineage(&keys, &key, None, &db, &provider).await);
+        key.aurinko_account
+            .as_mut()
+            .unwrap()
+            .application_id_hash
+            .clear();
+        assert!(matches!(
+            key_oauth_app_lineage(&keys, &key, None, &db, &provider).await,
+            OAuthAppLineage::Unknown(_)
+        ));
+        let mut provider = provider;
+        provider.revocation = Some(crate::models::provider_config::RevocationConfig {
+            style: "aurinko_account".into(),
+            url: "https://api.aurinko.io/v1/account/token".into(),
+            auth: "none".into(),
+            request_encoding: "form".into(),
+            revokes_grant: true,
+        });
+        let token = Zeroizing::new("mailbox-token".into());
+        assert_eq!(
+            known_remote_skip_reason(
+                &provider,
+                oauth_revocation::RevocationScope::Token,
+                None,
+                Some(&token),
+                None,
+                false
+            ),
+            Some("skipped_grant_only")
+        );
+        assert_eq!(
+            known_remote_skip_reason(
+                &provider,
+                oauth_revocation::RevocationScope::Grant,
+                None,
+                Some(&token),
+                None,
+                false
+            ),
+            None
+        );
     }
 }

@@ -2258,10 +2258,11 @@ export function KeyDetailPage() {
   const source = keyInfo.credential_source;
   const isOrgSource = source?.type === "org";
   const readOnly = isOrgSource && source.role !== "admin";
+  const isManagedAurinko = (keyInfo.catalog_service_slug ?? catalogEntry?.slug) === "api-aurinko" && keyInfo.credential_type === "oauth2";
   const canReconnect =
     !readOnly &&
     !keyInfo.auto_connected &&
-    (keyInfo.credential_missing || isReconnectableStatus(keyInfo.status)) &&
+    (isManagedAurinko && keyInfo.is_active || keyInfo.credential_missing || isReconnectableStatus(keyInfo.status)) &&
     (keyInfo.credential_type === "oauth2" ||
       catalogEntry?.provider_type === "oauth2" ||
       catalogEntry?.provider_type === "device_code");
@@ -2287,6 +2288,7 @@ export function KeyDetailPage() {
     !keyInfo.credential_missing &&
     keyInfo.status === "active" &&
     !isOpenAiDeviceCode &&
+    !isManagedAurinko &&
     catalogEntry?.supports_oauth_scopes !== false &&
     (keyInfo.credential_type === "oauth2" ||
       catalogEntry?.provider_type === "oauth2" ||
@@ -2373,7 +2375,7 @@ export function KeyDetailPage() {
                 <ButtonIcon variant="primary">
                   <RefreshCw className="h-4 w-4" />
                 </ButtonIcon>
-                {reconnectLabel(keyInfo.status)}
+                {isManagedAurinko ? "Reconnect mailbox" : reconnectLabel(keyInfo.status)}
               </Button>
             )}
             {canEditScopes && (

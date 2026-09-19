@@ -2,8 +2,54 @@ use super::*;
 use crate::models::channel_email::{
     BATCHES, EmailBatch, EmailReceipt, EmailSend, EmailSubscription, RECEIPTS, SENDS, SUBSCRIPTIONS,
 };
+use zeroize::Zeroizing;
 
 impl AurinkoAdapter {
+    pub(super) async fn signing_fingerprint(
+        &self,
+        db: &mongodb::Database,
+        bot: &ChannelBot,
+    ) -> AppResult<String> {
+        if bot.credential_source == "connection" {
+            let descriptor = self.platform_credentials().ok_or_else(invalid)?;
+            let row = crate::services::platform_credential_service::load(db, &descriptor)
+                .await?
+                .ok_or_else(invalid)?;
+            let secret = row.secrets.get("signing_secret").ok_or_else(invalid)?;
+            Ok(hex::encode(Sha256::digest(&secret.bytes)))
+        } else {
+            Ok(hex::encode(Sha256::digest(
+                bot.app_secret_encrypted.as_deref().ok_or_else(invalid)?,
+            )))
+        }
+    }
+    pub(super) async fn signing_verification(
+        &self,
+        db: &mongodb::Database,
+        keys: &crate::crypto::aes::EncryptionKeys,
+        bot: &ChannelBot,
+    ) -> AppResult<(
+        crate::services::channel_platform::PlatformVerifySecrets,
+        String,
+    )> {
+        if bot.credential_source != "connection" {
+            return Ok((
+                self.build_verify_secrets(keys, bot).await?,
+                self.signing_fingerprint(db, bot).await?,
+            ));
+        }
+        let descriptor = self.platform_credentials().ok_or_else(invalid)?;
+        let row = crate::services::platform_credential_service::load(db, &descriptor)
+            .await?
+            .ok_or_else(invalid)?;
+        let encrypted = &row.secrets.get("signing_secret").ok_or_else(invalid)?.bytes;
+        let fingerprint = hex::encode(Sha256::digest(encrypted));
+        let bytes = Zeroizing::new(keys.decrypt(encrypted).await?);
+        let secret = std::str::from_utf8(&bytes).map_err(|_| invalid())?;
+        let mut secrets = crate::services::channel_platform::PlatformVerifySecrets::default();
+        secrets.insert("app_secret", secret.to_owned());
+        Ok((secrets, fingerprint))
+    }
     async fn subscriptions(&self, token: &str, url: &str) -> AppResult<Vec<Value>> {
         let mut found = Vec::new();
         for offset in (0..1000).step_by(100) {
@@ -58,6 +104,15 @@ impl AurinkoAdapter {
         if !bot.is_active {
             return Err(AppError::ChannelBotInactive("Bot has been deleted".into()));
         }
+        if bot.credential_source == "connection" {
+            crate::services::aurinko_oauth_service::require_live_connection(
+                db,
+                &bot.user_id,
+                bot.connection_id.as_deref().ok_or_else(invalid)?,
+                true,
+            )
+            .await?;
+        }
         self.account(token, Some(&bot.platform_bot_id)).await?;
         let collection = db.collection::<EmailSubscription>(SUBSCRIPTIONS);
         let binding = match collection.find_one(doc! { "_id": &bot.id }).await? {
@@ -87,9 +142,7 @@ impl AurinkoAdapter {
         // Recover a successful subscribe whose response (or subsequent DB write)
         // was lost. Never subscribe a second time without checking the exact URL.
         let rows = self.subscriptions(token, url).await?;
-        let fingerprint = hex::encode(Sha256::digest(
-            bot.app_secret_encrypted.as_deref().ok_or_else(invalid)?,
-        ));
+        let fingerprint = self.signing_fingerprint(db, bot).await?;
         let active = rows.iter().find(|row| {
             binding.verified_secret_fingerprint.as_deref() == Some(&fingerprint)
                 && row["active"] == true
@@ -114,6 +167,11 @@ impl AurinkoAdapter {
             }
             identity(&row["id"]).ok_or_else(upstream)?
         };
+        if self.signing_fingerprint(db, bot).await? != fingerprint {
+            return Err(AppError::Conflict(
+                "Platform signing secret changed; retry Verify".into(),
+            ));
+        }
         let persisted = collection
             .update_one(
                 doc! { "_id": &bot.id, "user_id": &bot.user_id,
@@ -124,6 +182,11 @@ impl AurinkoAdapter {
         if persisted.matched_count != 1 {
             return Err(AppError::ChannelPlatformError(
                 "Aurinko did not verify the current signing secret; retry Verify".into(),
+            ));
+        }
+        if self.signing_fingerprint(db, bot).await? != fingerprint {
+            return Err(AppError::Conflict(
+                "Platform signing secret changed; retry Verify".into(),
             ));
         }
         for row in rows {
@@ -175,8 +238,8 @@ impl AurinkoAdapter {
         if bot.platform != "aurinko" || !bot.is_active {
             return Err(invalid());
         }
-        let secrets = self
-            .build_verify_secrets(context.encryption_keys, &bot)
+        let (secrets, fingerprint) = self
+            .signing_verification(context.db, context.encryption_keys, &bot)
             .await?;
         self.verify_webhook(&bot, Some(&secrets), headers, body)
             .await?;
@@ -189,9 +252,6 @@ impl AurinkoAdapter {
             }
             // No account payload exists in Aurinko's signed text/plain challenge.
             // The per-bot URL and persisted verified account bind setup here.
-            let fingerprint = hex::encode(Sha256::digest(
-                bot.app_secret_encrypted.as_deref().ok_or_else(invalid)?,
-            ));
             context
                 .db
                 .collection::<EmailSubscription>(SUBSCRIPTIONS)
@@ -286,10 +346,13 @@ impl AurinkoAdapter {
             "_id": uuid::Uuid::new_v4().to_string(), "bot_id": &bot.id, "user_id": &bot.user_id,
             "digest": digest, "next_offset": 0_i64, "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::days(31)),
         }}).upsert(true).return_document(mongodb::options::ReturnDocument::After).await?.ok_or_else(upstream)?;
-        let token = Zeroizing::new(
-            crate::services::channel_bot_service::decrypt_bot_token(context.encryption_keys, bot)
-                .await?,
-        );
+        let token = crate::services::channel_credentials::resolve_bot_token(
+            context.db,
+            context.encryption_keys,
+            self,
+            bot,
+        )
+        .await?;
         let account = self.account(&token, Some(&bot.platform_bot_id)).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         let mut failed = false;
@@ -388,6 +451,15 @@ impl AurinkoAdapter {
         conversation: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        if bot.credential_source == "connection" {
+            crate::services::aurinko_oauth_service::require_live_connection(
+                db,
+                &bot.user_id,
+                bot.connection_id.as_deref().ok_or_else(invalid)?,
+                true,
+            )
+            .await?;
+        }
         let live = crate::services::channel_bot_service::get_bot(db, &bot.id).await?;
         if !live.is_active
             || live.status != "active"

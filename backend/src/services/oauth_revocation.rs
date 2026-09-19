@@ -107,6 +107,35 @@ pub async fn revoke_remote(req: RevocationRequest<'_>) -> RevocationOutcome {
     let access_token = req.access_token.as_ref().map(|token| token.as_str());
     let refresh_token = req.refresh_token.as_ref().map(|token| token.as_str());
     let (access, refresh) = match config.style.as_str() {
+        "aurinko_account" if req.provider.slug == "aurinko" => {
+            let access = if req.scope == RevocationScope::Token {
+                access_token.map(|_| TokenOutcome::Skipped("grant_only"))
+            } else if let Some(token) = access_token {
+                Some(
+                    match send_revocation_request(
+                        REVOCATION_CLIENT
+                            .delete("https://api.aurinko.io/v1/account/token")
+                            .bearer_auth(token),
+                    )
+                    .await
+                    {
+                        Ok(response) if response.status.is_success() => TokenOutcome::Delivered,
+                        Ok(response)
+                            if matches!(
+                                response.status,
+                                StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED
+                            ) =>
+                        {
+                            TokenOutcome::NotFound
+                        }
+                        _ => TokenOutcome::SendFailed,
+                    },
+                )
+            } else {
+                None
+            };
+            (access, None)
+        }
         "rfc7009" => {
             let access = revoke_rfc7009_token(
                 req.provider,

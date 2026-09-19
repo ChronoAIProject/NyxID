@@ -73,6 +73,7 @@ export function OAuthCompletePage() {
     search.flow === "cc" && launchMetadata?.correlationId === search.nonce
       ? launchMetadata
       : null;
+  const returnToTab = displayContext?.returnToTab === true;
   const expectedProviderOrigin = displayContext?.providerOrigin ?? null;
   const [manualReturn, setManualReturn] = useState(false);
   const [staying, setStaying] = useState(false);
@@ -187,7 +188,7 @@ export function OAuthCompletePage() {
     search.code !== "session_mismatch" &&
     search.code !== "session_required" &&
     search.code !== "state_invalid";
-  const canRetryHere = retryable && expectedProviderOrigin !== null;
+  const canRetryHere = retryable && expectedProviderOrigin !== null && !returnToTab;
   const serviceName = displayContext?.serviceName;
   const title = success
     ? "Authorization response received"
@@ -200,17 +201,29 @@ export function OAuthCompletePage() {
     >
       <p role="status" aria-live="polite">
         {success
-          ? serviceName
-            ? `Return to your NyxID chat — the ${serviceName} connection's status appears there and updates automatically.`
-            : "Return to NyxID while the connection is verified."
+          ? returnToTab
+            ? "Return to your NyxID tab while the mailbox connection is verified."
+            : serviceName
+              ? `Return to your NyxID chat — the ${serviceName} connection's status appears there and updates automatically.`
+              : "Return to NyxID while the connection is verified."
           : (errorCopy?.[1] ?? "Return to NyxID and try again.")}
       </p>
-      {!success && retryable && expectedProviderOrigin === null ? (
+      {!success && retryable && (expectedProviderOrigin === null || returnToTab) ? (
         <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-[12px] text-foreground">
           Return to your NyxID tab and start the connection again there.
         </div>
       ) : null}
-      {manualReturn ? (
+      {returnToTab ? (
+        <Button
+          className="mt-5 w-full"
+          onClick={() => {
+            window.close();
+            setManualReturn(true);
+          }}
+        >
+          Close window
+        </Button>
+      ) : manualReturn ? (
         <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-[12px] text-foreground">
           Return to your NyxID tab to continue. You can close this window.
         </div>

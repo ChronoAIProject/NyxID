@@ -56,4 +56,5 @@ export interface OAuthLaunchNavigateMessage {
   readonly nonce: string;
   readonly url: string;
   readonly serviceName?: string;
+  readonly returnToTab?: boolean;
 }

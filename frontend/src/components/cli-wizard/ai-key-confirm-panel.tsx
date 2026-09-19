@@ -30,6 +30,9 @@ import {
   reservePairingAction,
   withRewindOnError,
 } from "@/pages/cli-pair/reserve-action";
+import { AurinkoMailboxConnect } from "@/components/shared/aurinko-mailbox-connect";
+import { AURINKO_PROTOCOL } from "@/schemas/aurinko-mailboxes";
+import type { KeyInfo } from "@/types/keys";
 import { CatalogGrid } from "./catalog-grid";
 
 /**
@@ -69,6 +72,7 @@ interface CatalogEntryShape {
    * `api_key`. This is what the wizard routes on.
    */
   readonly provider_type?: string;
+  readonly managed_onboarding?: string | null;
   readonly service_type: string;
   readonly requires_credential: boolean;
   readonly requires_gateway_url: boolean;
@@ -934,6 +938,7 @@ function CatalogConfirmForm({
   pairingId,
   onSuccess,
 }: CatalogConfirmFormProps) {
+  const [manualAurinko, setManualAurinko] = useState(false);
   const [platformChoice, setPlatformChoice] = useState(true);
   const usePlatformKey = Boolean(entry.platform_key?.available && !prefill.via_node && platformChoice);
   const shape = usePlatformKey ? "no-auth" : classifyFlow(entry);
@@ -1079,6 +1084,48 @@ function CatalogConfirmForm({
     } else {
       window.history.back();
     }
+  }
+
+  if (entry.managed_onboarding === AURINKO_PROTOCOL && !usePlatformKey && !manualAurinko && !viaNode) {
+    return <div className="space-y-4">
+      <Label htmlFor="aurinko-pairing-label">Service name</Label>
+      <Input id="aurinko-pairing-label" value={label} onChange={(event) => setLabel(event.target.value)} maxLength={128} />
+      {window.__WIZARD_BOOTSTRAP__?.context === "local" ? (
+        <p className="text-sm text-muted-foreground">Mailbox sign-in requires your NyxID browser session. Close this wizard and run <code>nyxid service add api-aurinko --oauth</code>, or open AI Services in your NyxID dashboard.</p>
+      ) : (
+        <AurinkoMailboxConnect
+          label={label}
+          ownerId={targetOrgId}
+          prepare={async () => {
+            await reservePairingAction(pairingId);
+            const key = await withRewindOnError(pairingId, () => api.post<KeyInfo>("/keys", {
+              service_slug: entry.slug,
+              label: label.trim(),
+              ...(prefill.custom_slug ? { custom_slug: prefill.custom_slug } : {}),
+              ...(targetOrgId ? { target_org_id: targetOrgId } : {}),
+            }));
+            if (!key.api_key_id) throw new Error("Mailbox connection has no credential. Open AI Services to complete setup.");
+            return {
+              connection_id: key.api_key_id,
+              service_id: key.id,
+              discardPending: async () => {
+                await api.delete(`/keys/${encodeURIComponent(key.id)}?only_if_pending=true`);
+                // Keep the pairing reservation: a completed callback may have won
+                // the conditional delete. A fresh CLI pairing safely retries.
+              },
+            };
+          }}
+          onConnected={async (connection) => {
+            const key = await api.get<KeyInfo>(`/keys/${encodeURIComponent(connection.service_id)}`);
+            if (key.id !== connection.service_id || key.api_key_id !== connection.connection_id || key.status !== "active" || !key.is_active) {
+              throw new Error("Mailbox is no longer active. Open AI Services to review the connection.");
+            }
+            onSuccess({ kind: "ai-key", service_id: key.id, slug: key.slug, label: key.label });
+          }}
+        />
+      )}
+      <Button variant="ghost" onClick={() => setManualAurinko(true)}>Use an existing Aurinko account token</Button>
+    </div>;
   }
 
   // SSH services use a distinct `service add-ssh` command in the CLI

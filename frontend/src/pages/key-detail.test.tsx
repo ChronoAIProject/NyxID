@@ -990,3 +990,20 @@ describe("explicit platform connection cosmetics", () => {
     expect(hooks.updateEndpoint).not.toHaveBeenCalled();
   });
 });
+
+describe("managed mailbox reconnect", () => {
+  it("reconnects an active Aurinko mailbox without generic permission or token editing", async () => {
+    hooks.key.data = makeKey({ catalog_service_slug: "api-aurinko", status: "active", is_active: true, credential_type: "oauth2" });
+    hooks.catalogEntry = { slug: "api-aurinko", provider_type: "api_key", managed_onboarding: "aurinko_account_code" };
+    render(<KeyDetailPage />);
+    expect(screen.queryByRole("button", { name: "Manage permissions" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect mailbox" }));
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute("data-reconnect", "key-1");
+  });
+  it("does not offer mailbox reconnect for a manual Aurinko account token", () => {
+    hooks.key.data = makeKey({ catalog_service_slug: "api-aurinko", status: "active", credential_type: "api_key" });
+    hooks.catalogEntry = { slug: "api-aurinko", provider_type: "api_key", managed_onboarding: "aurinko_account_code" };
+    render(<KeyDetailPage />);
+    expect(screen.queryByRole("button", { name: "Reconnect mailbox" })).not.toBeInTheDocument();
+  });
+});

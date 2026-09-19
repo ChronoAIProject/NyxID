@@ -36,6 +36,8 @@ pub struct CatalogEntryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed_onboarding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub revocation: Option<CatalogRevocationResponse>,
     pub requires_gateway_url: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -313,6 +315,7 @@ fn catalog_entry_response(
         auth_key_name: entry.auth_key_name,
         provider_config_id: entry.provider_config_id,
         provider_type: entry.provider_type,
+        managed_onboarding: entry.managed_onboarding,
         revocation: entry
             .revokes_grant
             .map(|revokes_grant| CatalogRevocationResponse { revokes_grant }),
@@ -878,6 +881,7 @@ mod tests {
 
     fn minimal_catalog_entry() -> crate::services::catalog_service::CatalogEntry {
         crate::services::catalog_service::CatalogEntry {
+            managed_onboarding: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             skills_manifest_digest: String::new(),

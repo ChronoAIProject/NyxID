@@ -2996,6 +2996,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 id: credential_id.to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 label: "full-router credential".to_string(),
@@ -3478,6 +3479,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 id: credential_id.to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 label: "ac5 credential".to_string(),
@@ -3643,6 +3645,7 @@ mod tests {
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 id: "00000000-0000-4000-8000-000000000713".to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 label: "oauth refresh canary".to_string(),

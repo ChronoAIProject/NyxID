@@ -22,8 +22,33 @@ import type {
   ManagedFlowProps,
   ManagedDetailProps,
 } from "./managed-flow-types";
+import { AurinkoMailboxConnect } from "@/components/shared/aurinko-mailbox-connect";
 
-export function ManagedOAuthConnect({
+export function ManagedOAuthConnect(props: ManagedFlowProps) {
+  return props.platform === "aurinko" ? <ManagedAurinkoConnect {...props} /> : <GenericManagedOAuthConnect {...props} />;
+}
+
+function ManagedAurinkoConnect({ bootstrap, label, orgId, botId, connectionId, onConnected }: ManagedFlowProps) {
+  const client = useQueryClient();
+  return <AurinkoMailboxConnect
+    label={label}
+    ownerId={orgId}
+    connectionId={connectionId}
+    allowReuse={!botId}
+    disabled={!bootstrap.available || Boolean(botId && !connectionId)}
+    onConnected={async (connection, signal) => {
+      const bot = await completeManagedOAuth("aurinko", {
+        connection_id: connection.connection_id,
+        label: label.trim(),
+        ...(orgId ? { target_org_id: orgId } : {}),
+      }, signal, botId);
+      await client.invalidateQueries({ queryKey: ["channel-bots"] });
+      if (!signal.aborted) onConnected(bot);
+    }}
+  />;
+}
+
+function GenericManagedOAuthConnect({
   platform,
   bootstrap,
   label,
@@ -184,12 +209,13 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
   const bootstrap = useManagedOnboarding(bot.platform);
   return (
     <DetailSection title="Connected account">
-      <DetailRow label="Handle" value={bot.platform_bot_username} />
+      <DetailRow label={bot.platform === "aurinko" ? "Mailbox" : "Handle"} value={bot.platform_bot_username} />
       <DetailRow
         label="Connection"
         value={bot.connection_id ?? "Missing"}
         copyable
       />
+      {!getPlatform(bot.platform).webhookIngestion && <>
       <DetailRow
         label="Last polled"
         value={bot.last_polled_at ?? "Not yet polled"}
@@ -204,6 +230,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         label="Consecutive errors"
         value={String(bot.poll_error_count ?? 0)}
       />
+      </>}
       <div className="space-y-3 py-3">
         {bot.last_poll_notice && (
           <p role="status" className="text-xs text-warning">{bot.last_poll_notice}</p>
@@ -222,6 +249,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
             label={bot.label}
             orgId={orgId}
             botId={bot.id}
+            connectionId={bot.connection_id}
             onConnected={() => toast.success("Account reconnected")}
           />
         )}

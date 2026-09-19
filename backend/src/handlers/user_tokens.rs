@@ -1077,7 +1077,7 @@ fn redirect_to_path(
 }
 
 /// Build the popup completion redirect from fixed tokens and an opaque nonce.
-fn redirect_to_oauth_completion(
+pub(crate) fn redirect_to_oauth_completion(
     frontend_url: &str,
     status: &str,
     flow: &str,
@@ -1698,6 +1698,7 @@ mod tests {
     fn test_oauth_state(state_id: &str, user_id: &str, provider_id: &str) -> OAuthState {
         let now = Utc::now();
         OAuthState {
+            aurinko: None,
             id: state_id.to_string(),
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
@@ -1721,6 +1722,7 @@ mod tests {
     fn test_pending_oauth_api_key(key_id: &str, user_id: &str, provider_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: key_id.to_string(),
             user_id: user_id.to_string(),

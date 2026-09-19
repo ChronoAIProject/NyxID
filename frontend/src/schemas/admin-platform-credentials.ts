@@ -28,6 +28,7 @@ export const platformCredentialsSchema = z.object({
   fields: z.array(platformCredentialFieldSchema),
   setup_checklist: z.array(z.string()),
   callback_url: z.string().nullable(),
+  intermediate_redirect_url: z.string().nullable().optional(),
   webhook_verify_token: z.string().nullable(),
   updated_at: z.string().nullable(),
 });

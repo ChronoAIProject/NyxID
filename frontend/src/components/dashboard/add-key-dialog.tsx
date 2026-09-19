@@ -69,6 +69,8 @@ import {
 import { useOAuthPopupStore } from "@/stores/oauth-popup-store";
 import { useOAuthPopupReceiver } from "@/hooks/use-oauth-popup";
 import type { OAuthFlowKind } from "@/types/oauth-popup";
+import { AurinkoMailboxConnect } from "@/components/shared/aurinko-mailbox-connect";
+import { AURINKO_PROTOCOL } from "@/schemas/aurinko-mailboxes";
 
 const POPUP_CLOSED_POLL_MS = 1_000;
 
@@ -80,6 +82,7 @@ type WizardStep =
   | "node_setup"
   | "oauth_credentials"
   | "oauth"
+  | "aurinko"
   | "device_code"
   /**
    * Aha-moment step (wave-aha-1 A4): after POST /keys succeeds, the dialog
@@ -3038,7 +3041,7 @@ export function AddKeyDialog({
       authKeyName:
         reconnectKey.auth_key_name || match.auth_key_name || "Authorization",
     });
-    setStep(match.provider_type === "device_code" ? "device_code" : "oauth");
+    setStep(match.slug === "api-aurinko" && reconnectKey.credential_type === "oauth2" ? "aurinko" : match.provider_type === "device_code" ? "device_code" : "oauth");
   }, [open, reconnectKey, catalogEntries]);
 
   useEffect(() => {
@@ -3128,6 +3131,11 @@ export function AddKeyDialog({
   function handleRoutingDirect() {
     if (!selectedEntry) {
       setStep("form");
+      return;
+    }
+
+    if (selectedEntry.managed_onboarding === AURINKO_PROTOCOL) {
+      setStep("aurinko");
       return;
     }
 
@@ -3271,7 +3279,7 @@ export function AddKeyDialog({
     const completionMode: CreatedKey["completionMode"] =
       step === "device_code"
         ? "device_code"
-        : step === "oauth"
+        : step === "oauth" || step === "aurinko"
           ? "oauth"
           : "credential";
     // For OAuth/device-code flows we don't always have the slug back —
@@ -3592,6 +3600,39 @@ export function AddKeyDialog({
               setStep(form.nodeId.trim() ? "node_setup" : "routing");
             }}
           />
+        )}
+
+        {step === "aurinko" && selectedEntry && (
+          <div className="space-y-4">
+            <StepHeader title={isReconnect ? "Reconnect mailbox" : "Connect your mailbox"} description="Use your email account for AI Services and Aurinko channel bots." />
+            <AurinkoMailboxConnect
+              label={form.label}
+              ownerId={targetOrgId}
+              connectionId={reconnectKey?.api_key_id}
+              disabled={selectedEntry.managed_onboarding !== AURINKO_PROTOCOL}
+              prepare={async () => {
+                const key = await ensureAuthKey();
+                if (!key.api_key_id) throw new Error("Mailbox connection has no credential. Delete this service and connect a new mailbox.");
+                return {
+                  connection_id: key.api_key_id,
+                  service_id: key.id,
+                  previousAuthorizationAt: key.last_authorized_at,
+                  ...(!isReconnect && key.status === "pending_auth" ? { discardPending: async () => {
+                    const result = await api.delete<{ skipped?: boolean }>(`/keys/${encodeURIComponent(key.id)}?only_if_pending=true`);
+                    if (!result.skipped) setAuthKey(null);
+                  } } : {}),
+                };
+              }}
+              onStarted={(started, previousAuthorizationAt) => onAuthorizationPending?.({ keyId: started.service_id, attemptId: started.attempt_nonce, previousAuthorizationAt })}
+              onAborted={onAuthorizationAborted}
+              onConnected={(connection) => handleAuthComplete(connection.service_id)}
+            />
+            {selectedEntry.managed_onboarding !== AURINKO_PROTOCOL && <p role="alert" className="text-sm text-muted-foreground">Ask a platform administrator to configure the Aurinko application before connecting.</p>}
+            <div className="flex gap-2">
+              <Button type="button" variant="ghost" onClick={() => isReconnect ? handleOpenChange(false) : setStep("routing")}>Back</Button>
+              {!isReconnect && <Button type="button" variant="ghost" onClick={() => setStep("form")}>Use an existing Aurinko account token</Button>}
+            </div>
+          </div>
         )}
 
         {step === "device_code" && selectedEntry && (

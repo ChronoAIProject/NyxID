@@ -351,6 +351,7 @@ mod tests {
     fn oauth_key(user_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            aurinko_account: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             label: "GitHub work account".to_string(),

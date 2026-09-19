@@ -2837,6 +2837,9 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
+    super::aurinko_oauth_service::validate_connection_route_snapshot(
+        db, &user_service, &api_key, &endpoint,
+    ).await?;
     let api_key = if materialize_credentials {
         maybe_refresh_provider_backed_api_key(
             db,
@@ -3237,6 +3240,13 @@ pub async fn resolve_agent_credential_override_identity(
             );
             AppError::Internal("Bound credential not found".to_string())
         })?;
+
+    if super::aurinko_oauth_service::is_managed_key(db, &api_key).await? {
+        return Err(AppError::ValidationError(
+            "Use the managed mailbox service directly instead of an agent credential override"
+                .into(),
+        ));
+    }
 
     let api_key = maybe_refresh_provider_backed_api_key(
         db,
@@ -5456,6 +5466,7 @@ mod tests {
         let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                aurinko_account: None,
                 credential_source: None,
                 id: override_credential_id.clone(),
                 user_id: user_id.clone(),
@@ -7974,6 +7985,7 @@ mod tests {
 
     fn authority_test_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -8052,6 +8064,7 @@ mod tests {
     #[test]
     fn missing_credential_error_oauth2_with_provider() {
         let key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),
@@ -8084,6 +8097,7 @@ mod tests {
     #[test]
     fn missing_credential_error_api_key() {
         let key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),

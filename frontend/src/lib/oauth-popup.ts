@@ -20,6 +20,7 @@ export interface PopupLaunchMetadata {
   readonly providerOrigin: string;
   readonly correlationId: string;
   readonly serviceName?: string;
+  readonly returnToTab?: boolean;
 }
 
 const POPUP_WIDTH = 760;
@@ -53,7 +54,12 @@ function popupFeatures(view: Window = window): string {
 export interface OAuthPopupHandle {
   readonly launchId: string;
   readonly ready: Promise<void>;
-  navigate(url: string, nonce: string, serviceName?: string): Promise<void>;
+  navigate(
+    url: string,
+    nonce: string,
+    serviceName?: string,
+    returnToTab?: boolean,
+  ): Promise<void>;
   close(): void;
   /** A soft hint only: COOP can make a live popup appear closed. */
   isClosed(): boolean;
@@ -111,6 +117,7 @@ export function readPopupLaunchMetadata(): PopupLaunchMetadata | null {
     return {
       providerOrigin: providerUrl.origin,
       correlationId: record.correlationId,
+      ...(record.returnToTab === true ? { returnToTab: true } : {}),
       ...(record.serviceName !== undefined
         ? { serviceName: record.serviceName }
         : {}),
@@ -124,11 +131,13 @@ export function popupLaunchMetadataForNavigation(
   providerUrl: URL,
   correlationId: string,
   serviceName: unknown,
+  returnToTab?: boolean,
 ): PopupLaunchMetadata {
   return {
     providerOrigin: providerUrl.origin,
     correlationId,
     ...(validServiceName(serviceName) ? { serviceName } : {}),
+    ...(returnToTab === true ? { returnToTab: true } : {}),
   };
 }
 
@@ -175,7 +184,7 @@ export function openOAuthPopup(): OAuthPopupHandle | null {
   return {
     launchId,
     ready,
-    async navigate(url, nonce, serviceName) {
+    async navigate(url, nonce, serviceName, returnToTab) {
       const authorizationUrl = validateAuthorizationUrl(url, nonce);
       if (authorizationUrl === null) {
         throw new Error("Invalid OAuth authorization URL");
@@ -188,6 +197,7 @@ export function openOAuthPopup(): OAuthPopupHandle | null {
           nonce,
           url: authorizationUrl.href,
           ...(serviceName !== undefined ? { serviceName } : {}),
+          ...(returnToTab === true ? { returnToTab: true } : {}),
         },
         window.location.origin,
       );

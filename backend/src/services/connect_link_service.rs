@@ -74,6 +74,7 @@ pub struct CatalogConnectInfo {
     pub provider_type: Option<String>,
     pub credential_mode: Option<String>,
     pub has_platform_oauth_credentials: bool,
+    pub managed_aurinko: bool,
     pub requires_gateway_url: bool,
     pub api_key_url: Option<String>,
     pub api_key_instructions: Option<String>,
@@ -81,6 +82,9 @@ pub struct CatalogConnectInfo {
 
 impl CatalogConnectInfo {
     pub fn connect_method(&self) -> &'static str {
+        if self.managed_aurinko {
+            return super::aurinko_oauth_service::PROTOCOL;
+        }
         match self.provider_type.as_deref() {
             Some("oauth2") => "oauth",
             Some("device_code") => "device_code",
@@ -242,6 +246,17 @@ async fn validate_scopes(
 ) -> AppResult<()> {
     if scopes.is_empty() {
         return Ok(());
+    }
+    if service.managed_aurinko {
+        if scopes
+            .iter()
+            .all(|s| super::aurinko_oauth_service::SCOPES.contains(&s.as_str()))
+        {
+            return Ok(());
+        }
+        return Err(AppError::ValidationError(
+            "Managed mailboxes support Mail.Read, Mail.Send and Mail.Drafts".into(),
+        ));
     }
     if !matches!(service.connect_method(), "oauth" | "device_code") {
         return Err(AppError::ValidationError(
@@ -1306,6 +1321,11 @@ async fn catalog_info(
         None => None,
     };
     Ok(CatalogConnectInfo {
+        managed_aurinko: service.slug == "api-aurinko"
+            && service.base_url.trim_end_matches('/') == super::aurinko_oauth_service::ORIGIN
+            && provider
+                .as_ref()
+                .is_some_and(super::aurinko_oauth_service::available),
         service_id: service.id,
         service_slug: service.slug,
         service_name: service.name,
@@ -1319,9 +1339,10 @@ async fn catalog_info(
             .as_ref()
             .map(|provider| provider.credential_mode.clone()),
         has_platform_oauth_credentials: provider.as_ref().is_some_and(|provider| {
-            crate::services::user_credentials_service::provider_has_admin_oauth_credentials(
-                provider,
-            )
+            super::aurinko_oauth_service::available(provider)
+                || crate::services::user_credentials_service::provider_has_admin_oauth_credentials(
+                    provider,
+                )
         }),
         requires_gateway_url: provider
             .as_ref()
@@ -1856,12 +1877,13 @@ mod tests {
             .unwrap();
             assert_eq!(status.scopes, preview.scopes);
             for attempt in 0..if device { 1 } else { 2 } {
-                let Json(completed) = handlers::complete_connect_link(
+                let (_, Json(completed)) = handlers::complete_connect_link(
                     State(state.clone()),
                     test_auth_user(&actor),
                     ConnectInfo("127.0.0.1:43210".parse().unwrap()),
                     HeaderMap::new(),
                     Json(handlers::CompleteConnectLinkRequest {
+                        aurinko_provider: None,
                         token: raw_token.clone(),
                         credential: None,
                         use_platform_key: None,

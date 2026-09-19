@@ -202,7 +202,7 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
     for adapter in crate::services::channel_adapters::registered_adapters(&cache) {
         assert_eq!(
             adapter.managed_onboarding().is_some(),
-            matches!(adapter.platform_id(), "whatsapp" | "x")
+            matches!(adapter.platform_id(), "whatsapp" | "x" | "aurinko")
         );
         assert_eq!(
             adapter.platform_webhook(),

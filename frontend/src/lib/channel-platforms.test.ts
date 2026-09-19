@@ -37,8 +37,8 @@ describe("channel catalog presentation", () => {
 });
 
 describe("Aurinko email setup", () => {
-  it("uses account-token onboarding without an OAuth launch", () => {
-    expect(platforms.aurinko!.managedFlow).toBeUndefined();
+  it("offers managed mailbox onboarding and manual account-token fields", () => {
+    expect(platforms.aurinko!.managedFlow).toBe("oauth_connection");
     expect(platforms.aurinko!.label).toBe("Aurinko Email");
     expect(platforms.aurinko!.setupNote?.text).toContain("stored separately");
     expect(editableChannelFields(platforms.aurinko!).map((field) => field.name)).toEqual(["bot_token", "app_secret"]);

@@ -1167,3 +1167,37 @@ describe("CLI wizard platform-key selection", () => {
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/keys", { service_slug: "llm-xai", label: "xAI", use_platform_key: true }));
   });
 });
+
+describe("AiKeyConfirm managed Aurinko", () => {
+  const entry = {
+    slug: "api-aurinko", name: "Aurinko Email", base_url: "https://api.aurinko.io",
+    auth_method: "bearer", provider_type: "api_key", managed_onboarding: "aurinko_account_code",
+    service_type: "http", requires_credential: true, requires_gateway_url: false,
+  };
+  beforeEach(() => {
+    mockGet.mockResolvedValue(entry);
+    mockPost.mockClear();
+  });
+  it("offers provider sign-in for the named flow despite the manual api_key provider type", async () => {
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-aurinko" }} />, { wrapper: createWrapper() });
+    expect(await screen.findByRole("button", { name: "Connect mailbox" })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "Email provider" })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Client ID|Client secret/i)).not.toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+  it("routes the localhost wizard to hosted browser sign-in and retains manual account tokens", async () => {
+    const previous = window.__WIZARD_BOOTSTRAP__;
+    Object.defineProperty(window, "__WIZARD_BOOTSTRAP__", { configurable: true, writable: true, value: { context: "local" } });
+    try {
+      render(<AiKeyConfirm {...baseProps} prefill={{ slug: "api-aurinko" }} />, { wrapper: createWrapper() });
+      expect(await screen.findByText(/requires your NyxID browser session/)).toBeInTheDocument();
+      expect(screen.getByText("nyxid service add api-aurinko --oauth")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Connect mailbox" })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Use an existing Aurinko account token" }));
+      expect(screen.getByRole("button", { name: "Create Service" })).toBeInTheDocument();
+      expect(mockPost).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, "__WIZARD_BOOTSTRAP__", { configurable: true, writable: true, value: previous });
+    }
+  });
+});

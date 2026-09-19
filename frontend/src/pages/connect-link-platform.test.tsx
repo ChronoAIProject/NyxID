@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   navigate: vi.fn(),
   available: true,
+  managedAurinko: false,
   choice: undefined as boolean | undefined,
   scopes: [] as string[],
 }));
@@ -35,7 +36,8 @@ vi.mock("@/hooks/use-connect-links", () => ({
       scopes: mocks.scopes,
       requested_by: "cli",
       expires_at: "2099-01-01T00:00:00Z",
-      connect_method: "api_key",
+      connect_method: mocks.managedAurinko ? "aurinko_account_code" : "api_key",
+      managed_onboarding: mocks.managedAurinko ? "aurinko_account_code" : null,
       auth_key_name: "Authorization",
       use_platform_key: mocks.choice,
     },
@@ -51,6 +53,7 @@ vi.mock("@/hooks/use-connect-links", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.available = true;
+  mocks.managedAurinko = false;
   mocks.choice = undefined;
   mocks.scopes = [];
   mocks.complete.mockResolvedValue({ status: "completed" });
@@ -96,4 +99,24 @@ it("retains creator-requested OAuth scope setup without defaulting to a platform
   await userEvent.click(screen.getByRole("button", { name: "Connect" }));
   expect(screen.getByLabelText("Authorization")).toBeInTheDocument();
   expect(mocks.complete).not.toHaveBeenCalled();
+});
+
+it.each([["IMAP / SMTP", "IMAP"], ["Zoho Mail", "Zoho"]])("hosted mailbox request selects %s without application credentials", async (label, provider) => {
+  mocks.available = false;
+  mocks.managedAurinko = true;
+  render(<ConnectLinkPage />);
+  await userEvent.click(screen.getByRole("combobox", { name: "Email provider" }));
+  await userEvent.click(screen.getByRole("option", { name: label }));
+  await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+  expect(mocks.complete).toHaveBeenCalledWith({ token: "hosted-token", values: { aurinko_provider: provider, use_platform_key: false } });
+  expect(screen.queryByLabelText(/client secret|client id/i)).not.toBeInTheDocument();
+});
+it("retains manual account-token entry alongside hosted mailbox sign-in", async () => {
+  mocks.available = false;
+  mocks.managedAurinko = true;
+  render(<ConnectLinkPage />);
+  await userEvent.click(screen.getByRole("button", { name: "Use an existing Aurinko account token" }));
+  await userEvent.type(screen.getByLabelText("Authorization"), "mailbox-account-token");
+  await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+  expect(mocks.complete).toHaveBeenCalledWith({ token: "hosted-token", values: expect.objectContaining({ credential: "mailbox-account-token", use_platform_key: false }) });
 });

@@ -1710,6 +1710,51 @@ async fn run_oauth_add(
         .map(str::to_string)
         .unwrap_or_else(|| slug.clone());
 
+    if catalog["managed_onboarding"].as_str() == Some("aurinko_account_code") {
+        if options.openapi_spec_url.is_some()
+            || options.ws_frame_injections.is_some()
+            || options
+                .additional_scopes
+                .iter()
+                .any(|s| !["Mail.Read", "Mail.Send", "Mail.Drafts"].contains(&s.as_str()))
+        {
+            bail!(
+                "Managed Aurinko uses its catalog API and Mail.Read, Mail.Send, Mail.Drafts permissions; custom API specs, frame injection and other scopes are unsupported"
+            );
+        }
+        if options.via_node.is_some()
+            || options.oauth_client_id.is_some()
+            || options.copy_oauth_client_from.is_some()
+        {
+            bail!(
+                "Managed Aurinko uses the platform application and direct mailbox connection; remove node and custom OAuth options"
+            );
+        }
+        if options.target_org_id.is_some() || options.custom_slug.is_some() {
+            return crate::wizard::run_ai_key_wizard(
+                auth,
+                crate::wizard::WizardPrefill {
+                    slug: Some(slug),
+                    label: Some(label),
+                    org: options.target_org_id.map(str::to_owned),
+                    custom_slug: options.custom_slug.map(str::to_owned),
+                    ..Default::default()
+                },
+                false,
+            )
+            .await;
+        }
+        return crate::commands::connect::run(crate::cli::ConnectArgs {
+            service_slug: slug,
+            label: Some(label),
+            scopes: options.additional_scopes.to_vec(),
+            no_wait: matches!(auth.output, OutputFormat::Json),
+            timeout: 900,
+            auth: auth.clone(),
+        })
+        .await;
+    }
+
     let mut key_body = serde_json::Map::new();
     key_body.insert("service_slug".into(), Value::String(slug.clone()));
     key_body.insert("label".into(), Value::String(label));

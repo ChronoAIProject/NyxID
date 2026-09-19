@@ -110,7 +110,7 @@ function CredentialForm({
               after:
                 provider.provider === "aurinko"
                   ? fields.client_id === null || fields.client_secret === null
-                    ? "Clearing application credentials prevents new mailbox authorizations and reconnects until restored. Clearing the webhook signing secret stops managed bot webhook verification. Manual connections keep their own credentials."
+                    ? "Clearing application credentials stops managed mailbox authorization, reconnects, and managed bot operations until restored. Manual connections keep their own credentials."
                     : "Clearing the webhook signing secret stops managed bot webhook verification until restored. Application credentials and AI Service mailbox tokens are retained."
                   : `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.`,
             },
@@ -296,8 +296,16 @@ function CredentialForm({
       <div className="max-w-2xl space-y-3">
         {provider.callback_url && (
           <CopyableUrlCallout
-            label="Platform Callback URL"
+            label={provider.provider === "aurinko" ? "Final mailbox callback URL" : "Platform Callback URL"}
             url={provider.callback_url}
+            description={provider.provider === "aurinko" ? "Register this exact URL in your Aurinko application's authorized return URLs." : undefined}
+          />
+        )}
+        {provider.intermediate_redirect_url && (
+          <CopyableUrlCallout
+            label="Intermediate provider redirect URL"
+            url={provider.intermediate_redirect_url}
+            description="Use this URL in your provider app and its matching Aurinko OAuth settings when a redirect on your own domain is required."
           />
         )}
         {provider.webhook_verify_token && (
@@ -336,7 +344,7 @@ function CredentialForm({
             <DialogDescription>
               {confirm === "clear"
                 ? provider.provider === "aurinko"
-                  ? "Clearing these credentials prevents managed mailbox authorization and managed bot webhook verification until restored. Manual connections keep their own credentials. Unsaved credential edits will be discarded."
+                  ? "Clearing these credentials prevents managed mailbox authorization and stops managed bot operations until restored. Manual connections keep their own credentials. Unsaved credential edits will be discarded."
                   : sharedProvider
                     ? `These credentials are shared with the ${sharedProvider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored. Unsaved credential edits will be discarded.`
                     : "Managed onboarding and managed bot authentication will be unavailable until credentials are restored. Unsaved credential edits will be discarded."

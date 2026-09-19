@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AurinkoProvider } from "./aurinko-mailboxes";
 
 export const connectLinkStatusSchema = z.enum([
   "pending",
@@ -12,9 +13,11 @@ export const connectMethodSchema = z.enum([
   "oauth",
   "device_code",
   "none",
+  "aurinko_account_code",
 ]);
 
 export const connectLinkPreviewSchema = z.object({
+  managed_onboarding: z.string().nullish(),
   use_platform_key: z.boolean().nullish(),
   scopes: z.array(z.string()).default([]),
   service_name: z.string().min(1),
@@ -100,6 +103,7 @@ export type ConnectLinkPreview = z.infer<typeof connectLinkPreviewSchema>;
 export type ConnectCredentialForm = z.infer<typeof connectCredentialFormSchema>;
 export type ConnectOAuthForm = z.infer<typeof connectOAuthFormSchema>;
 export interface CompleteConnectLinkInput {
+  readonly aurinko_provider?: AurinkoProvider;
   readonly use_platform_key?: boolean;
   readonly credential?: string;
   readonly endpoint_url?: string;

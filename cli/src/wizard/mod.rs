@@ -380,7 +380,7 @@ pub async fn run_ai_key_wizard(
 
     let base_url = auth.resolved_base_url()?;
 
-    let outcome = if is_wizard_eligible() {
+    let outcome = if is_wizard_eligible() && prefill.slug.as_deref() != Some("api-aurinko") {
         let access_token = crate::auth::resolve_access_token(auth)?;
         let base_url_root = base_url.trim_end_matches('/').to_string();
         let proxy = ProxyContext {

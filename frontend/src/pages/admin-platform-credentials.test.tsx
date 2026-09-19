@@ -332,7 +332,8 @@ it("renders Aurinko's three application fields and reviews a signing-only clear 
         help: "From the Aurinko application",
       })),
       setup_checklist: ["Each mailbox requires its owner's authorization."],
-      callback_url: null,
+      callback_url: "https://nyxid.example.com/api/v1/providers/aurinko/mailboxes/callback",
+      intermediate_redirect_url: "https://nyxid.example.com/api/v1/providers/aurinko/intermediate",
       webhook_verify_token: null,
       updated_at: "v1",
     },
@@ -342,6 +343,10 @@ it("renders Aurinko's three application fields and reviews a signing-only clear 
   expect(
     screen.getByRole("heading", { name: "Aurinko Email" }),
   ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Copy Final mailbox callback URL" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Copy Intermediate provider redirect URL" })).toBeInTheDocument();
+  expect(screen.getByText("https://nyxid.example.com/api/v1/providers/aurinko/mailboxes/callback")).toBeInTheDocument();
+  expect(screen.getByText("https://nyxid.example.com/api/v1/providers/aurinko/intermediate")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Clear provider" }));
   const clear = await screen.findByRole("dialog", {
     name: "Clear platform credentials",

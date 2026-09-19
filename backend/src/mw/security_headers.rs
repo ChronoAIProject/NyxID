@@ -16,6 +16,10 @@ use axum::{
 /// - Permissions-Policy
 /// - X-XSS-Protection
 pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> Response {
+    let sensitive_callback = request
+        .uri()
+        .path()
+        .starts_with("/api/v1/providers/aurinko/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
@@ -45,10 +49,18 @@ pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> 
     }
 
     // Control referrer information
-    headers.insert(
-        header::REFERRER_POLICY,
-        "strict-origin-when-cross-origin".parse().unwrap(),
-    );
+    if sensitive_callback
+        || headers
+            .get(header::REFERRER_POLICY)
+            .is_some_and(|value| value == "no-referrer")
+    {
+        headers.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
+    } else {
+        headers.insert(
+            header::REFERRER_POLICY,
+            "strict-origin-when-cross-origin".parse().unwrap(),
+        );
+    }
 
     // Restrict browser features
     headers.insert(
@@ -65,7 +77,7 @@ pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> 
     );
 
     // Prevent caching of API responses (SEC-6: protects credential endpoints)
-    if !headers.contains_key(header::CACHE_CONTROL) {
+    if sensitive_callback || !headers.contains_key(header::CACHE_CONTROL) {
         headers.insert(
             header::CACHE_CONTROL,
             "no-store, no-cache, must-revalidate".parse().unwrap(),
@@ -204,6 +216,124 @@ mod tests {
         assert_eq!(
             resp.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(),
             "default-src 'self'"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_explicit_no_referrer_on_other_routes() {
+        let app = with_response_headers(Router::new().route(
+            "/sensitive",
+            get(|| async { [(header::REFERRER_POLICY, "no-referrer")] }),
+        ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sensitive?code=private-code")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+    }
+
+    #[tokio::test]
+    async fn aurinko_redirect_and_error_responses_never_cache_or_send_referrers() {
+        let app = with_response_headers(Router::new().nest(
+            "/api/v1/providers",
+            Router::new().route(
+                "/aurinko/intermediate",
+                get(crate::handlers::aurinko_mailboxes::intermediate),
+            ),
+        ));
+        for (query, expected_status) in [
+            (
+                "state=provider-state&code=private-code&location=eu&accounts-server=https%3A%2F%2Faccounts.zoho.eu",
+                StatusCode::SEE_OTHER,
+            ),
+            ("code=private-code", StatusCode::BAD_REQUEST),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/providers/aurinko/intermediate?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+            assert!(
+                response.headers()[header::CACHE_CONTROL]
+                    .to_str()
+                    .unwrap()
+                    .split(',')
+                    .any(|directive| directive.trim() == "no-store")
+            );
+            if expected_status.is_redirection() {
+                let target =
+                    url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap())
+                        .unwrap();
+                assert_eq!(
+                    target.origin().ascii_serialization(),
+                    "https://api.aurinko.io"
+                );
+                assert_eq!(target.path(), "/v1/auth/callback");
+                let parameters = target
+                    .query_pairs()
+                    .collect::<std::collections::HashMap<_, _>>();
+                assert_eq!(parameters.get("location").map(|v| v.as_ref()), Some("eu"));
+                assert_eq!(
+                    parameters.get("accounts-server").map(|v| v.as_ref()),
+                    Some("https://accounts.zoho.eu")
+                );
+                assert_eq!(
+                    parameters.get("code").map(|v| v.as_ref()),
+                    Some("private-code")
+                );
+                assert_eq!(
+                    parameters.get("state").map(|v| v.as_ref()),
+                    Some("provider-state")
+                );
+            } else {
+                assert!(!response.headers().contains_key(header::LOCATION));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn aurinko_callback_cannot_override_no_store_or_no_referrer() {
+        let app = with_response_headers(Router::new().nest(
+            "/api/v1/providers",
+            Router::new().route(
+                "/aurinko/mailboxes/callback",
+                get(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        [
+                            (header::CACHE_CONTROL, "public, max-age=600"),
+                            (header::REFERRER_POLICY, "unsafe-url"),
+                        ],
+                    )
+                }),
+            ),
+        ));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/providers/aurinko/mailboxes/callback?code=private-code")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-store, no-cache, must-revalidate"
         );
     }
 

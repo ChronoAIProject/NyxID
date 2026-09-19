@@ -105,6 +105,15 @@ pub async fn switch_credential_binding(
     oauth_client_credentials: OauthClientCredentialsInput<'_>,
 ) -> AppResult<()> {
     let service = user_service_service::get_user_service(db, owner_id, service_id).await?;
+    if let Some(id) = &service.api_key_id
+        && let Some(key) = user_api_key_service::find_api_key(db, owner_id, id).await?
+        && crate::services::aurinko_oauth_service::is_managed_key(db, &key).await?
+    {
+        return Err(AppError::ValidationError(
+            "Managed mailboxes use their connected account; reconnect to replace credentials"
+                .into(),
+        ));
+    }
     let catalog_id = service.catalog_service_id.as_ref().ok_or_else(|| {
         AppError::ValidationError("Credential binding requires a catalog service".to_string())
     })?;

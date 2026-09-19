@@ -3981,6 +3981,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
 
         // Create UserApiKey -- clean up endpoint on failure
         let api_key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: api_key_id.clone(),
             user_id: token.user_id.clone(),
@@ -4228,6 +4229,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             .or_else(|| service.auth_type.clone())
             .unwrap_or_else(|| "api_key".to_string());
         let api_key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: api_key_id.clone(),
             user_id: conn.user_id.clone(),
@@ -4493,6 +4495,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 
         // Create UserApiKey (placeholder -- node-managed or SSH certificate)
         let api_key = UserApiKey {
+            aurinko_account: None,
             credential_source: None,
             id: api_key_id.clone(),
             user_id: binding.user_id.clone(),
