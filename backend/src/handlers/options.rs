@@ -260,12 +260,18 @@ mod tests {
         assert_eq!(found.total, 1);
         assert_eq!(found.items[0].value, "team:custom");
         assert_eq!(found.selected_items.len(), 2);
-        assert!(
-            found
+        assert!(found.selected_items.iter().all(|item| !item.disabled));
+        for (value, source) in [
+            ("legacy:read", "configured_scope"),
+            ("proxy:*", "backend_definition"),
+        ] {
+            let selected = found
                 .selected_items
                 .iter()
-                .all(|item| !item.disabled && item.source == "configured_scope")
-        );
+                .find(|item| item.value == value)
+                .unwrap();
+            assert_eq!(selected.source, source);
+        }
         db.collection::<mongodb::bson::Document>(crate::models::service_account::COLLECTION_NAME)
             .update_one(
                 doc! { "_id": &team_sa.id },
@@ -362,6 +368,16 @@ mod tests {
                 Some(token.clone()),
                 StatusCode::OK,
             ),
+            (
+                format!("{path}&search=proxy:*"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
+            (
+                format!("{path}&search=groups"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
             (path.clone(), None, StatusCode::UNAUTHORIZED),
             (
                 "/api/v1/options/service-history-action".into(),
@@ -412,6 +428,23 @@ mod tests {
                 .next()
                 .unwrap()
                 .to_string();
+            let expected_scopes: &[&str] = if path.contains("search=catalog:") {
+                &["catalog:skills:read", "catalog:skills:write"]
+            } else if path.contains("search=proxy:*") {
+                &["proxy:*"]
+            } else if path.contains("search=groups") {
+                &["groups"]
+            } else {
+                &[
+                    "proxy",
+                    "proxy:*",
+                    "llm:proxy",
+                    "roles",
+                    "groups",
+                    "catalog:skills:read",
+                    "catalog:skills:write",
+                ]
+            };
             let mut req = Request::builder().uri(path);
             if let Some(token) = token {
                 req = req.header("authorization", format!("Bearer {token}"));
@@ -428,20 +461,24 @@ mod tests {
                 let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(response["option_set"], expected_set);
                 if expected_set == "service-scope" {
-                    // Curation scopes are discoverable before any account exists.
+                    // Every known scope is discoverable before any account exists.
                     let items = response["items"].as_array().unwrap();
-                    for scope in ["catalog:skills:read", "catalog:skills:write"] {
+                    assert_eq!(items.len(), expected_scopes.len());
+                    assert_eq!(response["total"], expected_scopes.len());
+                    for &scope in expected_scopes {
                         let matches: Vec<_> =
                             items.iter().filter(|item| item["value"] == scope).collect();
                         assert_eq!(matches.len(), 1, "Missing or duplicate suggestion: {scope}");
                         assert_eq!(matches[0]["source"], "backend_definition");
                         assert_eq!(matches[0]["disabled"], false);
-                        assert!(
-                            matches[0]["description"]
-                                .as_str()
-                                .unwrap()
-                                .contains("curation grant")
-                        );
+                        let description = matches[0]["description"].as_str().unwrap();
+                        if scope.starts_with("catalog:") {
+                            assert!(description.contains("curation grant"));
+                        } else if scope == "proxy:*" {
+                            assert!(description.contains("alias of proxy"));
+                        } else if scope == "groups" {
+                            assert!(description.contains("group list is empty"));
+                        }
                     }
                 }
             }
