@@ -69,7 +69,7 @@ export function useOptions(
         response.next_offset !== null &&
         (response.next_offset <= pageParam.offset ||
           response.next_offset >= response.total ||
-          response.next_offset > (optionSet === "service-scope" ? 10005 : 1000))
+          response.next_offset > (optionSet === "service-scope" ? 10007 : 1000))
       ) {
         throw new Error(
           "Options returned invalid pagination. Reload and retry.",
