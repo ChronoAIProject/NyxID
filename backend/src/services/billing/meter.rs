@@ -326,6 +326,16 @@ async fn materialize_component_intent(
         .await?
         .try_collect()
         .await?;
+    materialize_component_rows(db, coordinator, usage, rows).await
+}
+
+async fn materialize_component_rows(
+    db: &mongodb::Database,
+    coordinator: &UsageMeterRow,
+    usage: &PlatformUsage,
+    rows: Vec<UsageMeterRow>,
+) -> AppResult<Vec<UsageMeterRow>> {
+    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
     let mut materialized = Vec::new();
     for row in rows {
         if let Some(finalized) = finalize_matching(
@@ -340,12 +350,19 @@ async fn materialize_component_intent(
         .await?
         {
             materialized.push(finalized);
-        } else if row.quantity.is_some() {
-            materialized.push(row);
         } else {
-            return Err(AppError::Internal(
-                "component settlement intent could not be materialized".into(),
-            ));
+            // Live settlement and reconciliation can both read a forwarded row.
+            // The other caller may have finalized (or settled) it since our read.
+            let fresh = collection
+                .find_one(doc! { "_id": &row.id })
+                .await?
+                .filter(|row| row.quantity.is_some())
+                .ok_or_else(|| {
+                    AppError::Internal(
+                        "component settlement intent could not be materialized".into(),
+                    )
+                })?;
+            materialized.push(fresh);
         }
     }
     if let Some(row) = materialize_pending_resale_intent(db, coordinator).await? {
@@ -1791,6 +1808,137 @@ mod tests {
         assert!(saved.settlement_next_retry_at.is_none());
         assert_eq!(wallet.reserved_credits, 0);
         assert_eq!(wallet.pending_lago_debits, 5);
+    }
+
+    #[tokio::test]
+    async fn component_materialization_rereads_concurrently_finalized_rows_without_double_debit() {
+        let db = connect_test_database("billing_component_finalize_race")
+            .await
+            .expect("MongoDB required");
+        create_usage_transaction_index(&db).await;
+        let owner = "component-race";
+        insert_wallet(&db, owner, 20, 0).await;
+        let mut ctx = platform_context("component-finalize-race", owner);
+        ctx.platform_metric = BillingMetric::InputTokens;
+        ctx.platform_lago_metric_code = "input".into();
+        ctx.platform_components
+            .push(crate::models::service_billing::ResaleSpec {
+                metric: BillingMetric::OutputTokens,
+                lago_metric_code: "output".into(),
+            });
+        insert_rate(&db, "input", 1).await;
+        insert_rate(&db, "output", 1).await;
+        crate::services::billing::reservation::try_reserve_prepaid(&db, owner, 2)
+            .await
+            .unwrap()
+            .expect("reserve both components");
+        let reservation = BillingReservation {
+            owner_id: owner.into(),
+            wallet_id: format!("wallet-{owner}"),
+            total_reserved_credits: 2,
+            layers: ctx
+                .platform_specs()
+                .map(
+                    |(metric, code)| crate::services::billing::reservation::LayerReservation {
+                        metric,
+                        lago_metric_code: code.into(),
+                        layer: BillingLayer::Platform,
+                        estimated_quantity: 1,
+                        credits_per_unit_micros: 1_000_000,
+                        credits_per_unit_pico: None,
+                        reserved_credits: 1,
+                        allowance_reservations: Vec::new(),
+                        grant_reservations: Vec::new(),
+                    },
+                )
+                .collect(),
+        };
+        let metered = open(&db, &ctx, Some(&reservation)).await.unwrap();
+        mark_forwarded(&db, &metered).await.unwrap();
+        let usage = PlatformUsage {
+            input_tokens: 2,
+            output_tokens: 3,
+            ..Default::default()
+        };
+        let collection = db.collection::<UsageMeterRow>(super::USAGE_METER);
+        collection.update_one(
+            doc! { "billing_request_id": &ctx.billing_request_id, "metric": "input_tokens" },
+            doc! { "$set": { "pending_platform_usage": mongodb::bson::to_bson(&usage).unwrap() } },
+        ).await.unwrap();
+        let stale_rows: Vec<UsageMeterRow> = collection
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert!(stale_rows.iter().all(|row| row.quantity.is_none()));
+        let coordinator = stale_rows
+            .iter()
+            .find(|row| row.metric == BillingMetric::InputTokens)
+            .unwrap()
+            .clone();
+        let output = stale_rows
+            .iter()
+            .find(|row| row.metric == BillingMetric::OutputTokens)
+            .unwrap();
+
+        // Another caller wins after our read but before our conditional finalize.
+        let finalized = super::finalize_matching(
+            &db,
+            doc! { "_id": &output.id, "status": "forwarded" },
+            3,
+            None,
+            None,
+            None,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        super::settle_persisted(&db, vec![finalized]).await.unwrap();
+
+        let rows = super::materialize_component_rows(&db, &coordinator, &usage, stale_rows)
+            .await
+            .expect("stale snapshot must use the fresh finalized row");
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .find(|row| row.metric == BillingMetric::OutputTokens)
+                .unwrap()
+                .released
+        );
+        super::settle_persisted(&db, rows).await.unwrap();
+        // A second recovery caller holding the old coordinator is also idempotent.
+        let replay = super::materialize_component_intent(&db, &coordinator)
+            .await
+            .unwrap();
+        super::settle_persisted(&db, replay).await.unwrap();
+        super::recover_pending_resale_intents(&db).await.unwrap();
+
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wallet.pending_lago_debits, 5);
+        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(
+            collection
+                .count_documents(doc! { "released": true })
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            collection
+                .count_documents(doc! { "pending_platform_usage": { "$type": "object" } })
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
     }
 
     async fn create_usage_transaction_index(db: &mongodb::Database) {

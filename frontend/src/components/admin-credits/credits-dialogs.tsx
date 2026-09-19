@@ -227,35 +227,8 @@ export function AllowanceDialog({
   const laneMetrics = [
     ...new Set(
       [
-        selectedService?.billing?.byok_pricing?.metric,
-        ...(selectedService?.billing?.byok_pricing?.components ?? []).map(
-          (component) => component.metric,
-        ),
-        ...(
-          selectedService?.billing?.platform_key_pricing?.components ?? []
-        ).map((component) => component.metric),
-        selectedService?.billing?.platform_key_pricing?.metric,
-        ...(selectedService &&
-        [
-          selectedService.billing?.byok_pricing,
-          selectedService.billing?.platform_key_pricing,
-        ].some(
-          (lane) =>
-            lane &&
-            (lane.sync_status !== "synced" ||
-              lane.components?.some(
-                (component) => component.sync_status !== "synced",
-              )),
-        )
-          ? [
-              selectedService.billing?.platform_metric ??
-                (selectedService.service_type === "ssh"
-                  ? "bytes"
-                  : selectedService.slug.startsWith("llm-")
-                    ? "tokens"
-                    : "requests"),
-            ]
-          : []),
+        ...(selectedService?.allowance_metrics ??
+          (selectedService ? [selectedService.effective_platform_metric] : [])),
         ...(editingAllowance?.service_id === selectedService?.id
           ? [editingAllowance?.metric]
           : []),

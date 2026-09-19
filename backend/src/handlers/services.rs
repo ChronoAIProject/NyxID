@@ -192,6 +192,8 @@ pub struct ServiceResponse {
     /// Default allowance/display unit: BYOK lane, then platform-key lane,
     /// then legacy override or protocol/slug heuristic. Requests use their lane.
     pub effective_platform_metric: BillingMetric,
+    /// Accepted allowance units, computed from current lane/fallback configuration.
+    pub allowance_metrics: Vec<BillingMetric>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3714,6 +3716,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_response_exposes_computed_allowance_metrics_without_storing_them() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.billing = Some(serde_json::from_value(serde_json::json!({
+            "byok_pricing": {"metric": "input_tokens", "credits_per_unit": "1",
+                "sync_status": "synced", "components": [
+                    {"metric": "output_tokens", "credits_per_unit": "1", "sync_status": "pending"}
+                ]}
+        })).unwrap());
+        assert!(
+            !bson::to_document(&service)
+                .unwrap()
+                .contains_key("allowance_metrics")
+        );
+        let response = crate::handlers::services_helpers::service_to_response_with_viewer(
+            None,
+            service.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.effective_platform_metric,
+            BillingMetric::InputTokens
+        );
+        assert_eq!(
+            serde_json::to_value(&response).unwrap()["allowance_metrics"],
+            serde_json::json!(["input_tokens", "output_tokens"])
+        );
+        service
+            .billing
+            .as_mut()
+            .unwrap()
+            .byok_pricing
+            .as_mut()
+            .unwrap()
+            .sync_status = crate::models::service_billing::PricingSyncStatus::Pending;
+        let response =
+            crate::handlers::services_helpers::service_to_response_with_viewer(None, service, None)
+                .await;
+        assert_eq!(
+            response.allowance_metrics,
+            vec![
+                BillingMetric::InputTokens,
+                BillingMetric::OutputTokens,
+                BillingMetric::Requests
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn create_service_allows_admin() {
         let Some(db) = connect_test_database("h_services_create_admin").await else {
             eprintln!("skipping create_service admin test: no local MongoDB available");
@@ -3742,6 +3793,7 @@ mod tests {
         assert_eq!(response.slug, "admin-service");
         assert_eq!(response.visibility, "public");
         assert_eq!(response.effective_platform_metric, BillingMetric::Requests);
+        assert_eq!(response.allowance_metrics, vec![BillingMetric::Requests]);
         let service_count = db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .count_documents(doc! { "_id": &response.id })

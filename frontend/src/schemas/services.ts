@@ -1,4 +1,4 @@
-import { unitPriceSchema } from "./billing-metrics";
+import { BILLING_METRICS, unitPriceSchema } from "./billing-metrics";
 import {
   inferenceMetadataSchema,
   platformKeyConfigSchema,
@@ -501,6 +501,11 @@ export const updateServiceSchema = z
   });
 
 export type UpdateServiceFormData = z.infer<typeof updateServiceSchema>;
+
+/** Computed admin allowance units; older replicas may omit the list. */
+export const serviceResponseAllowanceMetricsSchema = z.object({
+  allowance_metrics: z.array(z.enum(BILLING_METRICS)).optional(),
+});
 
 /**
  * Shape fragment for NyxID#356 on `ServiceResponse` / `DownstreamService`

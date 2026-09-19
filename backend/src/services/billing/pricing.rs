@@ -66,17 +66,15 @@ pub fn normalize_price(raw: &str) -> AppResult<String> {
                 .to_string(),
         ));
     }
-    let pico = decimal_to_pico(value).ok_or_else(|| {
-        AppError::ValidationError(
-            "billing.platform_pricing.credits_per_unit is outside the supported range".to_string(),
-        )
-    })?;
-    if pico > MAX_PRICE_PICO {
-        return Err(AppError::ValidationError(format!(
-            "billing.platform_pricing.credits_per_unit must not exceed {} credits",
-            MAX_PRICE_PICO / 1_000_000_000_000
-        )));
-    }
+    // Syntax is already validated; parse overflow also means above the price cap.
+    let pico = decimal_to_pico(value)
+        .filter(|pico| *pico <= MAX_PRICE_PICO)
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "billing.platform_pricing.credits_per_unit must not exceed 1,000,000 credits"
+                    .to_string(),
+            )
+        })?;
     Ok(format_pico(pico))
 }
 
@@ -618,6 +616,24 @@ mod tests {
         DOWNSTREAM_SERVICES, complete_price_removal, metric_code_for_service,
         normalize_platform_pricing, normalize_price,
     };
+
+    #[test]
+    fn prices_above_the_cap_have_one_validation_message_even_on_overflow() {
+        for price in [
+            "1000000.000000000001",
+            "1000001",
+            "9223373",
+            "9223372036854775808",
+            "999999999999999999999999999999999999999",
+        ] {
+            let error = normalize_price(price).unwrap_err();
+            assert!(
+                matches!(error, crate::errors::AppError::ValidationError(ref message)
+                if message == "billing.platform_pricing.credits_per_unit must not exceed 1,000,000 credits")
+            );
+        }
+        assert_eq!(normalize_price("1000000.000000000000").unwrap(), "1000000");
+    }
 
     #[test]
     fn price_normalization_is_exact_and_bounded() {

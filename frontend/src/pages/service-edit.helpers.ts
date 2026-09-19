@@ -1,4 +1,5 @@
 import type { DownstreamService, UpdateServicePayload } from "@/types/api";
+import type { LanePricingView } from "@/schemas/platform-keys";
 import type { UpdateServiceFormData } from "@/schemas/services";
 import { changedFields, normalizedSet, sameValue } from "@/lib/form-changes";
 import { inferSshAuthMode } from "@/lib/ssh-auth-mode";
@@ -202,9 +203,7 @@ export function serviceFormPayload(
       };
 }
 
-function laneValues(
-  lane: import("@/schemas/platform-keys").LanePricingView | null | undefined,
-) {
+function laneValues(lane: LanePricingView | null | undefined) {
   return lane
     ? {
         metric: lane.metric as NonNullable<

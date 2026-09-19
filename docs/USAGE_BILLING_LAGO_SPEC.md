@@ -130,14 +130,14 @@ accept only tokens/requests/bytes. Backend `BillingMetric` metadata and frontend
 | NoAuth | None (meter only) |
 
 At least one configured lane selects lane mode. A missing matching lane is free,
-even if legacy platform billing is enabled. Each synced component creates one
-platform usage row using its own metric/code. If any selected component is pending
-or failed, the request additionally uses **one** legacy fallback charge when legacy
-platform billing is enabled; otherwise those unsynced components are free. Multiple
-pending components never multiply the legacy fallback. Thus a synced input primary
-and pending output component charges input plus one configured legacy charge (or
-only input when legacy billing is free). Once output syncs, input and output are the
-only platform charges unless another component explicitly prices total `tokens`.
+even if legacy platform billing is enabled. While the selected lane's primary is
+pending or failed, the whole lane uses the legacy configuration (or is free);
+all additional components are ignored, even if synced. Once the primary is synced,
+it and every synced additional component create separate platform usage rows using
+their own metric/code. Unsynced additional components are free until they sync and
+never add a legacy charge. For example, a synced input primary and pending output
+component charges only input; after output syncs, both charge. Total `tokens` is
+charged only when explicitly configured.
 With no lanes, legacy behavior is unchanged. Resale remains independent. The
 `platform_charge_nyxid_credentials_only` restriction still applies after lane selection.
 
@@ -168,21 +168,31 @@ version prefixes; image usage can also populate all token classes. Completed ima
 SSE events count once per image index; partial previews do not count. Capture uses
 existing bounded bodies/buffers and never reads an additional response body. MCP
 estimates tokens only for token-family services when reported usage is absent.
+Without provider-reported usage, input/output/cache token classes are zero while
+legacy `tokens` still uses the byte estimate, so per-class pricing requires
+providers that report usage.
 
 Each platform component has independent allowance -> grant -> wallet funding,
 settlement, ledger reference and Lago event. The primary transaction identity remains
 unchanged; additional rows append `:component:{metric_code}`. A durable primary-row
 `pending_platform_usage` snapshot lets reconciliation finish partially materialized
 component settlements. Repeated opens/settlements reuse the same identities. Estimates
-use the token byte estimator for token-family units, the request's `n` (default 1)
-for images, and existing request/byte defaults. Standalone legacy metrics and resale
-retain their existing one-unit reservation gate. Zero final units release every hold
+use the request-byte token estimator for `tokens`, `input_tokens`, and
+`output_tokens` (the best available output proxy); `cache_read_tokens` and
+`cache_write_tokens` reserve one unit because the input estimate already covers
+cache quantities. Images use the request's `n` (default 1); requests and bytes
+reserve one unit. The request body is parsed for `n` only when an active platform
+price uses images. Standalone legacy metrics and resale retain their existing
+one-unit reservation gate. Zero final units release every hold
 and emit no Lago event. Platform-key execution still bills the acting person.
 
 An allowance may select any configured primary/component unit on either lane, plus
-the legacy fallback while any component is unsynced. It funds only identical-metric
-usage rows. Omitted allowance metric defaults to BYOK primary, then platform-key
-primary, then legacy; `effective_platform_metric` remains this display default.
+the legacy fallback while any lane primary is unsynced (or when no lanes exist).
+An unsynced additional component never re-enables the fallback metric. Admin service
+responses expose this computed, non-stored list as `allowance_metrics`; the allowance
+dialog consumes it directly. Allowances fund only identical-metric usage rows.
+Omitted allowance metric defaults to BYOK primary, then platform-key primary,
+then legacy; `effective_platform_metric` remains this display default.
 Existing allowances preserve their stored unit on unrelated edits. Periods, recurrence,
 grant expiry, ledger canonical fields/order/hash/dedupe keys and verification are unchanged.
 
@@ -375,7 +385,7 @@ reported usage retain the existing estimate.
 Mixed billing lanes may use different units. Allowances match the actual request's
 selected platform metric at reservation and settlement. Admin allowance create/update
 accepts optional `metric`, validated against configured lane units (plus a legacy
-fallback unit while sync is pending/failed). Omitted `metric` defaults to BYOK's unit,
+fallback unit while a lane primary is pending/failed). Omitted `metric` defaults to BYOK's unit,
 otherwise platform key's unit, otherwise the legacy service default. Existing allowance
 rows retain their original unit; the UI offers a unit selector for mixed lanes.
 

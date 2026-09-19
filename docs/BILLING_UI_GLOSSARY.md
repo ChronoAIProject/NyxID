@@ -35,16 +35,19 @@ A **lane** selects the platform-layer price; it is not an extra billing layer.
 **NyxID platform key** means NyxID supplied the catalog master credential. The
 connect dialog and service detail show every component's exact credits per unit,
 including input/output/cache-read/cache-write tokens and generated images. Each component
-has its own sync state. Synced prices charge independently; any pending/failed component
-adds at most one legacy fallback charge when configured, otherwise it is free. Resale may add its independent charge to platform-key
-traffic. Usage continues grouping by service/model/agent/layer; lane charges retain
-these dimensions and use the existing wallet/allowance/grant funding display.
+has its own sync state. A pending/failed primary substitutes legacy billing (or free)
+for the whole lane, ignoring all extras. With a synced primary, it and synced extras
+charge independently; unsynced extras are free and never add a legacy charge.
+Resale may add its independent charge to platform-key traffic. Usage continues
+grouping by service/model/agent/layer; lane charges retain these dimensions and use the existing wallet/allowance/grant funding display.
 
 Unit prices allow 12 fractional digits (`PRICE_FRACTIONAL_DIGITS = 12`), with exact
 integer picocredit rates and truncated legacy micro rates for compatibility. Gross
 costs truncate to micros after multiplication; wallet debits ceil the exact remaining
 cost to whole credits. These are different amounts, even for a sub-microcredit cost.
 An allowance covers only rows with its exact component metric, before grants and wallet.
+The server's computed `allowance_metrics` list supplies the dialog's units: configured
+primary/components plus legacy while a primary is unsynced or no lanes exist.
 Stable primary Lago codes remain `platform_svc_{slug}_{byok|pk}`; components append
 `_{metric}` and retain independent durable cleanup. Upgrade ALL replicas before
 configuring component prices, new-metric allowances, or prices beyond six decimals;
@@ -54,7 +57,15 @@ Priced input/cache classes do not overlap: OpenAI/Gemini caches are subtracted f
 input, while Anthropic's separate cache counts are not. The displayed provider token
 breakdown retains the original accounting. Successful image responses count generated
 images and may also carry token components. A zero component releases reservations
-and generates no Lago event. See [the lane contract](PLATFORM_KEYS_AND_INFERENCE.md#billing-lanes-and-durable-accounting).
+and generates no Lago event.
+Without provider-reported usage, input/output/cache token classes are zero while
+legacy `tokens` still uses the byte estimate, so per-class pricing requires
+providers that report usage.
+Reservations use the request-byte token estimate for `tokens`, `input_tokens`,
+and `output_tokens`; cache-read/cache-write reserve one unit because input already
+covers cache quantities. Images reserve request `n` (default one); requests and
+bytes reserve one unit. Standalone legacy metrics and resale keep their one-unit gate.
+See [the lane contract](PLATFORM_KEYS_AND_INFERENCE.md#billing-lanes-and-durable-accounting).
 
 The admin service setting **Charge only NyxID-provided credentials**
 (`platform_charge_nyxid_credentials_only`, default off) restricts enabled platform

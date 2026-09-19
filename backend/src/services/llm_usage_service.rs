@@ -401,6 +401,7 @@ fn token_at(value: &serde_json::Value, pointers: &[&str]) -> Option<u64> {
     pointers.iter().find_map(|pointer| {
         value.pointer(pointer).and_then(|raw| {
             raw.as_u64()
+                .or_else(|| raw.as_f64().map(|count| count.max(0.0).trunc() as u64))
                 .or_else(|| raw.as_str().and_then(|text| text.parse::<u64>().ok()))
         })
     })
@@ -751,6 +752,28 @@ mod tests {
         extract_reported_usage, extract_reported_usage_from_sse_event,
         force_stream_options_include_usage, token_quantity_or_estimate,
     };
+
+    #[test]
+    fn provider_token_counts_accept_floats_and_preserve_integer_precision() {
+        let usage = extract_reported_usage(&serde_json::json!({
+            "usage": {"prompt_tokens": 25.0, "completion_tokens": 9.75,
+                "prompt_tokens_details": {"cached_tokens": 2.9}}
+        }))
+        .unwrap();
+        assert_eq!(usage.prompt_tokens, 25);
+        assert_eq!(usage.completion_tokens, 9);
+        assert_eq!(usage.cached_tokens, 2);
+        for (value, expected) in [
+            (serde_json::json!(-5.5), 0),
+            (serde_json::json!(u64::MAX), u64::MAX),
+            (serde_json::json!("25"), 25),
+        ] {
+            assert_eq!(
+                super::token_at(&serde_json::json!({"count": value}), &["/count"]),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn extracts_usage_from_openai_style_payload() {

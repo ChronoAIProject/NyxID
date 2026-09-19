@@ -71,11 +71,6 @@ impl BillingRouteContext {
             .unwrap_or(legacy_metric_code)
             .to_string();
 
-        let legacy_spec = ResaleSpec {
-            metric: platform_metric,
-            lago_metric_code: platform_lago_metric_code.clone(),
-        };
-        let legacy_billable = service_platform_billable;
         let mut platform_components = Vec::new();
         let mut platform_metric = platform_metric;
         if let Some(billing) =
@@ -92,35 +87,21 @@ impl BillingRouteContext {
             };
             if let Some(lane) = lane {
                 use crate::models::service_billing::PricingSyncStatus;
-                let mut prices = Vec::new();
-                let mut needs_legacy = lane.sync_status != PricingSyncStatus::Synced;
-                if !needs_legacy {
-                    prices.push(ResaleSpec {
-                        metric: lane.metric,
-                        lago_metric_code: lane.lago_metric_code.clone(),
-                    });
-                }
-                for component in &lane.components {
-                    if component.sync_status == PricingSyncStatus::Synced {
-                        prices.push(ResaleSpec {
+                // Until the primary syncs, the entire lane uses legacy billing.
+                // Once synced, extra components never re-enable the fallback.
+                if lane.sync_status == PricingSyncStatus::Synced {
+                    service_platform_billable = true;
+                    platform_metric = lane.metric;
+                    platform_lago_metric_code = lane.lago_metric_code.clone();
+                    platform_components = lane
+                        .components
+                        .iter()
+                        .filter(|component| component.sync_status == PricingSyncStatus::Synced)
+                        .map(|component| ResaleSpec {
                             metric: component.metric,
                             lago_metric_code: component.lago_metric_code.clone(),
-                        });
-                    } else {
-                        needs_legacy = true;
-                    }
-                }
-                // The legacy fallback is a single charge per request, even when
-                // several components are awaiting synchronization.
-                if needs_legacy && legacy_billable {
-                    prices.push(legacy_spec);
-                }
-                service_platform_billable = !prices.is_empty();
-                if !prices.is_empty() {
-                    let primary = prices.remove(0);
-                    platform_metric = primary.metric;
-                    platform_lago_metric_code = primary.lago_metric_code;
-                    platform_components = prices;
+                        })
+                        .collect();
                 }
             } else {
                 service_platform_billable = false;
@@ -178,11 +159,17 @@ impl BillingRouteContext {
 
     pub fn with_request_body(mut self, body: Option<&[u8]>) -> Self {
         self.request_bytes = body.map_or(0, |b| i64::try_from(b.len()).unwrap_or(i64::MAX));
-        self.requested_images = body
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
-            .and_then(|value| value.get("n").and_then(serde_json::Value::as_i64))
-            .unwrap_or(1)
-            .max(1);
+        self.requested_images = if self
+            .platform_specs()
+            .any(|(metric, _)| metric == BillingMetric::Images)
+        {
+            body.and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+                .and_then(|value| value.get("n").and_then(serde_json::Value::as_i64))
+                .unwrap_or(1)
+                .max(1)
+        } else {
+            1
+        };
         self
     }
 
@@ -199,12 +186,16 @@ impl BillingRouteContext {
     }
 
     pub fn estimated_quantity(&self, metric: BillingMetric) -> i64 {
-        if metric.is_token_family() {
-            crate::services::llm_usage_service::estimate_tokens_from_bytes(self.request_bytes)
-        } else if metric == BillingMetric::Images {
-            self.requested_images
-        } else {
-            1
+        match metric {
+            BillingMetric::Tokens | BillingMetric::InputTokens | BillingMetric::OutputTokens => {
+                crate::services::llm_usage_service::estimate_tokens_from_bytes(self.request_bytes)
+            }
+            BillingMetric::Images => self.requested_images,
+            // Cache quantities are already covered by the input estimate.
+            BillingMetric::CacheReadTokens
+            | BillingMetric::CacheWriteTokens
+            | BillingMetric::Requests
+            | BillingMetric::Bytes => 1,
         }
     }
 
@@ -377,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn components_charge_independently_with_only_one_unsynced_fallback() {
+    fn primary_sync_selects_components_or_legacy_without_additive_fallback() {
         use crate::models::service_billing::{LanePricing, PricingSyncStatus};
         let mut billing: ServiceBilling = serde_json::from_value(serde_json::json!({
             "platform_billable": true,
@@ -411,11 +402,10 @@ mod tests {
             ctx.platform_specs().collect::<Vec<_>>(),
             vec![
                 (BillingMetric::InputTokens, "primary"),
-                (BillingMetric::OutputTokens, "output"),
-                (BillingMetric::Requests, "platform_requests")
+                (BillingMetric::OutputTokens, "output")
             ]
         );
-        assert_eq!(ctx.estimated_quantity(BillingMetric::Images), 3);
+        assert_eq!(ctx.requested_images, 1); // Unsynced image prices do not parse n.
         assert!(ctx.estimated_quantity(BillingMetric::CacheReadTokens) > 0);
         assert!(ctx.capture_tokens);
         billing.platform_billable = false;
@@ -425,11 +415,79 @@ mod tests {
             component.sync_status = PricingSyncStatus::Synced;
         }
         assert_eq!(context(&billing).platform_specs().count(), 4);
+        assert_eq!(context(&billing).requested_images, 3);
+        for legacy_enabled in [false, true] {
+            billing.platform_billable = legacy_enabled;
+            for status in [PricingSyncStatus::Pending, PricingSyncStatus::Failed] {
+                billing.byok_pricing.as_mut().unwrap().sync_status = status;
+                let ctx = context(&billing);
+                assert_eq!(ctx.service_platform_billable, legacy_enabled);
+                assert_eq!(
+                    ctx.platform_specs().collect::<Vec<_>>(),
+                    vec![(BillingMetric::Requests, "platform_requests")]
+                );
+                assert_eq!(ctx.requested_images, 1);
+                assert!(ctx.capture_tokens);
+            }
+        }
+        billing.byok_pricing.as_mut().unwrap().sync_status = PricingSyncStatus::Synced;
         assert!(
             context(&billing)
                 .platform_specs()
                 .all(|(metric, _)| metric != BillingMetric::Tokens)
         );
+    }
+
+    #[test]
+    fn component_estimates_do_not_reserve_the_prompt_again_for_caches() {
+        let ctx = context_for(CredentialClass::UserOwned).with_request_body(Some(&[b'x'; 400]));
+        assert_eq!(ctx.request_bytes, 400);
+        for metric in [
+            BillingMetric::Tokens,
+            BillingMetric::InputTokens,
+            BillingMetric::OutputTokens,
+        ] {
+            assert_eq!(ctx.estimated_quantity(metric), 100);
+        }
+        for metric in [
+            BillingMetric::CacheReadTokens,
+            BillingMetric::CacheWriteTokens,
+            BillingMetric::Requests,
+            BillingMetric::Bytes,
+            BillingMetric::Images,
+        ] {
+            assert_eq!(ctx.estimated_quantity(metric), 1);
+        }
+    }
+
+    #[test]
+    fn request_image_count_is_only_read_when_an_active_spec_prices_images() {
+        let ctx = context_for(CredentialClass::UserOwned);
+        assert_eq!(
+            ctx.clone()
+                .with_request_body(Some(br#"{"n":9}"#))
+                .requested_images,
+            1
+        );
+        let mut images = ctx;
+        images
+            .platform_components
+            .push(crate::models::service_billing::ResaleSpec {
+                metric: BillingMetric::Images,
+                lago_metric_code: "images".into(),
+            });
+        for (body, expected) in [
+            (br#"{"n":9}"#.as_slice(), 9),
+            (br#"{"n":0}"#.as_slice(), 1),
+            (br#"{"n":-1}"#.as_slice(), 1),
+            (br#"{"n":"invalid"}"#.as_slice(), 1),
+            (b"not json".as_slice(), 1),
+        ] {
+            let ctx = images.clone().with_request_body(Some(body));
+            assert_eq!(ctx.request_bytes, body.len() as i64);
+            assert_eq!(ctx.estimated_quantity(BillingMetric::Images), expected);
+        }
+        assert_eq!(images.with_request_body(None).requested_images, 1);
     }
 
     #[test]

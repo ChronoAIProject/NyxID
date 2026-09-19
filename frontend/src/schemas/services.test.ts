@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   createServiceSchema,
+  serviceResponseAllowanceMetricsSchema,
   updateServiceSchema,
   redirectUriSchema,
   sshServiceConfigSchema,
@@ -392,4 +393,23 @@ it("endpoint rules validate UTF-8 byte limits and reject ambiguous paths", async
     "/a/",
   ])
     expect(valid(path)).toBe(false);
+});
+
+it("accepts backend allowance units and older responses omitting the list", () => {
+  expect(serviceResponseAllowanceMetricsSchema.parse({})).toEqual({});
+  expect(
+    serviceResponseAllowanceMetricsSchema.parse({
+      allowance_metrics: [
+        "input_tokens",
+        "cache_read_tokens",
+        "images",
+        "requests",
+      ],
+    }).allowance_metrics,
+  ).toEqual(["input_tokens", "cache_read_tokens", "images", "requests"]);
+  expect(
+    serviceResponseAllowanceMetricsSchema.safeParse({
+      allowance_metrics: ["invalid"],
+    }).success,
+  ).toBe(false);
 });

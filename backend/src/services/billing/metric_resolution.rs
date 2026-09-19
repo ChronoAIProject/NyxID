@@ -35,14 +35,9 @@ pub fn configured_lane_metrics(service: &DownstreamService) -> Vec<BillingMetric
     metrics
 }
 
-pub fn allowance_metric(
-    service: &DownstreamService,
-    requested: Option<BillingMetric>,
-) -> crate::errors::AppResult<BillingMetric> {
-    let default = effective_platform_metric(service);
-    let Some(requested) = requested else {
-        return Ok(default);
-    };
+/// All accepted allowance units, including legacy fallback only while a primary
+/// is unsynced (or when there are no lanes). Shared by validation and admin UIs.
+pub fn allowance_metrics(service: &DownstreamService) -> Vec<BillingMetric> {
     let mut metrics = configured_lane_metrics(service);
     // Pending/failed lanes can still charge the legacy metric during sync.
     if metrics.is_empty()
@@ -52,16 +47,25 @@ pub fn allowance_metric(
                 .flatten()
                 .any(|lane| {
                     lane.sync_status != crate::models::service_billing::PricingSyncStatus::Synced
-                        || lane.components.iter().any(|c| {
-                            c.sync_status
-                                != crate::models::service_billing::PricingSyncStatus::Synced
-                        })
                 })
         })
     {
-        metrics.push(resolve_platform_metric(service, false));
+        let fallback = resolve_platform_metric(service, false);
+        if !metrics.contains(&fallback) {
+            metrics.push(fallback);
+        }
     }
-    if metrics.contains(&requested) {
+    metrics
+}
+
+pub fn allowance_metric(
+    service: &DownstreamService,
+    requested: Option<BillingMetric>,
+) -> crate::errors::AppResult<BillingMetric> {
+    let Some(requested) = requested else {
+        return Ok(effective_platform_metric(service));
+    };
+    if allowance_metrics(service).contains(&requested) {
         Ok(requested)
     } else {
         Err(crate::errors::AppError::ValidationError(
@@ -122,6 +126,61 @@ mod tests {
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
 
     use super::{effective_platform_metric, platform_metric_for_request};
+
+    #[test]
+    fn allowance_units_only_include_legacy_while_a_primary_is_unsynced() {
+        use crate::models::service_billing::PricingSyncStatus::{Failed, Pending, Synced};
+        let mut service = dummy_service();
+        service.billing = Some(
+            serde_json::from_value(serde_json::json!({
+                "platform_billable": true,
+                "byok_pricing": {"metric":"input_tokens", "credits_per_unit":"1",
+                    "sync_status":"synced", "components":[
+                        {"metric":"output_tokens", "credits_per_unit":"1", "sync_status":"pending"}
+                    ]},
+                "platform_key_pricing": {"metric":"images", "credits_per_unit":"1",
+                    "sync_status":"synced", "components":[
+                        {"metric":"input_tokens", "credits_per_unit":"1", "sync_status":"failed"}
+                    ]}
+            }))
+            .unwrap(),
+        );
+        for byok_status in [Synced, Pending, Failed] {
+            for pk_status in [Synced, Pending, Failed] {
+                for component_status in [Synced, Pending, Failed] {
+                    let billing = service.billing.as_mut().unwrap();
+                    billing.byok_pricing.as_mut().unwrap().sync_status = byok_status;
+                    billing.platform_key_pricing.as_mut().unwrap().sync_status = pk_status;
+                    billing.byok_pricing.as_mut().unwrap().components[0].sync_status =
+                        component_status;
+                    let mut expected = vec![
+                        BillingMetric::InputTokens,
+                        BillingMetric::OutputTokens,
+                        BillingMetric::Images,
+                    ];
+                    if byok_status != Synced || pk_status != Synced {
+                        expected.push(BillingMetric::Requests);
+                    }
+                    assert_eq!(super::allowance_metrics(&service), expected);
+                    for metric in BillingMetric::ALL {
+                        assert_eq!(
+                            super::allowance_metric(&service, Some(metric)).is_ok(),
+                            expected.contains(&metric)
+                        );
+                    }
+                    assert_eq!(
+                        super::allowance_metric(&service, None).unwrap(),
+                        BillingMetric::InputTokens
+                    );
+                }
+            }
+        }
+        service.billing = None;
+        assert_eq!(
+            super::allowance_metrics(&service),
+            vec![BillingMetric::Requests]
+        );
+    }
 
     #[test]
     fn explicit_platform_metric_wins_over_every_heuristic() {
