@@ -233,6 +233,7 @@ mod media_contract {
                 size_bytes: None,
             };
             let credentials = BotCredentials {
+                billing: None,
                 token: "invalid",
                 platform_bot_id: Some("123"),
                 platform_secrets: None,

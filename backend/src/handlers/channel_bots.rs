@@ -290,7 +290,8 @@ impl CreateChannelBotResponse {
     ) -> AppResult<Self> {
         let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
         Ok(Self {
-            webhook_ingestion: descriptor.webhook_ingestion,
+            webhook_ingestion: descriptor.webhook_ingestion
+                && (bot.credential_source != "connection" || bot.webhook_registered),
             connection_id: bot.connection_id.clone(),
             credential_source: bot.credential_source.clone(),
             managed_setup: bot.managed_setup.as_ref().map(Into::into),
@@ -313,7 +314,11 @@ impl CreateChannelBotResponse {
             id: bot.id,
             platform: bot.platform,
             platform_bot_username: bot.platform_bot_username,
-            status: descriptor.create_response_status.to_string(),
+            status: if bot.credential_source == "connection" {
+                bot.status
+            } else {
+                descriptor.create_response_status.to_string()
+            },
             permission_setup_url,
             permission_setup_scopes,
         })
@@ -341,7 +346,8 @@ impl ChannelConnectionState {
     ) -> Self {
         let next = match adapter.ingestion() {
             crate::services::channel_platform::Ingestion::Poll { min_interval_secs }
-                if config.channel_poll_interval_secs > 0
+                if !bot.webhook_registered
+                    && config.channel_poll_interval_secs > 0
                     && bot.is_active
                     && bot.status == "active" =>
             {
@@ -361,7 +367,8 @@ impl ChannelConnectionState {
             _ => None,
         };
         Self {
-            webhook_ingestion: adapter.registration().webhook_ingestion,
+            webhook_ingestion: adapter.registration().webhook_ingestion
+                && (bot.credential_source != "connection" || bot.webhook_registered),
             connection_id: bot.connection_id.clone(),
             poll_cursor: bot.poll_cursor.clone(),
             last_polled_at: bot.last_polled_at.map(|d| d.to_rfc3339()),
@@ -957,16 +964,43 @@ pub async fn verify_bot(
         None
     };
 
+    let channel_billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        auth_user.api_key_id.as_deref(),
+    );
     adapter
         .verify_bot_token(
             &state.http_client,
             &BotCredentials {
+                billing: channel_billing.as_ref(),
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: platform_secrets.as_ref(),
             },
         )
         .await?;
+
+    if bot.credential_source == "connection"
+        && crate::services::channel_connection_webhook_service::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &bot,
+            &state.config.base_url,
+        )
+        .await?
+    {
+        let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+        return Ok(Json(VerifyBotResponse {
+            id: current.id,
+            status: current.status,
+            webhook_registered: current.webhook_registered,
+        }));
+    }
 
     ensure_verify_material_present(&bot, adapter.as_ref())?;
 
