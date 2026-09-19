@@ -1963,6 +1963,12 @@ async fn handle_account_tool(
         token_exchange_cache: &state.token_exchange_cache,
         node_manager: &state.node_ws_manager,
     };
+    if let Err(error) =
+        crate::services::service_history::context::authenticated(&state.db, &user).await
+    {
+        let result = crate::services::assistant_account_tools::error_result(error);
+        return tool_result(request_id, &result.value.to_string(), true);
+    }
     let result = tools.execute(&user, name, args).await;
     tool_result(request_id, &result.value.to_string(), result.is_error)
 }

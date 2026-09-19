@@ -155,7 +155,7 @@ async fn create_binding_with_scope_authorization_inner(
                 )
                 .await?;
 
-                db.collection::<UserService>(USER_SERVICES)
+                crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
                     .find_one(doc! {
                         "_id": &user_service_id,
                         "user_id": &user_id,
@@ -165,14 +165,14 @@ async fn create_binding_with_scope_authorization_inner(
                     .await?
                     .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
 
-                let credential = db
-                    .collection::<UserApiKey>(USER_API_KEYS)
-                    .find_one(doc! { "_id": &user_api_key_id, "user_id": &user_id })
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| {
-                        AppError::NotFound("External credential not found".to_string())
-                    })?;
+                let credential =
+                    crate::services::service_history::collection::<UserApiKey>(&db, USER_API_KEYS)
+                        .find_one(doc! { "_id": &user_api_key_id, "user_id": &user_id })
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| {
+                            AppError::NotFound("External credential not found".to_string())
+                        })?;
                 if credential.status != "active" {
                     return Err(AppError::ValidationError(format!(
                         "credential is not active (status: {})",

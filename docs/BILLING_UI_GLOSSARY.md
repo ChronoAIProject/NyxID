@@ -90,6 +90,7 @@ Changing the period remounts the top-up history card (`key={period}`), resetting
 
 **Page access and rollout:**
 - Capability: `user.capabilities.billing_available` requires billing enabled + Lago configured + the user's billing feature flag.
+- Flag precedence is `Default → Global → Org → User`: each explicit value replaces the less-specific value. An active org's disable overrides a global enable, and an explicit user enable overrides that org disable. Conflicting org overrides at the same scope resolve to disabled. Clearing an override restores inheritance; revoked memberships do not contribute org overrides.
 - Frontend: `BillingRouteGuard` redirects to `/dashboard` if that capability is false.
 - Backend: wallet, top-up, receipt, and benefit reads retain their existing `ensure_billing_rollout()` gates. **Usage has no rollout gate**: authorized readers can see metered but uncharged traffic.
 

@@ -2,7 +2,7 @@ use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::options::FindOptions;
 use mongodb::{
-    ClientSession, Database,
+    Database,
     bson::{self, Document, doc},
     options::ReturnDocument,
 };
@@ -41,7 +41,7 @@ use crate::services::{
 ///   (`/<auth_key_name><credential>/...`), e.g. Telegram Bot API
 ///   (`/bot<token>/sendMessage`)
 /// - `none`: no credential injection
-const VALID_AUTH_METHODS: &[&str] = &[
+pub(crate) const VALID_AUTH_METHODS: &[&str] = &[
     "bearer",
     "bot_bearer",
     "header",
@@ -55,11 +55,12 @@ const VALID_AUTH_METHODS: &[&str] = &[
     // at the proxy boundary. `auth_key_name` is unused. NyxID#716.
     "aws_sigv4",
     "ifttt_webhook",
+    "ifttt_mcp",
     "none",
 ];
 
 /// Valid identity propagation modes.
-const VALID_IDENTITY_MODES: &[&str] = &["none", "headers", "jwt", "both"];
+pub(crate) const VALID_IDENTITY_MODES: &[&str] = &["none", "headers", "jwt", "both"];
 /// Identity propagation and delegation token configuration.
 #[derive(Clone, Debug)]
 pub struct IdentityConfig {
@@ -216,10 +217,14 @@ pub(crate) fn validate_ifttt_identity(
     forward_access_token: bool,
     inject_delegation_token: bool,
 ) -> AppResult<()> {
-    if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
-        && (mode != "none" || forward_access_token || inject_delegation_token)
+    if matches!(
+        auth_method,
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && (mode != "none" || forward_access_token || inject_delegation_token)
     {
-        return Err(AppError::ValidationError("IFTTT Webhooks does not support identity, access-token, or delegation-token forwarding".into()));
+        return Err(AppError::ValidationError(
+            "IFTTT does not support identity, access-token, or delegation-token forwarding".into(),
+        ));
     }
     Ok(())
 }
@@ -231,8 +236,18 @@ async fn validate_ifttt_endpoint(
     replacement_url: Option<&str>,
     node_id: Option<&str>,
 ) -> AppResult<()> {
-    if auth_method != nyxid_service_adapters::ifttt::AUTH_METHOD {
+    if !matches!(
+        auth_method,
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
         return Ok(());
+    }
+    if auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+        && node_id.is_some_and(|id| !id.is_empty())
+    {
+        return Err(AppError::ValidationError(
+            "IFTTT OAuth connections use server routing".into(),
+        ));
     }
     let existing;
     let url = match replacement_url {
@@ -248,6 +263,10 @@ async fn validate_ifttt_endpoint(
     };
     if url.is_empty() && node_id.is_some_and(|id| !id.is_empty()) {
         return Ok(());
+    }
+    if auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+        return nyxid_service_adapters::ifttt_mcp::validate_destination(url)
+            .map_err(|error| AppError::ValidationError(error.to_string()));
     }
     nyxid_service_adapters::ifttt::validate_destination(url)
         .map_err(|error| AppError::ValidationError(error.to_string()))
@@ -411,13 +430,13 @@ pub fn validate_service_auth_update(
 /// monotonic state-version increment inside a caller-owned transaction.
 pub async fn commit_user_service_mutation(
     db: &Database,
-    session: &mut ClientSession,
+    session: &mut crate::services::service_history::transaction::Transaction,
     owner_id: &str,
     service_id: &str,
     mut extra_set: Document,
 ) -> AppResult<UserService> {
     extra_set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
-    db.collection::<UserService>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .find_one_and_update(
             doc! { "_id": service_id, "user_id": owner_id },
             doc! {
@@ -454,13 +473,13 @@ async fn list_user_services_inner(
     if !include_disabled {
         filter.insert("is_active", true);
     }
-    let mut services: Vec<UserService> = db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find(filter)
-        .sort(doc! { "created_at": -1 })
-        .await?
-        .try_collect()
-        .await?;
+    let mut services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find(filter)
+            .sort(doc! { "created_at": -1 })
+            .await?
+            .try_collect()
+            .await?;
     let catalog_ids: Vec<_> = services
         .iter()
         .filter_map(|s| s.catalog_service_id.as_deref())
@@ -680,10 +699,11 @@ pub async fn find_user_service_by_id(
     db: &mongodb::Database,
     service_id: &str,
 ) -> AppResult<Option<UserService>> {
-    Ok(db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find_one(doc! { "_id": service_id, "is_active": true })
-        .await?)
+    Ok(
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find_one(doc! { "_id": service_id, "is_active": true })
+            .await?,
+    )
 }
 
 /// Get single user service by ID, verifying ownership.
@@ -692,7 +712,7 @@ pub async fn get_user_service(
     user_id: &str,
     service_id: &str,
 ) -> AppResult<UserService> {
-    db.collection::<UserService>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .find_one(doc! { "_id": service_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("User service not found".to_string()))
@@ -704,10 +724,11 @@ pub async fn find_by_slug(
     user_id: &str,
     slug: &str,
 ) -> AppResult<Option<UserService>> {
-    Ok(db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find_one(doc! { "user_id": user_id, "slug": slug, "is_active": true })
-        .await?)
+    Ok(
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find_one(doc! { "user_id": user_id, "slug": slug, "is_active": true })
+            .await?,
+    )
 }
 
 /// Resolve a user-service identifier by UUID or slug for a specific owner.
@@ -728,7 +749,8 @@ pub async fn resolve_service_id(
         ));
     }
 
-    let collection = db.collection::<UserService>(COLLECTION_NAME);
+    let collection =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME);
     if Uuid::parse_str(value).is_ok() {
         let service = collection
             .find_one(doc! { "_id": value, "is_active": true })
@@ -768,14 +790,15 @@ pub async fn find_by_catalog_service_id(
     user_id: &str,
     catalog_service_id: &str,
 ) -> AppResult<Option<UserService>> {
-    Ok(db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find_one(doc! {
-            "user_id": user_id,
-            "catalog_service_id": catalog_service_id,
-            "is_active": true,
-        })
-        .await?)
+    Ok(
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find_one(doc! {
+                "user_id": user_id,
+                "catalog_service_id": catalog_service_id,
+                "is_active": true,
+            })
+            .await?,
+    )
 }
 
 /// Translate a service allowlist into owner-bound endpoint and credential IDs
@@ -829,12 +852,12 @@ pub async fn user_service_ids_for_endpoint(
     user_id: &str,
     endpoint_id: &str,
 ) -> AppResult<Vec<String>> {
-    let services: Vec<UserService> = db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find(doc! { "user_id": user_id, "endpoint_id": endpoint_id })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find(doc! { "user_id": user_id, "endpoint_id": endpoint_id })
+            .await?
+            .try_collect()
+            .await?;
     Ok(services.into_iter().map(|s| s.id).collect())
 }
 
@@ -846,12 +869,12 @@ pub async fn user_service_ids_for_api_key(
     user_id: &str,
     user_api_key_id: &str,
 ) -> AppResult<Vec<String>> {
-    let services: Vec<UserService> = db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find(doc! { "user_id": user_id, "api_key_id": user_api_key_id })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find(doc! { "user_id": user_id, "api_key_id": user_api_key_id })
+            .await?
+            .try_collect()
+            .await?;
     Ok(services.into_iter().map(|s| s.id).collect())
 }
 
@@ -866,12 +889,12 @@ pub async fn user_service_ids_for_catalog(
     user_id: &str,
     catalog_service_id: &str,
 ) -> AppResult<Vec<String>> {
-    let services: Vec<UserService> = db
-        .collection::<UserService>(COLLECTION_NAME)
-        .find(doc! { "user_id": user_id, "catalog_service_id": catalog_service_id })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find(doc! { "user_id": user_id, "catalog_service_id": catalog_service_id })
+            .await?
+            .try_collect()
+            .await?;
     Ok(services.into_iter().map(|s| s.id).collect())
 }
 
@@ -956,6 +979,15 @@ pub async fn create_user_service_with_id(
 ) -> AppResult<UserService> {
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
+    super::ifttt_oauth_service::validate_key_route(
+        db,
+        api_key_id,
+        auth_method,
+        endpoint_id,
+        None,
+        node_id,
+    )
+    .await?;
     let identity = normalize_identity_config(identity)?;
     validate_ifttt_identity(
         auth_method,
@@ -963,11 +995,13 @@ pub async fn create_user_service_with_id(
         identity.forward_access_token,
         identity.inject_delegation_token,
     )?;
-    if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
-        && ws_frame_injections.is_some_and(|rules| !rules.is_empty())
+    if matches!(
+        auth_method,
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && ws_frame_injections.is_some_and(|rules| !rules.is_empty())
     {
         return Err(AppError::ValidationError(
-            "IFTTT Webhooks does not support WebSocket frame injection".into(),
+            "IFTTT does not support WebSocket frame injection".into(),
         ));
     }
     let node_id = node_id.filter(|nid| !nid.is_empty());
@@ -1028,10 +1062,10 @@ pub async fn create_user_service_with_id(
     }
 
     // Verify endpoint exists and belongs to user
-    let ep_count = db
-        .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
-        .count_documents(doc! { "_id": endpoint_id, "user_id": user_id })
-        .await?;
+    let ep_count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_ENDPOINTS)
+            .count_documents(doc! { "_id": endpoint_id, "user_id": user_id })
+            .await?;
     if ep_count == 0 {
         return Err(AppError::NotFound(
             "Endpoint not found or does not belong to user".to_string(),
@@ -1040,10 +1074,12 @@ pub async fn create_user_service_with_id(
 
     // Verify api_key exists and belongs to user (skip for no-auth services)
     if let Some(ak_id) = api_key_id {
-        let ak_count = db
-            .collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .count_documents(doc! { "_id": ak_id, "user_id": user_id })
-            .await?;
+        let ak_count = crate::services::service_history::collection::<mongodb::bson::Document>(
+            db,
+            USER_API_KEYS,
+        )
+        .count_documents(doc! { "_id": ak_id, "user_id": user_id })
+        .await?;
         if ak_count == 0 {
             return Err(AppError::NotFound(
                 "API key not found or does not belong to user".to_string(),
@@ -1077,6 +1113,9 @@ pub async fn create_user_service_with_id(
 
     let now = Utc::now();
     let service = UserService {
+        deleted_at: None,
+        created_by: None,
+        last_change: None,
         id: reserved_id
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -1115,7 +1154,7 @@ pub async fn create_user_service_with_id(
         rotation_predecessor_id: None,
     };
 
-    db.collection::<UserService>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .insert_one(&service)
         .await?;
 
@@ -1141,8 +1180,7 @@ pub async fn set_source_app_id(
     source_app_id: &str,
     connect_link_id: &str,
 ) -> AppResult<()> {
-    let result = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "_id": service_id,
@@ -1207,6 +1245,15 @@ pub async fn update_user_service(
     admin_only: Option<bool>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
+    super::ifttt_oauth_service::validate_key_route(
+        db,
+        current.api_key_id.as_deref(),
+        auth_method.unwrap_or(&current.auth_method),
+        &current.endpoint_id,
+        None,
+        node_id.or(current.node_id.as_deref()),
+    )
+    .await?;
     ensure_service_fields_editable(
         &current,
         &[
@@ -1242,13 +1289,15 @@ pub async fn update_user_service(
             cfg.inject_delegation_token
         }),
     )?;
-    if auth_method.unwrap_or(&current.auth_method) == nyxid_service_adapters::ifttt::AUTH_METHOD
-        && !ws_frame_injections
-            .unwrap_or(&current.ws_frame_injections)
-            .is_empty()
+    if matches!(
+        auth_method.unwrap_or(&current.auth_method),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && !ws_frame_injections
+        .unwrap_or(&current.ws_frame_injections)
+        .is_empty()
     {
         return Err(AppError::ValidationError(
-            "IFTTT Webhooks does not support WebSocket frame injection".into(),
+            "IFTTT does not support WebSocket frame injection".into(),
         ));
     }
     let mut set_doc = doc! {
@@ -1455,8 +1504,7 @@ pub async fn update_user_service(
         );
     }
 
-    let result = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! { "_id": service_id, "user_id": user_id },
             doc! {
@@ -1539,13 +1587,28 @@ pub async fn validate_update_inputs(
 ) -> AppResult<()> {
     ensure_user_managed_service(current)?;
 
+    super::ifttt_oauth_service::validate_key_route(
+        db,
+        current.api_key_id.as_deref(),
+        auth_method.unwrap_or(&current.auth_method),
+        &current.endpoint_id,
+        new_endpoint_url,
+        node_id.or(current.node_id.as_deref()),
+    )
+    .await?;
+
     if let Some(am) = auth_method {
         validate_auth_method(am)?;
     }
 
     let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
-    if effective_auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
-        if let Some(key) = credential {
+    if matches!(
+        effective_auth_method,
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
+        if effective_auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
+            && let Some(key) = credential
+        {
             nyxid_service_adapters::ifttt::validate_credential(key)
                 .map_err(|error| AppError::ValidationError(error.to_string()))?;
         }
@@ -1936,10 +1999,10 @@ pub async fn link_api_key(
     service_id: &str,
     api_key_id: &str,
 ) -> AppResult<()> {
-    let ak_count = db
-        .collection::<mongodb::bson::Document>(USER_API_KEYS)
-        .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
-        .await?;
+    let ak_count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_API_KEYS)
+            .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
+            .await?;
     if ak_count == 0 {
         return Err(AppError::NotFound(
             "API key not found or does not belong to user".to_string(),
@@ -1954,17 +2017,18 @@ pub async fn link_api_key(
     // round Codex P2). We also accept a re-attach of the same
     // `api_key_id` so an idempotent retry of a single request doesn't
     // return Conflict.
-    let current = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let current = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .find_one(doc! { "_id": service_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
     let stale_api_key_id = match current.api_key_id.as_deref() {
         Some(current_id) if current_id != api_key_id => {
-            let exists = db
-                .collection::<mongodb::bson::Document>(USER_API_KEYS)
-                .count_documents(doc! { "_id": current_id, "user_id": user_id })
-                .await?
+            let exists = crate::services::service_history::collection::<mongodb::bson::Document>(
+                db,
+                USER_API_KEYS,
+            )
+            .count_documents(doc! { "_id": current_id, "user_id": user_id })
+            .await?
                 > 0;
             (!exists).then_some(current_id.to_string())
         }
@@ -1979,8 +2043,7 @@ pub async fn link_api_key(
         binding_options.push(doc! { "api_key_id": stale_id });
     }
 
-    let result = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! {
                 "_id": service_id,
@@ -2000,10 +2063,10 @@ pub async fn link_api_key(
         // Distinguish "service missing" from "service already bound to a
         // different api_key" so the caller can reclaim the orphan
         // credential it just provisioned.
-        let existing = db
-            .collection::<UserService>(COLLECTION_NAME)
-            .find_one(doc! { "_id": service_id, "user_id": user_id })
-            .await?;
+        let existing =
+            crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+                .find_one(doc! { "_id": service_id, "user_id": user_id })
+                .await?;
         return match existing {
             None => Err(AppError::NotFound("User service not found".to_string())),
             Some(_) => Err(AppError::Conflict(
@@ -2035,18 +2098,17 @@ pub async fn rebind_user_service_api_key(
     slug: &str,
     api_key_id: &str,
 ) -> AppResult<()> {
-    let ak_count = db
-        .collection::<mongodb::bson::Document>(USER_API_KEYS)
-        .count_documents(doc! { "_id": api_key_id, "user_id": user_id, "status": "active" })
-        .await?;
+    let ak_count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_API_KEYS)
+            .count_documents(doc! { "_id": api_key_id, "user_id": user_id, "status": "active" })
+            .await?;
     if ak_count == 0 {
         return Err(AppError::NotFound(
             "API key not found, inactive, or does not belong to user".to_string(),
         ));
     }
 
-    let result = db
-        .collection::<UserService>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! { "user_id": user_id, "slug": slug, "is_active": true },
             doc! { "$set": {
@@ -2099,7 +2161,7 @@ pub async fn update_ssh_auth_mode(
         ssh_node_keys_stale_after_transition(current.ssh_node_keys_stale, from, mode);
     let now = Utc::now();
 
-    db.collection::<UserService>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .update_one(
             doc! { "_id": service_id, "user_id": user_id },
             doc! {
@@ -2269,24 +2331,24 @@ pub async fn backfill_stale_catalog_auth_snapshots(db: &mongodb::Database) -> Ap
             .clone()
             .unwrap_or_else(|| "Authorization".to_string());
 
-        let result = db
-            .collection::<UserService>(COLLECTION_NAME)
-            .update_many(
-                doc! {
-                    "catalog_service_id": &svc.id,
-                    "auth_method": "none",
-                    "auth_key_name": "",
-                    "api_key_id": { "$ne": null },
-                },
-                doc! {
-                    "$set": {
-                        "auth_method": &spr.injection_method,
-                        "auth_key_name": &injection_key,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    }
-                },
-            )
-            .await?;
+        let result =
+            crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+                .update_many(
+                    doc! {
+                        "catalog_service_id": &svc.id,
+                        "auth_method": "none",
+                        "auth_key_name": "",
+                        "api_key_id": { "$ne": null },
+                    },
+                    doc! {
+                        "$set": {
+                            "auth_method": &spr.injection_method,
+                            "auth_key_name": &injection_key,
+                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        }
+                    },
+                )
+                .await?;
 
         if result.modified_count > 0 {
             tracing::info!(
@@ -2320,9 +2382,9 @@ pub async fn backfill_stale_catalog_auth_snapshots(db: &mongodb::Database) -> Ap
 /// personal rows, explicit org platform bindings, or restricted-audience rows.
 /// Endpoint and (defensive) credential cleanup is limited to resources no longer
 /// referenced by any remaining user service (or agent credential binding).
-/// Delete orphan resources before their service row so interrupted runs retain
-/// references for retry, including on standalone MongoDB. API-key allowlists and
-/// agent bindings follow the existing stale-row cleanup behavior and are left intact.
+/// Each service and its orphan resources are removed in one journaled transaction.
+/// API-key allowlists and agent bindings follow the existing stale-row cleanup
+/// behavior and are left intact.
 pub async fn cleanup_public_org_auto_provisions(db: &mongodb::Database) -> AppResult<()> {
     let org_user_ids = db
         .collection::<Document>(USERS)
@@ -2355,81 +2417,111 @@ pub async fn cleanup_public_org_auto_provisions(db: &mongodb::Database) -> AppRe
     }
 
     let (mut deleted_services, mut deleted_endpoints, mut deleted_credentials) = (0, 0, 0);
-    for row in wrong_rows {
-        // Keep the row until orphan cleanup finishes so a crash leaves the
-        // references available for retry. This also works on standalone MongoDB.
-        let result: mongodb::error::Result<()> = async {
-            let rows = db.collection::<UserService>(COLLECTION_NAME);
-            let owner_is_org = db
-                .collection::<Document>(USERS)
-                .find_one(doc! { "_id": &row.user_id, "user_type": "org" })
-                .await?
-                .is_some();
-            let catalog_is_public = db
-                .collection::<Document>(DOWNSTREAM_SERVICES)
-                .find_one(
-                    doc! { "_id": &row.catalog_service_id, "platform_key.audience": "public" },
-                )
-                .await?
-                .is_some();
-            if !owner_is_org || !catalog_is_public {
-                return Ok(());
-            }
+    for candidate in wrong_rows {
+        let result = crate::services::service_history::context::scope(
+            crate::services::service_history::context::system("public_org_auto_provision_cleanup"),
+            crate::services::service_history::transaction::run(db, async |session| {
+                let rows = crate::services::service_history::collection::<UserService>(
+                    db,
+                    COLLECTION_NAME,
+                );
+                // Re-read the current references inside the same snapshot as cleanup.
+                let Some(row) = rows
+                    .find_one(doc! {
+                        "_id": &candidate.id,
+                        "user_id": &candidate.user_id,
+                        "source": AUTO_PROVISION_SOURCE,
+                        "catalog_service_id": &candidate.catalog_service_id,
+                    })
+                    .session(&mut *session)
+                    .await?
+                else {
+                    return Ok((0, 0, 0));
+                };
+                let owner_is_org = db
+                    .collection::<Document>(USERS)
+                    .find_one(doc! { "_id": &row.user_id, "user_type": "org" })
+                    .session(&mut *session)
+                    .await?
+                    .is_some();
+                let catalog_is_public = db
+                    .collection::<Document>(DOWNSTREAM_SERVICES)
+                    .find_one(
+                        doc! { "_id": &row.catalog_service_id, "platform_key.audience": "public" },
+                    )
+                    .session(&mut *session)
+                    .await?
+                    .is_some();
+                if !owner_is_org || !catalog_is_public {
+                    return Ok((0, 0, 0));
+                }
 
-            // Automatic provisioning never creates a UserApiKey. Defensively
-            // handle malformed legacy references, preserving shared credentials.
-            if let Some(key_id) = &row.api_key_id {
-                let service_reference = rows
-                    .find_one(doc! { "_id": { "$ne": &row.id }, "api_key_id": key_id })
-                    .await?
-                    .is_some();
-                let binding_reference = db
-                    .collection::<Document>(crate::models::agent_service_binding::COLLECTION_NAME)
-                    .find_one(doc! { "user_api_key_id": key_id })
-                    .await?
-                    .is_some();
-                if !service_reference && !binding_reference {
-                    deleted_credentials += db
-                        .collection::<Document>(USER_API_KEYS)
+                let (mut endpoints, mut credentials) = (0, 0);
+                // Automatic rows normally have no key; preserve any shared legacy key.
+                if let Some(key_id) = &row.api_key_id {
+                    let service_reference = rows
+                        .find_one(doc! { "_id": { "$ne": &row.id }, "api_key_id": key_id })
+                        .session(&mut *session)
+                        .await?
+                        .is_some();
+                    let binding_reference = db
+                        .collection::<Document>(
+                            crate::models::agent_service_binding::COLLECTION_NAME,
+                        )
+                        .find_one(doc! { "user_api_key_id": key_id })
+                        .session(&mut *session)
+                        .await?
+                        .is_some();
+                    if !service_reference && !binding_reference {
+                        credentials = crate::services::service_history::collection::<Document>(
+                            db,
+                            USER_API_KEYS,
+                        )
                         .delete_one(doc! { "_id": key_id, "user_id": &row.user_id })
+                        .session(&mut *session)
                         .await?
                         .deleted_count;
+                    }
                 }
-            }
-            let endpoint_referenced = rows
-                .find_one(doc! { "_id": { "$ne": &row.id }, "endpoint_id": &row.endpoint_id })
-                .await?
-                .is_some();
-            if !endpoint_referenced {
-                deleted_endpoints += db
-                    .collection::<Document>(USER_ENDPOINTS)
+                let endpoint_referenced = rows
+                    .find_one(doc! { "_id": { "$ne": &row.id }, "endpoint_id": &row.endpoint_id })
+                    .session(&mut *session)
+                    .await?
+                    .is_some();
+                if !endpoint_referenced {
+                    endpoints = crate::services::service_history::collection::<Document>(
+                        db,
+                        USER_ENDPOINTS,
+                    )
                     .delete_one(doc! { "_id": &row.endpoint_id, "user_id": &row.user_id })
+                    .session(&mut *session)
                     .await?
                     .deleted_count;
-            }
-            if rows
-                .find_one_and_delete(doc! {
-                    "_id": &row.id,
-                    "user_id": &row.user_id,
-                    "source": AUTO_PROVISION_SOURCE,
-                    "catalog_service_id": &row.catalog_service_id,
-                })
-                .await?
-                .is_some()
-            {
-                deleted_services += 1;
-            }
-            Ok(())
-        }
+                }
+                let services = rows
+                    .delete_one(doc! { "_id": &row.id })
+                    .session(&mut *session)
+                    .await?
+                    .deleted_count;
+                Ok((services, endpoints, credentials))
+            }),
+        )
         .await;
-        if let Err(error) = result {
-            tracing::warn!(
-                deleted_services,
-                deleted_endpoints,
-                deleted_credentials,
-                "Public platform org cleanup stopped after partial progress"
-            );
-            return Err(error.into());
+        match result {
+            Ok((services, endpoints, credentials)) => {
+                deleted_services += services;
+                deleted_endpoints += endpoints;
+                deleted_credentials += credentials;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    deleted_services,
+                    deleted_endpoints,
+                    deleted_credentials,
+                    "Public platform org cleanup stopped after partial progress"
+                );
+                return Err(error.into());
+            }
         }
     }
 
@@ -2590,6 +2682,7 @@ mod tests {
     ) -> DownstreamService {
         let now = Utc::now();
         DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: service_id.to_string(),
@@ -2796,6 +2889,22 @@ mod tests {
         .expect("proxy_only should not require catalog principals");
         assert_eq!(updated.ssh_auth_mode, SshAuthMode::ProxyOnly);
         assert!(updated.ssh_node_keys_stale);
+        let event = db
+            .collection::<crate::models::service_change_event::ServiceChangeEvent>(
+                crate::models::service_change_event::COLLECTION_NAME,
+            )
+            .find_one(doc! { "service_id": &proxy_service_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.action, "service.ssh_changed");
+        let mode = event
+            .changes
+            .iter()
+            .find(|change| change.field == "ssh_auth_mode")
+            .unwrap();
+        assert_eq!(mode.before, Some(serde_json::json!("node_key")));
+        assert_eq!(mode.after, Some(serde_json::json!("proxy_only")));
     }
 
     #[test]
@@ -2924,7 +3033,15 @@ mod tests {
             .await
             .unwrap();
         db.collection::<mongodb::bson::Document>(USER_API_KEYS)
-            .insert_one(doc! { "_id": &api_key_id, "user_id": &user_id })
+            .insert_one(doc! {
+                "_id": &api_key_id,
+                "user_id": &user_id,
+                "label": "Bearer test key",
+                "credential_type": "bearer",
+                "status": "active",
+                "created_at": mongodb::bson::DateTime::now(),
+                "updated_at": mongodb::bson::DateTime::now(),
+            })
             .await
             .unwrap();
 
@@ -4089,10 +4206,78 @@ mod tests {
             .await
             .unwrap();
 
-        cleanup_public_org_auto_provisions(&db).await.unwrap();
+        use crate::models::service_change_event::{
+            COLLECTION_NAME as EVENTS, HistoryActorKind, ServiceChangeEvent,
+        };
+        use crate::services::service_history::context;
+
+        // Fail the final service event after backing-resource events succeeded:
+        // the whole service cleanup, including both backing deletes, must abort.
+        db.create_collection(EVENTS)
+            .validator(doc! { "action": { "$ne": "service.deleted" } })
+            .await
+            .unwrap();
+        assert!(cleanup_public_org_auto_provisions(&db).await.is_err());
+        for (collection, id) in [
+            (COLLECTION_NAME, &wrong_service_id),
+            (USER_ENDPOINTS, &wrong_endpoint_id),
+            (USER_API_KEYS, &wrong_key_id),
+        ] {
+            assert!(
+                db.collection::<Document>(collection)
+                    .find_one(doc! { "_id": id })
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            db.collection::<Document>(EVENTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.run_command(doc! { "collMod": EVENTS, "validator": {} })
+            .await
+            .unwrap();
+
+        context::scope(context::system("unrelated_caller"), async {
+            cleanup_public_org_auto_provisions(&db).await.unwrap();
+            assert_eq!(context::current().unwrap().actor.id, "unrelated_caller");
+        })
+        .await;
         cleanup_public_org_auto_provisions(&db)
             .await
             .expect("the second startup sweep is a no-op");
+        let events: Vec<ServiceChangeEvent> = db
+            .collection::<ServiceChangeEvent>(EVENTS)
+            .find(doc! {})
+            .sort(doc! { "service_sequence": 1 })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            3,
+            "one event for each removal; retries add none"
+        );
+        assert_eq!(events[0].action, "service.credential_removed");
+        assert_eq!(events[1].entity_type, USER_ENDPOINTS);
+        assert_eq!(events[2].action, "service.deleted");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.service_id == wrong_service_id
+                    && event.owner_id == org_id
+                    && event.actor.kind == HistoryActorKind::System
+                    && event.actor.id == "public_org_auto_provision_cleanup"
+                    && event.change_group_id == events[0].change_group_id)
+        );
+        let serialized = serde_json::to_string(&events).unwrap();
+        assert!(!serialized.contains("https://public.example.com"));
 
         assert!(
             db.collection::<UserService>(COLLECTION_NAME)

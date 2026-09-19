@@ -1,6 +1,7 @@
+import { useAuthStore } from "@/stores/auth-store";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, ApiError } from "@/lib/api-client";
 import { connectWatchInterval } from "@/lib/assistant/connect-watch";
 import type {
   KeyInfo,
@@ -16,23 +17,50 @@ import type { WsFrameInjection } from "@/schemas/services";
 // -- Queries --
 
 export function useKeys() {
-  return useQuery({
-    queryKey: ["keys"],
+  const identity = useAuthStore((state) => state.user?.id);
+  const query = useQuery({
+    queryKey: ["keys", "list", identity],
     queryFn: async (): Promise<readonly KeyInfo[]> => {
       const res = await api.get<KeyListResponse>("/keys");
       return res.keys;
     },
+    staleTime: 0,
+    refetchOnMount: "always",
   });
+  return { ...query, data: query.isError ? undefined : query.data };
 }
 
 export function useKey(keyId: string) {
-  return useQuery({
-    queryKey: ["keys", keyId],
-    queryFn: async (): Promise<KeyInfo> => {
-      return api.get<KeyInfo>(`/keys/${keyId}`);
+  const identity = useAuthStore((state) => state.user?.id);
+  const client = useQueryClient();
+  const queryKey = ["keys", keyId, identity] as const;
+  const query = useQuery({
+    queryKey,
+    queryFn: async (): Promise<KeyInfo | null> => {
+      try {
+        return await api.get<KeyInfo>(`/keys/${keyId}`);
+      } catch (error) {
+        // Rejected access must also erase the cached copy, so a later network
+        // failure cannot make previously accessible details reappear.
+        if (!isTransientKeyReadError(error)) client.setQueryData(queryKey, null);
+        throw error;
+      }
     },
     enabled: Boolean(keyId),
+    staleTime: 0,
+    refetchOnMount: "always",
   });
+  return {
+    ...query,
+    data:
+      query.isError && !isTransientKeyReadError(query.error)
+        ? undefined
+        : (query.data ?? undefined),
+  };
+}
+
+function isTransientKeyReadError(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof ApiError && error.status >= 500);
 }
 
 /** Terminal states of a placeholder key created for an out-of-band flow. */
@@ -59,12 +87,13 @@ export function useKeyAuthorizationStatus(
   previousAuthorizationAt?: string | null,
   attemptId?: string,
 ) {
+  const identity = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   const active = Boolean(keyId) && enabled;
   const query = useQuery({
     queryKey: attemptId
-      ? ["keys", keyId, "authorization", attemptId]
-      : ["keys", keyId],
+      ? ["keys", keyId, identity, "authorization", attemptId]
+      : ["keys", keyId, identity],
     queryFn: async (): Promise<KeyInfo> => {
       return api.get<KeyInfo>(`/keys/${keyId ?? ""}`);
     },
@@ -104,15 +133,15 @@ export function useKeyAuthorizationStatus(
       status === KEY_AUTH_FAILED ||
       (status === KEY_AUTH_ACTIVE && authorizationAdvanced)
     ) {
-      void queryClient.invalidateQueries({ queryKey: ["keys"], exact: true });
+      void queryClient.invalidateQueries({ queryKey: ["keys", "list", identity], exact: true });
       if (keyId) {
         void queryClient.invalidateQueries({
-          queryKey: ["keys", keyId],
+          queryKey: ["keys", keyId, identity],
           exact: true,
         });
       }
     }
-  }, [authorizationAdvanced, keyId, status, queryClient]);
+  }, [authorizationAdvanced, identity, keyId, status, queryClient]);
 
   return query;
 }
@@ -152,6 +181,7 @@ export function useKeyAuthorizationWatch(
   },
 ): KeyAuthorizationWatch {
   const { attemptId, previousAuthorizationAt, enabled, deadlineAt } = options;
+  const identity = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   /**
    * The (key, deadline) pair a timer has already fired for. Storing the pair
@@ -187,7 +217,7 @@ export function useKeyAuthorizationWatch(
     expiredFor.deadlineAt >= deadlineAt;
   const active = Boolean(keyId) && enabled && !expired;
   const query = useQuery({
-    queryKey: ["keys", keyId, "authorization", attemptId],
+    queryKey: ["keys", keyId, identity, "authorization", attemptId],
     queryFn: async (): Promise<KeyInfo> => {
       return api.get<KeyInfo>(`/keys/${keyId ?? ""}`);
     },
@@ -220,15 +250,15 @@ export function useKeyAuthorizationWatch(
   const terminalActive = status === KEY_AUTH_ACTIVE && authorizationAdvanced;
   useEffect(() => {
     if (terminalActive || status === KEY_AUTH_FAILED) {
-      void queryClient.invalidateQueries({ queryKey: ["keys"], exact: true });
+      void queryClient.invalidateQueries({ queryKey: ["keys", "list", identity], exact: true });
       if (keyId) {
         void queryClient.invalidateQueries({
-          queryKey: ["keys", keyId],
+          queryKey: ["keys", keyId, identity],
           exact: true,
         });
       }
     }
-  }, [keyId, queryClient, status, terminalActive]);
+  }, [identity, keyId, queryClient, status, terminalActive]);
 
   const terminal = terminalActive || status === KEY_AUTH_FAILED;
   return {

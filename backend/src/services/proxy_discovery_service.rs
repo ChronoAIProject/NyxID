@@ -295,7 +295,7 @@ pub async fn list_proxy_discovery(
     let endpoints: Vec<UserEndpoint> = if endpoint_ids.is_empty() {
         vec![]
     } else {
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .find(doc! { "_id": { "$in": &endpoint_ids } })
             .await?
             .try_collect()

@@ -83,6 +83,7 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
     db.run_command(doc! { "ping": 1 }).await?;
     tracing::info!("MongoDB connection established");
 
+    require_transactions(&db).await?;
     ensure_indexes(&db).await?;
     tracing::info!("MongoDB indexes verified");
 
@@ -95,11 +96,25 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
     Ok(db)
 }
 
+/// Service configuration changes require an atomic mutation + history journal.
+pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::Error> {
+    let hello = db.run_command(doc! { "hello": 1 }).await?;
+    if !hello.contains_key("logicalSessionTimeoutMinutes")
+        || (!hello.contains_key("setName") && hello.get_str("msg") != Ok("isdbgrid"))
+    {
+        return Err(mongodb::error::Error::custom(
+            "NyxID requires transaction-capable MongoDB (replica set or mongos). See docs/SERVICE_HISTORY.md for local setup and existing-volume migration.",
+        ));
+    }
+    Ok(())
+}
+
 /// Create all required indexes for every collection.
 ///
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
     crate::services::coordination_service::ensure_indexes(db).await?;
@@ -308,6 +323,18 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 
     // ── downstream_services ──
     let services = db.collection::<mongodb::bson::Document>("downstream_services");
+    services
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_user_id": 1, "is_active": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! { "owner_user_id": { "$type": "string" } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     // Migration: drop legacy non-partial unique index on slug so the new partial index can be created
     let _ = services.drop_index("slug_1").await;
     services
@@ -3407,7 +3434,7 @@ async fn migrate_legacy_ssh_auth_mode(db: &Database) -> Result<(), mongodb::erro
         )
         .await?;
 
-    let user_services = db.collection::<Document>(USER_SERVICES);
+    let user_services = crate::services::service_history::collection::<Document>(db, USER_SERVICES);
     let non_ssh_mode = user_services
         .update_many(
             doc! {
@@ -3649,16 +3676,16 @@ async fn cleanup_duplicate_migration_services(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Find active migration-sourced UserService records with suffixed slugs
     // (the "-N" pattern produced by the slug collision resolver).
-    let migration_services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "is_active": true,
-            "source": { "$regex": "^migration_" },
-            "catalog_service_id": { "$ne": null },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let migration_services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "is_active": true,
+                "source": { "$regex": "^migration_" },
+                "catalog_service_id": { "$ne": null },
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     let mut cleaned = 0u64;
     for svc in &migration_services {
@@ -3681,32 +3708,29 @@ async fn cleanup_duplicate_migration_services(
         };
 
         // Verify the base slug record exists and is active for the same user + catalog service
-        let base_exists = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "user_id": &svc.user_id,
-                "slug": base_slug,
-                "catalog_service_id": csid,
-                "is_active": true,
-            })
-            .await?;
+        let base_exists =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &svc.user_id,
+                    "slug": base_slug,
+                    "catalog_service_id": csid,
+                    "is_active": true,
+                })
+                .await?;
 
         if base_exists.is_none() {
             continue;
         }
 
         // This is a migration-created suffix duplicate -- delete it and its associated records
-        let _ = db
-            .collection::<UserService>(USER_SERVICES)
+        let _ = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .delete_one(doc! { "_id": &svc.id })
             .await;
-        let _ = db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
+        let _ = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .delete_one(doc! { "_id": &svc.endpoint_id })
             .await;
         if let Some(ref ak_id) = svc.api_key_id {
-            let _ = db
-                .collection::<UserApiKey>(USER_API_KEYS)
+            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .delete_one(doc! { "_id": ak_id })
                 .await;
         }
@@ -3799,16 +3823,16 @@ async fn resolve_migration_user_service_slug(
         .cloned()
         .map(bson::Bson::String)
         .collect();
-    let existing: Vec<Document> = db
-        .collection::<Document>(USER_SERVICES)
-        .find(doc! {
-            "user_id": user_id,
-            "is_active": true,
-            "slug": { "$in": slug_values },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let existing: Vec<Document> =
+        crate::services::service_history::collection::<Document>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": user_id,
+                "is_active": true,
+                "slug": { "$in": slug_values },
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     let existing_slugs: HashSet<String> = existing
         .into_iter()
@@ -3837,23 +3861,23 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
         // sibling `user_api_keys` row while leaving the matching
         // `user_services` row in place, leaving stale state that would
         // otherwise re-trigger the insert and hit the unique index.
-        let existing_api_key = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .find_one(doc! {
-                "source": "migration_provider_token",
-                "source_id": &token.id,
-            })
-            .await?;
+        let existing_api_key =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .find_one(doc! {
+                    "source": "migration_provider_token",
+                    "source_id": &token.id,
+                })
+                .await?;
         if existing_api_key.is_some() {
             continue;
         }
-        let existing_service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "source": "migration_provider_token",
-                "source_id": &token.id,
-            })
-            .await?;
+        let existing_service =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "source": "migration_provider_token",
+                    "source_id": &token.id,
+                })
+                .await?;
         if existing_service.is_some() {
             continue;
         }
@@ -3917,14 +3941,14 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
         // Skip if a UserService already exists for this user + catalog service
         // (e.g., created by an earlier token for the same provider)
         if let Some(ref csid) = catalog_service_id {
-            let already_has_service = db
-                .collection::<UserService>(USER_SERVICES)
-                .find_one(doc! {
-                    "user_id": &token.user_id,
-                    "catalog_service_id": csid,
-                    "is_active": true,
-                })
-                .await?;
+            let already_has_service =
+                crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                    .find_one(doc! {
+                        "user_id": &token.user_id,
+                        "catalog_service_id": csid,
+                        "is_active": true,
+                    })
+                    .await?;
             if already_has_service.is_some() {
                 continue;
             }
@@ -3966,7 +3990,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             created_at: now,
             updated_at: now,
         };
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .insert_one(&endpoint)
             .await?;
 
@@ -4010,16 +4034,16 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             updated_at: now,
             credential_epoch: 1,
         };
-        if let Err(e) = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(&api_key)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .insert_one(&api_key)
+                .await
         {
             // Clean up orphaned endpoint
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
             return Err(e.into());
         }
 
@@ -4035,6 +4059,9 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             .and_then(|svc| svc.ssh_config.as_ref().map(|ssh| ssh.ssh_auth_mode))
             .unwrap_or(SshAuthMode::ProxyOnly);
         let user_service = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: service_id,
             user_id: token.user_id.clone(),
             slug,
@@ -4073,18 +4100,17 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             state_version: 1,
             rotation_predecessor_id: None,
         };
-        if let Err(e) = db
-            .collection::<UserService>(USER_SERVICES)
-            .insert_one(&user_service)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .insert_one(&user_service)
+                .await
         {
             // Clean up orphaned endpoint and api_key
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
-            let _ = db
-                .collection::<UserApiKey>(USER_API_KEYS)
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
+            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .delete_one(doc! { "_id": &api_key_id })
                 .await;
             if is_duplicate_key_error(&e) {
@@ -4125,23 +4151,23 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
         // `user_api_keys` row while leaving the matching `user_services` row
         // in place, leaving stale state that would otherwise re-trigger the
         // insert and hit the unique index.
-        let existing_api_key = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .find_one(doc! {
-                "source": "migration_connection",
-                "source_id": &conn.id,
-            })
-            .await?;
+        let existing_api_key =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .find_one(doc! {
+                    "source": "migration_connection",
+                    "source_id": &conn.id,
+                })
+                .await?;
         if existing_api_key.is_some() {
             continue;
         }
-        let existing_service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "source": "migration_connection",
-                "source_id": &conn.id,
-            })
-            .await?;
+        let existing_service =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "source": "migration_connection",
+                    "source_id": &conn.id,
+                })
+                .await?;
         if existing_service.is_some() {
             continue;
         }
@@ -4164,14 +4190,14 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
         };
 
         // Check if already migrated via provider token path
-        let already_has_service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "user_id": &conn.user_id,
-                "catalog_service_id": &service.id,
-                "is_active": true,
-            })
-            .await?;
+        let already_has_service =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &conn.user_id,
+                    "catalog_service_id": &service.id,
+                    "is_active": true,
+                })
+                .await?;
         if already_has_service.is_some() {
             continue;
         }
@@ -4217,7 +4243,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             created_at: now,
             updated_at: now,
         };
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .insert_one(&endpoint)
             .await?;
 
@@ -4256,21 +4282,24 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             updated_at: now,
             credential_epoch: 1,
         };
-        if let Err(e) = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(&api_key)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .insert_one(&api_key)
+                .await
         {
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
             return Err(e.into());
         }
 
         // Create UserService -- clean up endpoint + api_key on failure
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: service_id,
             user_id: conn.user_id.clone(),
             slug,
@@ -4314,17 +4343,16 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             state_version: 1,
             rotation_predecessor_id: None,
         };
-        if let Err(e) = db
-            .collection::<UserService>(USER_SERVICES)
-            .insert_one(&user_service)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .insert_one(&user_service)
+                .await
         {
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
-            let _ = db
-                .collection::<UserApiKey>(USER_API_KEYS)
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
+            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .delete_one(doc! { "_id": &api_key_id })
                 .await;
             if is_duplicate_key_error(&e) {
@@ -4364,8 +4392,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
     let mut created = 0u64;
     for binding in &bindings {
         // Try to update existing UserService (created by provider_token or connection migration)
-        let result = db
-            .collection::<Document>(USER_SERVICES)
+        let result = crate::services::service_history::collection::<Document>(db, USER_SERVICES)
             .update_one(
                 doc! {
                     "user_id": &binding.user_id,
@@ -4388,26 +4415,26 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
         }
 
         // No existing UserService was updated -- check if one already exists
-        let already_exists = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "user_id": &binding.user_id,
-                "catalog_service_id": &binding.service_id,
-                "is_active": true,
-            })
-            .await?;
+        let already_exists =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &binding.user_id,
+                    "catalog_service_id": &binding.service_id,
+                    "is_active": true,
+                })
+                .await?;
         if already_exists.is_some() {
             continue;
         }
 
         // Check idempotency by source
-        let migrated_before = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .find_one(doc! {
-                "source": "migration_node_binding",
-                "source_id": &binding.id,
-            })
-            .await?;
+        let migrated_before =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .find_one(doc! {
+                    "source": "migration_node_binding",
+                    "source_id": &binding.id,
+                })
+                .await?;
         if migrated_before.is_some() {
             continue;
         }
@@ -4487,7 +4514,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             created_at: now,
             updated_at: now,
         };
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .insert_one(&endpoint)
             .await?;
 
@@ -4518,21 +4545,24 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             updated_at: now,
             credential_epoch: 1,
         };
-        if let Err(e) = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(&api_key)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .insert_one(&api_key)
+                .await
         {
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
             return Err(e.into());
         }
 
         // Create UserService with node routing
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: service_id,
             user_id: binding.user_id.clone(),
             slug,
@@ -4576,17 +4606,16 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             state_version: 1,
             rotation_predecessor_id: None,
         };
-        if let Err(e) = db
-            .collection::<UserService>(USER_SERVICES)
-            .insert_one(&user_service)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .insert_one(&user_service)
+                .await
         {
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
-            let _ = db
-                .collection::<UserApiKey>(USER_API_KEYS)
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
+            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .delete_one(doc! { "_id": &api_key_id })
                 .await;
             return Err(e.into());
@@ -4684,6 +4713,7 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: "svc-1".to_string(),

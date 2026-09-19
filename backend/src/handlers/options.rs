@@ -11,18 +11,18 @@ use crate::handlers::admin_service_accounts::{
 };
 use crate::services::org_service;
 use crate::services::{
-    options_service::{self, OptionSet, OptionsQuery, OptionsResponse},
+    options_service::{self, OptionSet, OptionsQuery, RegisteredOptionsResponse},
     service_account_service,
 };
 use crate::{AppState, errors::AppResult, mw::auth::AuthUser};
 
 #[utoipa::path(
     get, path = "/api/v1/options/{option_set}",
-    params(("option_set" = String, Path, description = "Registered option set: service-scope"), OptionsQuery),
+    params(("option_set" = String, Path, description = "Registered option set: service-scope, service-history-action, service-history-field"), OptionsQuery),
     responses(
-        (status = 200, description = "Options authorized for the requested owner", body = OptionsResponse),
+        (status = 200, description = "Static history definitions or owner-authorized service scopes", body = RegisteredOptionsResponse),
         (status = 400, description = "Invalid context or pagination", body = crate::errors::ErrorResponse),
-        (status = 403, description = "Service account management access required", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Route credentials or service-scope management access required", body = crate::errors::ErrorResponse),
         (status = 404, description = "Unknown option set or inaccessible account", body = crate::errors::ErrorResponse)
     ),
     security(("bearer_auth" = [])), tag = "Options"
@@ -34,10 +34,18 @@ pub async fn get_options(
     Query(query): Query<OptionsQuery>,
 ) -> AppResult<(
     [(header::HeaderName, &'static str); 1],
-    Json<OptionsResponse>,
+    Json<RegisteredOptionsResponse>,
 )> {
     let option_set = OptionSet::resolve(&name)?;
-    query.validate()?;
+    query.validate_for(option_set)?;
+    if option_set != OptionSet::Scope {
+        return Ok((
+            [(header::CACHE_CONTROL, "private, no-store")],
+            Json(RegisteredOptionsResponse::History(
+                options_service::resolve_static(option_set, &query)?,
+            )),
+        ));
+    }
     let existing = if let Some(id) = &query.service_account_id {
         let sa = service_account_service::get_service_account(&state.db, id).await?;
         // This endpoint requires actual org ownership on the non-global path.
@@ -46,7 +54,7 @@ pub async fn get_options(
             org_service::get_org_user(&state.db, sa.effective_owner_user_id()).await?;
         }
         require_admin_or_owning_org_admin(&state, &auth, &sa).await?;
-        if sa.effective_owner_user_id() != query.owner_id {
+        if Some(sa.effective_owner_user_id()) != query.owner_id.as_deref() {
             return Err(AppError::ValidationError(
                 "Service account does not belong to the requested owner".into(),
             ));
@@ -54,7 +62,7 @@ pub async fn get_options(
         Some(sa)
     } else {
         let actor = auth.user_id.to_string();
-        let org = (query.owner_id != actor).then_some(query.owner_id.as_str());
+        let org = query.owner_id.as_deref().filter(|owner| *owner != actor);
         if let Some(org) = org {
             org_service::get_org_user(&state.db, org).await?;
         }
@@ -70,7 +78,7 @@ pub async fn get_options(
     .await?;
     Ok((
         [(header::CACHE_CONTROL, "private, no-store")],
-        Json(response),
+        Json(RegisteredOptionsResponse::Scope(response)),
     ))
 }
 
@@ -95,8 +103,8 @@ mod tests {
 
     fn query(owner: &str) -> OptionsQuery {
         OptionsQuery {
-            principal_type: "service_account".into(),
-            owner_id: owner.into(),
+            principal_type: Some("service_account".into()),
+            owner_id: Some(owner.into()),
             service_account_id: None,
             search: None,
             offset: None,
@@ -150,14 +158,16 @@ mod tests {
         db.collection::<mongodb::bson::Document>(crate::models::service_account::COLLECTION_NAME)
             .update_one(doc! { "_id": &own.id }, doc! { "$unset": { "owner_user_id": "" }, "$set": { "allowed_scopes": "owner:custom owner:custom proxy" } }).await.unwrap();
         let state = test_app_state(db.clone());
-        let (_, Json(response)) = get_options(
+        let (_, Json(RegisteredOptionsResponse::Scope(response))) = get_options(
             State(state.clone()),
             test_auth_user(&actor),
             Path("service-scope".into()),
             Query(query(&actor)),
         )
         .await
-        .unwrap();
+        .unwrap() else {
+            panic!("Expected scope response")
+        };
         assert!(response.items.iter().any(|v| v.value == "owner:custom"));
         assert!(!response.items.iter().any(|v| v.value == "team:custom"));
         assert_eq!(
@@ -214,23 +224,25 @@ mod tests {
             .insert_one(test_membership(&org, &outsider, OrgRole::Admin, None))
             .await
             .unwrap();
-        let (_, Json(team)) = get_options(
+        let (_, Json(RegisteredOptionsResponse::Scope(team))) = get_options(
             State(state.clone()),
             test_auth_user(&outsider),
             Path("service-scope".into()),
             Query(query(&org)),
         )
         .await
-        .unwrap();
+        .unwrap() else {
+            panic!("Expected scope response")
+        };
         assert!(team.items.iter().any(|v| v.value == "team:custom"));
         assert!(!team.items.iter().any(|v| v.value == "owner:custom"));
         let mut page_query = query(&org);
         page_query.limit = Some(1);
-        let first = options_service::resolve(&db, OptionSet::ServiceScope, &page_query, None)
+        let first = options_service::resolve(&db, OptionSet::Scope, &page_query, None)
             .await
             .unwrap();
         page_query.offset = first.next_offset;
-        let second = options_service::resolve(&db, OptionSet::ServiceScope, &page_query, None)
+        let second = options_service::resolve(&db, OptionSet::Scope, &page_query, None)
             .await
             .unwrap();
         assert_ne!(first.items[0].value, second.items[0].value);
@@ -239,7 +251,7 @@ mod tests {
         page_query.offset = None;
         let found = options_service::resolve(
             &db,
-            OptionSet::ServiceScope,
+            OptionSet::Scope,
             &page_query,
             Some("legacy:read proxy:*"),
         )
@@ -248,12 +260,18 @@ mod tests {
         assert_eq!(found.total, 1);
         assert_eq!(found.items[0].value, "team:custom");
         assert_eq!(found.selected_items.len(), 2);
-        assert!(
-            found
+        assert!(found.selected_items.iter().all(|item| !item.disabled));
+        for (value, source) in [
+            ("legacy:read", "configured_scope"),
+            ("proxy:*", "backend_definition"),
+        ] {
+            let selected = found
                 .selected_items
                 .iter()
-                .all(|item| !item.disabled && item.source == "configured_scope")
-        );
+                .find(|item| item.value == value)
+                .unwrap();
+            assert_eq!(selected.source, source);
+        }
         db.collection::<mongodb::bson::Document>(crate::models::service_account::COLLECTION_NAME)
             .update_one(
                 doc! { "_id": &team_sa.id },
@@ -261,7 +279,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let hidden = options_service::resolve(&db, OptionSet::ServiceScope, &page_query, None)
+        let hidden = options_service::resolve(&db, OptionSet::Scope, &page_query, None)
             .await
             .unwrap();
         assert_eq!(hidden.total, 0);
@@ -296,11 +314,11 @@ mod tests {
             assert!(q.validate().is_err());
         }
         let mut q = query(&actor);
-        q.principal_type = "user".into();
+        q.principal_type = Some("user".into());
         assert!(q.validate().is_err());
         let mut q = query("bad-id");
         assert!(q.validate().is_err());
-        q.owner_id = actor;
+        q.owner_id = Some(actor);
         q.search = Some("x".repeat(201));
         assert!(q.validate().is_err());
     }
@@ -340,7 +358,57 @@ mod tests {
         );
         for (path, token, expected) in [
             (path.clone(), Some(token.clone()), StatusCode::OK),
+            (
+                format!("{path}&search=catalog:"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
+            (
+                format!("{path}&search=catalog:skills:"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
+            (
+                format!("{path}&search=proxy:*"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
+            (
+                format!("{path}&search=groups"),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
             (path.clone(), None, StatusCode::UNAUTHORIZED),
+            (
+                "/api/v1/options/service-history-action".into(),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
+            (
+                "/api/v1/options/service-history-field".into(),
+                Some(token.clone()),
+                StatusCode::OK,
+            ),
+            (
+                "/api/v1/options/service-history-action".into(),
+                None,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "/api/v1/options/service-history-field?owner_id=".into(),
+                Some(token.clone()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/api/v1/options/service-history-action?principal_type=".into(),
+                Some(token.clone()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/api/v1/options/service-history-action?service_account_id=".into(),
+                Some(token.clone()),
+                StatusCode::BAD_REQUEST,
+            ),
             (
                 path.replace("service-scope?", "unknown?"),
                 Some(token.clone()),
@@ -348,10 +416,35 @@ mod tests {
             ),
             (
                 format!("{path}&unexpected=true"),
-                Some(token),
+                Some(token.clone()),
                 StatusCode::BAD_REQUEST,
             ),
         ] {
+            let expected_set = path
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .split('?')
+                .next()
+                .unwrap()
+                .to_string();
+            let expected_scopes: &[&str] = if path.contains("search=catalog:") {
+                &["catalog:skills:read", "catalog:skills:write"]
+            } else if path.contains("search=proxy:*") {
+                &["proxy:*"]
+            } else if path.contains("search=groups") {
+                &["groups"]
+            } else {
+                &[
+                    "proxy",
+                    "proxy:*",
+                    "llm:proxy",
+                    "roles",
+                    "groups",
+                    "catalog:skills:read",
+                    "catalog:skills:write",
+                ]
+            };
             let mut req = Request::builder().uri(path);
             if let Some(token) = token {
                 req = req.header("authorization", format!("Bearer {token}"));
@@ -364,6 +457,31 @@ mod tests {
             let status = response.status();
             let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
             assert_eq!(status, expected, "{}", String::from_utf8_lossy(&body));
+            if status == StatusCode::OK {
+                let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(response["option_set"], expected_set);
+                if expected_set == "service-scope" {
+                    // Every known scope is discoverable before any account exists.
+                    let items = response["items"].as_array().unwrap();
+                    assert_eq!(items.len(), expected_scopes.len());
+                    assert_eq!(response["total"], expected_scopes.len());
+                    for &scope in expected_scopes {
+                        let matches: Vec<_> =
+                            items.iter().filter(|item| item["value"] == scope).collect();
+                        assert_eq!(matches.len(), 1, "Missing or duplicate suggestion: {scope}");
+                        assert_eq!(matches[0]["source"], "backend_definition");
+                        assert_eq!(matches[0]["disabled"], false);
+                        let description = matches[0]["description"].as_str().unwrap();
+                        if scope.starts_with("catalog:") {
+                            assert!(description.contains("curation grant"));
+                        } else if scope == "proxy:*" {
+                            assert!(description.contains("alias of proxy"));
+                        } else if scope == "groups" {
+                            assert!(description.contains("group list is empty"));
+                        }
+                    }
+                }
+            }
         }
         let (sa, secret) = service_account_service::create_service_account(
             &db,

@@ -118,6 +118,60 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    if !slug_exists!("ifttt-mcp") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "ifttt-mcp".into(),
+            name: "IFTTT".into(),
+            description: Some(
+                "Connect IFTTT to discover services, create Applets, and use its AI tools".into(),
+            ),
+            provider_type: "oauth2".into(),
+            authorization_url: Some(super::ifttt_oauth_service::AUTHORIZE_URL.into()),
+            token_url: Some(super::ifttt_oauth_service::TOKEN_URL.into()),
+            revocation_url: Some("https://ifttt.com/oauth/revoke".into()),
+            revocation: Some(RevocationConfig {
+                request_encoding: "form".into(),
+                style: "rfc7009".into(),
+                url: "https://ifttt.com/oauth/revoke".into(),
+                auth: "inherit".into(),
+                revokes_grant: false,
+            }),
+            default_scopes: Some(vec!["mcp".into()]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://ifttt.com/mcp".into()),
+            is_active: true,
+            credential_mode: "admin".into(),
+            token_endpoint_auth_method: "client_secret_post".into(),
+            token_request_encoding: Some("form".into()),
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: Some(HashMap::from([(
+                "resource".into(),
+                nyxid_service_adapters::ifttt_mcp::BASE_URL.into(),
+            )])),
+            device_code_format: "rfc8628".into(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".into(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        seeded_count += 1;
+    }
+
     // 1. OpenAI (API Key)
     if !slug_exists!("openai") {
         let provider = ProviderConfig {
@@ -2938,6 +2992,18 @@ struct SeededHeader {
 /// capability flags to clients.
 fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
     match slug {
+        "api-ifttt-mcp" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: false,
+                supports_authoring_via_nyx: true,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         "api-ifttt" => Some((
             ServiceCapabilities {
                 supports_proxy_read: false,
@@ -3116,6 +3182,29 @@ const OPENROUTER_DEFAULT_HEADERS: &[SeededHeader] = &[
 ];
 
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
+    DefaultServiceSeed {
+        provider_slug: "ifttt-mcp",
+        service_slug: "api-ifttt-mcp",
+        service_name: "IFTTT",
+        base_url: nyxid_service_adapters::ifttt_mcp::BASE_URL,
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some(nyxid_service_adapters::ifttt_mcp::AUTH_METHOD),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Connect your IFTTT account to discover available tools, create Applets, and use connected services. Discover tools first, then call a tool using its returned name and input schema.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://ifttt.com/mcp"),
+        auth_notes: Some(
+            "Sign in to IFTTT in your browser. NyxID registers its OAuth client on first connection and stores your tokens encrypted. IFTTT manages the accounts used by your Applets.",
+        ),
+        known_limitations: Some(
+            "Available tools and actions depend on your IFTTT account and plan. Tool calls may create or enable persistent automations; review their effects before calling. Later autonomous Applet runs execute in IFTTT, outside NyxID approval and audit. No automatic retries or completion guarantee. Server routing only; Webhooks connections remain separate.",
+        ),
+    },
     DefaultServiceSeed {
         provider_slug: "ifttt",
         service_slug: "api-ifttt",
@@ -4834,6 +4923,7 @@ pub async fn seed_default_services(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: service_id.clone(),
@@ -5104,22 +5194,24 @@ pub async fn seed_default_services(
             );
         }
 
-        let user_res = db
-            .collection::<mongodb::bson::Document>(USER_SERVICES)
-            .update_many(
-                doc! {
-                    "catalog_service_id": { "$in": &telegram_service_ids },
-                    "auth_method": { "$ne": "path" },
-                },
-                doc! {
-                    "$set": {
-                        "auth_method": "path",
-                        "auth_key_name": "bot",
-                        "updated_at": bson::DateTime::from_chrono(now),
-                    }
-                },
-            )
-            .await?;
+        let user_res = crate::services::service_history::collection::<mongodb::bson::Document>(
+            db,
+            USER_SERVICES,
+        )
+        .update_many(
+            doc! {
+                "catalog_service_id": { "$in": &telegram_service_ids },
+                "auth_method": { "$ne": "path" },
+            },
+            doc! {
+                "$set": {
+                    "auth_method": "path",
+                    "auth_key_name": "bot",
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .await?;
         if user_res.modified_count > 0 {
             tracing::info!(
                 modified = user_res.modified_count,
@@ -5281,7 +5373,8 @@ async fn cleanup_legacy_gcp_sa_data(
         .collect();
 
     // Cascade-delete user-owned rows tied to the removed catalog slugs.
-    let user_service_col = db.collection::<UserService>(USER_SERVICES);
+    let user_service_col =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES);
     let user_services: Vec<UserService> = user_service_col
         .find(doc! { "slug": { "$in": REMOVED_SERVICE_SLUGS } })
         .await?
@@ -5422,16 +5515,16 @@ async fn delete_unreferenced(
     if candidate_ids.is_empty() {
         return Ok(0);
     }
-    let still_referenced: std::collections::HashSet<String> = db
-        .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .distinct(
-            referencing_field,
-            doc! { referencing_field: { "$in": candidate_ids } },
-        )
-        .await?
-        .into_iter()
-        .filter_map(|b| b.as_str().map(str::to_string))
-        .collect();
+    let still_referenced: std::collections::HashSet<String> =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_SERVICES)
+            .distinct(
+                referencing_field,
+                doc! { referencing_field: { "$in": candidate_ids } },
+            )
+            .await?
+            .into_iter()
+            .filter_map(|b| b.as_str().map(str::to_string))
+            .collect();
     let orphaned: Vec<&String> = candidate_ids
         .iter()
         .filter(|id| !still_referenced.contains(*id))
@@ -5439,11 +5532,12 @@ async fn delete_unreferenced(
     if orphaned.is_empty() {
         return Ok(0);
     }
-    Ok(db
-        .collection::<mongodb::bson::Document>(collection)
-        .delete_many(doc! { "_id": { "$in": &orphaned } })
-        .await?
-        .deleted_count)
+    Ok(
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, collection)
+            .delete_many(doc! { "_id": { "$in": &orphaned } })
+            .await?
+            .deleted_count,
+    )
 }
 
 /// Input for OAuth2 provider configuration fields.

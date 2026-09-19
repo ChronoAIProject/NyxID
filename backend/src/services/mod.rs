@@ -72,6 +72,7 @@ pub mod gcp_sa_service;
 pub mod google_workspace;
 pub mod group_service;
 pub mod identity_service;
+pub mod ifttt_oauth_service;
 pub mod internal_auth;
 pub mod invite_code_service;
 pub mod key_service;
@@ -115,6 +116,9 @@ pub mod org_invite_service;
 pub mod org_role_scope_service;
 pub mod org_service;
 pub mod org_slug;
+pub mod ownership_transfer_service;
+#[cfg(test)]
+mod ownership_transfer_tests;
 pub mod par_service;
 pub mod platform_credential_service;
 pub mod platform_settings_service;
@@ -176,6 +180,7 @@ pub mod assistant_nyxagent;
 pub mod channel_retry_ingress;
 pub mod provider_link_service;
 pub mod retired_service_service;
+pub mod service_history;
 
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;

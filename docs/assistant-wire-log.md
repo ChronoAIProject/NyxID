@@ -60,9 +60,10 @@ Both gates must pass:
    user — through the platform-admin feature-flag API
    (`PUT /api/v1/admin/feature-flags/{flag_key}`). No redeploy or restart is
    involved: the next request resolves the new value. Assistant chat is a
-   personal surface, so resolution uses the same grant-union chain as
-   `/users/me`: a personal user override takes precedence over the
-   global/default value, while any organization grant enables the flag.
+   personal surface, so resolution uses the same specificity chain as
+   `/users/me`: default → global → matching organization scopes → personal
+   user. An organization override therefore can disable a globally enabled
+   flag for that organization's members.
 2. The authenticated caller must enable the per-browser **Capture** switch,
    which causes the frontend to send `X-NyxID-Debug-Upstream: 1`.
 

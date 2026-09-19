@@ -717,6 +717,13 @@ async fn api_key_listing_neither_provisions_nor_reconciles_inventory() {
         .count_documents(doc! {})
         .await
         .unwrap();
+    let history_before = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::service_change_event::COLLECTION_NAME)
+        .count_documents(doc! {})
+        .await
+        .unwrap();
     for header in ["x-api-key", "authorization"] {
         let value = if header == "authorization" {
             format!("Bearer {}", key.full_key)
@@ -727,6 +734,18 @@ async fn api_key_listing_neither_provisions_nor_reconciles_inventory() {
             .request("GET", "/api/v1/keys", Some((header, &value)), None)
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::service_change_event::COLLECTION_NAME
+                )
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            history_before,
+            "API-key inventory reads must not write service history"
+        );
         assert_eq!(
             f.state
                 .db

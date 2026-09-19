@@ -467,11 +467,9 @@ describe("ConnectCard authorization settlement", () => {
     expect(mocks.invalidateQueries).toHaveBeenCalledTimes(2);
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({
       queryKey: ["keys"],
-      exact: true,
     });
     expect(mocks.invalidateQueries).toHaveBeenCalledWith({
       queryKey: ["keys", "key-1"],
-      exact: true,
     });
   });
 

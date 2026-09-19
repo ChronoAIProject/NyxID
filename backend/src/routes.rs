@@ -851,6 +851,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let admin_routes = Router::new()
         .route(
+            "/ownership/{kind}",
+            get(handlers::admin_ownership::list_resources),
+        )
+        .route(
+            "/ownership/{kind}/{id}/preview",
+            post(handlers::admin_ownership::preview),
+        )
+        .route(
+            "/ownership/{kind}/{id}/transfer",
+            post(handlers::admin_ownership::transfer),
+        )
+        .route(
             "/feature-flags",
             get(handlers::admin_feature_flags::list_feature_flags),
         )
@@ -1267,6 +1279,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_service_account_tokens));
 
     let unified_key_routes = Router::new()
+        .route(
+            "/history/archived",
+            get(handlers::service_history::get_archived),
+        )
+        .route(
+            "/{service_id}/history",
+            get(handlers::service_history::get_history),
+        )
         .route("/", post(handlers::keys::create_key))
         .route(
             "/{key_id}",
@@ -2165,7 +2185,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(DefaultBodyLimit::disable());
     let private = private.merge(mcp_transport_routes).merge(public_mcp_routes);
 
-    (public_oauth, private)
+    (
+        public_oauth.layer(middleware::from_fn(
+            crate::services::service_history::context::middleware,
+        )),
+        private.layer(middleware::from_fn(
+            crate::services::service_history::context::middleware,
+        )),
+    )
 }
 
 #[cfg(test)]

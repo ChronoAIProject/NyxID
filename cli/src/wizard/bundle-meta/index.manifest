@@ -37,6 +37,7 @@ frontend/src/components/service-icons/api-google-drive.tsx
 frontend/src/components/service-icons/api-google-gmail.tsx
 frontend/src/components/service-icons/api-google-workspace.tsx
 frontend/src/components/service-icons/api-google.tsx
+frontend/src/components/service-icons/api-ifttt-mcp.tsx
 frontend/src/components/service-icons/api-ifttt.tsx
 frontend/src/components/service-icons/api-lark-bot.tsx
 frontend/src/components/service-icons/api-lark.tsx
@@ -110,5 +111,6 @@ frontend/src/stores/assistant-draft-store.ts
 frontend/src/stores/assistant-wire-log-store.ts
 frontend/src/stores/auth-store.ts
 frontend/src/stores/theme-store.ts
+frontend/src/types/options.ts
 frontend/src/wizard-entry.tsx
 frontend/wizard.html
