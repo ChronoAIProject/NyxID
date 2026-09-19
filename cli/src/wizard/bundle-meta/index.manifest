@@ -103,6 +103,7 @@ frontend/src/pages/cli-pair/reserve-action.ts
 frontend/src/schemas/api-keys.ts
 frontend/src/schemas/assistant-wire-log.ts
 frontend/src/schemas/aurinko-mailboxes.ts
+frontend/src/schemas/billing-metrics.ts
 frontend/src/schemas/cli-wizard.ts
 frontend/src/schemas/http-url.ts
 frontend/src/schemas/oauth-popup.ts

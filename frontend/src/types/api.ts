@@ -257,6 +257,8 @@ export interface DownstreamService {
   readonly billing?: ServiceBilling | null;
   /** Backend-resolved unit used by service allowances and platform metering. */
   readonly effective_platform_metric: BillingMetric;
+  /** Backend-accepted allowance units; absent on older replicas. */
+  readonly allowance_metrics?: readonly BillingMetric[];
   readonly legacy_public_master?: boolean;
   readonly auth_notes?: string | null;
   readonly known_limitations?: string | null;

@@ -208,6 +208,7 @@ pub struct AppState {
     /// Vendor-neutral telemetry client. `None` when no DSN is configured
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
+    pub audit_event_types: Arc<services::admin_audit_service::EventTypeCache>,
 }
 
 impl AppState {
@@ -581,6 +582,16 @@ async fn main() {
         .await
         .expect("Failed to backfill stale UserService auth_method snapshots");
 
+    // Remove org-owned public platform rows created by the pre-0.26.1
+    // provisioning bug. The sweep deletes orphan resources before each row so
+    // retries work on standalone MongoDB too. Personal rows, explicit bindings,
+    // and restricted grants are untouched; cleanup failures do not stop startup.
+    if let Err(error) =
+        services::user_service_service::cleanup_public_org_auto_provisions(&db).await
+    {
+        tracing::warn!(%error, "Failed to clean up stale public platform org auto-provisions");
+    }
+
     // Seed system roles for RBAC (idempotent)
     services::role_service::seed_system_roles(&db)
         .await
@@ -943,6 +954,7 @@ async fn main() {
         ),
         billing,
         telemetry: telemetry::TelemetryClient::from_config(&config),
+        audit_event_types: Arc::default(),
     };
 
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`

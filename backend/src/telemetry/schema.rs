@@ -306,6 +306,9 @@ pub enum TelemetryEvent {
     // --- handlers/admin_*.rs --------------------------------------------
     AdminUserSuspended,
     AdminUserUnsuspended,
+    AdminUsageViewed {
+        filter: Option<String>,
+    },
     AdminAuditLogViewed {
         filter: Option<String>,
     },
@@ -433,6 +436,7 @@ impl TelemetryEvent {
             Self::AdminUserSuspended => "admin.user_suspended",
             Self::AdminUserUnsuspended => "admin.user_unsuspended",
             Self::AdminAuditLogViewed { .. } => "admin.audit_log_viewed",
+            Self::AdminUsageViewed { .. } => "admin.usage_viewed",
             Self::AdminOauthClientRegistered => "admin.oauth_client_registered",
             Self::AdminServiceAccountCreated => "admin.service_account_created",
             Self::AdminServiceAccountRotated => "admin.service_account_rotated",
@@ -736,7 +740,9 @@ impl TelemetryEvent {
             Self::NotificationDeviceRemoved { platform } => json!({ "platform": platform }),
             Self::AdminUserSuspended => json!({}),
             Self::AdminUserUnsuspended => json!({}),
-            Self::AdminAuditLogViewed { filter } => json!({ "filter": filter }),
+            Self::AdminAuditLogViewed { filter } | Self::AdminUsageViewed { filter } => {
+                json!({ "filter": filter })
+            }
             Self::AdminOauthClientRegistered => json!({}),
             Self::AdminServiceAccountCreated => json!({}),
             Self::AdminServiceAccountRotated => json!({}),

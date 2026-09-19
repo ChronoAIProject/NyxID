@@ -9,6 +9,7 @@ pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
 pub mod admin_service_accounts;
+pub mod admin_usage;
 pub mod agent_bindings;
 pub mod api_keys;
 pub mod approvals;

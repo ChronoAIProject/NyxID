@@ -4,6 +4,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { AdminCreditsPage } from "./admin-credits";
 const mock = vi.hoisted(() => ({
   allowanceActive: true,
+  targetKind: "all_users",
   scheduleActive: true,
   updateAllowance: vi.fn(),
   updateSchedule: vi.fn(),
@@ -25,7 +26,10 @@ vi.mock("@/hooks/use-billing-credits", () => ({
           quantity: 10,
           metric: "requests",
           recurrence: "monthly",
-          target_kind: "all_users",
+          target_kind: mock.targetKind,
+          target_org_ids:
+            mock.targetKind === "org_members" ? ["a", "b", "c"] : [],
+          target_group_ids: mock.targetKind === "groups" ? ["a", "b"] : [],
           target_user_ids: [],
           is_active: mock.allowanceActive,
         },
@@ -40,7 +44,10 @@ vi.mock("@/hooks/use-billing-credits", () => ({
           amount_credits: 20,
           expiry: { kind: "end_of_period" },
           recurrence: "monthly",
-          target_kind: "all_users",
+          target_kind: mock.targetKind,
+          target_org_ids:
+            mock.targetKind === "org_members" ? ["a", "b", "c"] : [],
+          target_group_ids: mock.targetKind === "groups" ? ["a", "b"] : [],
           target_user_ids: [],
           is_active: mock.scheduleActive,
           skipped_periods: 0,
@@ -65,6 +72,7 @@ vi.mock("@/hooks/use-billing-credits", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mock.allowanceActive = true;
+  mock.targetKind = "all_users";
   mock.scheduleActive = true;
 });
 it("reviews allowance disabling and sends only status after confirmation", async () => {
@@ -97,4 +105,14 @@ it("blocks a reviewed schedule status change after an observed concurrent change
   ).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Confirm changes" }));
   expect(mock.updateSchedule).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["org_members", "3 organizations · members"],
+  ["groups", "2 groups · members"],
+])("shows %s allowance recipients", async (kind, label) => {
+  mock.targetKind = kind;
+  render(<AdminCreditsPage />);
+  await userEvent.click(screen.getByRole("tab", { name: "Free allowances" }));
+  expect(screen.getByText(label)).toBeInTheDocument();
 });

@@ -23,7 +23,7 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 |---|---|
 | **Credit** | The billing unit. **1 credit = 1 USD.** NyxID creates every Lago wallet in USD with `rate_amount: "1"`, so credits are 1:1 with the wallet currency (`services/billing/lago_client.rs:93-95`, `:272-278`). Wallet amounts are always whole integers. |
 | **Credit micros** | One millionth of a credit — fixed-point, no floating point. Any field ending in `_credits_micros` is divided by 1,000,000 for display, with up to 6 decimals (`billing.tsx:584-591`). 4,200 micros → `0.0042 credits`. Usage costs and funding splits use micros; wallet balances and debits use whole credits. The wallet debit rounds its exact funded cost up to a whole credit, so the Usage cost is not the wallet balance change. |
-| **Layer** | Which of two independent charges produced a usage row. One request can produce one of each. |
+| **Layer** | Which of two independent charges produced a usage row. One request can produce several platform component rows and one resale row. |
 
 | Layer | What is being charged |
 |---|---|
@@ -33,11 +33,39 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 A **lane** selects the platform-layer price; it is not an extra billing layer.
 **Your own key** includes BYOK, agent credential overrides and node-managed keys.
 **NyxID platform key** means NyxID supplied the catalog master credential. The
-connect dialog and service detail show each lane's exact credits per token, request
-or byte. Pending/failed prices are labeled pending because legacy charging remains
-in force until sync succeeds. Resale may add its independent charge to platform-key
-traffic. Usage continues grouping by service/model/agent/layer; lane charges retain
-these dimensions and use the existing wallet/allowance/grant funding display.
+connect dialog and service detail show every component's exact credits per unit,
+including input/output/cache-read/cache-write tokens and generated images. Each component
+has its own sync state. A pending/failed primary substitutes legacy billing (or free)
+for the whole lane, ignoring all extras. With a synced primary, it and synced extras
+charge independently; unsynced extras are free and never add a legacy charge.
+Resale may add its independent charge to platform-key traffic. Usage continues
+grouping by service/model/agent/layer; lane charges retain these dimensions and use the existing wallet/allowance/grant funding display.
+
+Unit prices allow 12 fractional digits (`PRICE_FRACTIONAL_DIGITS = 12`), with exact
+integer picocredit rates and truncated legacy micro rates for compatibility. Gross
+costs truncate to micros after multiplication; wallet debits ceil the exact remaining
+cost to whole credits. These are different amounts, even for a sub-microcredit cost.
+An allowance covers only rows with its exact component metric, before grants and wallet.
+The server's computed `allowance_metrics` list supplies the dialog's units: configured
+primary/components plus legacy while a primary is unsynced or no lanes exist.
+Stable primary Lago codes remain `platform_svc_{slug}_{byok|pk}`; components append
+`_{metric}` and retain independent durable cleanup. Upgrade ALL replicas before
+configuring component prices, new-metric allowances, or prices beyond six decimals;
+old binaries cannot read those enums or charge picocredit rates.
+
+Priced input/cache classes do not overlap: OpenAI/Gemini caches are subtracted from
+input, while Anthropic's separate cache counts are not. The displayed provider token
+breakdown retains the original accounting. Successful image responses count generated
+images and may also carry token components. A zero component releases reservations
+and generates no Lago event.
+Without provider-reported usage, input/output/cache token classes are zero while
+legacy `tokens` still uses the byte estimate, so per-class pricing requires
+providers that report usage.
+Reservations use the request-byte token estimate for `tokens`, `input_tokens`,
+and `output_tokens`; cache-read/cache-write reserve one unit because input already
+covers cache quantities. Images reserve request `n` (default one); requests and
+bytes reserve one unit. Standalone legacy metrics and resale keep their one-unit gate.
+See [the lane contract](PLATFORM_KEYS_AND_INFERENCE.md#billing-lanes-and-durable-accounting).
 
 The admin service setting **Charge only NyxID-provided credentials**
 (`platform_charge_nyxid_credentials_only`, default off) restricts enabled platform
@@ -100,6 +128,23 @@ Backed by `GET /api/v1/billing/wallet` → `BillingWalletResponse` (`handlers/bi
 model at `models/billing_wallet.rs`).
 
 For mixed billing lanes, the allowance unit selector follows [the metering and allowance rules](USAGE_BILLING_LAGO_SPEC.md#40-metadata-only-route-context-r1).
+
+### Credit-benefit recipients
+
+The admin grant, credit schedule, and allowance dialogs share four choices:
+
+| Recipients | Wallet receiving the benefit |
+|---|---|
+| **All billing owners** (`all_users`) | Every active person's and organization's wallet. |
+| **Selected owners** (`selected_users`, `target_user_ids`) | Each selected person's or organization's wallet. Selecting an organization funds its shared wallet. |
+| **Organization members** (`org_members`, `target_org_ids`) | Each active person's personal wallet when they have a non-revoked membership in any selected organization, including viewers. The organization wallet receives nothing. |
+| **Group members** (`groups`, `target_group_ids`) | Each active person's personal wallet through direct group membership. Parent/child groups are not expanded; organization accounts are excluded. |
+
+Selected lists contain 1–500 unique ids, with only the list matching the recipient kind populated. Organizations must be active; groups must exist. Overlapping memberships pay a person once. One-shot org/group grants reject more than 100,000 resolved recipients; larger populations use schedules.
+
+Grants snapshot recipients when issued. Schedule periods freeze the recipient policy when claimed and page by person id, excluding later signups and later organization joins. Revocations/deactivation can remove people ahead of the cursor. Group membership has no join timestamp: existing people's group changes can affect an unfinished period, while later-created people wait for the next period. Allowances follow live membership in both the balance display and funding path. Removing membership stops new matching immediately; existing consumption-period rows are retained and reservations already admitted can settle. Reading with an organization `owner_id` never applies member benefits to its wallet.
+
+Old rows default the new id lists to empty. Older replicas do not understand the new enum values: upgrade all readers/writers before using member targets (rollback requires migrating every persisted new-kind row).
 
 ### Header
 
@@ -193,7 +238,7 @@ never sent to Lago, and render **Free** with **—** cost.
 | Label | Meaning |
 |---|---|
 | **Est. cost** | Sum of visible row costs in microcredits, displayed to 6 decimals. The same row costs are summed for each service. Missing estimates are skipped by `sum_optional`; a known zero counts, and all-unknown/empty costs show `-`. |
-| **Tokens / Requests / Bytes** | Quantities summed separately by metric. A token-metered LLM call contributes tokens, not a request count. |
+| **Tokens / Requests / Bytes / component units** | Quantities summed separately by metric. A token-metered LLM call contributes tokens, not a request count. |
 | **Funding line** | Appears when grants or allowances funded usage: **Funded by grants … · Funded by allowances … · Charged to wallet …**. These are exact pre-rounding costs for new settlements, not whole-credit wallet debits. |
 
 ### Table columns
@@ -224,6 +269,53 @@ wallet-funded Lago quantity, usage identity and ledger encoding are unchanged.
 Empty state: **No usage in this period.** This means no finalized or forwarded-dead-letter meters
 with a known quantity for this person in the selected period. The backend can expose free meters even when
 the person has no chargeable wallet.
+
+---
+
+### Admin usage
+
+`/admin/usage` (API: `GET /api/v1/admin/usage`) is available to platform admins
+and read-only operators. It reports all credential classes, including free BYOK,
+agent overrides, node credentials and no-auth traffic. **`BILLING_ENABLED` must
+be on when traffic occurs** for meters to exist; turning it on does not backfill
+past usage. No Lago connection or per-user billing rollout is required to read it.
+
+The default window is the last 24 hours; presets are 24h, 7d and 30d. Custom
+RFC 3339 windows use `[from, to)` and must be positive and at most 31 days;
+inverted or longer windows are rejected. The user picker searches names/emails
+and matches either the actor or billing owner, so selecting an organization shows
+its members' usage of that organization's wallet. Ranking attributes each row to
+the actor and separately identifies a differing billing owner. Deleted identities
+say **Unknown user**; their IDs are available only in a tooltip.
+
+Only non-null quantities in finalized rows or forwarded dead letters count.
+Requests and provider token classes come exclusively from the unique primary
+`{billing_request_id}:platform` row; historical component copies and resale rows
+cannot inflate them. New component rows no longer store `token_breakdown`.
+Events and per-metric quantities include primary, component and resale rows;
+quantities are billing units, not a second count of distinct requests. Cache-read
+and cache-write retain provider accounting and can overlap input. **Total tokens**
+is derived as prompt + completion; cache counts are displayed separately because
+no provider-independent non-overlapping grand total can be reconstructed from
+historical `token_breakdown` alone. Estimated tokens without a breakdown remain
+visible in metric quantities, not in provider token-class totals.
+
+Costs follow the personal Usage card: exact persisted settlements first, then
+current model-specific/generic rates for legacy billable groups; free events cost
+zero. Known costs are summed, unknown groups remain null and are skipped by totals.
+A **Partial estimate** notice exposes missing historical rates. Grant micros stay
+known even without a rate. Funding amounts are pre-rounding costs, not wallet debits.
+Ranking is paged by actor × billing owner × service, descending by requests, cost,
+a selected metric's quantity, or a token class, with stable identity tie-breakers.
+A quantity ranking never adds unlike metrics. Expanding a user shows all their
+services in the exact response window. The service picker retains all options in
+the selected window/user scope when a service is selected.
+
+All reductions, rate joins, ranking sorts and paging run in MongoDB with a 20-second
+server limit (and a 22-second complete-request guard); timeouts return HTTP 503.
+One additive non-unique status/date index bounds the reporting scans, at the cost
+of another index update on meter inserts and status transitions. No existing index,
+meter lifecycle, charging rule, or ledger format changes.
 
 ---
 

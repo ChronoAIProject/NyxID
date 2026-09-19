@@ -27,6 +27,10 @@ pub struct IssueGrantRequest {
     pub target_kind: BillingTargetKind,
     #[serde(default)]
     pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
     pub all_services: bool,
     #[serde(default)]
     pub service_refs: Vec<String>,
@@ -36,6 +40,9 @@ pub struct IssueGrantRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct IssueGrantResponse {
+    pub target_kind: BillingTargetKind,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub batch_id: String,
     pub created_count: usize,
     /// Recipients whose immutable issuance ledger entry was confirmed inline.
@@ -90,6 +97,8 @@ pub struct CreditGrantResponse {
     pub recipient_billing_enabled: Option<bool>,
     pub activation_state: CreditGrantActivationState,
     pub target_kind: BillingTargetKind,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub amount_credits: i64,
     pub amount_micros: i64,
     pub remaining_micros: i64,
@@ -123,6 +132,10 @@ pub struct CreateAllowanceRequest {
     pub target_kind: BillingTargetKind,
     #[serde(default)]
     pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
@@ -133,6 +146,8 @@ pub struct UpdateAllowanceRequest {
     pub recurrence: Option<AllowanceRecurrence>,
     pub target_kind: Option<BillingTargetKind>,
     pub target_user_ids: Option<Vec<String>>,
+    pub target_org_ids: Option<Vec<String>>,
+    pub target_group_ids: Option<Vec<String>>,
     pub is_active: Option<bool>,
 }
 
@@ -146,6 +161,8 @@ pub struct UsageAllowanceResponse {
     pub recurrence: AllowanceRecurrence,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub is_active: bool,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
@@ -189,12 +206,16 @@ pub async fn issue_grant(
     Json(body): Json<IssueGrantRequest>,
 ) -> AppResult<Json<IssueGrantResponse>> {
     require_admin(&state, &auth_user).await?;
+    let target_org_ids = body.target_org_ids.clone();
+    let target_group_ids = body.target_group_ids.clone();
     let grants = billing::grants::issue_grants(
         &state.db,
         billing::grants::IssueCreditGrantInput {
             amount_credits: body.amount_credits,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             all_services: body.all_services,
             service_refs: body.service_refs,
             expires_at: body.expires_at,
@@ -239,10 +260,16 @@ pub async fn issue_grant(
         Some(serde_json::json!({
             "batch_id": batch_id,
             "recipient_count": grants.len(),
+            "target_kind": body.target_kind,
+            "target_org_count": target_org_ids.len(),
+            "target_group_count": target_group_ids.len(),
             "amount_credits_each": body.amount_credits,
         })),
     );
     Ok(Json(IssueGrantResponse {
+        target_kind: body.target_kind,
+        target_org_ids,
+        target_group_ids,
         batch_id,
         created_count: grants.len(),
         activated_count,
@@ -383,6 +410,8 @@ pub async fn create_allowance(
             recurrence: body.recurrence,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             created_by: auth_user.user_id.to_string(),
         },
     )
@@ -391,7 +420,12 @@ pub async fn create_allowance(
         state.db.clone(),
         &auth_user,
         "billing.usage_allowance.created",
-        Some(serde_json::json!({ "allowance_id": allowance.id })),
+        Some(serde_json::json!({ "allowance_id": allowance.id,
+            "target_kind": allowance.target_kind,
+            "target_user_count": allowance.target_user_ids.len(),
+            "target_org_count": allowance.target_org_ids.len(),
+            "target_group_count": allowance.target_group_ids.len(),
+        })),
     );
     Ok(Json(allowance_response(allowance)))
 }
@@ -440,6 +474,8 @@ pub async fn update_allowance(
             recurrence: body.recurrence,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             is_active: body.is_active,
         },
     )
@@ -450,6 +486,10 @@ pub async fn update_allowance(
         "billing.usage_allowance.updated",
         Some(serde_json::json!({
             "allowance_id": allowance_id,
+            "target_kind": allowance.target_kind,
+            "target_user_count": allowance.target_user_ids.len(),
+            "target_org_count": allowance.target_org_ids.len(),
+            "target_group_count": allowance.target_group_ids.len(),
             "is_active": allowance.is_active,
         })),
     );
@@ -511,6 +551,8 @@ fn grant_response(
         recipient_billing_enabled,
         activation_state,
         target_kind: grant.target_kind,
+        target_org_ids: grant.target_org_ids,
+        target_group_ids: grant.target_group_ids,
         amount_credits: grant.amount_credits,
         amount_micros: grant.amount_micros,
         remaining_micros: grant.remaining_micros,
@@ -538,6 +580,8 @@ fn allowance_response(allowance: UsageAllowance) -> UsageAllowanceResponse {
         recurrence: allowance.recurrence,
         target_kind: allowance.target_kind,
         target_user_ids: allowance.target_user_ids,
+        target_org_ids: allowance.target_org_ids,
+        target_group_ids: allowance.target_group_ids,
         is_active: allowance.is_active,
         created_by: allowance.created_by,
         created_at: allowance.created_at,
@@ -679,6 +723,8 @@ mod tests {
                 amount_credits: 1,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -704,6 +750,8 @@ mod tests {
                 recurrence: AllowanceRecurrence::Daily,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
             }),
         )
         .await
@@ -776,6 +824,8 @@ mod tests {
                 amount_credits: 0,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -794,6 +844,8 @@ mod tests {
                 recurrence: AllowanceRecurrence::Monthly,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
             }),
         )
         .await
@@ -803,3 +855,6 @@ mod tests {
         assert!(matches!(allowance, AppError::ValidationError(_)));
     }
 }
+
+#[cfg(test)]
+mod target_tests;

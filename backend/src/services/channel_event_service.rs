@@ -780,6 +780,7 @@ mod tests {
             allow_auto_connected_services: false,
             allow_all_nodes: true,
             allowed_service_ids: Vec::new(),
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,

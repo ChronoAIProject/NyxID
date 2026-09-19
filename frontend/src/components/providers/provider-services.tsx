@@ -18,14 +18,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ApiError } from "@/lib/api-client";
+import { lanePriceLabel } from "@/schemas/platform-keys";
 
 function laneSummary(service: DownstreamService) {
   const billing = service.billing;
   const lane = (
     name: string,
     price: NonNullable<typeof billing>["byok_pricing"],
-  ) =>
-    `${name}: ${price ? `${price.credits_per_unit} credits/${price.metric} (${price.sync_status ?? "pending"})` : "free"}`;
+  ) => `${name}: ${lanePriceLabel(price)}`;
   return billing?.byok_pricing || billing?.platform_key_pricing
     ? `${lane("Own key", billing.byok_pricing)} · ${lane("Platform key", billing.platform_key_pricing)}`
     : billing?.platform_billable

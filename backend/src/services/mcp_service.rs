@@ -4153,6 +4153,7 @@ pub async fn execute_tool_resolved(
             has_server_credential,
         )
         .await?;
+    let billing_ctx = billing_ctx.with_request_body(body.as_deref());
     let metered = billing.open(&billing_ctx).await?;
     let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
 
@@ -4246,7 +4247,13 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            mcp_platform_usage(&resp.body, request_len, &target.service),
+                            mcp_platform_usage_for_path(
+                                &resp.body,
+                                request_len,
+                                &target.service,
+                                &path,
+                                resp.status,
+                            ),
                             None,
                             None,
                         )
@@ -4264,7 +4271,13 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            mcp_platform_usage(&body_buf, request_len, &target.service),
+                            mcp_platform_usage_for_path(
+                                &body_buf,
+                                request_len,
+                                &target.service,
+                                &path,
+                                status,
+                            ),
                             None,
                             None,
                         )
@@ -4366,7 +4379,13 @@ pub async fn execute_tool_resolved(
     billing
         .settle(
             &metered,
-            mcp_platform_usage(body_text.as_bytes(), request_len, &target.service),
+            mcp_platform_usage_for_path(
+                body_text.as_bytes(),
+                request_len,
+                &target.service,
+                &path,
+                status,
+            ),
             None,
             None,
         )
@@ -4375,34 +4394,27 @@ pub async fn execute_tool_resolved(
     Ok(McpToolExecutionOutcome::Response((status, body_text)))
 }
 
+#[cfg(test)]
 fn mcp_platform_usage(body: &[u8], request_len: i64, service: &DownstreamService) -> PlatformUsage {
+    mcp_platform_usage_for_path(body, request_len, service, "", 200)
+}
+
+fn mcp_platform_usage_for_path(
+    body: &[u8],
+    request_len: i64,
+    service: &DownstreamService,
+    path: &str,
+    status: u16,
+) -> PlatformUsage {
     use crate::services::llm_usage_service;
-    let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
-    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
-        if let Some(usage) = llm_usage_service::extract_reported_usage(&value) {
-            accumulator.observe_snapshot(usage);
-        }
-    } else {
-        let mut buffer = String::from_utf8_lossy(body).into_owned();
-        while let Some(event) = super::sse_parser::parse_next_event(&mut buffer) {
-            if let Some((usage, mode)) = llm_usage_service::extract_reported_usage_from_sse_event(
-                event.event_type.as_deref(),
-                &event.data,
-            ) {
-                accumulator.observe(usage, mode);
-            }
-        }
-    }
-    let usage = accumulator.finalize();
-    let bytes = request_len.saturating_add(body.len() as i64);
-    if usage.is_none() && !crate::services::billing::metric_resolution::captures_tokens(service) {
-        return PlatformUsage::single_request(bytes);
-    }
-    PlatformUsage::llm_completion(
-        bytes,
-        llm_usage_service::token_quantity_or_estimate(usage.as_ref(), bytes),
+    // Reuse the already-read response and existing MCP transport limits. A
+    // smaller proxy-specific cap would change legacy MCP token accounting.
+    let usage = llm_usage_service::usage_from_body(body, path, (200..300).contains(&status));
+    llm_usage_service::platform_usage(
+        usage.as_ref(),
+        request_len.saturating_add(body.len() as i64),
+        crate::services::billing::metric_resolution::captures_tokens(service),
     )
-    .with_token_breakdown(usage.as_ref().map(|usage| usage.token_breakdown()))
 }
 
 fn direct_transport_failure_is_pre_dispatch(error: &reqwest::Error) -> bool {
@@ -4497,10 +4509,25 @@ pub struct SearchResult {
 /// Search ALL user tools (regardless of activation state) and return matches
 /// plus the service IDs they belong to.
 pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResult {
-    let q_lower = query.to_lowercase();
-    let mut matches = Vec::new();
-    let mut matched_ids: HashSet<String> = HashSet::new();
-
+    // Models phrase queries freely ("skill search", "light state"), so match
+    // each query word independently against the qualified tool name, the
+    // service identity and the description, then rank tools that contain
+    // every word above partial matches. Words are substrings so concatenated
+    // operation names such as `getentitystate` still match "entity state".
+    let tokens: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut candidates: Vec<(
+        usize,
+        usize,
+        &McpToolService,
+        &McpToolEndpoint,
+        String,
+        String,
+    )> = Vec::new();
     for service in services {
         for endpoint in &service.endpoints {
             let name = format!("{}__{}", service.service_slug, endpoint.name);
@@ -4509,29 +4536,34 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name),
             );
-
-            if name.to_lowercase().contains(&q_lower)
-                || description.to_lowercase().contains(&q_lower)
-            {
-                matched_ids.insert(service.service_id.clone());
-                let input_schema = if service.is_generic_proxy {
-                    build_generic_proxy_input_schema()
-                } else {
-                    build_input_schema(endpoint)
-                };
-                matches.push(McpToolDefinition {
-                    name,
-                    description,
-                    input_schema,
-                });
-                if matches.len() >= MAX_SEARCH_RESULTS {
-                    break;
-                }
+            let haystack = format!("{name}\n{description}").to_lowercase();
+            let matched = tokens
+                .iter()
+                .filter(|token| haystack.contains(token.as_str()))
+                .count();
+            if tokens.is_empty() || matched > 0 {
+                let order = candidates.len();
+                candidates.push((matched, order, service, endpoint, name, description));
             }
         }
-        if matches.len() >= MAX_SEARCH_RESULTS {
-            break;
-        }
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    candidates.truncate(MAX_SEARCH_RESULTS);
+
+    let mut matches = Vec::with_capacity(candidates.len());
+    let mut matched_ids: HashSet<String> = HashSet::new();
+    for (_, _, service, endpoint, name, description) in candidates {
+        matched_ids.insert(service.service_id.clone());
+        let input_schema = if service.is_generic_proxy {
+            build_generic_proxy_input_schema()
+        } else {
+            build_input_schema(endpoint)
+        };
+        matches.push(McpToolDefinition {
+            name,
+            description,
+            input_schema,
+        });
     }
 
     SearchResult {
@@ -4959,6 +4991,33 @@ mod tests {
             .unwrap()
             .metric = BillingMetric::Requests;
         assert_eq!(super::mcp_platform_usage(body, 12, &service).tokens, 0);
+        service
+            .billing
+            .as_mut()
+            .unwrap()
+            .platform_key_pricing
+            .as_mut()
+            .unwrap()
+            .components = vec![
+            serde_json::from_value(
+                serde_json::json!({"metric":"input_tokens", "credits_per_unit":"0.000000250001"}),
+            )
+            .unwrap(),
+        ];
+        assert!(super::mcp_platform_usage(body, 12, &service).tokens > 0);
+        let images = super::mcp_platform_usage_for_path(
+            br#"{"data":[{"url":"image"}],"usage":{"input_tokens":120,"output_tokens":20,"input_tokens_details":{"cached_tokens":100}}}"#,
+            12, &service, "/v1/images/generations", 200,
+        );
+        assert_eq!(
+            (
+                images.input_tokens,
+                images.output_tokens,
+                images.cache_read_tokens,
+                images.images
+            ),
+            (20, 20, 100, 1)
+        );
     }
 
     use super::*;
@@ -5883,6 +5942,64 @@ mod tests {
         assert_eq!(result.matched_service_ids.len(), 2);
         assert!(result.matched_service_ids.contains(&"svc-1".to_string()));
         assert!(result.matched_service_ids.contains(&"svc-2".to_string()));
+    }
+
+    #[test]
+    fn search_all_tools_matches_words_in_any_order_and_ranks_full_matches_first() {
+        let services = vec![
+            make_service(
+                "ornn",
+                "Ornn",
+                "ornn-api",
+                vec![
+                    make_endpoint("searchskills", "Search published skills"),
+                    make_endpoint("getformatrules", "Skill format rules"),
+                ],
+            ),
+            make_service(
+                "ha",
+                "Home Assistant at office",
+                "home-assistant",
+                vec![
+                    make_endpoint("getentitystate", "Read an entity"),
+                    make_endpoint("lightturnon", "Turn a light on"),
+                    make_endpoint("switchturnoff", "Turn a switch off"),
+                ],
+            ),
+        ];
+        // Word order does not matter and every word need not be adjacent.
+        for query in ["skill search", "search skills", "SKILL-SEARCH"] {
+            let result = search_all_tools(&services, query);
+            assert_eq!(result.matches[0].name, "ornn-api__searchskills", "{query}");
+        }
+        // Concatenated operation names match by substring; tools that contain
+        // every word rank above partial matches, which are still returned.
+        let result = search_all_tools(&services, "entity state");
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].name, "home-assistant__getentitystate");
+        let result = search_all_tools(&services, "state entity light");
+        let names: Vec<_> = result.matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "home-assistant__getentitystate",
+                "home-assistant__lightturnon"
+            ]
+        );
+        let result = search_all_tools(&services, "light state");
+        assert_eq!(result.matches.len(), 2);
+        let names: Vec<_> = result.matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "home-assistant__getentitystate",
+                "home-assistant__lightturnon"
+            ]
+        );
+        // The service name is searchable too.
+        let result = search_all_tools(&services, "home assistant office");
+        assert_eq!(result.matches.len(), 3);
+        assert_eq!(result.matched_service_ids, vec!["ha".to_string()]);
     }
 
     #[test]

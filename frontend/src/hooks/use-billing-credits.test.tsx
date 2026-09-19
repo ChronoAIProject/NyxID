@@ -7,6 +7,7 @@ import {
   useAdminCreditGrants,
   useAdminCreditSchedules,
   useCreateCreditSchedule,
+  useCreateAllowance,
   useCurrentAllowances,
   useIssueCreditGrant,
   useUpdateCreditSchedule,
@@ -46,7 +47,7 @@ describe("billing credit hooks", () => {
     );
   });
 
-  it("normalizes all-owner and all-service grant payloads", async () => {
+  it("normalizes all-service grant payloads and empty target lists", async () => {
     mockPost.mockResolvedValue({
       batch_id: "batch-1",
       created_count: 3,
@@ -67,7 +68,9 @@ describe("billing credit hooks", () => {
     result.current.mutate({
       amount_credits: 100,
       target_kind: "all_users",
-      target_user_ids: ["ignored-user"],
+      target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       all_services: true,
       service_refs: ["ignored-service"],
       expires_at: "",
@@ -79,6 +82,8 @@ describe("billing credit hooks", () => {
       amount_credits: 100,
       target_kind: "all_users",
       target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       all_services: true,
       service_refs: [],
       expires_at: null,
@@ -146,6 +151,8 @@ describe("billing credit hooks", () => {
       expiry: { kind: "end_of_period" },
       target_kind: "all_users",
       target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       scope: { all_services: true, service_ids: [], service_slugs: [] },
       is_active: true,
       created_by: "admin-1",
@@ -163,6 +170,8 @@ describe("billing credit hooks", () => {
       expiry: { kind: "end_of_period" },
       target_kind: "all_users",
       target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       all_services: true,
       service_refs: [],
       reason: "",
@@ -174,6 +183,8 @@ describe("billing credit hooks", () => {
       expiry: { kind: "end_of_period" },
       target_kind: "all_users",
       target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       all_services: true,
       service_refs: [],
       reason: null,
@@ -194,3 +205,74 @@ describe("billing credit hooks", () => {
     );
   });
 });
+
+it.each(["org_members", "groups"] as const)(
+  "sends %s targets through grant, schedule and allowance hooks",
+  async (kind) => {
+    const targets = {
+      target_kind: kind,
+      target_user_ids: [],
+      target_org_ids: kind === "org_members" ? ["org"] : [],
+      target_group_ids: kind === "groups" ? ["group"] : [],
+    };
+    const commonResponse = {
+      ...targets,
+      id: "benefit",
+      amount_credits: 10,
+      amount_micros: 10_000_000,
+      recurrence: "monthly",
+      expiry: { kind: "never" },
+      scope: { all_services: true, service_ids: [], service_slugs: [] },
+      created_by: "admin",
+      created_at: "2026-09-01T00:00:00Z",
+      updated_at: "2026-09-01T00:00:00Z",
+      is_active: true,
+      skipped_periods: 0,
+      batch_id: "batch",
+      created_count: 1,
+      activated_count: 1,
+      pending_activation_count: 0,
+      recipients: [],
+      service_id: "service",
+      service_slug: "service",
+      metric: "requests",
+      quantity: 100,
+    };
+    mockPost.mockResolvedValue(commonResponse);
+    const grant = renderHook(() => useIssueCreditGrant(), {
+      wrapper: wrapperFactory(),
+    });
+    const schedule = renderHook(() => useCreateCreditSchedule(), {
+      wrapper: wrapperFactory(),
+    });
+    const allowance = renderHook(() => useCreateAllowance(), {
+      wrapper: wrapperFactory(),
+    });
+    const grantForm = {
+      ...targets,
+      amount_credits: 10,
+      all_services: true,
+      service_refs: [],
+      expires_at: "",
+      reason: "",
+    };
+    await grant.result.current.mutateAsync(grantForm);
+    await schedule.result.current.mutateAsync({
+      ...grantForm,
+      recurrence: "monthly",
+      expiry: { kind: "never" },
+    });
+    await allowance.result.current.mutateAsync({
+      ...targets,
+      service_ref: "service",
+      quantity: 100,
+      recurrence: "monthly",
+    });
+    for (const path of ["grants", "schedules", "allowances"]) {
+      expect(mockPost).toHaveBeenCalledWith(
+        `/admin/credits/${path}`,
+        expect.objectContaining(targets),
+      );
+    }
+  },
+);

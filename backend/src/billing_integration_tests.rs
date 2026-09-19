@@ -1103,6 +1103,7 @@ async fn billing_gate_rejects_missing_and_stale_rate_cache_entries() {
             lago_metric_code: "platform_requests".to_string(),
             model: None,
             credits_per_unit_micros: 1_000_000,
+            credits_per_unit_pico: None,
             synced_at: Utc::now() - Duration::seconds(901),
         })
         .await
@@ -2558,6 +2559,7 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
         }
         BillingMetric::Requests => (PlatformUsage::single_request(9), 1),
         BillingMetric::Bytes => (PlatformUsage::single_request(23), 23),
+        _ => panic!("Legacy route matrix uses legacy metrics"),
     }
 }
 
@@ -2591,6 +2593,7 @@ fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRateCache {
         lago_metric_code: metric.to_string(),
         model: None,
         credits_per_unit_micros: 1_000_000,
+        credits_per_unit_pico: None,
         synced_at,
     }
 }

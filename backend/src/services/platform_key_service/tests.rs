@@ -8,6 +8,7 @@ use crate::services::{
 };
 use crate::test_utils::{
     connect_transaction_test_database, test_encryption_keys, test_membership, test_user,
+    test_user_endpoint, test_user_service,
 };
 use mongodb::bson;
 use std::sync::Arc;
@@ -798,6 +799,550 @@ async fn org_auto_platform_rows_inherit_acl_and_agent_union_tracks_binding() {
 }
 
 #[tokio::test]
+async fn public_platform_auto_connection_is_personal_only_and_reconciles_org_rows() {
+    let db = connect_transaction_test_database("platform_public_personal_only").await;
+    let enc = test_encryption_keys();
+    let person = owner(&db, UserType::Person).await;
+    let org = owner(&db, UserType::Org).await;
+    let member_org = owner(&db, UserType::Org).await;
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .insert_one(test_membership(&member_org, &person, OrgRole::Member, None))
+        .await
+        .unwrap();
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .insert_one(test_membership(&org, &person, OrgRole::Admin, None))
+        .await
+        .unwrap();
+
+    let mut catalog = platform_service();
+    catalog.credential_encrypted = enc.encrypt(b"platform-secret").await.unwrap();
+    catalog.platform_key.as_mut().unwrap().audience = PlatformKeyAudience::Public;
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+
+    unified_key_service::auto_provision_no_auth_services(&db, &person)
+        .await
+        .unwrap();
+    unified_key_service::auto_provision_no_auth_services(&db, &org)
+        .await
+        .unwrap();
+    let listed = unified_key_service::list_keys(&db, &enc, &person, &HashMap::new())
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].auto_connected);
+    assert_eq!(
+        crate::services::key_service::active_auto_connected_service_ids(&db, &person)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        crate::services::key_service::active_auto_connected_service_ids(&db, &member_org)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let rows = db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME);
+    assert_eq!(
+        rows.count_documents(doc! { "user_id": &person, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap(),
+        1,
+        "public platform services must auto-connect the personal owner"
+    );
+    assert_eq!(
+        rows.count_documents(doc! { "user_id": &org, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap(),
+        0,
+        "public platform services must not fan out into organizations"
+    );
+
+    // Simulate a row created by the pre-fix org traversal. Reconciliation on
+    // the next listing must remove it and its endpoint before provisioning.
+    let wrong_service_id = uuid::Uuid::new_v4().to_string();
+    let wrong_endpoint_id = uuid::Uuid::new_v4().to_string();
+    db.collection::<crate::models::user_endpoint::UserEndpoint>(
+        crate::models::user_endpoint::COLLECTION_NAME,
+    )
+    .insert_one(test_user_endpoint(
+        &wrong_endpoint_id,
+        &org,
+        "DeepSeek",
+        "https://api.example.com",
+        None,
+        Some(&catalog.id),
+    ))
+    .await
+    .unwrap();
+    let mut wrong = test_user_service(
+        &wrong_service_id,
+        &org,
+        &catalog.slug,
+        &wrong_endpoint_id,
+        Some(&catalog.id),
+        None,
+    );
+    wrong.source = Some(crate::models::user_service::AUTO_PROVISION_SOURCE.to_string());
+    wrong.source_id = Some(format!("{org}:{}", catalog.id));
+    wrong.credential_binding = Some("platform".to_string());
+    wrong.auth_method = catalog.auth_method.clone();
+    wrong.auth_key_name = catalog.auth_key_name.clone();
+    rows.insert_one(wrong).await.unwrap();
+
+    unified_key_service::auto_provision_no_auth_services(&db, &person)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.count_documents(doc! { "user_id": &org, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        db.collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
+            .find_one(doc! { "_id": &wrong_endpoint_id })
+            .await
+            .unwrap()
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn inactive_personal_rows_preserve_disabled_connections_and_replace_tombstones() {
+    for state in ["deleted", "disabled", "inactive-auto"] {
+        assert_inactive_connection_provisioning(UserType::Person, state).await;
+    }
+}
+
+#[tokio::test]
+async fn inactive_org_rows_preserve_disabled_connections_and_replace_tombstones() {
+    for state in ["deleted", "disabled", "inactive-auto"] {
+        assert_inactive_connection_provisioning(UserType::Org, state).await;
+    }
+}
+
+async fn assert_inactive_connection_provisioning(kind: UserType, state: &str) {
+    let db = connect_transaction_test_database("platform_inactive_connection").await;
+    crate::db::ensure_indexes(&db).await.unwrap();
+    let is_org = kind == UserType::Org;
+    let user = owner(&db, kind).await;
+    let enc = test_encryption_keys();
+    let mut catalog = platform_service();
+    let actor = if is_org {
+        let actor = owner(&db, UserType::Person).await;
+        db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+            .insert_one(test_membership(&user, &actor, OrgRole::Admin, None))
+            .await
+            .unwrap();
+        catalog.platform_key.as_mut().unwrap().audience = PlatformKeyAudience::Restricted;
+        catalog.platform_key.as_mut().unwrap().allowed_owner_ids = vec![user.clone()];
+        actor
+    } else {
+        user.clone()
+    };
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let old_id = uuid::Uuid::new_v4().to_string();
+    let endpoint_id = uuid::Uuid::new_v4().to_string();
+    if state != "deleted" {
+        db.collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(test_user_endpoint(
+            &endpoint_id,
+            &user,
+            "Old connection",
+            &catalog.base_url,
+            None,
+            Some(&catalog.id),
+        ))
+        .await
+        .unwrap();
+    }
+    let mut old = test_user_service(
+        &old_id,
+        &user,
+        &catalog.slug,
+        &endpoint_id,
+        Some(&catalog.id),
+        None,
+    );
+    old.is_active = state == "disabled";
+    if state == "inactive-auto" {
+        old.source = Some(crate::models::user_service::AUTO_PROVISION_SOURCE.into());
+        old.source_id = Some(format!("{user}:{}", catalog.id));
+    }
+    db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
+        .insert_one(old)
+        .await
+        .unwrap();
+
+    if state == "disabled" {
+        unified_key_service::switch_credential_binding(
+            &db,
+            &enc,
+            &user,
+            &old_id,
+            false,
+            Some("own-secret"),
+            unified_key_service::OauthClientCredentialsInput::None,
+        )
+        .await
+        .unwrap();
+        crate::services::user_service_service::update_user_service(
+            &db,
+            &user,
+            &actor,
+            &old_id,
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    for _ in 0..2 {
+        let listed = unified_key_service::list_keys(&db, &enc, &actor, &HashMap::new())
+            .await
+            .unwrap();
+        if state == "disabled" {
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].id, old_id);
+            assert!(!listed[0].is_active);
+            assert!(!listed[0].auto_connected);
+            assert!(!listed[0].credential_missing);
+        } else {
+            let active: Vec<_> = listed.iter().filter(|row| row.is_active).collect();
+            assert_eq!(active.len(), 1, "{state}");
+            assert!(active[0].auto_connected);
+            assert_eq!(
+                active[0].slug, catalog.slug,
+                "reuse the base slug for {state}"
+            );
+        }
+    }
+    let rows = rows_for_catalog(&db, &user, &catalog.id).await;
+    if state == "disabled" {
+        assert_eq!(rows.len(), 1);
+        let credential_id = rows[0]
+            .api_key_id
+            .clone()
+            .expect("BYOK credential retained");
+        crate::services::user_service_service::update_user_service(
+            &db,
+            &user,
+            &actor,
+            &old_id,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("Enable must succeed after listing a disabled BYOK connection");
+        let listed = unified_key_service::list_keys(&db, &enc, &actor, &HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, old_id);
+        assert_eq!(listed[0].slug, catalog.slug);
+        assert!(listed[0].is_active);
+        assert!(!listed[0].auto_connected);
+        assert_eq!(listed[0].credential_binding, "user");
+        let enabled = rows_for_catalog(&db, &user, &catalog.id).await;
+        assert_eq!(
+            enabled[0].api_key_id.as_deref(),
+            Some(credential_id.as_str())
+        );
+        assert_eq!(enabled[0].endpoint_id, endpoint_id);
+    } else {
+        assert_eq!(rows.len(), if state == "inactive-auto" { 1 } else { 2 });
+        assert_ne!(rows.iter().find(|row| row.is_active).unwrap().id, old_id);
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn active_personal_byok_stays_visible_without_duplicate_auto_connection() {
+    let db = connect_transaction_test_database("platform_public_byok").await;
+    let person = owner(&db, UserType::Person).await;
+    let enc = test_encryption_keys();
+    let catalog = platform_service();
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let connection = unified_key_service::create_platform_key(
+        &db,
+        &person,
+        &person,
+        &catalog.slug,
+        "Personal",
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    unified_key_service::switch_credential_binding(
+        &db,
+        &enc,
+        &person,
+        &connection.service.id,
+        false,
+        Some("own-secret"),
+        unified_key_service::OauthClientCredentialsInput::None,
+    )
+    .await
+    .unwrap();
+    let listed = unified_key_service::list_keys(&db, &enc, &person, &HashMap::new())
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, connection.service.id);
+    assert_eq!(listed[0].credential_binding, "user");
+    assert!(listed[0].platform_key_available);
+    assert!(!listed[0].auto_connected);
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn automatic_platform_grants_require_active_direct_owners() {
+    let grants = OwnerGrants {
+        actor_id: "person".into(),
+        active_owner_ids: ["person".into(), "org".into()].into(),
+        org_owner_ids: ["org".into()].into(),
+        memberships: vec![],
+    };
+    let mut catalog = platform_service();
+    assert!(auto_provisionable_with_grants(
+        &catalog, None, "person", &grants
+    ));
+    assert!(!auto_provisionable_with_grants(
+        &catalog, None, "org", &grants
+    ));
+    assert!(!auto_provisionable_with_grants(
+        &catalog, None, "inactive", &grants
+    ));
+    catalog.platform_key.as_mut().unwrap().audience = PlatformKeyAudience::Restricted;
+    catalog.platform_key.as_mut().unwrap().allowed_owner_ids = vec!["org".into()];
+    assert!(!auto_provisionable_with_grants(
+        &catalog, None, "person", &grants
+    ));
+    assert!(auto_provisionable_with_grants(
+        &catalog, None, "org", &grants
+    ));
+    assert!(available_with_grants(&catalog, None, "person", &grants));
+    catalog.platform_key.as_mut().unwrap().allowed_owner_ids = vec!["person".into()];
+    assert!(auto_provisionable_with_grants(
+        &catalog, None, "person", &grants
+    ));
+    assert!(!auto_provisionable_with_grants(
+        &catalog, None, "org", &grants
+    ));
+}
+
+#[tokio::test]
+async fn public_platform_explicit_org_binding_keeps_execution_and_agent_access() {
+    let db = connect_transaction_test_database("platform_public_explicit_org").await;
+    let enc = test_encryption_keys();
+    let person = owner(&db, UserType::Person).await;
+    let org = owner(&db, UserType::Org).await;
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .insert_one(test_membership(&org, &person, OrgRole::Admin, None))
+        .await
+        .unwrap();
+    let mut catalog = platform_service();
+    catalog.credential_encrypted = enc.encrypt(b"platform-secret").await.unwrap();
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let explicit = unified_key_service::create_platform_key(
+        &db,
+        &org,
+        &person,
+        &catalog.slug,
+        "Explicit org",
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_ne!(
+        explicit.service.source.as_deref(),
+        Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
+    );
+    // Both direct org invocation and the member's listing preserve explicit rows.
+    unified_key_service::auto_provision_no_auth_services(&db, &org)
+        .await
+        .unwrap();
+    unified_key_service::list_keys(&db, &enc, &person, &HashMap::new())
+        .await
+        .unwrap();
+    crate::services::user_service_service::cleanup_public_org_auto_provisions(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::services::key_service::active_auto_connected_service_ids(&db, &org)
+            .await
+            .unwrap(),
+        vec![explicit.service.id.clone()],
+    );
+    let target = proxy_service::resolve_proxy_target_from_user_service(
+        &db,
+        &enc,
+        &Arc::new(crate::services::node_ws_manager::NodeWsManager::new(
+            30, 100,
+        )),
+        &org,
+        Some(&explicit.service.slug),
+        None,
+        proxy_service::ProxyExecutionContext::new(
+            None,
+            crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+        ),
+    )
+    .await
+    .unwrap();
+    let target = target.expect("public explicit org binding remains executable");
+    assert!(target.master_credential);
+    assert_eq!(target.target.credential, "platform-secret");
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn platform_audience_switch_reconciles_org_auto_rows_in_both_directions() {
+    let db = connect_transaction_test_database("platform_audience_switch").await;
+    let enc = test_encryption_keys();
+    let person = owner(&db, UserType::Person).await;
+    let org = owner(&db, UserType::Org).await;
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .insert_one(test_membership(&org, &person, OrgRole::Member, None))
+        .await
+        .unwrap();
+
+    let mut catalog = platform_service();
+    catalog.credential_encrypted = enc.encrypt(b"platform-secret").await.unwrap();
+    catalog.platform_key.as_mut().unwrap().audience = PlatformKeyAudience::Restricted;
+    catalog.platform_key.as_mut().unwrap().allowed_owner_ids = vec![org.clone()];
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+
+    unified_key_service::auto_provision_no_auth_services(&db, &person)
+        .await
+        .unwrap();
+    let rows = db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME);
+    assert_eq!(
+        rows.count_documents(doc! { "user_id": &org, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap(),
+        1,
+        "restricted org grants still create the org auto-connected row"
+    );
+
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &catalog.id },
+            doc! { "$set": { "platform_key.audience": "public" } },
+        )
+        .await
+        .unwrap();
+    unified_key_service::auto_provision_no_auth_services(&db, &person)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.count_documents(doc! { "user_id": &org, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap(),
+        0,
+        "switching restricted to public removes the org auto row"
+    );
+    assert_eq!(
+        rows.count_documents(doc! { "user_id": &person, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap(),
+        1,
+        "switching restricted to public retains personal auto provisioning"
+    );
+
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &catalog.id },
+            doc! {
+                "$set": {
+                    "platform_key.audience": "restricted",
+                    "platform_key.allowed_owner_ids": [&org],
+                }
+            },
+        )
+        .await
+        .unwrap();
+    unified_key_service::auto_provision_no_auth_services(&db, &person)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.count_documents(doc! { "user_id": &org, "catalog_service_id": &catalog.id })
+            .await
+            .unwrap(),
+        1,
+        "switching public to restricted recreates the granted org row"
+    );
+    assert!(
+        rows_for_catalog(&db, &person, &catalog.id).await.is_empty(),
+        "an inherited org execution grant must not retain an automatic personal row"
+    );
+    unified_key_service::auto_provision_no_auth_services(&db, &person)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows_for_catalog(&db, &org, &catalog.id).await.len(),
+        1,
+        "a directly granted restricted org row survives reconciliation"
+    );
+    db.drop().await.unwrap();
+}
+
+async fn rows_for_catalog(
+    db: &mongodb::Database,
+    user_id: &str,
+    catalog_id: &str,
+) -> Vec<UserService> {
+    db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
+        .find(doc! { "user_id": user_id, "catalog_service_id": catalog_id })
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
 async fn platform_to_oauth_uses_existing_unified_placeholder_flow() {
     let db = connect_transaction_test_database("platform_oauth_switch").await;
     let enc = test_encryption_keys();
@@ -955,6 +1500,7 @@ async fn server_chosen_accepts_implicit_and_explicit_public_only() {
 #[test]
 fn owner_grant_intersection_is_independent_of_allowlist_size() {
     let grants = OwnerGrants {
+        org_owner_ids: HashSet::new(),
         actor_id: "person".into(),
         memberships: vec![],
         active_owner_ids: ["person", "org-1", "org-2", "org-3"]
@@ -1214,6 +1760,7 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
         .unwrap();
     catalog.billing = Some(ServiceBilling {
         platform_key_pricing: Some(LanePricing {
+            components: Vec::new(),
             metric: BillingMetric::Tokens,
             credits_per_unit: "0.01".into(),
             lago_metric_code: "platform_svc_chrono-llm-public_pk".into(),

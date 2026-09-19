@@ -1,3 +1,5 @@
+import { BILLING_METRICS, metricLabel } from "@/schemas/billing-metrics";
+import { Badge } from "@/components/ui/badge";
 import { serviceCredentialStatus } from "@/lib/service-credential-status";
 import { useController, useFormContext } from "react-hook-form";
 import type { SharedServiceFormData } from "@/schemas/services";
@@ -24,7 +26,6 @@ import { Label } from "@/components/ui/label";
 import type {
   InferenceMetadata,
   PlatformKeyConfig,
-  LanePricingView,
 } from "@/schemas/platform-keys";
 
 export function PlatformServiceFields({
@@ -316,7 +317,7 @@ export function PlatformServiceFields({
           {(["byok_pricing", "platform_key_pricing"] as const).map((field) => {
             const lane = form.watch(field);
             const status = service?.billing?.[field]?.sync_status;
-            const setLane = (value: LanePricingView | null) =>
+            const setLane = (value: SharedServiceFormData[typeof field]) =>
               form.setValue(field, value, {
                 shouldDirty: true,
                 shouldValidate: true,
@@ -355,7 +356,9 @@ export function PlatformServiceFields({
                       onValueChange={(metric) =>
                         setLane({
                           ...lane,
-                          metric: metric as LanePricingView["metric"],
+                          metric: metric as NonNullable<
+                            SharedServiceFormData[typeof field]
+                          >["metric"],
                         })
                       }
                     >
@@ -363,9 +366,9 @@ export function PlatformServiceFields({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {["requests", "tokens", "bytes"].map((metric) => (
+                        {BILLING_METRICS.map((metric) => (
                           <SelectItem key={metric} value={metric}>
-                            {metric}
+                            {metricLabel(metric)}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -384,10 +387,136 @@ export function PlatformServiceFields({
                       )}
                     />
                     {status && (
-                      <p className="text-[11px] text-muted-foreground">
-                        Price sync: {status}
-                      </p>
+                      <Badge
+                        variant={status === "synced" ? "success" : "warning"}
+                      >
+                        {status === "synced"
+                          ? "Synced"
+                          : status === "failed"
+                            ? "Failed"
+                            : "Pending"}
+                      </Badge>
                     )}
+                    {(lane.components ?? []).map((component, index) => {
+                      const saved = service?.billing?.[field]?.components?.find(
+                        (item) => item.metric === component.metric,
+                      );
+                      return (
+                        <div
+                          key={index}
+                          className="space-y-2 border-t border-border/50 pt-3"
+                        >
+                          <FormField
+                            control={form.control}
+                            name={`${field}.components.${index}.metric`}
+                            render={({ field: input }) => (
+                              <FormItem>
+                                <FormLabel>Component unit</FormLabel>
+                                <Select
+                                  value={input.value}
+                                  onValueChange={input.onChange}
+                                >
+                                  <FormControl>
+                                    <SelectTrigger
+                                      aria-label={`Component ${index + 1} unit`}
+                                    >
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                  </FormControl>
+                                  <SelectContent>
+                                    {BILLING_METRICS.map((metric) => (
+                                      <SelectItem key={metric} value={metric}>
+                                        {metricLabel(metric)}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          <FormField
+                            control={form.control}
+                            name={`${field}.components.${index}.credits_per_unit`}
+                            render={({ field: input }) => (
+                              <FormItem>
+                                <FormLabel>Credits per unit</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    {...input}
+                                    inputMode="decimal"
+                                    aria-label={`Component ${index + 1} price`}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                          <div className="flex items-center justify-between">
+                            {saved?.sync_status && (
+                              <Badge
+                                variant={
+                                  saved.sync_status === "synced"
+                                    ? "success"
+                                    : "warning"
+                                }
+                              >
+                                {saved.sync_status === "synced"
+                                  ? "Synced"
+                                  : saved.sync_status === "failed"
+                                    ? "Failed"
+                                    : "Pending"}
+                              </Badge>
+                            )}
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() =>
+                                setLane({
+                                  ...lane,
+                                  components: lane.components?.filter(
+                                    (_, i) => i !== index,
+                                  ),
+                                })
+                              }
+                            >
+                              Remove component
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={
+                        (lane.components?.length ?? 0) >=
+                        BILLING_METRICS.length - 1
+                      }
+                      onClick={() => {
+                        const metric = BILLING_METRICS.find(
+                          (metric) =>
+                            metric !== lane.metric &&
+                            !lane.components?.some(
+                              (component) => component.metric === metric,
+                            ),
+                        );
+                        if (metric)
+                          setLane({
+                            ...lane,
+                            components: [
+                              ...(lane.components ?? []),
+                              { metric, credits_per_unit: "0" },
+                            ],
+                          });
+                      }}
+                    >
+                      Add component
+                    </Button>
+                    <p className="text-[11px] text-muted-foreground">
+                      Prices support up to 12 decimal places. Each unit is
+                      charged separately.
+                    </p>
                   </>
                 )}
               </div>
