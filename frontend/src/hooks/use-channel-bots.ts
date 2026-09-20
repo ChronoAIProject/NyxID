@@ -59,6 +59,7 @@ export function useChannelBot(id: string) {
       return api.get<ChannelBotDetail>(`/channel-bots/${id}`);
     },
     enabled: Boolean(id),
+    refetchInterval: (query) => query.state.data?.last_verification?.status === "pending" ? 2000 : false,
   });
 }
 

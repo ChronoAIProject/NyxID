@@ -260,6 +260,7 @@ async fn persist_verified_bot(
 
     let now = Utc::now();
     let bot = ChannelBot {
+        last_verification: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
@@ -948,6 +949,9 @@ async fn update_bot_inner(
     let descriptor = adapter.registration();
     let fields = params.fields();
     descriptor.validate(&fields, true)?;
+    if !fields.0.is_empty() {
+        unset_doc.insert("last_verification", "");
+    }
     if adapter.serializes_lifecycle() && fields.get("app_secret").is_some() {
         set_doc.insert("status", "pending_webhook");
         set_doc.insert("webhook_registered", false);
@@ -1842,6 +1846,7 @@ mod tests {
 
     async fn make_lark_bot(encryption_keys: &EncryptionKeys, bot_token: &str) -> ChannelBot {
         ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),

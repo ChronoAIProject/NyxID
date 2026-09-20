@@ -174,6 +174,7 @@ pub struct ChannelBotListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotDetailResponse {
+    pub last_verification: Option<BotVerificationResponse>,
     #[serde(flatten)]
     pub connection: ChannelConnectionState,
     pub credential_source: String,
@@ -238,9 +239,38 @@ pub struct CreateChannelBotResponse {
 
 #[derive(Debug, Serialize)]
 pub struct VerifyBotResponse {
+    pub last_verification: Option<BotVerificationResponse>,
     pub id: String,
     pub status: String,
     pub webhook_registered: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BotVerificationResponse {
+    pub id: String,
+    pub status: &'static str,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub message: Option<String>,
+}
+
+impl From<crate::models::channel_bot::BotVerification> for BotVerificationResponse {
+    fn from(check: crate::models::channel_bot::BotVerification) -> Self {
+        use crate::models::channel_bot::VerificationStatus;
+        let status = match check.status {
+            VerificationStatus::Incomplete => "incomplete",
+            VerificationStatus::Pending => "pending",
+            VerificationStatus::Verified => "verified",
+            VerificationStatus::Failed => "failed",
+        };
+        Self {
+            id: check.attempt_id,
+            status,
+            started_at: check.started_at.to_rfc3339(),
+            completed_at: check.completed_at.map(|date| date.to_rfc3339()),
+            message: check.message,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -747,6 +777,13 @@ pub async fn update_bot(
     .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        last_verification: crate::services::channel_verification_service::current(
+            &state.db,
+            adapter.as_ref(),
+            &updated,
+        )
+        .await?
+        .map(Into::into),
         connection: ChannelConnectionState::new(&updated, adapter.as_ref(), &state.config),
         credential_source: updated.credential_source.clone(),
         managed_setup: updated.managed_setup.as_ref().map(Into::into),
@@ -824,6 +861,13 @@ pub async fn get_bot(
     .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        last_verification: crate::services::channel_verification_service::current(
+            &state.db,
+            adapter.as_ref(),
+            &bot,
+        )
+        .await?
+        .map(Into::into),
         connection: ChannelConnectionState::new(&bot, adapter.as_ref(), &state.config),
         credential_source: bot.credential_source.clone(),
         managed_setup: bot.managed_setup.as_ref().map(Into::into),
@@ -951,6 +995,7 @@ pub(crate) async fn verify_bot_with_adapter(
         )
         .await?;
         return Ok(Json(VerifyBotResponse {
+            last_verification: None,
             id: verified.id,
             status: verified.status,
             webhook_registered: verified.webhook_registered,
@@ -969,6 +1014,33 @@ pub(crate) async fn verify_bot_with_adapter(
             ));
         }
     }
+    if adapter.records_verification_result() {
+        let check = crate::services::channel_verification_service::verify(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter,
+            &bot,
+        )
+        .await?;
+        let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+        let observed =
+            crate::services::channel_verification_service::current(&state.db, adapter, &current)
+                .await?
+                .filter(|observed| observed.attempt_id == check.attempt_id)
+                .ok_or_else(|| {
+                    AppError::Conflict(
+                        "Bot credentials or verification changed. Run verification again.".into(),
+                    )
+                })?;
+        return Ok(Json(VerifyBotResponse {
+            id: current.id,
+            status: current.status,
+            webhook_registered: current.webhook_registered,
+            last_verification: Some(observed.into()),
+        }));
+    }
+
     if adapter.serializes_lifecycle() {
         let url = format!(
             "{}/api/v1/webhooks/channel/{}/{}",
@@ -985,6 +1057,7 @@ pub(crate) async fn verify_bot_with_adapter(
         )
         .await?;
         return Ok(Json(VerifyBotResponse {
+            last_verification: None,
             id: verified.id,
             status: verified.status,
             webhook_registered: verified.webhook_registered,
@@ -1048,6 +1121,7 @@ pub(crate) async fn verify_bot_with_adapter(
         {
             let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
             return Ok(Json(VerifyBotResponse {
+                last_verification: None,
                 id: current.id,
                 status: current.status,
                 webhook_registered: current.webhook_registered,
@@ -1059,6 +1133,7 @@ pub(crate) async fn verify_bot_with_adapter(
     // Some subscription protocols bind the dashboard to the original secret.
     if adapter.registration().preserve_subscription_on_verify || bot.platform == "telegram-new" {
         return Ok(Json(VerifyBotResponse {
+            last_verification: None,
             id: bot.id,
             status: bot.status,
             webhook_registered: bot.webhook_registered,
@@ -1120,6 +1195,7 @@ pub(crate) async fn verify_bot_with_adapter(
     };
 
     Ok(Json(VerifyBotResponse {
+        last_verification: None,
         id: bot.id,
         status,
         webhook_registered,
@@ -1160,6 +1236,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),
@@ -1233,6 +1310,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),

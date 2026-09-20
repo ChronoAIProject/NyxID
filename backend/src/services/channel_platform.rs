@@ -3,6 +3,31 @@ use serde::{Deserialize, Serialize};
 pub use super::channel_registration::{BotCredentials, RegistrationDescriptor, RegistrationValues};
 use crate::errors::AppResult;
 
+/// Adapter send evidence. WhatsApp returns `Err` only when no message could
+/// have been accepted. Once acceptance is possible, the outcome retains IDs
+/// and an optional failure; callers persist that evidence before returning it.
+/// Default hooks retain the legacy error semantics of other adapters.
+pub struct SendOutcome {
+    pub final_id: Option<String>,
+    pub observation: Option<crate::models::channel_delivery::PlatformSendRecord>,
+    pub error: Option<crate::errors::AppError>,
+}
+impl SendOutcome {
+    pub fn legacy(final_id: Option<String>) -> Self {
+        Self {
+            final_id,
+            observation: None,
+            error: None,
+        }
+    }
+    pub fn into_result(self) -> AppResult<Option<String>> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok(self.final_id),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Ingestion {
@@ -318,6 +343,8 @@ impl std::fmt::Debug for PlatformVerifySecrets {
 pub struct PreparedWebhook {
     pub body: Vec<u8>,
     pub challenge_response: Option<serde_json::Value>,
+    /// Verified evidence that this bot's webhook is receiving its own events.
+    pub activate_bot: bool,
 }
 
 /// Challenge-only responses perform no relay work. Immediate acknowledgments
@@ -344,6 +371,47 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
 pub trait PlatformAdapter: Send + Sync {
+    fn atomic_inbound_admission(&self) -> bool {
+        false
+    }
+    async fn send_reply_outcome(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<SendOutcome> {
+        self.send_reply(http, credentials, conversation_id, reply)
+            .await
+            .map(SendOutcome::legacy)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_bound_reply_outcome(
+        &self,
+        db: &mongodb::Database,
+        http: &reqwest::Client,
+        bot: &crate::models::channel_bot::ChannelBot,
+        original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<SendOutcome> {
+        // Preserve adapter-specific send_bound_reply fences and persisted attempts.
+        self.send_bound_reply(db, http, bot, original, credentials, conversation_id, reply)
+            .await
+            .map(SendOutcome::legacy)
+    }
+    fn receipt_observations(
+        &self,
+        _prepared_body: &[u8],
+    ) -> Vec<super::channel_delivery_service::ReceiptObservation> {
+        Vec::new()
+    }
+
+    fn records_verification_result(&self) -> bool {
+        false
+    }
     /// Platform identifier (e.g. "telegram", "discord", "lark", "feishu").
     fn platform_id(&self) -> &str;
 
@@ -644,6 +712,7 @@ pub trait PlatformAdapter: Send + Sync {
         Ok(PreparedWebhook {
             body: body.to_vec(),
             challenge_response: None,
+            activate_bot: true,
         })
     }
 

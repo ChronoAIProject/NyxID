@@ -28,6 +28,8 @@ import { editableChannelFields, TELEGRAM_MANAGER_DELETION_NOTE } from "@/lib/cha
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
+import { CredentialVerification, RouteReadiness } from "@/components/channels/bot-readiness";
+import { routeAgentIssue, verificationErrorMessage } from "@/lib/channel-readiness";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
@@ -175,6 +177,7 @@ function ConversationsSection({
   botId,
   apiKeyNames,
   ownerOrgId,
+  ownerLabel,
   isTelegramManager,
 }: {
   readonly botId: string;
@@ -183,12 +186,14 @@ function ConversationsSection({
    *  scope the conversation list and pre-fill `target_org_id` on create.
    *  `null` means personal. */
   readonly ownerOrgId: string | null;
+  readonly ownerLabel: string;
   readonly isTelegramManager: boolean;
 }) {
-  const { data: conversations, isLoading } = useChannelConversations({
+  const { data: conversations, isLoading, error } = useChannelConversations({
     botId,
     orgId: ownerOrgId,
   });
+  const keys = useApiKeys({ orgId: ownerOrgId });
   const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
@@ -206,7 +211,9 @@ function ConversationsSection({
         </div>
       </div>
 
-      {isLoading ? (
+      {keys.error ? <ErrorBanner message="Agent keys could not be loaded for this owner. Retry the page." /> : !keys.isLoading && keys.data && <RouteReadiness keys={keys.data} ownerOrgId={ownerOrgId} ownerLabel={ownerLabel} conversations={conversations} />}
+
+      {error ? <ErrorBanner message="Conversation routes could not be loaded. Retry the page." /> : isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 2 }, (_, i) => (
             <Skeleton key={`conv-skel-${String(i)}`} className="h-12 w-full" />
@@ -299,6 +306,7 @@ function ConversationsSection({
         onOpenChange={setAddOpen}
         botId={botId}
         ownerOrgId={ownerOrgId}
+        ownerLabel={ownerLabel}
         isTelegramManager={isTelegramManager}
       />
       <DeleteRouteDialog
@@ -309,11 +317,12 @@ function ConversationsSection({
   );
 }
 
-function AddRouteDialog({
+export function AddRouteDialog({
   open,
   onOpenChange,
   botId,
   ownerOrgId,
+  ownerLabel,
   isTelegramManager,
 }: {
   readonly open: boolean;
@@ -322,9 +331,10 @@ function AddRouteDialog({
   /** Bot's owner scope. When non-null, the conversation is created under
    *  that org and only org-owned agent keys from the same org are shown. */
   readonly ownerOrgId: string | null;
+  readonly ownerLabel: string;
   readonly isTelegramManager: boolean;
 }) {
-  const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
+  const { data: apiKeys, isLoading: keysLoading, error: keysError, refetch: refetchKeys } = useApiKeys({ orgId: ownerOrgId });
   const createConversation = useCreateChannelConversation();
 
   const {
@@ -404,8 +414,7 @@ function AddRouteDialog({
     );
   }
 
-  const activeApiKeys = (apiKeys ?? []).filter((k) => k.is_active && k.platform !== "nyxid-assistant");
-  const keysWithCallback = activeApiKeys.filter((k) => k.callback_url);
+  const eligibleKeys = (apiKeys ?? []).filter((key) => !routeAgentIssue(key, ownerOrgId));
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -440,20 +449,13 @@ function AddRouteDialog({
             </div>
           )}
 
+          {keysError ? <ErrorBanner message="Agent keys could not be loaded for this owner." onRetry={() => void refetchKeys()} /> : keysLoading ? <p className="text-xs text-muted-foreground">Loading agent keys…</p> : <RouteReadiness keys={apiKeys ?? []} ownerOrgId={ownerOrgId} ownerLabel={ownerLabel} />}
+
           <div className="space-y-2">
             <Label htmlFor="agent_api_key_id">Agent (API Key)</Label>
-            {keysWithCallback.length === 0 && activeApiKeys.length > 0 ? (
-              <div className="rounded-lg border border-border bg-muted/50 p-3">
-                <p className="text-[12px] text-muted-foreground">
-                  None of your agent keys have a callback URL set. Go to{" "}
-                  <a href="/keys?tab=nyxid" className="text-primary underline">
-                    Agent Keys
-                  </a>{" "}
-                  and set a Callback URL on the key you want to use as an agent.
-                </p>
-              </div>
-            ) : (
+            {(
               <Select
+                disabled={keysLoading || Boolean(keysError) || eligibleKeys.length === 0}
                 value={watch("agent_api_key_id") ?? ""}
                 onValueChange={(value) => setValue("agent_api_key_id", value)}
               >
@@ -461,15 +463,15 @@ function AddRouteDialog({
                   <SelectValue placeholder="Select an API key" />
                 </SelectTrigger>
                 <SelectContent>
-                  {activeApiKeys.map((key) => (
+                  {(apiKeys ?? []).map((key) => (
                     <SelectItem
                       key={key.id}
                       value={key.id}
-                      disabled={!key.callback_url}
+                      disabled={Boolean(routeAgentIssue(key, ownerOrgId))}
                     >
                       {key.name}
                       {key.platform ? ` (${key.platform})` : ""}
-                      {!key.callback_url ? " -- no callback URL" : ""}
+                      {routeAgentIssue(key, ownerOrgId) ? ` — ${routeAgentIssue(key, ownerOrgId)}` : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -564,7 +566,8 @@ function AddRouteDialog({
               type="submit"
               disabled={
                 createConversation.isPending ||
-                !watch("agent_api_key_id") ||
+                Boolean(keysError) ||
+                !eligibleKeys.some((key) => key.id === watch("agent_api_key_id")) ||
                 (isTelegramManager &&
                   !watch("default_agent") &&
                   (!watch("platform_conversation_id")?.trim() ||
@@ -873,7 +876,12 @@ function EditVerificationSection({
             {errors[field.name] && <p className="text-xs text-destructive">{errors[field.name]?.message}</p>}
           </div>
         ))}
-        {(bot.status === "pending" || bot.status === "pending_webhook") && (
+        {bot.platform === "whatsapp" ? (
+          <p className="text-xs text-muted-foreground">
+            Saving stores these credentials immediately. Run Verify Bot to check
+            the saved credentials, then confirm a new message exchange with your agent.
+          </p>
+        ) : (bot.status === "pending" || bot.status === "pending_webhook") && (
           <p className="text-xs text-muted-foreground">
             Saving stores these credentials immediately (watch the Configured badges above).
             The bot stays pending until the platform delivers its first verified webhook,
@@ -1058,6 +1066,7 @@ export function ChannelBotDetailPage() {
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showEditNameDialog, setShowEditNameDialog] = useState(false);
+  const [verificationContext, setVerificationContext] = useState<{ id: string; updatedAt: string; previousCheckId: string | null } | null>(null);
 
   const apiKeyNames: ReadonlyMap<string, string> = new Map(
     (apiKeys ?? []).map((k) => [k.id, k.name]),
@@ -1089,12 +1098,17 @@ export function ChannelBotDetailPage() {
   }
 
   async function handleVerify() {
+    if (!bot) return;
+    setVerificationContext({ id: bot.id, updatedAt: bot.updated_at, previousCheckId: bot.last_verification?.id ?? null });
     try {
       const result = await verifyMutation.mutateAsync(botId);
-      if (result.status === "active") toast.success("Bot verified successfully");
+      if (result.last_verification?.status === "verified") toast.success("WhatsApp credentials verified");
+      else if (result.status === "failed" || result.status === "invalid") toast.error("Bot verification failed");
+      else if (result.status === "active") toast.success("Bot verified successfully");
+      else toast.success("Bot verification completed");
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to verify bot",
+        bot.platform === "whatsapp" ? verificationErrorMessage(err) : err instanceof ApiError ? err.message : "Failed to verify bot",
       );
     }
   }
@@ -1151,7 +1165,14 @@ export function ChannelBotDetailPage() {
         }
       />
 
-      {verifyMutation.variables === botId && verifyMutation.isError ? (
+      {bot.platform === "whatsapp" && <CredentialVerification
+        check={bot.last_verification}
+        pending={verificationContext?.id === bot.id && verifyMutation.isPending}
+        error={verificationContext?.id === bot.id && verificationContext.updatedAt === bot.updated_at && verifyMutation.isError ? verificationErrorMessage(verifyMutation.error) : null}
+        previousCheckId={verificationContext?.previousCheckId ?? null}
+      />}
+
+      {bot.platform !== "whatsapp" && (verifyMutation.variables === botId && verifyMutation.isError ? (
         <div role="alert"><ErrorBanner message={verifyMutation.error instanceof ApiError ? verifyMutation.error.message : "Failed to verify bot"} /></div>
       ) : bot.credential_source === "telegram_manager" && bot.error ? (
         <div role="alert"><ErrorBanner message={bot.error} /></div>
@@ -1159,7 +1180,7 @@ export function ChannelBotDetailPage() {
         <p role="status" className="text-xs text-muted-foreground">
           Verification complete. Status: {statusLabel(verifyMutation.data.status)}.
         </p>
-      )}
+      ))}
 
       {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-xs text-muted-foreground">Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.</p> : bot.credential_source === "platform" ? <p role="status" className="text-xs text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? "Managed setup needs attention. Review the setup status below." : "Waiting for the first verified inbound message."}</p> : <WebhookSetupChecklist bot={bot} />)}
 
@@ -1184,8 +1205,8 @@ export function ChannelBotDetailPage() {
         <DetailRow label="Bot Username" value={bot.platform_bot_username || "-"} />
         <DetailRow label={getPlatform(bot.platform).identityLabel ?? "Platform Bot ID"} value={bot.platform_bot_id || "-"} copyable />
         {getPlatform(bot.platform).detailFields?.map(({ name, label }) => typeof bot[name] === "string" && bot[name] ? <DetailRow key={name} label={label} value={String(bot[name])} copyable /> : null)}
-        <DetailRow label="Status" value={statusLabel(bot.status)} badge badgeVariant={statusBadgeVariant(bot.status)} />
-        {bot.webhook_ingestion === false ? <DetailRow label="Ingestion" value="Polling" /> : <DetailRow label="Webhook" value={bot.webhook_registered ? "Registered" : "Not registered"} />}
+        <DetailRow label={bot.platform === "whatsapp" ? "Webhook lifecycle" : "Status"} value={statusLabel(bot.status)} badge badgeVariant={statusBadgeVariant(bot.status)} />
+        {bot.webhook_ingestion === false ? <DetailRow label="Ingestion" value="Polling" /> : <DetailRow label="Webhook" value={bot.platform === "whatsapp" ? (bot.webhook_registered ? "Previously observed (historical)" : "Not yet observed") : bot.webhook_registered ? "Registered" : "Not registered"} />}
         <DetailRow label="Owner" value={ownerLabel} />
         <DetailRow label="Created" value={formatDate(bot.created_at)} />
         <DetailRow label="Updated" value={formatRelativeTime(bot.updated_at)} />
@@ -1248,6 +1269,7 @@ export function ChannelBotDetailPage() {
         botId={botId}
         apiKeyNames={apiKeyNames}
         ownerOrgId={ownerOrgId}
+        ownerLabel={ownerLabel}
         isTelegramManager={bot.credential_source === "telegram_manager"}
       />
 

@@ -78,6 +78,7 @@ pub async fn load(
             )
         };
         let mut projected = row.map(|row| PlatformCredential {
+            channel_observation_version: 0,
             id: row.id,
             provider: descriptor.provider.to_string(),
             fields: BTreeMap::new(),
@@ -150,17 +151,24 @@ pub async fn load_decrypted(
     keys: &EncryptionKeys,
     descriptor: &PlatformCredentialDescriptor,
 ) -> AppResult<PlatformVerifySecrets> {
+    decrypt_snapshot(keys, load(db, descriptor).await?.as_ref()).await
+}
+
+pub(crate) async fn decrypt_snapshot(
+    keys: &EncryptionKeys,
+    row: Option<&PlatformCredential>,
+) -> AppResult<PlatformVerifySecrets> {
     let mut result = PlatformVerifySecrets::default();
-    if let Some(row) = load(db, descriptor).await? {
-        for (name, value) in row.fields {
-            result.insert(&name, value);
+    if let Some(row) = row {
+        for (name, value) in &row.fields {
+            result.insert(name, value.clone());
         }
-        for (name, encrypted) in row.secrets {
+        for (name, encrypted) in &row.secrets {
             let bytes = Zeroizing::new(keys.decrypt(&encrypted.bytes).await?);
             let value = std::str::from_utf8(&bytes).map_err(|_| {
                 AppError::Internal("Invalid platform credential encoding".to_string())
             })?;
-            result.insert(&name, value.to_string());
+            result.insert(name, value.to_string());
         }
     }
     Ok(result)

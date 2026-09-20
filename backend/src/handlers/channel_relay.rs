@@ -161,6 +161,8 @@ pub struct UpdateReplyResponse {
 /// keep their own conversation state.
 #[derive(Debug, Serialize)]
 pub struct MessageItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryItem>,
     pub attachments: Vec<MessageAttachmentItem>,
     pub id: String,
     pub direction: String,
@@ -177,6 +179,55 @@ pub struct MessageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<String>,
     pub created_at: String,
+}
+
+/// Metadata-only projection of an authorized WhatsApp outbound record.
+#[derive(Debug, Serialize)]
+pub struct DeliveryItem {
+    pub status: &'static str,
+    pub complete: bool,
+    pub expected_components: Option<u32>,
+    pub recipient_only: bool,
+    pub failure_code: Option<u32>,
+    pub components: Vec<DeliveryComponentItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeliveryComponentItem {
+    pub platform_message_id: String,
+    pub status: &'static str,
+    pub sent_at: Option<String>,
+    pub delivered_at: Option<String>,
+    pub read_at: Option<String>,
+    pub played_at: Option<String>,
+    pub failed_at: Option<String>,
+    pub error_codes: Vec<i64>,
+}
+
+impl From<crate::services::channel_delivery_service::DeliverySummary> for DeliveryItem {
+    fn from(summary: crate::services::channel_delivery_service::DeliverySummary) -> Self {
+        Self {
+            status: summary.status,
+            complete: summary.complete,
+            expected_components: summary.expected_components,
+            recipient_only: summary.recipient_only,
+            failure_code: summary.failure_code,
+            components: summary
+                .components
+                .into_iter()
+                .map(|part| DeliveryComponentItem {
+                    platform_message_id: part.id,
+                    status: part.status,
+                    sent_at: part.times.sent_at.map(|time| time.to_rfc3339()),
+                    delivered_at: part.times.delivered_at.map(|time| time.to_rfc3339()),
+                    read_at: part.times.read_at.map(|time| time.to_rfc3339()),
+                    played_at: part.times.played_at.map(|time| time.to_rfc3339()),
+                    failed_at: part.times.failed_at.map(|time| time.to_rfc3339()),
+                    error_codes: part.error_codes,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -302,6 +353,7 @@ fn message_to_item(
     base_url: &str,
 ) -> MessageItem {
     MessageItem {
+        delivery: None,
         attachments: msg
             .attachments
             .iter()
@@ -1025,7 +1077,7 @@ async fn deliver_initiated_message(
             None
         };
         adapter
-            .send_reply(
+            .send_reply_outcome(
                 &state.http_client,
                 &crate::services::channel_platform::BotCredentials {
                     billing: billing.as_ref(),
@@ -1044,8 +1096,8 @@ async fn deliver_initiated_message(
             .await
     }
     .await;
-    let platform_message_id = match send_result {
-        Ok(id) => id,
+    let mut outcome = match send_result {
+        Ok(outcome) => outcome,
         Err(error) => {
             if crate::services::channel_billing_service::blocks_channel(&error)
                 && crate::services::channel_billing_service::suspend(
@@ -1068,6 +1120,10 @@ async fn deliver_initiated_message(
             return Err(error);
         }
     };
+    if let Some(observation) = &mut outcome.observation {
+        observation.waba_id = bot.app_id.clone();
+    }
+    let platform_message_id = outcome.final_id;
     // After upstream acceptance, retain pending claims on persistence failure.
     // An uncertain outcome must never automatically dispatch a second copy.
     let stored = channel_relay_service::store_outbound_message(
@@ -1081,8 +1137,12 @@ async fn deliver_initiated_message(
         platform_message_id.as_deref(),
         Some(&conversation.platform_conversation_id),
         content_type,
+        outcome.observation,
     )
     .await?;
+    if let Some(error) = outcome.error {
+        return Err(error);
+    }
     if let Some(claim) = &claim {
         channel_send_service::complete_send(
             &state.db,
@@ -1281,7 +1341,7 @@ async fn deliver_async_reply(
         Some(&attributed_api_key_id),
     );
     let send_result = adapter
-        .send_bound_reply(
+        .send_bound_reply_outcome(
             &state.db,
             &state.http_client,
             &bot,
@@ -1296,8 +1356,8 @@ async fn deliver_async_reply(
             &outbound,
         )
         .await;
-    let platform_msg_id = match send_result {
-        Ok(id) => id,
+    let mut outcome = match send_result {
+        Ok(outcome) => outcome,
         Err(error) => {
             if billing.is_some()
                 && crate::services::channel_billing_service::blocks_channel(&error)
@@ -1315,6 +1375,10 @@ async fn deliver_async_reply(
         }
     };
 
+    if let Some(observation) = &mut outcome.observation {
+        observation.waba_id = bot.app_id.clone();
+    }
+    let platform_msg_id = outcome.final_id;
     // Store outbound-message metadata only (per ADR-013). The reply text
     // is already on the wire to the platform; we do not persist it.
     let stored = channel_relay_service::store_outbound_message(
@@ -1331,8 +1395,13 @@ async fn deliver_async_reply(
             .attachments
             .first()
             .map_or("text", |a| a.kind.as_str()),
+        outcome.observation,
     )
     .await?;
+
+    if let Some(error) = outcome.error {
+        return Err(error);
+    }
 
     if !outbound.attachments.is_empty() {
         let kinds: Vec<_> = outbound.attachments.iter().map(|a| a.kind).collect();
@@ -1704,20 +1773,38 @@ pub async fn list_messages(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Conversation not found: {conversation_id}")))?;
 
-    if conversation.agent_api_key_id != caller_api_key_id {
+    if conversation.agent_api_key_id != caller_api_key_id
+        || conversation.user_id != auth_user.user_id.to_string()
+    {
         return Err(AppError::Forbidden(
             "API key is not the assigned agent for this conversation".to_string(),
         ));
     }
 
-    let per_page = params.per_page.min(100);
-    let (messages, total) =
-        channel_relay_service::list_messages(&state.db, &conversation_id, params.page, per_page)
-            .await?;
+    let per_page = params.per_page.clamp(1, 100);
+    let (messages, total) = channel_relay_service::list_messages(
+        &state.db,
+        &conversation_id,
+        &conversation.user_id,
+        params.page,
+        per_page,
+    )
+    .await?;
 
+    let mut delivery = crate::services::channel_delivery_service::summaries(
+        &state.db,
+        &messages,
+        &conversation.user_id,
+        conversation.platform_conversation_type == "private",
+    )
+    .await?;
     let items = messages
         .iter()
-        .map(|msg| message_to_item(msg, &state.config.base_url))
+        .map(|msg| {
+            let mut item = message_to_item(msg, &state.config.base_url);
+            item.delivery = delivery.remove(&msg.id).map(DeliveryItem::from);
+            item
+        })
         .collect();
 
     Ok(Json(MessageListResponse {
@@ -1793,6 +1880,7 @@ pub async fn resolve_sender(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::TryStreamExt;
     use jsonwebtoken::{Algorithm, Header, encode};
     use mongodb::bson::doc;
     use uuid::Uuid;
@@ -1810,6 +1898,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingSendAdapter {
+        whatsapp_base: Option<String>,
         calls: std::sync::atomic::AtomicUsize,
         media: bool,
         recorded_media: std::sync::Mutex<Vec<bytes::Bytes>>,
@@ -1884,6 +1973,48 @@ mod tests {
             assert_eq!(edit.text.as_deref(), Some("Updated digest"));
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
+        }
+        async fn send_bound_reply_outcome(
+            &self,
+            db: &mongodb::Database,
+            http: &reqwest::Client,
+            bot: &ChannelBot,
+            original: &ChannelMessage,
+            credentials: &crate::services::channel_platform::BotCredentials<'_>,
+            target: &str,
+            reply: &OutboundReply,
+        ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+            if self.whatsapp_base.is_some() {
+                self.send_reply_outcome(http, credentials, target, reply)
+                    .await
+            } else {
+                self.send_bound_reply(db, http, bot, original, credentials, target, reply)
+                    .await
+                    .map(crate::services::channel_platform::SendOutcome::legacy)
+            }
+        }
+        async fn send_reply_outcome(
+            &self,
+            http: &reqwest::Client,
+            credentials: &crate::services::channel_platform::BotCredentials<'_>,
+            target: &str,
+            reply: &OutboundReply,
+        ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+            if let Some(base) = &self.whatsapp_base {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::services::channel_adapters::whatsapp::send_outcome_at(
+                    http,
+                    credentials,
+                    target,
+                    reply,
+                    base,
+                )
+                .await
+            } else {
+                self.send_reply(http, credentials, target, reply)
+                    .await
+                    .map(crate::services::channel_platform::SendOutcome::legacy)
+            }
         }
         async fn send_reply(
             &self,
@@ -2069,6 +2200,310 @@ mod tests {
         ));
         assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_agent_message_page_enriches_only_authorized_owner_rows() {
+        let fixture = setup_reply_token_fixture("channel_wa_receipt_page")
+            .await
+            .unwrap();
+        let db = &fixture.state.db;
+        crate::services::channel_delivery_service::ensure_indexes(db)
+            .await
+            .unwrap();
+        let mut bot = fixture.bot.clone();
+        bot.platform = "whatsapp".into();
+        bot.platform_bot_id = "123".into();
+        let row = channel_relay_service::store_outbound_message(
+            db,
+            &bot.id,
+            &fixture.conversation.id,
+            &bot.user_id,
+            "whatsapp",
+            &fixture.api_key.id,
+            None,
+            Some("wamid.page"),
+            Some("789"),
+            "text",
+            Some(crate::models::channel_delivery::PlatformSendRecord {
+                phone_number_id: "123".into(),
+                waba_id: bot.app_id.clone(),
+                recipient_id: "789".into(),
+                component_ids: vec!["wamid.page".into()],
+                expected_components: 1,
+                complete: true,
+                uncertain: false,
+                failure_code: None,
+            }),
+        )
+        .await
+        .unwrap();
+        crate::services::channel_delivery_service::observe(
+            db,
+            &bot,
+            &[
+                crate::services::channel_delivery_service::ReceiptObservation {
+                    message_id: "wamid.page".into(),
+                    recipient_id: "789".into(),
+                    status: crate::services::channel_delivery_service::ReceiptStatus::Read,
+                    provider_at: Utc::now(),
+                    error_codes: vec![],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        let auth = api_key_auth_user(&fixture.api_key);
+        let response = list_messages(
+            State(fixture.state.clone()),
+            auth.clone(),
+            Path(fixture.conversation.id.clone()),
+            Query(ListMessagesQuery {
+                page: 1,
+                per_page: 50,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let item = response
+            .messages
+            .iter()
+            .find(|message| message.id == row.id)
+            .unwrap();
+        assert_eq!(item.delivery.as_ref().unwrap().status, "read");
+        let json = serde_json::to_value(item).unwrap();
+        assert!(json["delivery"]["components"][0]["read_at"].is_string());
+        assert!(json["delivery"].get("recipient_id").is_none());
+        assert!(json.get("platform_send").is_none());
+        let mut wrong = auth.clone();
+        wrong.user_id = Uuid::new_v4();
+        assert!(matches!(
+            list_messages(
+                State(fixture.state.clone()),
+                wrong,
+                Path(fixture.conversation.id.clone()),
+                Query(ListMessagesQuery {
+                    page: 1,
+                    per_page: 50
+                })
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        let mut wrong_key = auth;
+        wrong_key.api_key_id = Some(Uuid::new_v4().to_string());
+        assert!(matches!(
+            list_messages(
+                State(fixture.state.clone()),
+                wrong_key,
+                Path(fixture.conversation.id.clone()),
+                Query(ListMessagesQuery {
+                    page: 1,
+                    per_page: 50
+                })
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_whatsapp_bound_partial_reply_persists_all_accepted_evidence() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mut fixture = setup_reply_token_fixture("channel_wa_partial_reply")
+            .await
+            .unwrap();
+        fixture.bot.platform = "whatsapp".into();
+        fixture.bot.platform_bot_id = "123".into();
+        fixture.bot.app_id = Some("456".into());
+        fixture.conversation.platform = "whatsapp".into();
+        fixture.conversation.platform_conversation_id = "789".into();
+        fixture.message.platform = "whatsapp".into();
+        fixture.message.platform_conversation_id = Some("789".into());
+        let server = MockServer::start().await;
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .and(path("/123/messages"))
+            .respond_with(move |_: &wiremock::Request| {
+                if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"messages":[{"id":"wamid.accepted"}]}))
+                } else {
+                    ResponseTemplate::new(503)
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let adapter = RecordingSendAdapter {
+            whatsapp_base: Some(server.uri()),
+            ..Default::default()
+        };
+        let context = ReplyRequestContext {
+            original: fixture.message.clone(),
+            conversation: fixture.conversation.clone(),
+            attributed_api_key_id: fixture.api_key.id.clone(),
+            validated_bot: Some(fixture.bot.clone()),
+        };
+        let request = AsyncReplyRequest {
+            message_id: fixture.message.id.clone(),
+            reply: body(Some(&"t".repeat(4097)), None),
+        };
+        assert!(
+            deliver_async_reply(
+                &fixture.state,
+                &HeaderMap::new(),
+                context,
+                request,
+                &adapter
+            )
+            .await
+            .is_err()
+        );
+        let stored = fixture
+            .state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(doc! {"platform":"whatsapp", "direction":"outbound"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.reply_to_message_id.as_deref(),
+            Some(fixture.message.id.as_str())
+        );
+        assert_eq!(
+            stored.platform_message_id.as_deref(),
+            Some("wamid.accepted")
+        );
+        let record = stored.platform_send.unwrap();
+        assert_eq!(record.component_ids, vec!["wamid.accepted"]);
+        assert!(!record.complete);
+        assert!(record.uncertain);
+        assert_eq!(record.waba_id.as_deref(), Some("456"));
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_whatsapp_initiated_claims_follow_real_provider_certainty() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for mode in ["refused", "unknown", "partial", "complete"] {
+            let mut fixture = setup_reply_token_fixture("channel_wa_send_certainty")
+                .await
+                .unwrap();
+            enable_initiated(&mut fixture).await;
+            fixture.bot.platform = "whatsapp".into();
+            fixture.bot.platform_bot_id = "123".into();
+            fixture.bot.app_id = Some("456".into());
+            fixture.conversation.platform = "whatsapp".into();
+            fixture.conversation.platform_conversation_id = "789".into();
+            fixture
+                .state
+                .db
+                .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+                .replace_one(doc! {"_id":&fixture.bot.id}, &fixture.bot)
+                .await
+                .unwrap();
+            fixture
+                .state
+                .db
+                .collection::<ChannelConversation>(CONVERSATIONS)
+                .replace_one(doc! {"_id":&fixture.conversation.id}, &fixture.conversation)
+                .await
+                .unwrap();
+            let server = MockServer::start().await;
+            let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = counter.clone();
+            Mock::given(method("POST"))
+                .and(path("/123/messages"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let attempt = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if mode == "refused" || (mode == "partial" && attempt == 1) {
+                        ResponseTemplate::new(400).set_body_json(
+                            serde_json::json!({"error":{"code":190,"message":"private"}}),
+                        )
+                    } else if mode == "unknown" {
+                        ResponseTemplate::new(503).set_body_string("upstream unavailable")
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(
+                            serde_json::json!({"messages":[{"id":format!("wamid.{attempt}")}]}),
+                        )
+                    }
+                })
+                .mount(&server)
+                .await;
+            let adapter = RecordingSendAdapter {
+                whatsapp_base: Some(server.uri()),
+                ..Default::default()
+            };
+            let auth = api_key_auth_user(&fixture.api_key);
+            let request = || {
+                let mut request = send_body(&fixture, Some("stable-key"));
+                request.message.text = Some("t".repeat(4097));
+                request
+            };
+            let first = send_with_adapter(&fixture, &auth, request(), &adapter).await;
+            assert_eq!(first.is_ok(), mode == "complete");
+            let second = send_with_adapter(&fixture, &auth, request(), &adapter).await;
+            let rows = fixture
+                .state
+                .db
+                .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+                .find(doc! {"platform":"whatsapp", "direction":"outbound"})
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            if mode == "refused" {
+                assert!(matches!(second, Err(AppError::ChannelPlatformError(_))));
+                assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+                assert!(rows.is_empty());
+                assert_eq!(
+                    fixture
+                        .state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::channel_send_claim::COLLECTION_NAME
+                        )
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    0
+                );
+            } else {
+                assert_eq!(rows.len(), 1);
+                let record = rows[0].platform_send.as_ref().unwrap();
+                assert_eq!(record.waba_id.as_deref(), Some("456"));
+                assert_eq!(record.phone_number_id, "123");
+                assert_eq!(record.recipient_id, "789");
+                assert_eq!(record.complete, mode == "complete");
+                assert_eq!(record.uncertain, mode == "unknown");
+                assert_eq!(
+                    record.component_ids.len(),
+                    match mode {
+                        "complete" => 2,
+                        "partial" => 1,
+                        _ => 0,
+                    }
+                );
+                assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                if mode == "complete" {
+                    assert_eq!(first.unwrap().message_id, second.unwrap().message_id);
+                } else {
+                    assert!(matches!(second, Err(AppError::Conflict(_))));
+                }
+            }
+            fixture.state.db.drop().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -3168,6 +3603,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            last_verification: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             platform: "telegram".to_string(),
@@ -3218,6 +3654,7 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            platform_send: None,
             attachments: vec![],
             id: Uuid::new_v4().to_string(),
             channel_bot_id: Some(bot.id.clone()),
@@ -3240,6 +3677,7 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            platform_send: None,
             attachments: vec![],
             id: Uuid::new_v4().to_string(),
             channel_bot_id: Some(bot.id.clone()),
@@ -3436,6 +3874,7 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            platform_send: None,
             attachments: vec![],
             id: Uuid::new_v4().to_string(),
             platform_message_id: Some("msg_456".to_string()),
@@ -3672,6 +4111,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            last_verification: None,
             id: Uuid::new_v4().to_string(),
             user_id: fixture.bot.user_id.clone(),
             platform: "lark".to_string(),

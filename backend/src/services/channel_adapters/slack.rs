@@ -924,6 +924,7 @@ mod tests {
 
     fn make_test_bot(_signing_secret: &str) -> ChannelBot {
         ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "slack".to_string(),

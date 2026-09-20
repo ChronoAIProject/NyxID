@@ -57,6 +57,7 @@ export interface ChannelBotListResponse {
 }
 
 export interface ChannelBotDetail extends ChannelBotItem {
+  readonly last_verification?: BotVerification | null;
   readonly webhook_ingestion?: boolean;
   readonly connection_id?: string | null;
   readonly poll_cursor?: string | null;
@@ -82,6 +83,21 @@ export interface ChannelBotDetail extends ChannelBotItem {
   /** Lark/Feishu only: scope keys encoded in `permission_setup_url`,
    *  echoed back so the UI can render the list under the link. */
   readonly permission_setup_scopes?: readonly string[] | null;
+}
+
+export interface BotVerification {
+  readonly id: string;
+  readonly status: "pending" | "verified" | "failed" | "incomplete";
+  readonly started_at: string;
+  readonly completed_at: string | null;
+  readonly message: string | null;
+}
+
+export interface VerifyChannelBotResponse {
+  readonly id: string;
+  readonly status: ChannelBotStatus;
+  readonly webhook_registered: boolean;
+  readonly last_verification?: BotVerification | null;
 }
 
 export interface CreateChannelBotRequest {
@@ -113,12 +129,6 @@ export interface UpdateChannelBotRequest {
   readonly encrypt_key?: string;
   readonly app_id?: string;
   readonly app_secret?: string;
-}
-
-export interface VerifyChannelBotResponse {
-  readonly id: string;
-  readonly status: ChannelBotStatus;
-  readonly webhook_registered: boolean;
 }
 
 export interface CreateChannelBotResponse {
@@ -222,7 +232,29 @@ export interface UpdateChannelConversationRequest {
  * the message body lives with the downstream agent (e.g. Aevatar grain state)
  * and NyxID retains only routing metadata.
  */
+export type ChannelDeliveryStatus = "accepted" | "sent" | "delivered" | "read" | "played" | "failed" | "partial" | "unknown" | "legacy_final_only" | "recipient_only";
+export interface ChannelDeliveryComponent {
+  readonly platform_message_id: string;
+  readonly status: ChannelDeliveryStatus;
+  readonly sent_at: string | null;
+  readonly delivered_at: string | null;
+  readonly read_at: string | null;
+  readonly played_at: string | null;
+  readonly failed_at: string | null;
+  readonly error_codes: readonly number[];
+}
+export interface ChannelDelivery {
+  readonly status: ChannelDeliveryStatus;
+  /** All send components were accepted and their IDs are recorded. */
+  readonly complete: boolean;
+  readonly expected_components: number | null;
+  readonly recipient_only: boolean;
+  readonly failure_code: number | null;
+  readonly components: readonly ChannelDeliveryComponent[];
+}
+
 export interface ChannelMessageItem {
+  readonly delivery?: ChannelDelivery | null;
   readonly attachments?: readonly ChannelAttachment[];
   readonly id: string;
   /** `null` for messages on device channels. */

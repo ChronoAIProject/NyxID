@@ -1,12 +1,10 @@
 //! Shared post-parse channel routing and callback dispatch.
 
 use crate::AppState;
-use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::services::{channel_relay_service, channel_routing_service};
 use crate::telemetry::{
     TelemetryClient, TelemetryContext, TelemetryEvent, emit_event, should_sample_event,
 };
-use bson::doc;
 
 pub(crate) struct InboundDeps<'a> {
     pub(crate) db: &'a crate::db::DbHandle,
@@ -83,6 +81,7 @@ pub(crate) async fn process_inbound_messages(
             return Err(Box::new(error));
         }
         if adapter.dedup_inbound_by_platform_message_id()
+            && !adapter.atomic_inbound_admission()
             && channel_relay_service::inbound_platform_message_exists(
                 state.db,
                 &bot.id,
@@ -91,11 +90,6 @@ pub(crate) async fn process_inbound_messages(
             )
             .await?
         {
-            tracing::debug!(
-                bot_id = %bot.id, platform = %bot.platform,
-                platform_message_id = %inbound.platform_message_id,
-                "skipping duplicate inbound platform message"
-            );
             continue;
         }
         // Resolve which agent should handle this message
@@ -104,6 +98,7 @@ pub(crate) async fn process_inbound_messages(
             &bot.id,
             &inbound.conversation_id,
             Some(&inbound.sender_platform_id),
+            &bot.user_id,
         )
         .await
         {
@@ -128,20 +123,35 @@ pub(crate) async fn process_inbound_messages(
         };
 
         // Store the inbound message
-        let stored_message = match channel_relay_service::store_inbound_message(
-            state.db,
-            &bot.id,
-            &route.conversation.id,
-            &bot.user_id,
-            &bot.platform,
-            inbound,
-            &route.api_key_id,
-        )
-        .await
-        {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to store inbound message");
+        let stored = if adapter.atomic_inbound_admission() {
+            let metadata = channel_relay_service::inbound_metadata(
+                &bot.id,
+                &route.conversation.id,
+                &bot.user_id,
+                &bot.platform,
+                inbound,
+                &route.api_key_id,
+                &uuid::Uuid::new_v4().to_string(),
+            );
+            super::channel_admission_service::store(state.db, metadata).await
+        } else {
+            channel_relay_service::store_inbound_message(
+                state.db,
+                &bot.id,
+                &route.conversation.id,
+                &bot.user_id,
+                &bot.platform,
+                inbound,
+                &route.api_key_id,
+            )
+            .await
+            .map(Some)
+        };
+        let stored_message = match stored {
+            Ok(Some(message)) => message,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to admit inbound message");
                 complete = false;
                 continue;
             }
@@ -171,13 +181,14 @@ pub(crate) async fn process_inbound_messages(
         }
 
         // Look up the API key for signing and name attribution
-        let api_key = match state
-            .db
-            .collection::<ApiKey>(API_KEYS)
-            .find_one(doc! { "_id": &route.api_key_id })
-            .await
+        let api_key = match channel_routing_service::load_callback_key(
+            state.db,
+            &route,
+            &bot.user_id,
+        )
+        .await
         {
-            Ok(Some(k)) => k,
+            Ok(k) if route.conversation.platform == bot.platform => k,
             _ => {
                 tracing::warn!(
                     api_key_id = %route.api_key_id,
@@ -262,6 +273,22 @@ pub(crate) async fn process_inbound_messages(
         );
 
         // Forward to the agent's callback URL
+        let key_is_current =
+            channel_routing_service::load_callback_key(state.db, &route, &bot.user_id)
+                .await
+                .is_ok_and(|current| {
+                    current.state_version == api_key.state_version
+                        && current.key_hash == api_key.key_hash
+                });
+        if !key_is_current {
+            let _ = channel_relay_service::update_callback_status(
+                state.db,
+                &stored_message.id,
+                "failed",
+            )
+            .await;
+            continue;
+        }
         let delivery = channel_relay_service::forward_to_agent(
             state.http_client,
             state.config,

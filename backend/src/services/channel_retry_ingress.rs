@@ -94,6 +94,7 @@ pub async fn deliver(
         &bot.id,
         &inbound.conversation_id,
         Some(&inbound.sender_platform_id),
+        &bot.user_id,
     )
     .await?
     .ok_or_else(retry_later)?;

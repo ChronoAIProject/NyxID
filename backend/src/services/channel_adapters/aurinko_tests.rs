@@ -306,7 +306,7 @@ impl Fixture {
         metadata: Option<Value>,
     ) -> AppResult<Option<String>> {
         self.adapter
-            .send_bound_reply(
+            .send_bound_reply_outcome(
                 &self.state.db,
                 &self.state.http_client,
                 &self.bot,
@@ -325,7 +325,8 @@ impl Fixture {
                     metadata,
                 },
             )
-            .await
+            .await?
+            .into_result()
     }
 }
 

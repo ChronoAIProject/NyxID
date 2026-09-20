@@ -212,6 +212,7 @@ impl LarkFamilyAdapter {
         };
 
         Ok(PreparedWebhook {
+            activate_bot: true,
             body: effective_body,
             challenge_response,
         })
@@ -1271,6 +1272,7 @@ mod tests {
 
     fn make_test_bot(platform: &str) -> ChannelBot {
         ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: platform.to_string(),
