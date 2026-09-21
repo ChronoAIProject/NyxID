@@ -37,8 +37,12 @@ describe("allowance bundles", () => {
     expect(bundleStatus(groups[1]!)).toBe("Partially disabled");
     expect(bundleForm(groups[1]!).units.map((u) => u.metric)).toEqual([
       "tokens",
-      "images",
     ]);
+  });
+  it("loads no inactive units when the whole bundle is disabled", () => {
+    const bundle = groupAllowances([{ ...row, is_active: false }])[0]!;
+    expect(bundleStatus(bundle)).toBe("Disabled");
+    expect(bundleForm(bundle).units).toEqual([]);
   });
   it("rejects duplicate, empty, excessive and invalid units", () => {
     const form = bundleForm(groupAllowances([row])[0]!);

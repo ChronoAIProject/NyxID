@@ -50,6 +50,7 @@ export const adminUsageResponseSchema = z.object({
     .object({
       rolled_up_through: z.iso.datetime({ offset: true }),
       tail_rows: count,
+      validated: z.boolean().optional(),
     })
     .optional(),
   window: z.object({

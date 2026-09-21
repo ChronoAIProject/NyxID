@@ -156,3 +156,107 @@ There are no outstanding test failures or benchmark target misses. The intention
 - `frontend/src/pages/admin-usage.tsx`
 - `frontend/src/schemas/admin-usage.ts`
 - `frontend/src/schemas/billing-credits.ts`
+
+## Review round 1
+
+This section supersedes the initial cutoff, retry, acknowledgement, editor, index, and performance statements above. All ten findings on `5a210635` are addressed; no version change, push, or PR is included.
+
+### Changes and reasoning
+
+1. **Production scan budget:** presets now start at `hour(now - duration)` and end at `now`, with the exact bounds still visible. Stable rows fold below `now - 60 seconds`, including the current hour. A defaulted journal `folded_before` bound is published atomically with each claim, before any summary increment; reads use the partially filled end bucket only while that bound proves it contains no source outside the request. Concurrent advancement revalidates the bound. Historical custom edges keep disjoint indexed raw ranges. The pending scan is the top-level aggregation with an explicit pending-index hint: the first density run exposed MongoDB selecting the old status/date index inside `unionWith` and fetching 607,208 already-folded sources. Rollups and custom edges now join that root scan. The old benchmark also fetched approximately 60,000 hourly summary documents for 24 hours; three additive covering indexes (window, actor, owner) eliminate those document fetches on the common single-partition path. The compatibility path and all prior indexes remain intact. Covering reductions sum stored nonnegative integer costs, clamp overflow to `i64::MAX`, then convert only reduced groups to Decimal128 for the shared pricing stages; tests prove exactness at `2^53 + 1`, near `i64::MAX`, and above saturation against the raw oracle.
+2. **Bounded availability:** all three contention/snapshot-expiry paths share an eight-attempt budget. An unvalidated completed result is returned after exhaustion; if every snapshot expired, one ordinary aggregation using conservative raw edges supplies the result. `freshness.validated: false` and the UI's “Updating totals” identify this temporary result. Persisted folding remains exactly once. A test holds the journal batch active throughout and requires standalone-mode HTTP 200 within two seconds.
+3. **Lago outages:** released, settled exact rows fold without ack. Legacy billable rows still need ack/dead-letter to freeze their display partition. Unacked charged rows also require forwarding: `reconcile::mark_dead_letter` changes status without setting `forwarded`, so an anomalous finalized/unforwarded row could leave the dashboard predicate. Such rows stay raw; a regression exercises their disappearance without a stale summary. Forwarding is monotonic: meter creation initializes false, `meter::mark_forwarded` sets true before dispatch, and finalization/reconciliation never reset it. The test covers current-hour folding, exact/unacked versus legacy/unacked rows, the 60-second edge, subsequent ack, watermark advancement, and custom boundaries.
+4. **Worker survival:** every `expect`, `unwrap`, and `unreachable!` path in the fold module has been removed. Missing/malformed state, invalid sequence fences, and invalid group documents return `AppError`. The worker warns without identifiers and retries on a later tick. Tests cover missing, malformed, and exhausted-sequence journal state.
+5. **Backfill budget:** the worker gives a tick 45 seconds while the gap-free watermark is more than two hours old, retaining 20 seconds once caught up and the existing 100-batch cap. Cadence and configuration are unchanged. A unit test covers both budgets.
+6. **Watermark UX:** before the request start the watermark renders “Backfilling history · rollups complete through <time>”; otherwise the footer shows the live unfolded count. Both branches and the unvalidated indicator are tested. The watermark is now an exclusive source-time bound, not an hour boundary; the glossary documents its initialization and unstable-row behavior.
+7. **Bundle transaction consistency:** create now uses `transaction_result` and `map_transaction_error`, matching replacement and toggles. A focused test against a temporary real standalone MongoDB confirms all three fail closed, preserve a legacy row, and create no partial bundle.
+8. **Inactive units:** editing loads active rows only. Saving a quantity change does not propose re-enabling removed metrics; explicitly adding one does. Change review now derives the before-values from active form defaults. Regression tests cover both save paths, an entirely disabled bundle, and whole-bundle toggles. The inline explanation and glossary describe restoration.
+9. **Table consistency:** allowances use the sibling's `overflow-x-auto rounded-lg border border-border` container and inline Pencil plus Disable/Enable controls, per the review's explicit design direction. Recurrences are capitalized. Mobile actions remain accessible without overlapping the service name.
+10. **Hook boundary:** both bundle hooks normalize target lists before schema validation and request submission. A hook regression switches to `all_users` while stale user/org/group selections remain and asserts empty arrays for both POST and PUT.
+
+### Verification and benchmark
+
+| Command | Review round 1 result |
+|---|---|
+| `cargo fmt --all -- --check` | Passed. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed after simplifying two boolean expressions; final run 1m 47s. |
+| `NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27019/?replicaSet=nyxid1530&directConnection=true' cargo test -p nyxid --bin nyxid-server -- --test-threads 2` | **6,410 passed**, 0 failed, 2 intentionally ignored; **417.85 s**. Includes all six added backend regressions. |
+| `cargo test -p nyxid-cli` | **1,277 passed** (1,246 unit; integration suites 10 + 5 + 13 + 2 + 1). |
+| `npm --prefix frontend run lint` | Passed: 0 errors, 27 existing warnings. |
+| `npm --prefix frontend run test` | **346 files / 3,498 tests passed**; **56.38 s**. |
+| `npm --prefix frontend run build` | Passed, including credential-accept and mock-footprint checks. |
+| `npm --prefix frontend run build:wizard` | Passed; generated assets and source hash remain unchanged. |
+| `cargo test -p nyxid-cli --test wizard_bundle_freshness` | **1 passed**. |
+| Actual standalone checks below | **2 passed**, including HTTP 200 with `validated: false`; **0.58 s** for both tests. |
+| `git diff --check` | Passed. |
+
+Standalone verification used a disposable local server, subsequently stopped and removed:
+
+```sh
+mongod --dbpath /tmp/nyxid-review1-standalone-final --port 27020 --bind_ip 127.0.0.1 --wiredTigerCacheSizeGB 0.25 --logpath /tmp/nyxid-review1-standalone-final/mongod.log --pidfilepath /tmp/nyxid-review1-standalone-final/mongod.pid --fork
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27020/?directConnection=true' target/debug/deps/nyxid_server-8697d3d03a01e14a --exact services::billing::allowances::bundle_tests::bundle_writes_fail_closed_on_standalone services::admin_usage_service::tests::persistently_active_standalone_batch_returns_unvalidated_success_within_bound --nocapture
+```
+
+The replica-set tests exercise the forced standalone aggregation mode too; the additional run above verifies the real topology decision and full authorized HTTP handler. No existing test was removed. Initial focused failures from the intentionally changed cutoff and inline action selectors were updated to the new behavior. The first density run exposed the broad raw index choice; its successor met the document budget but narrowly missed 24-hour latency and exposed the slower Decimal128 reduction. Both were fixed before the final density run.
+
+`df -h /System/Volumes/Data` ran before long Cargo commands and throughout verification. There were **46 GiB free** before the final benchmark and **47 GiB free** after fixture cleanup. No application environment variables, billing funding paths, versions, or pre-existing index definitions changed.
+
+### Final production-density benchmark
+
+Environment remains Apple M2 / 16 GiB, MongoDB 8.0.23 replica set `nyxid1530`, 256 MiB WiredTiger cache. The retained disposable fixture contains **1,800,000 rows uniformly across the 72 hours ending at the benchmark time**, including the partial current hour, plus **125 extra live rows**. Every exact-settled charged row is deliberately **unacknowledged**. All legacy billable rows are acknowledged. This exercises a prolonged Lago outage without making its exact traffic accumulate in the live tail.
+
+For the final run, the disposable derived rollup/state collections and source fold markers were reset and the previous fold timer removed. The raw event contents and raw indexes were retained. This also removed experimental derived indexes, so the final worker measures only the final index set. The final test refolds every eligible event and preserves the one-minute cutoff tail. No other heavy verification runs overlap its measurements.
+
+```sh
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27019/?replicaSet=nyxid1530&directConnection=true' cargo test -p nyxid --bin nyxid-server hourly_rollup_production_density_benchmark -- --ignored --nocapture --test-threads 1
+# Final full refold of that retained disposable raw fixture:
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27019/nyxid_benchmark_39277ed65dea4712aca15bb79290c1a5?replicaSet=nyxid1530&directConnection=true' cargo test -p nyxid --bin nyxid-server hourly_rollup_production_density_benchmark -- --ignored --nocapture --test-threads 1
+```
+
+| Window | Filter | p50 ms | Max ms | Documents examined | Keys examined |
+|---|---|---:|---:|---:|---:|
+| 24 h | none | 382.0 | 448.9 | 541 | 65,443 |
+| 24 h | user | 58.5 | 95.0 | 541 | 9,214 |
+| 24 h | service | 353.6 | 368.0 | 541 | 65,443 |
+| 24 h | both | 60.2 | 67.2 | 541 | 9,214 |
+| 7 d | none | 893.8 | 1064.7 | 541 | 191,082 |
+| 7 d | user | 131.8 | 170.6 | 541 | 25,998 |
+| 7 d | service | 866.9 | 948.5 | 541 | 191,082 |
+| 7 d | both | 124.9 | 130.8 | 541 | 25,998 |
+| 31 d | none | 896.1 | 942.8 | 541 | 191,083 |
+| 31 d | user | 131.9 | 146.4 | 541 | 25,998 |
+| 31 d | service | 865.5 | 932.5 | 541 | 191,083 |
+| 31 d | both | 123.5 | 134.8 | 541 | 25,998 |
+
+**12/12 cases passed**, including all five raw-oracle comparisons per case (60 total). Worst p50s are **382.0 / 893.8 / 896.1 ms** for 24 h / 7 d / 31 d, below **500 / 1,000 / 2,000 ms**. The slowest individual call was **1,064.7 ms**, far below the request guard. The final ignored test passed in **832.85 s**, excluding compilation. Full evidence is in [`allowance-bundles-usage-benchmark.json`](allowance-bundles-usage-benchmark.json).
+
+All cases examine **541 raw documents and zero hourly documents**. This is the production-density one-minute tail (416 rows) plus 125 extra live rows. The 24-hour total falls from the reviewed **78,301** to **541 documents**, a **99.31% reduction**. The hinted pending index reads 542 keys; the single-partition hourly path uses the new covering indexes, and the compatibility branch uses its existing partial index. Keys examined remain explicit in the table: the cost of traversing compact hourly index entries is not hidden. Counts refer to the combined usage aggregation's execution stats, as before; latency includes the full service read and enrichment. The 7-day and 31-day cases contain the same three-day seed, as allowed by the brief; 31 days uses a custom range within the existing maximum.
+
+The final worker folded **1,799,584 rows** in **755.34 s**, or **2,382.5 rows/s**. With the 45-second budget in each 60-second backfill tick, this corresponds to **1,786.9 rows/s** after duty-cycle adjustment, before scheduling overhead (an extrapolation from continuous folding, not a separately timed scheduled-worker run). The prior report's 20/60-second estimate was 838 rows/s. The final fold uses only the final indexes and includes all accelerator writes. The fixture is dropped on benchmark success; its deletion was verified afterward.
+
+### Remaining behavior and scope
+
+No review finding or verification failure remains open. Custom partial edge hours intentionally use indexed raw scans and may cost more than presets. Exact historical partial-hour boundaries still require retained raw events; complete-hour history remains exact after raw TTL expiry. An exhausted read-validation budget returns explicitly unvalidated, temporarily approximate totals. Legacy unacknowledged priced rows intentionally remain live, while exact traffic no longer accumulates during Lago outages. Bundle mutations retain the repository's standalone fail-closed transaction requirement.
+
+### Files changed in this review
+
+- `.claude-brief/ALLOWANCE_BUNDLES_USAGE_PERF_REPORT.md`
+- `.claude-brief/allowance-bundles-usage-benchmark.json`
+- `backend/src/models/usage_rollup_state.rs`
+- `backend/src/services/admin_usage_service.rs`
+- `backend/src/services/admin_usage_service/tests.rs`
+- `backend/src/services/billing/allowances.rs`
+- `backend/src/services/billing/usage_rollup.rs`
+- `backend/src/services/billing/usage_rollup/tests.rs`
+- `docs/BILLING_UI_GLOSSARY.md`
+- `frontend/src/components/admin-credits/allowance-bundles.test.ts`
+- `frontend/src/components/admin-credits/allowance-bundles.ts`
+- `frontend/src/components/admin-credits/allowances-table.tsx`
+- `frontend/src/components/admin-credits/credits-dialogs.tsx`
+- `frontend/src/hooks/use-billing-credits.test.tsx`
+- `frontend/src/hooks/use-billing-credits.ts`
+- `frontend/src/pages/admin-credits-safety.test.tsx`
+- `frontend/src/pages/admin-credits.tsx`
+- `frontend/src/pages/admin-usage.test.tsx`
+- `frontend/src/pages/admin-usage.tsx`
+- `frontend/src/schemas/admin-usage.ts`

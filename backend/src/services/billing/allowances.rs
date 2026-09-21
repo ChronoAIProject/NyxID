@@ -283,12 +283,18 @@ pub async fn create_allowance_bundle(
     session
         .start_transaction()
         .and_run2(async move |session| {
-            db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
-                .insert_many(&inserted)
-                .session(session)
-                .await
+            let operation: AppResult<()> = async {
+                db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+                    .insert_many(&inserted)
+                    .session(session)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(operation)
         })
-        .await?;
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
     Ok(rows)
 }
 
@@ -861,6 +867,72 @@ mod bundle_tests {
                 ],
             },
         )
+    }
+
+    #[tokio::test]
+    async fn bundle_writes_fail_closed_on_standalone() {
+        let db = crate::test_utils::connect_test_database("bundle_standalone")
+            .await
+            .unwrap();
+        if super::super::usage_rollup::supports_transactions(&db)
+            .await
+            .unwrap()
+        {
+            db.drop().await.unwrap();
+            return;
+        }
+        let service = test_auto_connected_catalog_service();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let input = AllowanceBundleInput {
+            service_ref: service.id.clone(),
+            target_kind: BillingTargetKind::AllUsers,
+            target_user_ids: vec![],
+            target_org_ids: vec![],
+            target_group_ids: vec![],
+            created_by: "admin".into(),
+            units: vec![AllowanceUnitInput {
+                metric: BillingMetric::Requests,
+                quantity: 10,
+                recurrence: AllowanceRecurrence::Daily,
+            }],
+        };
+        assert!(matches!(
+            create_allowance_bundle(&db, input.clone()).await,
+            Err(AppError::DatabaseError(_))
+        ));
+        assert!(list_allowances(&db, true).await.unwrap().is_empty());
+        let row = create_allowance(
+            &db,
+            CreateAllowanceInput {
+                service_ref: service.id,
+                metric: Some(BillingMetric::Requests),
+                quantity: 10,
+                recurrence: AllowanceRecurrence::Daily,
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: vec![],
+                target_org_ids: vec![],
+                target_group_ids: vec![],
+                created_by: "admin".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            replace_allowance_bundle(&db, &row.id, input).await,
+            Err(AppError::DatabaseError(_))
+        ));
+        assert!(matches!(
+            set_bundle_active(&db, &row.id, false).await,
+            Err(AppError::DatabaseError(_))
+        ));
+        let saved = list_allowances(&db, true).await.unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].is_active);
+        assert_eq!(saved[0].bundle_id, None);
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]

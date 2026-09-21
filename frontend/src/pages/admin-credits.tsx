@@ -274,13 +274,9 @@ export function AdminCreditsPage() {
                   unit.recurrence,
                 ) ?? "Invalid quantity")
               : "Disabled";
-          const wasDisabled = editingAllowance.rows.some(
-            (row) => row.metric === metric && !row.is_active,
-          );
-          const beforeDisplay =
-            oldUnit && wasDisabled
-              ? `${show(oldUnit)} · Disabled`
-              : show(oldUnit);
+          // Defaults contain active units only. An absent previous unit is
+          // either new or explicitly re-added; untouched disabled rows stay out.
+          const beforeDisplay = show(oldUnit);
           const afterDisplay = show(newUnit);
           return beforeDisplay === afterDisplay
             ? []

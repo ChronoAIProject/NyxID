@@ -1,15 +1,9 @@
-import { MoreHorizontal } from "lucide-react";
+import { Pencil } from "lucide-react";
 import { billingTargetLabel } from "@/lib/billing-targets";
 import { billingMetricLabel } from "@/lib/billing-units";
 import type { DownstreamService } from "@/types/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import {
   Table,
   TableBody,
@@ -44,7 +38,9 @@ export function AllowancesTable({
         <div key={row.id}>
           {row.quantity.toLocaleString()}{" "}
           {billingMetricLabel(row.metric, row.quantity)} ·{" "}
-          {row.recurrence.replaceAll("_", " ")}
+          <span className="capitalize">
+            {row.recurrence.replaceAll("_", " ")}
+          </span>
           {!row.is_active && (
             <span className="ml-2 text-muted-foreground">Disabled</span>
           )}
@@ -67,28 +63,27 @@ export function AllowancesTable({
   );
   const actions = (bundle: AllowanceBundle) =>
     canWrite && (
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label={`Actions for ${bundle.service_slug}`}
-          >
-            <MoreHorizontal className="size-4" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={() => onEdit(bundle)}>
-            Edit
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            disabled={pending}
-            onSelect={() => onToggle(bundle)}
-          >
-            {bundle.is_active ? "Disable" : "Enable"}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <div className="flex items-center justify-end gap-3">
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          title="Edit allowance"
+          aria-label={`Edit ${bundle.service_slug} allowance`}
+          onClick={() => onEdit(bundle)}
+        >
+          <Pencil className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={pending}
+          onClick={() => onToggle(bundle)}
+        >
+          {bundle.is_active ? "Disable" : "Enable"}
+        </Button>
+      </div>
     );
   if (!bundles.length)
     return (
@@ -104,17 +99,19 @@ export function AllowancesTable({
             key={bundle.id}
             className="relative rounded-xl border border-border/50 bg-card p-4"
           >
-            <div className="absolute right-2 top-2">{actions(bundle)}</div>
-            <div className="pr-8 text-[13px] font-semibold">{name(bundle)}</div>
+            <div className="text-[13px] font-semibold">{name(bundle)}</div>
             <div className="my-2 text-[11px]">{units(bundle)}</div>
             <div className="mb-2 text-[11px] text-muted-foreground">
               {billingTargetLabel(bundle)}
             </div>
-            {status(bundle)}
+            <div className="flex items-center justify-between gap-3">
+              {status(bundle)}
+              {actions(bundle)}
+            </div>
           </div>
         ))}
       </div>
-      <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
+      <div className="hidden overflow-x-auto rounded-lg border border-border md:block">
         <Table>
           <TableHeader>
             <TableRow>

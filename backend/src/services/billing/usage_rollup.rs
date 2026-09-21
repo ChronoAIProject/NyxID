@@ -31,8 +31,10 @@ use crate::{
 };
 
 pub const BATCH_SIZE: i64 = 2_000;
+pub const PENDING_INDEX: &str = "usage_rollup_pending_window";
 const MAX_BATCHES_PER_TICK: usize = 100;
 const TICK_BUDGET: Duration = Duration::from_secs(20);
+const BACKFILL_TICK_BUDGET: Duration = Duration::from_secs(45);
 pub const MEASURES: &[&str] = &[
     "quantity",
     "events",
@@ -66,12 +68,20 @@ pub const DIMENSIONS: &[&str] = &[
 ];
 
 pub fn hour(time: DateTime<Utc>) -> DateTime<Utc> {
-    time.with_minute(0)
-        .unwrap()
-        .with_second(0)
-        .unwrap()
-        .with_nanosecond(0)
-        .unwrap()
+    time - chrono::Duration::seconds(i64::from(time.minute() * 60 + time.second()))
+        - chrono::Duration::nanoseconds(i64::from(time.nanosecond()))
+}
+
+pub fn cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - chrono::Duration::seconds(60)
+}
+
+pub fn tick_budget(watermark: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
+    if watermark < now - chrono::Duration::hours(2) {
+        BACKFILL_TICK_BUDGET
+    } else {
+        TICK_BUDGET
+    }
 }
 
 /// A full equality prefix includes missing pre-deployment markers as null.
@@ -81,7 +91,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     let meters = db.collection::<Document>(METERS);
     for (name, keys) in [
         (
-            "usage_rollup_pending_window",
+            PENDING_INDEX,
             doc! { "rollup_pending": 1, "status": 1, "created_at": -1 },
         ),
         (
@@ -105,6 +115,34 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     ] {
         db.collection::<Document>(ROLLUPS)
             .create_index(IndexModel::builder().keys(keys).build())
+            .await?;
+    }
+    // Cover the common single-partition reduction: fetching tens of thousands
+    // of hourly BSON documents defeats the production dashboard budget even
+    // after removing raw edge scans. All values are scalar or embedded objects
+    // (never arrays), so these indexes can answer the reduction without FETCH.
+    for (name, mut keys) in [
+        ("usage_rollup_reduce_window", doc! { "hour": 1 }),
+        (
+            "usage_rollup_reduce_actor",
+            doc! { "actor": 1, "hour": 1, "owner": 1 },
+        ),
+        (
+            "usage_rollup_reduce_owner",
+            doc! { "owner": 1, "hour": 1, "actor": 1 },
+        ),
+    ] {
+        keys.insert("single_display_key", 1);
+        for field in MEASURES.iter().filter(|field| **field != "rows_folded") {
+            keys.insert(*field, 1);
+        }
+        db.collection::<Document>(ROLLUPS)
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(IndexOptions::builder().name(name.to_owned()).build())
+                    .build(),
+            )
             .await?;
     }
     // Most summaries contain one display partition and use the main hour
@@ -137,16 +175,45 @@ pub fn pending_filter(cutoff: DateTime<Utc>) -> Document {
             // Finalization fixes free-row measurements. Charged rows remain live
             // until wallet release and funding settlement have both completed.
             // Old released rows without a funding object are immutable legacy.
-            { "$or": [ { "wallet_id": null }, { "released": true, "$and": [{ "$or": [ { "funding": null }, { "funding.settled": true } ] }, { "$or": [{ "lago_acked": true }, { "status": "dead_letter" }] }] } ] },
+            { "$or": [ { "wallet_id": null }, { "released": true, "$and": [
+                { "$or": [ { "funding": null }, { "funding.settled": true } ] },
+                // Exact settlements do not wait for Lago availability. Before
+                // ack, require forwarded=true: a permanent Lago rejection can
+                // move finalized -> dead_letter, whose dashboard predicate
+                // excludes unforwarded rows. Forwarded never reverts to false.
+                { "$or": [
+                    { "lago_acked": true }, { "status": "dead_letter" },
+                    { "funding.total_charge_micros": { "$ne": null }, "forwarded": true },
+                ] },
+            ] } ] },
         ],
     }
 }
 
 pub async fn state(db: &Database) -> AppResult<Option<UsageRollupState>> {
-    Ok(db
+    let state = db
         .collection::<UsageRollupState>(STATE)
         .find_one(doc! { "_id": STATE_ID })
-        .await?)
+        .await?;
+    if state.as_ref().is_some_and(|s| {
+        s.sequence < 0
+            || s.sequence == i64::MAX
+            || s.batch.as_ref().is_some_and(|batch| {
+                batch.sequence != s.sequence + 1
+                    || batch.row_ids.is_empty()
+                    || batch.row_ids.len() > BATCH_SIZE as usize
+                    || batch.increments.is_empty()
+            })
+    }) {
+        return Err(AppError::Internal("Invalid usage rollup state".into()));
+    }
+    Ok(state)
+}
+
+async fn required_state(db: &Database) -> AppResult<UsageRollupState> {
+    state(db)
+        .await?
+        .ok_or_else(|| AppError::Internal("Missing usage rollup state".into()))
 }
 
 async fn initialize(db: &Database) -> AppResult<()> {
@@ -185,8 +252,12 @@ async fn claim(
             "$or": [{ "status": "finalized" }, { "forwarded": true }],
         }).projection(doc! { "created_at": 1 }).sort(doc! { "created_at": 1 }).await?;
         let watermark = remaining
-            .and_then(|r| r.get_datetime("created_at").ok().copied())
-            .map(|t| hour(t.to_chrono()))
+            .map(|r| {
+                r.get_datetime("created_at")
+                    .map(|t| t.to_chrono())
+                    .map_err(|_| AppError::Internal("Invalid usage source timestamp".into()))
+            })
+            .transpose()?
             .unwrap_or(cutoff);
         db.collection::<Document>(STATE)
             .update_one(
@@ -205,7 +276,9 @@ async fn claim(
         })
         .collect::<AppResult<_>>()?;
     let mut group = meter_group(true);
-    let key = group.get_document_mut("_id").expect("literal group key");
+    let key = group
+        .get_document_mut("_id")
+        .map_err(|_| AppError::Internal("Invalid usage group key".into()))?;
     key.insert(
         "hour",
         doc! { "$dateTrunc": { "date": "$created_at", "unit": "hour", "timezone": "UTC" } },
@@ -224,8 +297,8 @@ async fn claim(
         .await?;
     let mut combined = std::collections::BTreeMap::<String, Document>::new();
     for group in &mut groups {
-        let Bson::Document(mut key) = group.remove("_id").expect("group key") else {
-            unreachable!()
+        let Some(Bson::Document(mut key)) = group.remove("_id") else {
+            return Err(AppError::Internal("Missing usage group key".into()));
         };
         let mut partition_key = Document::new();
         for field in ["api_key", "acked"] {
@@ -275,7 +348,7 @@ async fn claim(
             }
             existing
                 .get_document_mut("cost_partitions")
-                .expect("partitions")
+                .map_err(|_| AppError::Internal("Invalid usage cost partitions".into()))?
                 .extend(partitions);
         } else {
             combined.insert(hash, group.clone());
@@ -297,7 +370,7 @@ async fn claim(
             doc! { "_id": STATE_ID, "sequence": current.sequence, "batch": null },
             doc! { "$set": {
                 "batch": bson::to_bson(&batch).map_err(|e| AppError::Internal(e.to_string()))?,
-            } },
+            }, "$max": { "folded_before": bson::DateTime::from_chrono(cutoff) } },
         )
         .await?;
     Ok((result.modified_count == 1).then_some(batch))
@@ -399,7 +472,7 @@ async fn apply(
     let mut display_key = Document::new();
     for field in meter_group(true)
         .get_document("_id")
-        .expect("group key")
+        .map_err(|_| AppError::Internal("Invalid usage group key".into()))?
         .keys()
     {
         display_key.insert(
@@ -483,10 +556,10 @@ pub async fn fold_once(db: &Database, now: DateTime<Utc>) -> AppResult<usize> {
     );
     let db = &durable;
     initialize(db).await?;
-    let current = state(db).await?.expect("initialized state");
+    let current = required_state(db).await?;
     let batch = match current.batch {
         Some(batch) => batch,
-        None => match claim(db, &current, hour(now)).await? {
+        None => match claim(db, &current, cutoff(now)).await? {
             Some(batch) => batch,
             None => return Ok(0),
         },
@@ -536,6 +609,18 @@ pub fn spawn_worker(db: Database, config: Arc<AppConfig>) -> Option<tokio::task:
         loop {
             interval.tick().await;
             let start = std::time::Instant::now();
+            let budget = match state(&db).await {
+                Ok(state) => tick_budget(
+                    state
+                        .map(|s| s.rolled_up_through)
+                        .unwrap_or(DateTime::UNIX_EPOCH),
+                    Utc::now(),
+                ),
+                Err(_) => {
+                    tracing::warn!("Usage rollup state unavailable; retrying next tick");
+                    continue;
+                }
+            };
             let mut folded = 0;
             for _ in 0..MAX_BATCHES_PER_TICK {
                 match fold_once(&db, Utc::now()).await {
@@ -546,7 +631,7 @@ pub fn spawn_worker(db: Database, config: Arc<AppConfig>) -> Option<tokio::task:
                         break;
                     }
                 }
-                if start.elapsed() >= TICK_BUDGET {
+                if start.elapsed() >= budget {
                     break;
                 }
             }

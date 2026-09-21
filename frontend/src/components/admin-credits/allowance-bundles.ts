@@ -32,10 +32,12 @@ export function bundleForm(bundle: AllowanceBundle): AllowanceBundleForm {
     service_ref: bundle.service_id,
     target_kind: bundle.target_kind,
     ...normalizedBillingTargets(bundle),
-    units: bundle.rows.map(({ metric, quantity, recurrence }) => ({
-      metric,
-      quantity,
-      recurrence,
-    })),
+    units: bundle.rows
+      .filter((row) => row.is_active)
+      .map(({ metric, quantity, recurrence }) => ({
+        metric,
+        quantity,
+        recurrence,
+      })),
   };
 }

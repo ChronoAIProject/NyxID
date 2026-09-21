@@ -37,6 +37,8 @@ const COUNT_FIELDS: &[&str] = &[
 #[derive(Debug, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct AdminUsageQuery {
+    /// 24h (default), 7d, or 30d. Starts at the UTC hour at/before
+    /// now minus the duration, ends at now; exact bounds are in the response.
     pub period: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
@@ -125,8 +127,12 @@ pub struct UsageRanking {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UsageFreshness {
+    /// Exclusive source-time watermark from the last gap-free sweep: at most
+    /// now minus 60 seconds, or an older unfolded terminal row. Initially epoch.
     pub rolled_up_through: DateTime<Utc>,
     pub tail_rows: i64,
+    /// False when bounded consistency retries returned a best-effort result.
+    pub validated: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -185,7 +191,9 @@ impl AdminUsageQuery {
                     _ => return Err(invalid("period must be 24h, 7d, or 30d")),
                 };
                 UsageWindow {
-                    from: now - chrono::Duration::days(days),
+                    from: crate::services::billing::usage_rollup::hour(
+                        now - chrono::Duration::days(days),
+                    ),
                     to: now,
                     period,
                 }
@@ -733,7 +741,11 @@ fn source_filter(params: &UsageParams, start: DateTime<Utc>, end: DateTime<Utc>)
     filter
 }
 
-fn fast_pipeline(params: &UsageParams, rates: Document) -> Vec<Document> {
+fn fast_pipeline(
+    params: &UsageParams,
+    rates: Document,
+    folded_before: Option<DateTime<Utc>>,
+) -> Vec<Document> {
     use crate::services::billing::usage_rollup::{DIMENSIONS, MEASURES, hour};
     let from_hour = hour(params.window.from);
     let start = if params.window.from == from_hour {
@@ -741,7 +753,13 @@ fn fast_pipeline(params: &UsageParams, rates: Document) -> Vec<Document> {
     } else {
         from_hour + chrono::Duration::hours(1)
     };
-    let end = hour(params.window.to).max(start);
+    // The journal publishes an upper bound before any summary increment. A
+    // live end beyond that bound can include the current, partially filled
+    // bucket. Historical custom edges still read their indexed raw ranges.
+    let to_hour = hour(params.window.to);
+    let include_partial_end =
+        params.window.to > to_hour && folded_before.is_some_and(|bound| bound <= params.window.to);
+    let end = (to_hour + chrono::Duration::hours(i64::from(include_partial_end))).max(start);
     let mut key = Document::new();
     for field in DIMENSIONS {
         key.insert(*field, format!("${field}"));
@@ -765,15 +783,31 @@ fn fast_pipeline(params: &UsageParams, rates: Document) -> Vec<Document> {
     }
     let mut initial_group = regroup.clone();
     initial_group.insert("_id", "$single_display_key");
+    initial_group.remove("rows_folded");
+    initial_group.insert("tail_rows", doc! { "$sum": 0_i64 });
     let mut partition_group = regroup.clone();
     partition_group.insert("_id", canonical_key);
     for field in COST_FIELDS {
-        initial_group.insert(*field, doc! { "$sum": format!("$query_costs.{field}") });
+        initial_group.insert(*field, doc! { "$sum": format!("${field}") });
         partition_group.insert(
             *field,
             doc! { "$sum": { "$toDecimal": format!("${field}") } },
         );
     }
+    // Persisted funding costs are nonnegative int64 (billing::amounts).
+    // Sum integers exactly until overflow; Mongo promotes an overflowing sum
+    // to double, which is necessarily >= i64::MAX and saturates here. Convert
+    // only the reduced groups to Decimal128 for the shared legacy price path.
+    // This avoids decoding/adding a Decimal128 for every hourly source value.
+    let bounded_costs: Document = COST_FIELDS
+        .iter()
+        .map(|field| {
+            (
+                (*field).to_owned(),
+                Bson::Document(doc! { "$toDecimal": { "$min": [i64::MAX, format!("${field}")] } }),
+            )
+        })
+        .collect();
     let mut single_filter = source_filter(params, start, end);
     single_filter.insert("single_display_key", doc! { "$ne": null });
     let mut partition_filter = source_filter(params, start, end);
@@ -793,34 +827,9 @@ fn fast_pipeline(params: &UsageParams, rates: Document) -> Vec<Document> {
         doc! { "$set": unfold },
         doc! { "$group": partition_group },
     ];
-    let mut pipeline = vec![
-        doc! { "$match": single_filter },
-        doc! { "$group": initial_group },
-        doc! { "$unionWith": { "coll": crate::models::usage_rollup_hourly::COLLECTION_NAME, "pipeline": partition_pipeline } },
-        doc! { "$group": regroup },
-        doc! { "$set": { "rate": { "$ifNull": [
-            { "$getField": { "field": { "$concat": ["$_id.code", ":", { "$ifNull": ["$_id.model", "*"] }] }, "input": { "$literal": rates.clone() } } },
-            { "$getField": { "field": { "$concat": ["$_id.code", ":*"] }, "input": { "$literal": rates } } }, null,
-        ] } } },
-    ];
-    // Separate disjoint indexed ranges prevent the planner from satisfying a
-    // broad OR with a full-window status/date scan over already-folded rows.
-    let mut branches = Vec::new();
-    for (from, to, pending_only) in [
-        (
-            start.max(params.window.from),
-            end.min(params.window.to),
-            true,
-        ),
-        (params.window.from, start.min(params.window.to), false),
-        (end.max(params.window.from), params.window.to, false),
-    ] {
-        if from >= to {
-            continue;
-        }
+    let raw_filter = |from: DateTime<Utc>, to: DateTime<Utc>, pending_only: bool| {
         let mut filter = meter_filter(params, false);
-        // Keep status/date as one indexable range. A query-level terminal OR
-        // lets Mongo choose an unbounded status index for one OR branch.
+        // Keep status/date as one indexable range for historical raw edges.
         filter.remove("$or");
         filter.insert(
             "$expr",
@@ -830,9 +839,38 @@ fn fast_pipeline(params: &UsageParams, rates: Document) -> Vec<Document> {
         if pending_only {
             filter.insert("rollup_pending", doc! { "$in": [true, null] });
         }
-        branches.push(doc! { "$unionWith": { "coll": COLLECTION_NAME, "pipeline": [doc! { "$match": filter }, meter_flags(), doc! { "$group": raw_group.clone() }] } });
+        filter
+    };
+    // The root scan is always the pending tail so the aggregate's explicit
+    // index hint applies to it. MongoDB may otherwise choose the old status/date
+    // index inside unionWith and fetch every already-folded row in the window.
+    // An inverted/empty interior range correctly produces no root documents.
+    let mut pipeline = vec![
+        doc! { "$match": raw_filter(start.max(params.window.from), end.min(params.window.to), true) },
+        meter_flags(),
+        doc! { "$group": raw_group.clone() },
+        doc! { "$unionWith": { "coll": crate::models::usage_rollup_hourly::COLLECTION_NAME, "pipeline": [
+            doc! { "$match": single_filter }, doc! { "$group": initial_group }, doc! { "$set": bounded_costs },
+        ] } },
+        doc! { "$unionWith": { "coll": crate::models::usage_rollup_hourly::COLLECTION_NAME, "pipeline": partition_pipeline } },
+    ];
+    for (from, to) in [
+        (params.window.from, start.min(params.window.to)),
+        (end.max(params.window.from), params.window.to),
+    ] {
+        if from < to {
+            pipeline.push(doc! { "$unionWith": { "coll": COLLECTION_NAME, "pipeline": [
+                doc! { "$match": raw_filter(from, to, false) }, meter_flags(), doc! { "$group": raw_group.clone() },
+            ] } });
+        }
     }
-    pipeline.splice(3..3, branches);
+    pipeline.extend([
+        doc! { "$group": regroup },
+        doc! { "$set": { "rate": { "$ifNull": [
+            { "$getField": { "field": { "$concat": ["$_id.code", ":", { "$ifNull": ["$_id.model", "*"] }] }, "input": { "$literal": rates.clone() } } },
+            { "$getField": { "field": { "$concat": ["$_id.code", ":*"] }, "input": { "$literal": rates } } }, null,
+        ] } } },
+    ]);
     let mut price = base_pipeline(params).split_off(6);
     price[0].get_document_mut("$set").expect("price set").insert("unknown", doc! { "$and": ["$_id.billable", { "$gt": ["$legacy_quantity", 0] }, { "$eq": [{ "$ifNull": ["$rate", null] }, null] }] });
     pipeline.extend(price);
@@ -881,70 +919,128 @@ async fn cached_rates(db: &mongodb::Database) -> AppResult<Document> {
         .collect())
 }
 
+const MAX_READ_ATTEMPTS: usize = 8;
+
 async fn fast_aggregate(
     db: &mongodb::Database,
     params: &UsageParams,
 ) -> AppResult<(Document, UsageFreshness)> {
+    let snapshot = crate::services::billing::usage_rollup::supports_transactions(db).await?;
+    fast_aggregate_with_mode(db, params, snapshot).await
+}
+
+async fn fast_aggregate_with_mode(
+    db: &mongodb::Database,
+    params: &UsageParams,
+    snapshot: bool,
+) -> AppResult<(Document, UsageFreshness)> {
     use crate::services::billing::usage_rollup;
-    let pipeline = fast_pipeline(params, cached_rates(db).await?);
-    let snapshot = usage_rollup::supports_transactions(db).await?;
-    loop {
+    let rates = cached_rates(db).await?;
+    let mut last_completed = None;
+    for attempt in 0..MAX_READ_ATTEMPTS {
         let before = usage_rollup::state(db).await?;
-        if !snapshot && before.as_ref().is_some_and(|s| s.batch.is_some()) {
+        let active = before.as_ref().is_some_and(|s| s.batch.is_some());
+        if !snapshot && active && attempt + 1 < MAX_READ_ATTEMPTS {
             tokio::time::sleep(Duration::from_millis(10)).await;
             continue;
         }
-        // An idle journal can validate a normal read without retaining a
-        // historical snapshot. This also avoids stale read timestamps on an
-        // otherwise idle replica set with a short snapshot-history window.
-        let use_snapshot = snapshot && before.as_ref().is_some_and(|s| s.batch.is_some());
-        let collection =
-            db.collection::<Document>(crate::models::usage_rollup_hourly::COLLECTION_NAME);
-        let mut action = collection
-            .aggregate(pipeline.clone())
-            .max_time(QUERY_TIMEOUT)
-            .allow_disk_use(true);
-        if use_snapshot {
-            action = action.read_concern(mongodb::options::ReadConcern::snapshot());
-        }
-        let result = async { action.await?.try_collect::<Vec<Document>>().await }.await;
-        let results = match result {
-            Err(error)
+        // Idle reads validate the journal; active replica-set folds use a
+        // snapshot. Neither contention nor a short snapshot history may keep
+        // a dashboard request retrying until the complete-request timeout.
+        let use_snapshot = snapshot && active;
+        let bound = before.as_ref().and_then(|s| s.folded_before);
+        let result = run_fast_pipeline(db, params, rates.clone(), bound, use_snapshot).await;
+        let result = match result {
+            Err(AppError::DatabaseError(error))
                 if use_snapshot
                     && matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if matches!(command.code, 239 | 246)) =>
             {
                 continue;
             }
-            result => result.map_err(query_error)?,
+            result => result?,
         };
         let after = usage_rollup::state(db).await?;
-        // Seqlock validation covers rollup increments AND source markers,
-        // including on standalone MongoDB. Never return a mixed fold state.
-        if !use_snapshot
-            && (after.as_ref().is_some_and(|s| s.batch.is_some())
-                || before.as_ref().map(|s| s.sequence).unwrap_or(0)
-                    != after.as_ref().map(|s| s.sequence).unwrap_or(0))
-        {
+        // A later claim can advance the upper bound past a historical custom
+        // end. In that case rebuild with raw edges even after a snapshot read.
+        let range_safe = bound.is_none_or(|b| b > params.window.to)
+            || after
+                .as_ref()
+                .and_then(|s| s.folded_before)
+                .is_some_and(|b| b <= params.window.to);
+        if !range_safe {
             continue;
         }
-        let result = results
-            .into_iter()
-            .next()
-            .ok_or_else(|| AppError::Internal("Missing usage summary".into()))?;
-        let tail_rows = documents(&result, "freshness")?
-            .first()
-            .and_then(|row| row.get_i64("tail_rows").ok())
-            .unwrap_or(0);
-        return Ok((
-            result,
-            UsageFreshness {
-                rolled_up_through: after
-                    .map(|s| s.rolled_up_through)
-                    .unwrap_or(DateTime::UNIX_EPOCH),
-                tail_rows,
-            },
-        ));
+        let validated = use_snapshot
+            || (!active
+                && after.as_ref().is_none_or(|s| s.batch.is_none())
+                && before.as_ref().map(|s| s.sequence).unwrap_or(0)
+                    == after.as_ref().map(|s| s.sequence).unwrap_or(0));
+        let completed = with_freshness(result, after, validated)?;
+        if validated {
+            return Ok(completed);
+        }
+        last_completed = Some(completed);
     }
+    if let Some(completed) = last_completed {
+        return Ok(completed);
+    }
+    // Persistent snapshot expiry (or advancing custom edges): one ordinary
+    // read with conservative raw boundary hours guarantees a completed result.
+    // Standalone concurrent writes can skew it by an in-flight bounded batch;
+    // freshness explicitly reports that validation was not obtained.
+    let result = run_fast_pipeline(db, params, rates, None, false).await?;
+    with_freshness(result, usage_rollup::state(db).await?, false)
+}
+
+async fn run_fast_pipeline(
+    db: &mongodb::Database,
+    params: &UsageParams,
+    rates: Document,
+    folded_before: Option<DateTime<Utc>>,
+    snapshot: bool,
+) -> AppResult<Document> {
+    let collection = db.collection::<Document>(COLLECTION_NAME);
+    let mut action = collection
+        .aggregate(fast_pipeline(params, rates, folded_before))
+        .hint(mongodb::options::Hint::Name(
+            crate::services::billing::usage_rollup::PENDING_INDEX.to_owned(),
+        ))
+        .max_time(QUERY_TIMEOUT)
+        .allow_disk_use(true);
+    if snapshot {
+        action = action.read_concern(mongodb::options::ReadConcern::snapshot());
+    }
+    let results = action
+        .await
+        .map_err(query_error)?
+        .try_collect::<Vec<Document>>()
+        .await
+        .map_err(query_error)?;
+    results
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::Internal("Missing usage summary".into()))
+}
+
+fn with_freshness(
+    result: Document,
+    state: Option<crate::models::usage_rollup_state::UsageRollupState>,
+    validated: bool,
+) -> AppResult<(Document, UsageFreshness)> {
+    let tail_rows = documents(&result, "freshness")?
+        .first()
+        .and_then(|row| row.get_i64("tail_rows").ok())
+        .unwrap_or(0);
+    Ok((
+        result,
+        UsageFreshness {
+            rolled_up_through: state
+                .map(|s| s.rolled_up_through)
+                .unwrap_or(DateTime::UNIX_EPOCH),
+            tail_rows,
+            validated,
+        },
+    ))
 }
 
 #[cfg(test)]

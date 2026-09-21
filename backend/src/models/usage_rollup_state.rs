@@ -20,6 +20,10 @@ pub struct UsageRollupState {
     pub id: String,
     pub sequence: i64,
     pub batch: Option<UsageRollupBatch>,
+    /// Exclusive upper bound of every source timestamp ever claimed, including
+    /// the in-flight batch. Lets readers safely use a partially filled hour.
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub folded_before: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub rolled_up_through: DateTime<Utc>,
 }

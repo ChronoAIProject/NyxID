@@ -212,7 +212,10 @@ export function useCreateAllowanceBundle() {
       allowanceBundleResponseSchema.parse(
         await api.post<unknown>(
           "/admin/credits/allowances",
-          allowanceBundleFormSchema.parse(form),
+          allowanceBundleFormSchema.parse({
+            ...form,
+            ...normalizedBillingTargets(form),
+          }),
         ),
       ),
     onSuccess: () =>
@@ -232,7 +235,10 @@ export function useReplaceAllowanceBundle() {
       allowanceBundleResponseSchema.parse(
         await api.put<unknown>(
           `/admin/credits/allowances/bundles/${encodeURIComponent(id)}`,
-          allowanceBundleFormSchema.parse(body),
+          allowanceBundleFormSchema.parse({
+            ...body,
+            ...normalizedBillingTargets(body),
+          }),
         ),
       ),
     onSuccess: () =>

@@ -656,8 +656,12 @@ export function AdminUsagePage() {
               {new Date(data.window.to).toLocaleString()} ·{" "}
               {data.freshness && (
                 <>
-                  Live · includes {data.freshness.tail_rows.toLocaleString()}{" "}
-                  unfolded rows ·{" "}
+                  {new Date(data.freshness.rolled_up_through) <
+                  new Date(data.window.from)
+                    ? `Backfilling history · rollups complete through ${new Date(data.freshness.rolled_up_through).toLocaleString()}`
+                    : `Live · includes ${data.freshness.tail_rows.toLocaleString()} unfolded rows`}
+                  {data.freshness.validated === false && " · Updating totals"}{" "}
+                  ·{" "}
                 </>
               )}
               {formatNumber(data.totals.events)} metered events ·{" "}

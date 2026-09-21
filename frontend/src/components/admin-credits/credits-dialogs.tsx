@@ -429,8 +429,9 @@ export function AllowanceDialog({
                   {editingAllowance && (
                     <p className="text-[11px] text-muted-foreground">
                       Removing a unit disables its allowance when you save.
-                      Existing consumption is retained. Saving enables the
-                      listed units.
+                      Existing consumption is retained. Disabled units stay
+                      disabled unless you add them again. Use Enable to restore
+                      all units.
                     </p>
                   )}
                 </div>
