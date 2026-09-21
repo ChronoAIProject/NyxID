@@ -2028,7 +2028,7 @@ Contract guarantees for `contract_version: "1.0"`:
 - `is_generic_proxy: true` means the service exposes only NyxID's generic HTTP request operation. It is not a declared OpenAPI operation and must not be admitted as one.
 - Only currently executable operations are in `services`. Credential-unavailable services are counted in diagnostics but omitted. Service and node scope restrictions are applied before publication.
 - `service_scope_restricted` and `node_scope_restricted` report that caller scope is active. `node_scope_exclusions_present` may explain an omission only after service authorization has established that the service is caller-visible; it is a boolean and never enumerates excluded nodes or services. Diagnostics never include excluded-resource counts, IDs, node topology, credential material, tokens, or internal routing details.
-- REST `/mcp/config` and stateless MCP `tools/list` use the same scoped catalog loader. Stateful MCP sessions may show only the subset activated for that session.
+- REST `/mcp/config` and stateless MCP `tools/list` use the same scoped catalog loader, including auto-connected service expansion. Assistant chat keys discover services before acknowledgement on both surfaces; platform grants and account acknowledgement gate execution, not discovery. MCP adds its protocol-specific account/meta-tools separately. Stateful MCP sessions may show only the subset activated for that session.
 
 `catalog_digest` is the source revision for the normalized descriptor. It is `sha256:<lowercase-hex>` over compact UTF-8 JSON containing exactly `{"contract_version":"1.0","services":[...]}`. Services are sorted by `service_id`, endpoints by `endpoint_id`, and every JSON object key recursively in lexicographic order. `user_id`, `proxy_base_url`, diagnostics, counts, and observation time are excluded. Consumers must not substitute fetch time or a local counter for this digest.
 
@@ -2042,7 +2042,7 @@ Schema contract:
 
 Platform services are included only when the user has a valid connection with satisfied credentials. `provider` services are excluded because they are not proxyable. User-managed services additionally require an executable server credential or an in-scope dispatchable node route.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`), or non-Curation service-account access token. Tokens and API keys require `proxy` or `proxy:*` scope. Scheduled-invocation keys, Curation service accounts, delegated tokens, and relay tokens are rejected.
 
 **Response (200):**
 
@@ -3578,13 +3578,23 @@ Read-only catalog of available service templates for users.
 
 List all available service templates from the admin-managed catalog.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
 
 #### GET /api/v1/catalog/{slug}
 
 Get a specific catalog template by slug.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
+
+#### GET /api/v1/catalog/{slug}/endpoints
+
+Return operations parsed from the admin-configured catalog OpenAPI spec. If no readable catalog template matches, a readable user-service slug can resolve its owner-scoped mounted spec.
+
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
+
+Service accounts remain rejected: catalog detail resolves restricted platform grants through a User actor, while SA tokens carry the SA ID.
+
+Catalog entries use template slugs, resource URIs and skills, with live platform grants determining `platform_key.available` and inference binding/status. They do not include instance overrides or connection flags. API keys can use instance-backed private catalog access and mounted-spec fallback only within their effective service allowlist, including auto-connected expansion, and active Member/Admin org scopes. Org-owned keys act as the org. Catalog discovery does not provision services or reconcile pending OAuth credentials.
 
 ---
 
