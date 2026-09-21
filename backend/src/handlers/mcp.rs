@@ -2,7 +2,7 @@ use axum::{Json, extract::State};
 use serde::Serialize;
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::mcp_service;
 
@@ -107,7 +107,22 @@ pub async fn get_mcp_config(
         mcp_service::NodeScope::Allowed(auth_user.allowed_node_ids.as_slice())
     };
 
-    let service_scope = if auth_user.allow_all_services {
+    let chat = crate::services::assistant_acknowledgement_service::for_key(
+        &state.db,
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+    )
+    .await
+    .map_err(|error| match error {
+        AppError::NotFound(_) => {
+            AppError::Unauthorized("Invalid authentication credentials".to_string())
+        }
+        error => error,
+    })?;
+    // Match MCP tools/list: chat keys discover services before acknowledgement.
+    // allowed_platform_service_ids and account_acknowledged gate execution,
+    // not this catalog. MCP-only account/meta-tools are added by the transport.
+    let service_scope = if chat.is_some() || auth_user.allow_all_services {
         mcp_service::ServiceScope::Unrestricted
     } else {
         mcp_service::ServiceScope::Allowed(auth_user.allowed_service_ids.as_slice())

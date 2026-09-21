@@ -5156,3 +5156,7 @@ mod curation_auth_regressions {
 #[cfg(test)]
 #[path = "mcp_chat_authority_tests.rs"]
 mod chat_authority_tests;
+
+#[cfg(test)]
+#[path = "mcp_config_routes_tests.rs"]
+mod config_routes_tests;

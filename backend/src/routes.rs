@@ -673,8 +673,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/", get(handlers::sessions::list_sessions))
         .route("/{id}", delete(handlers::sessions::revoke_own_session));
 
-    let mcp_routes = Router::new().route("/config", get(handlers::mcp::get_mcp_config));
-
     let connection_routes = Router::new()
         .route("/", get(handlers::connections::list_connections))
         .route(
@@ -1765,6 +1763,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
         .merge(service_inventory_read_routes)
+        // Like authenticate_mcp: sessions, proxy-scoped access tokens, general
+        // API keys (including chat keys), and non-Curation service accounts.
+        // AuthUser rejects scheduled keys and Curation SAs; the handler checks
+        // proxy scope. REST discovery retains the delegated/relay rejection
+        // layers below, even though the MCP transport accepts those classes.
+        .route("/mcp/config", get(handlers::mcp::get_mcp_config))
         .route(
             "/auth/agent-key/self",
             get(handlers::auth_agent_key::get_self).delete(handlers::auth_agent_key::delete_self),
@@ -2005,7 +2009,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/docs/asyncapi.json", get(handlers::docs::asyncapi_json))
         .merge(ssh_billing_routes)
         .nest("/sessions", session_routes)
-        .nest("/mcp", mcp_routes)
         .nest("/developer", developer_routes)
         .nest("/admin", admin_routes)
         .nest("/notifications", notification_routes)
