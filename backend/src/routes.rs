@@ -970,6 +970,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::billing_credits::create_allowance),
         )
         .route(
+            "/credits/allowances/bundles/{bundle_key}",
+            put(handlers::billing_credits::replace_allowance_bundle)
+                .patch(handlers::billing_credits::set_allowance_bundle_active),
+        )
+        .route(
             "/credits/allowances/{allowance_id}",
             patch(handlers::billing_credits::update_allowance),
         )

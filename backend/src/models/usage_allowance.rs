@@ -20,6 +20,8 @@ pub enum AllowanceRecurrence {
 pub struct UsageAllowance {
     #[serde(rename = "_id")]
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
     pub service_id: String,
     pub service_slug: String,
     pub metric: BillingMetric,

@@ -241,6 +241,7 @@ export const issueGrantResponseSchema = z.object({
 
 export const usageAllowanceSchema = z.object({
   id: z.string(),
+  bundle_id: z.string().nullable().optional(),
   service_id: z.string(),
   service_slug: z.string(),
   metric: billingMetricSchema,
@@ -344,3 +345,33 @@ function refineBillingTargets(
     }
   }
 }
+
+export const allowanceUnitSchema = z.object({
+  metric: billingMetricSchema,
+  quantity: z.number().int().min(1).max(1_000_000_000_000),
+  recurrence: allowanceRecurrenceSchema,
+});
+export const allowanceBundleFormSchema = z
+  .object({
+    service_ref: z.string().min(1, "Select a service"),
+    target_kind: billingTargetKindSchema,
+    target_user_ids: z.array(z.string()).max(500),
+    target_org_ids: z.array(z.string()).optional(),
+    target_group_ids: z.array(z.string()).optional(),
+    units: z.array(allowanceUnitSchema).min(1).max(16),
+  })
+  .superRefine((value, ctx) => {
+    refineBillingTargets(value, ctx);
+    if (new Set(value.units.map((u) => u.metric)).size !== value.units.length) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["units"],
+        message: "Choose each unit only once",
+      });
+    }
+  });
+export const allowanceBundleResponseSchema = z.object({
+  bundle_id: z.string(),
+  allowances: z.array(usageAllowanceSchema),
+});
+export type AllowanceBundleForm = z.infer<typeof allowanceBundleFormSchema>;

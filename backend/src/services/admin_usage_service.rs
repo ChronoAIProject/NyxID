@@ -124,7 +124,14 @@ pub struct UsageRanking {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct UsageFreshness {
+    pub rolled_up_through: DateTime<Utc>,
+    pub tail_rows: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AdminUsageResponse {
+    pub freshness: UsageFreshness,
     pub window: UsageWindow,
     pub totals: UsageStats,
     pub by_service: Vec<UsageService>,
@@ -274,9 +281,7 @@ fn legacy_cost(quantity: &str) -> Bson {
     .into()
 }
 
-/// First group at the billing display's exact/legacy rate dimensions, plus
-/// actor/owner/credential attribution. No per-row rate queries or Rust sums.
-fn base_pipeline(params: &UsageParams) -> Vec<Document> {
+pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
     let mut group = doc! {
         "_id": {
             "actor": "$actor_user_id", "owner": "$billing_owner_id",
@@ -309,6 +314,25 @@ fn base_pipeline(params: &UsageParams) -> Vec<Document> {
             doc! { "$sum": { "$toDecimal": { "$ifNull": [format!("$funding.{source}"), 0] } } },
         );
     }
+    if !legacy_dimensions {
+        let key = group.get_document_mut("_id").expect("literal group key");
+        key.remove("api_key");
+        key.remove("acked");
+    }
+    group
+}
+
+pub(crate) fn meter_flags() -> Document {
+    doc! { "$set": {
+        "primary": { "$and": [{ "$eq": ["$layer", "platform"] }, { "$eq": ["$transaction_id", { "$concat": ["$billing_request_id", ":platform"] }] }] },
+        "exact": { "$ne": [{ "$ifNull": ["$funding.total_charge_micros", null] }, null] },
+    } }
+}
+
+/// First group at the billing display's exact/legacy rate dimensions, plus
+/// actor/owner/credential attribution. No per-row rate queries or Rust sums.
+fn base_pipeline(params: &UsageParams) -> Vec<Document> {
+    let group = meter_group(true);
     let mut costs = Document::new();
     for (field, legacy) in COST_FIELDS.iter().zip([
         Bson::String("$legacy_gross".into()),
@@ -415,6 +439,7 @@ fn rollup(dimensions: &[&str]) -> Vec<Document> {
     ]
 }
 
+#[cfg(test)]
 fn summary_pipeline(params: &UsageParams) -> Vec<Document> {
     let mut pipeline = base_pipeline(params);
     pipeline.push(doc! { "$facet": {
@@ -426,6 +451,7 @@ fn summary_pipeline(params: &UsageParams) -> Vec<Document> {
     pipeline
 }
 
+#[cfg(test)]
 fn ranking_pipeline(params: &UsageParams) -> Vec<Document> {
     let mut pipeline = base_pipeline(params);
     pipeline.extend(rollup(&["actor", "owner", "service_id", "service_slug"]));
@@ -453,6 +479,7 @@ fn query_error(error: mongodb::error::Error) -> AppError {
     }
 }
 
+#[cfg(test)]
 async fn aggregate(db: &mongodb::Database, pipeline: Vec<Document>) -> AppResult<Vec<Document>> {
     db.collection::<Document>(COLLECTION_NAME)
         .aggregate(pipeline)
@@ -512,22 +539,10 @@ async fn get_usage_inner(
     db: &mongodb::Database,
     params: UsageParams,
 ) -> AppResult<AdminUsageResponse> {
-    let options = vec![
-        doc! { "$match": meter_filter(&params, false) },
-        doc! { "$group": { "_id": { "service_id": { "$ifNull": ["$service_id", null] }, "service_slug": { "$ifNull": ["$service_slug", null] } } } },
-        doc! { "$sort": { "_id.service_slug": 1, "_id.service_id": 1 } },
-    ];
-    let (summary, ranking, options) = tokio::try_join!(
-        aggregate(db, summary_pipeline(&params)),
-        aggregate(db, ranking_pipeline(&params)),
-        aggregate(db, options),
-    )?;
-    let summary = summary
-        .first()
-        .ok_or_else(|| AppError::Internal("Missing usage summary".into()))?;
-    let ranking = ranking
-        .first()
-        .ok_or_else(|| AppError::Internal("Missing usage ranking".into()))?;
+    let (result, freshness) = fast_aggregate(db, &params).await?;
+    let summary = &result;
+    let ranking = &result;
+    let options = documents(&result, "options")?;
     let rank_rows = documents(ranking, "ranking")?;
     let service_rows = documents(summary, "services")?;
     let mut user_ids = HashSet::new();
@@ -689,6 +704,7 @@ async fn get_usage_inner(
         })
         .unwrap_or(0);
     Ok(AdminUsageResponse {
+        freshness,
         window: params.window,
         totals,
         by_service,
@@ -707,6 +723,228 @@ async fn get_usage_inner(
             .collect::<AppResult<_>>()?,
         selected_user: params.user.as_deref().map(identity),
     })
+}
+
+fn source_filter(params: &UsageParams, start: DateTime<Utc>, end: DateTime<Utc>) -> Document {
+    let mut filter = doc! { "hour": { "$gte": bson::DateTime::from_chrono(start), "$lt": bson::DateTime::from_chrono(end) } };
+    if let Some(user) = &params.user {
+        filter.insert("$or", vec![doc! { "actor": user }, doc! { "owner": user }]);
+    }
+    filter
+}
+
+fn fast_pipeline(params: &UsageParams, rates: Document) -> Vec<Document> {
+    use crate::services::billing::usage_rollup::{DIMENSIONS, MEASURES, hour};
+    let from_hour = hour(params.window.from);
+    let start = if params.window.from == from_hour {
+        from_hour
+    } else {
+        from_hour + chrono::Duration::hours(1)
+    };
+    let end = hour(params.window.to).max(start);
+    let mut key = Document::new();
+    for field in DIMENSIONS {
+        key.insert(*field, format!("${field}"));
+    }
+    let mut raw_group = meter_group(true);
+    raw_group.insert(
+        "tail_rows",
+        doc! { "$sum": { "$cond": [{ "$eq": ["$rollup_pending", false] }, 0_i64, 1_i64] } },
+    );
+    // BSON object key order is significant to grouping. Rebuild one canonical
+    // key for both raw groups and unfolded summaries before legacy rounding.
+    let canonical_key: Document = raw_group
+        .get_document("_id")
+        .expect("literal group key")
+        .keys()
+        .map(|field| (field.clone(), Bson::String(format!("$_id.{field}"))))
+        .collect();
+    let mut regroup = doc! { "_id": "$_id", "tail_rows": { "$sum": "$tail_rows" } };
+    for field in MEASURES {
+        regroup.insert(*field, doc! { "$sum": format!("${field}") });
+    }
+    let mut initial_group = regroup.clone();
+    initial_group.insert("_id", "$single_display_key");
+    let mut partition_group = regroup.clone();
+    partition_group.insert("_id", canonical_key);
+    for field in COST_FIELDS {
+        initial_group.insert(*field, doc! { "$sum": format!("$query_costs.{field}") });
+        partition_group.insert(
+            *field,
+            doc! { "$sum": { "$toDecimal": format!("${field}") } },
+        );
+    }
+    let mut single_filter = source_filter(params, start, end);
+    single_filter.insert("single_display_key", doc! { "$ne": null });
+    let mut partition_filter = source_filter(params, start, end);
+    partition_filter.insert("single_display_key", Bson::Null);
+    let mut unfold = doc! { "_id": { "$mergeObjects": [key, { "$ifNull": ["$part.key", {}] }] }, "tail_rows": 0_i64 };
+    for field in MEASURES {
+        unfold.insert(*field, format!("$part.{field}"));
+    }
+    let partition_pipeline = vec![
+        doc! { "$match": partition_filter },
+        doc! { "$set": { "part": { "$cond": [
+            { "$gt": [{ "$size": { "$objectToArray": { "$ifNull": ["$cost_partitions", {}] } } }, 0] },
+            { "$map": { "input": { "$objectToArray": "$cost_partitions" }, "as": "part", "in": "$$part.v" } },
+            ["$$ROOT"],
+        ] } } },
+        doc! { "$unwind": "$part" },
+        doc! { "$set": unfold },
+        doc! { "$group": partition_group },
+    ];
+    let mut pipeline = vec![
+        doc! { "$match": single_filter },
+        doc! { "$group": initial_group },
+        doc! { "$unionWith": { "coll": crate::models::usage_rollup_hourly::COLLECTION_NAME, "pipeline": partition_pipeline } },
+        doc! { "$group": regroup },
+        doc! { "$set": { "rate": { "$ifNull": [
+            { "$getField": { "field": { "$concat": ["$_id.code", ":", { "$ifNull": ["$_id.model", "*"] }] }, "input": { "$literal": rates.clone() } } },
+            { "$getField": { "field": { "$concat": ["$_id.code", ":*"] }, "input": { "$literal": rates } } }, null,
+        ] } } },
+    ];
+    // Separate disjoint indexed ranges prevent the planner from satisfying a
+    // broad OR with a full-window status/date scan over already-folded rows.
+    let mut branches = Vec::new();
+    for (from, to, pending_only) in [
+        (
+            start.max(params.window.from),
+            end.min(params.window.to),
+            true,
+        ),
+        (params.window.from, start.min(params.window.to), false),
+        (end.max(params.window.from), params.window.to, false),
+    ] {
+        if from >= to {
+            continue;
+        }
+        let mut filter = meter_filter(params, false);
+        // Keep status/date as one indexable range. A query-level terminal OR
+        // lets Mongo choose an unbounded status index for one OR branch.
+        filter.remove("$or");
+        filter.insert(
+            "$expr",
+            doc! { "$or": [{ "$eq": ["$status", "finalized"] }, { "$eq": ["$forwarded", true] }] },
+        );
+        filter.insert("created_at", doc! { "$gte": bson::DateTime::from_chrono(from), "$lt": bson::DateTime::from_chrono(to) });
+        if pending_only {
+            filter.insert("rollup_pending", doc! { "$in": [true, null] });
+        }
+        branches.push(doc! { "$unionWith": { "coll": COLLECTION_NAME, "pipeline": [doc! { "$match": filter }, meter_flags(), doc! { "$group": raw_group.clone() }] } });
+    }
+    pipeline.splice(3..3, branches);
+    let mut price = base_pipeline(params).split_off(6);
+    price[0].get_document_mut("$set").expect("price set").insert("unknown", doc! { "$and": ["$_id.billable", { "$gt": ["$legacy_quantity", 0] }, { "$eq": [{ "$ifNull": ["$rate", null] }, null] }] });
+    pipeline.extend(price);
+    let selected = || -> Vec<Document> {
+        params.service.as_ref().map(|s| vec![doc! { "$match": { "$or": [{ "_id.service_id": s }, { "_id.service_slug": s }] } }]).unwrap_or_default()
+    };
+    let reduced = |dimensions: &[&str]| {
+        let mut stages = selected();
+        stages.extend(rollup(dimensions));
+        stages
+    };
+    let sort = match params.sort.as_str() {
+        "quantity" => format!("quantities.{}", params.metric),
+        "cost" => "gross_cost_micros".into(),
+        value => value.into(),
+    };
+    let mut ranking = reduced(&["actor", "owner", "service_id", "service_slug"]);
+    ranking.extend([doc! { "$sort": { sort: -1, "_id.actor": 1, "_id.owner": 1, "_id.service_slug": 1, "_id.service_id": 1 } }, doc! { "$skip": params.offset }, doc! { "$limit": params.per_page as i64 }]);
+    let mut total = reduced(&["actor", "owner", "service_id", "service_slug"]);
+    total.push(doc! { "$count": "count" });
+    let mut freshness = selected();
+    freshness.push(doc! { "$group": { "_id": null, "tail_rows": { "$sum": "$tail_rows" } } });
+    pipeline.push(doc! { "$facet": {
+        "totals": reduced(&[]), "services": reduced(&["service_id", "service_slug"]),
+        "classes": reduced(&["class"]), "service_classes": reduced(&["service_id", "service_slug", "class"]),
+        "ranking": ranking, "total": total, "freshness": freshness,
+        "options": [ { "$group": { "_id": { "service_id": "$_id.service_id", "service_slug": "$_id.service_slug" } } }, { "$sort": { "_id.service_slug": 1, "_id.service_id": 1 } } ],
+    } });
+    pipeline
+}
+
+async fn cached_rates(db: &mongodb::Database) -> AppResult<Document> {
+    let rows: Vec<Document> = db
+        .collection::<Document>("billing_rate_cache")
+        .find(doc! {})
+        .projection(doc! { "credits_per_unit_micros": 1, "credits_per_unit_pico": 1 })
+        .max_time(QUERY_TIMEOUT)
+        .await
+        .map_err(query_error)?
+        .try_collect()
+        .await
+        .map_err(query_error)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| Some((row.get_str("_id").ok()?.to_owned(), Bson::Document(row))))
+        .collect())
+}
+
+async fn fast_aggregate(
+    db: &mongodb::Database,
+    params: &UsageParams,
+) -> AppResult<(Document, UsageFreshness)> {
+    use crate::services::billing::usage_rollup;
+    let pipeline = fast_pipeline(params, cached_rates(db).await?);
+    let snapshot = usage_rollup::supports_transactions(db).await?;
+    loop {
+        let before = usage_rollup::state(db).await?;
+        if !snapshot && before.as_ref().is_some_and(|s| s.batch.is_some()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        }
+        // An idle journal can validate a normal read without retaining a
+        // historical snapshot. This also avoids stale read timestamps on an
+        // otherwise idle replica set with a short snapshot-history window.
+        let use_snapshot = snapshot && before.as_ref().is_some_and(|s| s.batch.is_some());
+        let collection =
+            db.collection::<Document>(crate::models::usage_rollup_hourly::COLLECTION_NAME);
+        let mut action = collection
+            .aggregate(pipeline.clone())
+            .max_time(QUERY_TIMEOUT)
+            .allow_disk_use(true);
+        if use_snapshot {
+            action = action.read_concern(mongodb::options::ReadConcern::snapshot());
+        }
+        let result = async { action.await?.try_collect::<Vec<Document>>().await }.await;
+        let results = match result {
+            Err(error)
+                if use_snapshot
+                    && matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if matches!(command.code, 239 | 246)) =>
+            {
+                continue;
+            }
+            result => result.map_err(query_error)?,
+        };
+        let after = usage_rollup::state(db).await?;
+        // Seqlock validation covers rollup increments AND source markers,
+        // including on standalone MongoDB. Never return a mixed fold state.
+        if !use_snapshot
+            && (after.as_ref().is_some_and(|s| s.batch.is_some())
+                || before.as_ref().map(|s| s.sequence).unwrap_or(0)
+                    != after.as_ref().map(|s| s.sequence).unwrap_or(0))
+        {
+            continue;
+        }
+        let result = results
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::Internal("Missing usage summary".into()))?;
+        let tail_rows = documents(&result, "freshness")?
+            .first()
+            .and_then(|row| row.get_i64("tail_rows").ok())
+            .unwrap_or(0);
+        return Ok((
+            result,
+            UsageFreshness {
+                rolled_up_through: after
+                    .map(|s| s.rolled_up_through)
+                    .unwrap_or(DateTime::UNIX_EPOCH),
+                tail_rows,
+            },
+        ));
+    }
 }
 
 #[cfg(test)]

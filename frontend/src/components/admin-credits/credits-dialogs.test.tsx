@@ -1,7 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { AllowanceForm, IssueGrantForm } from "@/schemas/billing-credits";
+import type {
+  AllowanceBundleForm as AllowanceForm,
+  IssueGrantForm,
+} from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
 import { useAppForm } from "@/components/ui/form";
 import { AllowanceDialog, GrantDialog } from "./credits-dialogs";
@@ -41,8 +44,7 @@ function AllowanceHarness({
   const form = useAppForm<AllowanceForm>({
     defaultValues: {
       service_ref: "",
-      quantity: 1_000_000,
-      recurrence: "monthly",
+      units: [{ metric: "tokens", quantity: 1_000_000, recurrence: "monthly" }],
       target_kind: "all_users",
       target_user_ids: [],
     },
@@ -120,12 +122,12 @@ describe("credits dialogs", () => {
   it("updates the allowance label and preview from the selected service metric", () => {
     render(<AllowanceHarness />);
 
-    expect(screen.getByText("Free units")).toBeInTheDocument();
+    expect(screen.getByText("Free quantity")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Token service"));
 
-    expect(screen.getByText("Free tokens")).toBeInTheDocument();
+    expect(screen.getByText("Free quantity")).toBeInTheDocument();
     expect(
-      screen.getByText(/1,000,000 tokens \(1M\) free each month/),
+      screen.getByText(/1,000 tokens \(1K\) free each month/),
     ).toBeInTheDocument();
   });
 
@@ -144,20 +146,20 @@ it("selects the allowance unit for mixed credential lanes", async () => {
   const onSubmit = vi.fn().mockResolvedValue(undefined);
   render(<AllowanceHarness mixed onSubmit={onSubmit} />);
   await userEvent.click(screen.getByText("Token service"));
-  await userEvent.click(
-    screen.getByRole("combobox", { name: "Allowance unit" }),
-  );
+  await userEvent.click(screen.getByRole("combobox", { name: "Unit" }));
   expect(
     screen.getByRole("option", { name: "cache-read tokens" }),
   ).toBeInTheDocument();
   expect(screen.getByRole("option", { name: "images" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("option", { name: "requests" }));
-  expect(screen.getByText("Free requests")).toBeInTheDocument();
+  expect(screen.getByText("Free quantity")).toBeInTheDocument();
   await userEvent.click(
     screen.getByRole("button", { name: "Create allowance" }),
   );
   expect(onSubmit).toHaveBeenCalledWith(
-    expect.objectContaining({ metric: "requests" }),
+    expect.objectContaining({
+      units: [expect.objectContaining({ metric: "requests" })],
+    }),
     expect.anything(),
   );
 });
@@ -196,9 +198,7 @@ it.each([
       />,
     );
     await userEvent.click(screen.getByText("Token service"));
-    await userEvent.click(
-      screen.getByRole("combobox", { name: "Allowance unit" }),
-    );
+    await userEvent.click(screen.getByRole("combobox", { name: "Unit" }));
     expect(
       screen.getByRole("option", { name: "input tokens" }),
     ).toBeInTheDocument();
@@ -216,3 +216,34 @@ it.each([
     );
   },
 );
+
+it("adds distinct units, previews them, and retains at least one unit", async () => {
+  const onSubmit = vi.fn().mockResolvedValue(undefined);
+  render(<AllowanceHarness mixed onSubmit={onSubmit} />);
+  await userEvent.click(screen.getByText("Token service"));
+  expect(screen.getByRole("button", { name: "Remove unit" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "Add unit" }));
+  const unitSelectors = screen.getAllByRole("combobox", { name: "Unit" });
+  expect(unitSelectors).toHaveLength(2);
+  await userEvent.click(unitSelectors[1]!);
+  expect(
+    screen.queryByRole("option", { name: "requests" }),
+  ).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("option", { name: "images" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Create allowance" }),
+  );
+  expect(onSubmit).toHaveBeenCalledWith(
+    expect.objectContaining({
+      units: [
+        expect.objectContaining({ metric: "requests" }),
+        expect.objectContaining({ metric: "images" }),
+      ],
+    }),
+    expect.anything(),
+  );
+  await userEvent.click(
+    screen.getAllByRole("button", { name: "Remove unit" })[1]!,
+  );
+  expect(screen.getByRole("button", { name: "Remove unit" })).toBeDisabled();
+});

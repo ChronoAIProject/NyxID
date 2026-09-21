@@ -847,3 +847,396 @@ async fn admin_query_execution_stats() {
     std::fs::write(path, serde_json::to_string_pretty(&evidence).unwrap()).unwrap();
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn hourly_cost_partitions_preserve_legacy_rounding_and_unknown_masking() {
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("rollup_cost_partitions")
+        .await
+        .expect("MongoDB required");
+    let end = hour(Utc::now()) + chrono::Duration::minutes(17);
+    db.collection::<Document>("billing_rate_cache")
+        .insert_one(doc! { "_id": "tokens:*", "credits_per_unit_pico": 600_001_i64 })
+        .await
+        .unwrap();
+    for (key, ack, exact, code) in [
+        ("a", false, false, "tokens"),
+        ("b", false, false, "tokens"),
+        ("a", true, false, "tokens"),
+        ("c", true, false, "missing"),
+        ("d", true, true, "missing"),
+    ] {
+        let mut row = meter("actor", "owner", "service", 1);
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(end - chrono::Duration::hours(2)),
+        );
+        row.insert("api_key_id", key);
+        row.insert("lago_acked", ack);
+        if !ack {
+            row.insert("status", "dead_letter");
+        }
+        row.insert("wallet_id", "wallet");
+        row.insert("released", true);
+        row.insert("lago_metric_code", code);
+        if exact {
+            row.insert(
+                "funding",
+                doc! { "settled": true, "total_charge_micros": 17_i64 },
+            );
+        }
+        insert(&db, row).await;
+    }
+    // This row stays in the current-hour raw tail. Its display group must
+    // combine with the folded "a" / unacked group before truncation: two
+    // 0.600001-microcredit quantities yield one microcredit, not two zeros.
+    let mut tail = meter("actor", "owner", "service", 1);
+    tail.insert(
+        "created_at",
+        bson::DateTime::from_chrono(end - chrono::Duration::seconds(1)),
+    );
+    tail.insert("api_key_id", "a");
+    tail.insert("lago_acked", false);
+    tail.insert("status", "dead_letter");
+    tail.insert("wallet_id", "wallet");
+    tail.insert("released", true);
+    insert(&db, tail).await;
+    let params = query().validate(end).unwrap();
+    let oracle = aggregate(&db, summary_pipeline(&params)).await.unwrap();
+    let expected = stats(&documents(&oracle[0], "totals").unwrap()[0]).unwrap();
+    assert_eq!(expected.gross_cost_micros, Some(18));
+    let before = get_usage(&db, query().validate(end).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&before.totals).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+    while fold_once(&db, end).await.unwrap() > 0 {}
+    let after = get_usage(&db, query().validate(end).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&after.totals).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+    db.drop().await.unwrap();
+}
+
+/// Production-density seed: 72 * 25,000 rows, plus a live tail. Use a disposable
+/// replica-set DB via NYXID_TEST_DATABASE_URL. No production data is touched.
+#[tokio::test]
+#[ignore = "seeds 1.8M meters, folds history, checks oracle and latency budgets"]
+async fn hourly_rollup_production_density_benchmark() {
+    use crate::services::billing::usage_rollup::{self, fold_once, hour};
+    use serde_json::json;
+    use std::time::Instant;
+    // Keep a failed benchmark's synthetic data for diagnosis. An explicit
+    // nyxid_benchmark_* database in the existing test URI resumes that seed;
+    // successful runs always drop it. Other database names are rejected.
+    let uri = std::env::var("NYXID_TEST_DATABASE_URL").expect("replica-set test URI required");
+    let options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
+    let name = options
+        .default_database
+        .clone()
+        .unwrap_or_else(|| format!("nyxid_benchmark_{}", uuid::Uuid::new_v4().simple()));
+    assert!(
+        name.starts_with("nyxid_benchmark_"),
+        "benchmark requires a disposable database name"
+    );
+    let client = mongodb::Client::with_options(options).unwrap();
+    let db = client.database(&name);
+    assert!(usage_rollup::supports_transactions(&db).await.unwrap());
+    println!("benchmark database: {}", db.name());
+    crate::db::ensure_indexes(&db).await.unwrap();
+    let metadata = db.collection::<Document>("benchmark_metadata");
+    let previous = metadata.find_one(doc! { "_id": "seed" }).await.unwrap();
+    let end = previous
+        .as_ref()
+        .map(|s| s.get_datetime("end").unwrap().to_chrono())
+        .unwrap_or_else(|| hour(Utc::now()) + chrono::Duration::minutes(17));
+    let first = hour(end) - chrono::Duration::hours(72);
+    let actors: Vec<String> = previous
+        .as_ref()
+        .map(|s| {
+            s.get_array("actors")
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_else(|| (0..15).map(|_| uuid::Uuid::new_v4().to_string()).collect());
+    if previous.is_none() {
+        assert_eq!(
+            db.collection::<Document>(COLLECTION_NAME)
+                .estimated_document_count()
+                .await
+                .unwrap(),
+            0,
+            "partial seed: drop this disposable database before restarting"
+        );
+        let classes = [
+            "user_owned",
+            "agent_override_user_owned",
+            "nyxid_managed_master",
+            "nyxid_platform_oauth_app",
+            "node_managed",
+            "no_auth",
+        ];
+        let metrics = [
+            "tokens",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "images",
+        ];
+        for metric in metrics {
+            db.collection::<Document>("billing_rate_cache")
+                .insert_one(
+                    doc! { "_id": format!("{metric}:*"), "credits_per_unit_pico": 600_001_i64 },
+                )
+                .await
+                .unwrap();
+        }
+        let seeded = Instant::now();
+        for bucket in 0..72 {
+            for chunk in 0..5 {
+                let mut rows = Vec::with_capacity(5_000);
+                for n in 0..5_000 {
+                    let i = chunk * 5_000 + n;
+                    let service = format!("service-{:02}", i % 17);
+                    let actor = &actors[i % 15];
+                    let mut row = meter(
+                        actor,
+                        if i % 11 == 0 {
+                            &actors[(i + 1) % 15]
+                        } else {
+                            actor
+                        },
+                        &service,
+                        (i % 90 + 1) as i64,
+                    );
+                    row.insert(
+                        "created_at",
+                        bson::DateTime::from_chrono(
+                            first
+                                + chrono::Duration::hours(bucket)
+                                + chrono::Duration::milliseconds(i as i64 * 144),
+                        ),
+                    );
+                    row.insert("credential_class", classes[i % 6]);
+                    row.insert("metric", metrics[i % 5]);
+                    row.insert("lago_metric_code", metrics[i % 5]);
+                    row.insert("rollup_pending", true);
+                    row.insert("released", true);
+                    row.insert("lago_acked", true);
+                    row.insert("api_key_id", format!("agent-{}", i % 3));
+                    row.insert("token_breakdown", doc! { "prompt_tokens": 23_i64, "completion_tokens": 7_i64, "cached_tokens": 3_i64, "cache_creation_tokens": 1_i64 });
+                    if i % 5 == 0 {
+                        row.insert(
+                            "transaction_id",
+                            format!(
+                                "{}:component:output",
+                                row.get_str("transaction_id").unwrap()
+                            ),
+                        );
+                    }
+                    if i % 7 == 0 {
+                        row.insert("layer", "resale");
+                        row.insert(
+                            "transaction_id",
+                            format!("{}:resale", row.get_str("billing_request_id").unwrap()),
+                        );
+                    }
+                    if i % 6 != 5 {
+                        row.insert("wallet_id", "wallet");
+                        if i % 4 != 0 {
+                            row.insert("funding", doc! { "settled": true, "total_charge_micros": 123_i64, "wallet_funded_micros": 100_i64, "grant_funded_micros": 13_i64, "allowance_funded_micros": 10_i64 });
+                        }
+                    }
+                    rows.push(row);
+                }
+                db.collection::<Document>(COLLECTION_NAME)
+                    .insert_many(rows)
+                    .await
+                    .unwrap();
+            }
+            if bucket % 12 == 11 {
+                println!(
+                    "seeded {} hours ({:.1}s)",
+                    bucket + 1,
+                    seeded.elapsed().as_secs_f64()
+                );
+            }
+        }
+        for i in 0..125 {
+            let mut row = meter(&actors[i % 15], &actors[i % 15], "service-00", 7);
+            row.insert(
+                "created_at",
+                bson::DateTime::from_chrono(end - chrono::Duration::seconds(1)),
+            );
+            row.insert("rollup_pending", true);
+            insert(&db, row).await;
+        }
+        metadata
+            .insert_one(
+                doc! { "_id": "seed", "end": bson::DateTime::from_chrono(end), "actors": &actors },
+            )
+            .await
+            .unwrap();
+    }
+    let debug_params = AdminUsageQuery {
+        from: Some((end - chrono::Duration::days(1)).to_rfc3339()),
+        to: Some(end.to_rfc3339()),
+        ..Default::default()
+    }
+    .validate(end)
+    .unwrap();
+    std::fs::write(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+        .join(".claude-brief/allowance-bundles-usage-query.json"),
+        serde_json::to_string_pretty(&doc! { "database": db.name(), "pipeline": fast_pipeline(&debug_params, cached_rates(&db).await.unwrap()) }).unwrap()).unwrap();
+    let fold_explain = db.run_command(doc! { "explain": { "find": COLLECTION_NAME, "filter": usage_rollup::pending_filter(hour(end)), "sort": { "created_at": -1 }, "limit": usage_rollup::BATCH_SIZE }, "verbosity": "executionStats" }).await.unwrap();
+    assert!(
+        serde_json::to_string(&fold_explain)
+            .unwrap()
+            .contains("IXSCAN")
+    );
+    let start = Instant::now();
+    let mut folded = db
+        .collection::<Document>(COLLECTION_NAME)
+        .count_documents(doc! { "rollup_pending": false })
+        .await
+        .unwrap() as usize;
+    loop {
+        let count = fold_once(&db, end).await.unwrap();
+        if count == 0 {
+            break;
+        }
+        folded += count;
+        if folded.is_multiple_of(200_000) {
+            println!(
+                "folded {folded} rows ({:.1}s)",
+                start.elapsed().as_secs_f64()
+            );
+        }
+    }
+    assert_eq!(folded, 1_800_000);
+    let fold_seconds = previous
+        .as_ref()
+        .and_then(|s| s.get_f64("fold_seconds").ok())
+        .unwrap_or_else(|| start.elapsed().as_secs_f64());
+    metadata
+        .update_one(
+            doc! { "_id": "seed" },
+            doc! { "$set": { "fold_seconds": fold_seconds } },
+        )
+        .await
+        .unwrap();
+    let mut measurements = Vec::new();
+    for (days, budget_ms) in [(1, 500.0), (7, 1_000.0), (31, 2_000.0)] {
+        for filter in ["none", "user", "service", "both"] {
+            let make_query = || AdminUsageQuery {
+                from: Some((end - chrono::Duration::days(days)).to_rfc3339()),
+                to: Some(end.to_rfc3339()),
+                user: matches!(filter, "user" | "both").then(|| actors[0].clone()),
+                service: matches!(filter, "service" | "both").then(|| "service-00".into()),
+                ..Default::default()
+            };
+            let params = make_query().validate(end).unwrap();
+            // The oracle intentionally has a generous bound: this is exactly
+            // the slow raw scan being replaced, not an endpoint SLA assertion.
+            let oracle: Vec<Document> = db
+                .collection::<Document>(COLLECTION_NAME)
+                .aggregate(summary_pipeline(&params))
+                .max_time(Duration::from_secs(180))
+                .allow_disk_use(true)
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            let expected = documents(&oracle[0], "totals")
+                .unwrap()
+                .first()
+                .map(stats)
+                .transpose()
+                .unwrap()
+                .unwrap_or_default();
+            let mut ms = Vec::new();
+            for _ in 0..5 {
+                let started = Instant::now();
+                let actual = get_usage(&db, make_query().validate(end).unwrap())
+                    .await
+                    .unwrap();
+                ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+                assert_eq!(
+                    serde_json::to_value(&actual.totals).unwrap(),
+                    serde_json::to_value(&expected).unwrap(),
+                    "{days} days / {filter}"
+                );
+            }
+            ms.sort_by(f64::total_cmp);
+            let explain = db.run_command(doc! { "explain": { "aggregate": crate::models::usage_rollup_hourly::COLLECTION_NAME, "pipeline": fast_pipeline(&params, cached_rates(&db).await.unwrap()), "cursor": {} }, "verbosity": "executionStats" }).await.unwrap();
+            let mut docs = 0_i64;
+            let mut keys = 0_i64;
+            fn examined(value: &Bson, docs: &mut i64, keys: &mut i64) {
+                match value {
+                    Bson::Document(d) => {
+                        if let Some(v) = d.get("totalDocsExamined") {
+                            *docs += match v {
+                                Bson::Int32(n) => i64::from(*n),
+                                Bson::Int64(n) => *n,
+                                _ => 0,
+                            };
+                        }
+                        if let Some(v) = d.get("totalKeysExamined") {
+                            *keys += match v {
+                                Bson::Int32(n) => i64::from(*n),
+                                Bson::Int64(n) => *n,
+                                _ => 0,
+                            };
+                        }
+                        // SBE repeats these totals in nested execution stages.
+                        // Count each cursor's executionStats once, not its
+                        // child-stage copies as additional collection reads.
+                        if d.contains_key("totalDocsExamined") {
+                            return;
+                        }
+                        for (_, value) in d {
+                            examined(value, docs, keys);
+                        }
+                    }
+                    Bson::Array(a) => {
+                        for value in a {
+                            examined(value, docs, keys);
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            examined(&Bson::Document(explain.clone()), &mut docs, &mut keys);
+            println!(
+                "{days}d {filter}: p50 {:.1}ms, max {:.1}ms, docs {docs}, keys {keys}",
+                ms[2], ms[4]
+            );
+            measurements.push(json!({ "days": days, "filter": filter, "p50_ms": ms[2], "max_ms": ms[4], "docs_examined": docs, "keys_examined": keys, "oracle_equal": true, "explain": explain }));
+            // Save evidence before asserting, so failed performance runs remain
+            // inspectable and can guide optimization.
+            let evidence = json!({ "rows": folded + 125, "users": 15, "services": 17, "credential_classes": 6, "metrics": 5, "fold_seconds": fold_seconds, "fold_rows_per_second": folded as f64 / fold_seconds, "fold_explain": fold_explain, "measurements": measurements });
+            std::fs::write(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join(".claude-brief/allowance-bundles-usage-benchmark.json"),
+                serde_json::to_string_pretty(&evidence).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                ms[2] < budget_ms,
+                "latency budget exceeded: {days}d {filter} {:.1}ms",
+                ms[2]
+            );
+        }
+    }
+    db.drop().await.unwrap();
+}

@@ -3021,6 +3021,7 @@ mod tests {
     fn usage_event_uses_wallet_funded_decimal_quantity() {
         let now = chrono::Utc::now();
         let mut row = crate::models::usage_meter::UsageMeterRow {
+            rollup_pending: true,
             id: "row-1".to_string(),
             transaction_id: "tx-1".to_string(),
             billing_request_id: "request-1".to_string(),

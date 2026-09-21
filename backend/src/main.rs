@@ -960,6 +960,8 @@ async fn main() {
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
     // is `None` (hard-off mode); the function logs + returns.
     services::telemetry_erasure_service::spawn_worker(state.db.clone(), state.telemetry.clone());
+    let _usage_rollup_worker =
+        services::billing::usage_rollup::spawn_worker(state.db.clone(), Arc::new(config.clone()));
     let _billing_reconcile_worker = services::billing::reconcile::spawn_reconcile_worker(
         state.billing.reconciler(),
         config.billing_reconcile_interval_secs,

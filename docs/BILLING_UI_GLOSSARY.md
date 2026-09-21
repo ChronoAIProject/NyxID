@@ -146,6 +146,23 @@ Grants snapshot recipients when issued. Schedule periods freeze the recipient po
 
 Old rows default the new id lists to empty. Older replicas do not understand the new enum values: upgrade all readers/writers before using member targets (rollback requires migrating every persisted new-kind row).
 
+### Free allowance bundles
+
+Admins choose a service and recipients once, then add one or more units with their
+own quantity and recurrence. The Free allowances table groups these rows by
+`bundle_id` (legacy singletons use their own id). Each bundle lists every unit and
+shows **Active**, **Partially disabled**, or **Disabled**. Edit reviews each unit's
+before/after values. Removing a unit disables its row on save, retaining its
+consumption history; saving enables the listed units. Disable/Enable applies to
+all rows, including previously removed units. A bundle's service cannot change.
+
+A bundle is only an admin grouping: every unit retains an independent allowance
+id, period, and exact-metric funding match. Funding order and user balances are
+unchanged; the user balance response exposes the optional bundle id read-only.
+Legacy single-row API clients remain supported. Bundle mutations use the same
+MongoDB transaction requirement as the repository's other atomic multi-document
+mutations, so standalone deployments fail closed instead of writing partial grants.
+
 ### Header
 
 | Label | Meaning | API field |
@@ -311,11 +328,36 @@ A quantity ranking never adds unlike metrics. Expanding a user shows all their
 services in the exact response window. The service picker retains all options in
 the selected window/user scope when a service is selected.
 
-All reductions, rate joins, ranking sorts and paging run in MongoDB with a 20-second
-server limit (and a 22-second complete-request guard); timeouts return HTTP 503.
-One additive non-unique status/date index bounds the reporting scans, at the cost
-of another index update on meter inserts and status transitions. No existing index,
-meter lifecycle, charging rule, or ledger format changes.
+Hourly operational rollups supply whole UTC hours. Disjoint index-supported raw
+ranges supply partial first/last hours and every not-yet-folded row, including
+historical rows without a marker. One aggregation combines totals, ranking,
+service options and live-tail counts. Rates are read once and joined through a
+MongoDB literal lookup map. Legacy per-display-group truncation and missing-rate
+masking remain intact through internal cost partitions; API keys and ack state
+are not dimensions of the hourly primary key.
+
+The footer says **Live · includes N unfolded rows**. The API also reports
+`freshness.rolled_up_through`, a gap-free UTC-hour watermark; it is initially the
+Unix epoch while automatic backfill is incomplete. Unsettled charged rows remain
+in the live tail until release and funding settlement have frozen their values,
+and until Lago acknowledgement (or terminal dead-letter status) fixes their legacy
+display-group boundary.
+The worker uses the billing reconcile interval capped at 60 seconds; zero disables
+it. Each batch contains at most 2,000 rows and each tick has a count/time budget.
+
+Replica-set folds commit atomically. Reporting validates the journal around idle
+reads and uses snapshots during active folds, retrying transient snapshot expiry
+within the existing request bound. A durable,
+ordered batch journal and monotonic per-summary sequence fences also provide
+exactly-once recovery on standalone MongoDB; standalone readers validate the
+journal around their aggregation. Every new index is additive. Hourly documents
+have no TTL, while raw rows retain their existing TTL. Historical whole-hour
+windows therefore remain available from rollups after raw data expires. Exact
+partial-hour boundaries require retained raw rows; see the implementation report
+for this inherent hourly-retention limitation.
+
+The existing 20-second server limit and 22-second complete-request guard remain;
+timeouts return HTTP 503 and the client does not automatically retry.
 
 ---
 

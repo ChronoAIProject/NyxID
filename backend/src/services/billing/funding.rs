@@ -1275,6 +1275,7 @@ mod tests {
             .expect("insert rate");
         db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
             .insert_one(UsageAllowance {
+                bundle_id: None,
                 id: allowance_id.to_string(),
                 service_id: service_id.to_string(),
                 service_slug: service_slug.to_string(),
@@ -1344,6 +1345,7 @@ mod tests {
             .expect("insert grant");
 
         let row = UsageMeterRow {
+            rollup_pending: true,
             id: row_id.to_string(),
             transaction_id: "funding-tx-1".to_string(),
             billing_request_id: "funding-request-1".to_string(),

@@ -367,6 +367,7 @@ async fn issued_member_grants_snapshot_provenance_and_keep_bounded_ledger_activa
 
 async fn seed_allowance(db: &mongodb::Database, kind: BillingTargetKind) -> UsageAllowance {
     let allowance = UsageAllowance {
+        bundle_id: None,
         id: format!("allowance-{kind:?}"),
         service_id: "service".to_string(),
         service_slug: "service".to_string(),

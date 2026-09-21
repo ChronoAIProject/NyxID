@@ -56,6 +56,17 @@ pub async fn create_allowance(
     db: &mongodb::Database,
     input: CreateAllowanceInput,
 ) -> AppResult<UsageAllowance> {
+    let allowance = prepare_allowance(db, input).await?;
+    db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+        .insert_one(&allowance)
+        .await?;
+    Ok(allowance)
+}
+
+async fn prepare_allowance(
+    db: &mongodb::Database,
+    input: CreateAllowanceInput,
+) -> AppResult<UsageAllowance> {
     validate_quantity(input.quantity)?;
     super::targets::validate(
         db,
@@ -69,6 +80,7 @@ pub async fn create_allowance(
     let metric = super::metric_resolution::allowance_metric(&service, input.metric)?;
     let now = Utc::now();
     let allowance = UsageAllowance {
+        bundle_id: None,
         id: Uuid::new_v4().to_string(),
         service_id: service.id,
         service_slug: service.slug.clone(),
@@ -84,9 +96,6 @@ pub async fn create_allowance(
         created_at: now,
         updated_at: now,
     };
-    db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
-        .insert_one(&allowance)
-        .await?;
     Ok(allowance)
 }
 
@@ -100,6 +109,21 @@ pub async fn update_allowance(
         .find_one(doc! { "_id": allowance_id })
         .await?
         .ok_or_else(|| AppError::NotFound("Usage allowance not found".to_string()))?;
+    let set = prepare_update(db, &current, input).await?;
+    db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+        .update_one(doc! { "_id": allowance_id }, doc! { "$set": set })
+        .await?;
+    db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+        .find_one(doc! { "_id": allowance_id })
+        .await?
+        .ok_or_else(|| AppError::Internal("updated usage allowance disappeared".into()))
+}
+
+async fn prepare_update(
+    db: &mongodb::Database,
+    current: &UsageAllowance,
+    input: UpdateAllowanceInput,
+) -> AppResult<bson::Document> {
     let service = match input.service_ref.as_deref() {
         Some(reference) => Some(resolve_service(db, reference).await?),
         None if input.metric.is_some() => Some(resolve_service(db, &current.service_id).await?),
@@ -171,13 +195,216 @@ pub async fn update_allowance(
             })?,
         );
     }
-    db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
-        .update_one(doc! { "_id": allowance_id }, doc! { "$set": set })
+    Ok(set)
+}
+
+#[derive(Clone, Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct AllowanceUnitInput {
+    pub metric: BillingMetric,
+    pub quantity: i64,
+    pub recurrence: AllowanceRecurrence,
+}
+
+#[derive(Clone, Debug)]
+pub struct AllowanceBundleInput {
+    pub service_ref: String,
+    pub target_kind: BillingTargetKind,
+    pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
+    pub units: Vec<AllowanceUnitInput>,
+    pub created_by: String,
+}
+
+async fn validate_bundle(
+    db: &mongodb::Database,
+    input: &AllowanceBundleInput,
+) -> AppResult<DownstreamService> {
+    if !(1..=16).contains(&input.units.len()) {
+        return Err(AppError::ValidationError(
+            "Select 1 to 16 allowance units".into(),
+        ));
+    }
+    let service = resolve_service(db, &input.service_ref).await?;
+    let mut metrics = std::collections::HashSet::new();
+    for unit in &input.units {
+        if !metrics.insert(unit.metric.as_str()) {
+            return Err(AppError::ValidationError(
+                "Allowance units must have unique metrics".into(),
+            ));
+        }
+        validate_quantity(unit.quantity)?;
+        super::metric_resolution::allowance_metric(&service, Some(unit.metric))?;
+    }
+    super::targets::validate(
+        db,
+        input.target_kind,
+        &input.target_user_ids,
+        &input.target_org_ids,
+        &input.target_group_ids,
+    )
+    .await?;
+    Ok(service)
+}
+
+fn bundle_filter(key: &str) -> bson::Document {
+    doc! { "$or": [{ "bundle_id": key }, { "_id": key, "bundle_id": null }] }
+}
+
+pub async fn create_allowance_bundle(
+    db: &mongodb::Database,
+    input: AllowanceBundleInput,
+) -> AppResult<Vec<UsageAllowance>> {
+    validate_bundle(db, &input).await?;
+    let bundle_id = Uuid::new_v4().to_string();
+    let mut rows = Vec::new();
+    for unit in &input.units {
+        let mut row = prepare_allowance(
+            db,
+            CreateAllowanceInput {
+                service_ref: input.service_ref.clone(),
+                metric: Some(unit.metric),
+                quantity: unit.quantity,
+                recurrence: unit.recurrence,
+                target_kind: input.target_kind,
+                target_user_ids: input.target_user_ids.clone(),
+                target_org_ids: input.target_org_ids.clone(),
+                target_group_ids: input.target_group_ids.clone(),
+                created_by: input.created_by.clone(),
+            },
+        )
         .await?;
-    db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
-        .find_one(doc! { "_id": allowance_id })
-        .await?
-        .ok_or_else(|| AppError::Internal("updated usage allowance disappeared".to_string()))
+        row.bundle_id = Some(bundle_id.clone());
+        rows.push(row);
+    }
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let inserted = rows.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+                .insert_many(&inserted)
+                .session(session)
+                .await
+        })
+        .await?;
+    Ok(rows)
+}
+
+/// Like the repository's other atomic multi-document mutations, bundle writes
+/// require transactions and fail closed on standalone MongoDB.
+pub async fn replace_allowance_bundle(
+    db: &mongodb::Database,
+    key: &str,
+    input: AllowanceBundleInput,
+) -> AppResult<Vec<UsageAllowance>> {
+    let service = validate_bundle(db, &input).await?;
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let key = key.to_owned();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation: AppResult<Vec<UsageAllowance>> = async {
+                let collection = db.collection::<UsageAllowance>(USAGE_ALLOWANCES);
+                let mut cursor = collection
+                    .find(bundle_filter(&key))
+                    .session(&mut *session)
+                    .await?;
+                let current: Vec<UsageAllowance> =
+                    cursor.stream(&mut *session).try_collect().await?;
+                if current.is_empty() {
+                    return Err(AppError::NotFound(
+                        "Usage allowance bundle not found".into(),
+                    ));
+                }
+                if current.iter().any(|row| row.service_id != service.id) {
+                    return Err(AppError::ValidationError(
+                        "A bundle's service cannot be changed; create a new bundle".into(),
+                    ));
+                }
+                let mut result = Vec::new();
+                for row in &current {
+                    let unit = input.units.iter().find(|unit| unit.metric == row.metric);
+                    let mut set = prepare_update(
+                        &db,
+                        row,
+                        UpdateAllowanceInput {
+                            quantity: unit.map(|u| u.quantity),
+                            recurrence: unit.map(|u| u.recurrence),
+                            target_kind: Some(input.target_kind),
+                            target_user_ids: Some(input.target_user_ids.clone()),
+                            target_org_ids: Some(input.target_org_ids.clone()),
+                            target_group_ids: Some(input.target_group_ids.clone()),
+                            is_active: Some(unit.is_some()),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                    set.insert("bundle_id", &key);
+                    collection
+                        .update_one(doc! { "_id": &row.id }, doc! { "$set": set })
+                        .session(&mut *session)
+                        .await?;
+                    result.push(
+                        collection
+                            .find_one(doc! { "_id": &row.id })
+                            .session(&mut *session)
+                            .await?
+                            .ok_or_else(|| AppError::Internal("Allowance disappeared".into()))?,
+                    );
+                }
+                for unit in &input.units {
+                    if current.iter().any(|row| row.metric == unit.metric) {
+                        continue;
+                    }
+                    let mut row = prepare_allowance(
+                        &db,
+                        CreateAllowanceInput {
+                            service_ref: service.id.clone(),
+                            metric: Some(unit.metric),
+                            quantity: unit.quantity,
+                            recurrence: unit.recurrence,
+                            target_kind: input.target_kind,
+                            target_user_ids: input.target_user_ids.clone(),
+                            target_org_ids: input.target_org_ids.clone(),
+                            target_group_ids: input.target_group_ids.clone(),
+                            created_by: input.created_by.clone(),
+                        },
+                    )
+                    .await?;
+                    row.bundle_id = Some(key.to_owned());
+                    collection.insert_one(&row).session(&mut *session).await?;
+                    result.push(row);
+                }
+                Ok(result)
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(operation)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+pub async fn set_bundle_active(
+    db: &mongodb::Database,
+    key: &str,
+    active: bool,
+) -> AppResult<Vec<UsageAllowance>> {
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let key = key.to_owned();
+    session.start_transaction().and_run2(async move |session| {
+        let operation: AppResult<Vec<UsageAllowance>> = async {
+            let collection = db.collection::<UsageAllowance>(USAGE_ALLOWANCES);
+            let result = collection.update_many(bundle_filter(&key), doc! { "$set": { "is_active": active, "updated_at": bson::DateTime::from_chrono(Utc::now()) } }).session(&mut *session).await?;
+            if result.matched_count == 0 { return Err(AppError::NotFound("Usage allowance bundle not found".into())); }
+            let mut cursor = collection.find(bundle_filter(&key)).session(&mut *session).await?;
+            Ok(cursor.stream(&mut *session).try_collect().await?)
+        }.await;
+        crate::services::api_key_mutation_service::transaction_result(operation)
+    }).await.map_err(crate::services::api_key_mutation_service::map_transaction_error)
 }
 
 pub async fn list_allowances(
@@ -457,6 +684,7 @@ mod tests {
         };
         let now = Utc.with_ymd_and_hms(2026, 8, 21, 13, 45, 0).unwrap();
         let mut allowance = UsageAllowance {
+            bundle_id: None,
             id: "allowance-1".to_string(),
             service_id: "service-1".to_string(),
             service_slug: "llm-one".to_string(),
@@ -501,6 +729,7 @@ mod tests {
         };
         let now = Utc.with_ymd_and_hms(2026, 8, 21, 13, 45, 0).unwrap();
         let allowance = UsageAllowance {
+            bundle_id: None,
             id: "allowance-concurrent".to_string(),
             service_id: "service-1".to_string(),
             service_slug: "llm-one".to_string(),
@@ -588,5 +817,210 @@ mod tests {
         )
         .await
         .expect("organization owner is eligible");
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+    use crate::test_utils::{
+        connect_transaction_test_database, test_auto_connected_catalog_service,
+    };
+
+    async fn setup() -> (mongodb::Database, AllowanceBundleInput) {
+        let db = connect_transaction_test_database("allowance_bundles").await;
+        let mut service = test_auto_connected_catalog_service();
+        service.billing = Some(serde_json::from_value(serde_json::json!({
+            "byok_pricing": { "metric": "input_tokens", "credits_per_unit": "1", "sync_status": "synced",
+                "components": [{ "metric": "output_tokens", "credits_per_unit": "2", "sync_status": "synced" }, { "metric": "images", "credits_per_unit": "1", "sync_status": "synced" }] }
+        })).unwrap());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        (
+            db,
+            AllowanceBundleInput {
+                service_ref: service.id,
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: vec![],
+                target_org_ids: vec![],
+                target_group_ids: vec![],
+                created_by: "admin".into(),
+                units: vec![
+                    AllowanceUnitInput {
+                        metric: BillingMetric::InputTokens,
+                        quantity: 100,
+                        recurrence: AllowanceRecurrence::Daily,
+                    },
+                    AllowanceUnitInput {
+                        metric: BillingMetric::OutputTokens,
+                        quantity: 200,
+                        recurrence: AllowanceRecurrence::Monthly,
+                    },
+                ],
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn bundle_create_replace_toggle_preserves_row_and_period_identities() {
+        let (db, mut input) = setup().await;
+        let created = create_allowance_bundle(&db, input.clone()).await.unwrap();
+        let key = created[0].bundle_id.clone().unwrap();
+        assert!(Uuid::parse_str(&key).unwrap().get_version_num() == 4);
+        assert!(created.iter().all(|r| r.bundle_id.as_deref() == Some(&key)));
+        let period = ensure_current_period(&db, &created[0], "owner", Utc::now())
+            .await
+            .unwrap();
+        input.units[0].quantity = 50;
+        input.units[1].metric = BillingMetric::Images;
+        let updated = replace_allowance_bundle(&db, &key, input).await.unwrap();
+        assert_eq!(updated.len(), 3);
+        assert_eq!(
+            updated
+                .iter()
+                .find(|r| r.metric == BillingMetric::InputTokens)
+                .unwrap()
+                .id,
+            created[0].id
+        );
+        assert!(
+            !updated
+                .iter()
+                .find(|r| r.metric == BillingMetric::OutputTokens)
+                .unwrap()
+                .is_active
+        );
+        let unchanged = db
+            .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+            .find_one(doc! { "_id": &period.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.allowance_id, created[0].id);
+        assert!(
+            set_bundle_active(&db, &key, false)
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| !r.is_active)
+        );
+        assert!(
+            set_bundle_active(&db, &key, true)
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.is_active)
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bundle_validation_is_atomic_and_rejects_service_change() {
+        let (db, input) = setup().await;
+        for invalid in [
+            vec![],
+            vec![input.units[0].clone(); 2],
+            vec![input.units[0].clone(); 17],
+            vec![AllowanceUnitInput {
+                quantity: 0,
+                ..input.units[0].clone()
+            }],
+            vec![AllowanceUnitInput {
+                metric: BillingMetric::Bytes,
+                ..input.units[0].clone()
+            }],
+        ] {
+            assert!(matches!(
+                create_allowance_bundle(
+                    &db,
+                    AllowanceBundleInput {
+                        units: invalid,
+                        ..input.clone()
+                    }
+                )
+                .await,
+                Err(AppError::ValidationError(_))
+            ));
+            assert_eq!(list_allowances(&db, true).await.unwrap().len(), 0);
+        }
+        let rows = create_allowance_bundle(&db, input.clone()).await.unwrap();
+        let key = rows[0].bundle_id.as_deref().unwrap();
+        let mut other = test_auto_connected_catalog_service();
+        other.slug = "other".into();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&other)
+            .await
+            .unwrap();
+        let invalid = AllowanceBundleInput {
+            service_ref: other.id,
+            units: vec![AllowanceUnitInput {
+                metric: BillingMetric::Requests,
+                ..input.units[0].clone()
+            }],
+            ..input.clone()
+        };
+        assert!(replace_allowance_bundle(&db, key, invalid).await.is_err());
+        let invalid = AllowanceBundleInput {
+            units: vec![AllowanceUnitInput {
+                quantity: 0,
+                ..input.units[0].clone()
+            }],
+            ..input
+        };
+        assert!(replace_allowance_bundle(&db, key, invalid).await.is_err());
+        assert_eq!(list_allowances(&db, true).await.unwrap().len(), 2);
+        assert!(
+            list_allowances(&db, true)
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.is_active)
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_singleton_upgrade_keeps_id_and_compatibility_writes() {
+        let (db, input) = setup().await;
+        let legacy = create_allowance(
+            &db,
+            CreateAllowanceInput {
+                service_ref: input.service_ref.clone(),
+                metric: Some(input.units[0].metric),
+                quantity: 7,
+                recurrence: AllowanceRecurrence::Daily,
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: vec![],
+                target_org_ids: vec![],
+                target_group_ids: vec![],
+                created_by: "admin".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(legacy.bundle_id, None);
+        let rows = replace_allowance_bundle(&db, &legacy.id, input)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|r| r.bundle_id.as_deref() == Some(&legacy.id))
+        );
+        let updated = update_allowance(
+            &db,
+            &legacy.id,
+            UpdateAllowanceInput {
+                quantity: Some(42),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.quantity, 42);
+        assert_eq!(updated.bundle_id.as_deref(), Some(legacy.id.as_str()));
+        db.drop().await.unwrap();
     }
 }

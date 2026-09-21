@@ -58,9 +58,10 @@ vi.mock("@/hooks/use-billing-credits", () => ({
   }),
   useIssueCreditGrant: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useRevokeCreditGrant: () => ({ isPending: false, mutateAsync: vi.fn() }),
-  useCreateAllowance: () => ({ isPending: false, mutateAsync: vi.fn() }),
+  useCreateAllowanceBundle: () => ({ isPending: false, mutateAsync: vi.fn() }),
+  useReplaceAllowanceBundle: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useCreateCreditSchedule: () => ({ isPending: false, mutateAsync: vi.fn() }),
-  useUpdateAllowance: () => ({
+  useSetAllowanceBundleActive: () => ({
     isPending: false,
     mutateAsync: mock.updateAllowance,
   }),
@@ -79,11 +80,17 @@ it("reviews allowance disabling and sends only status after confirmation", async
   const user = userEvent.setup();
   render(<AdminCreditsPage />);
   await user.click(screen.getByRole("tab", { name: "Free allowances" }));
-  await user.click(screen.getByRole("button", { name: "Disable" }));
+  await user.click(
+    screen.getAllByRole("button", { name: "Actions for test" })[0]!,
+  );
+  await user.click(screen.getByRole("menuitem", { name: "Disable" }));
   expect(mock.updateAllowance).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(mock.updateAllowance).not.toHaveBeenCalled();
-  await user.click(screen.getByRole("button", { name: "Disable" }));
+  await user.click(
+    screen.getAllByRole("button", { name: "Actions for test" })[0]!,
+  );
+  await user.click(screen.getByRole("menuitem", { name: "Disable" }));
   await user.click(screen.getByRole("button", { name: "Confirm changes" }));
   await waitFor(() =>
     expect(mock.updateAllowance).toHaveBeenCalledWith({
@@ -114,5 +121,5 @@ it.each([
   mock.targetKind = kind;
   render(<AdminCreditsPage />);
   await userEvent.click(screen.getByRole("tab", { name: "Free allowances" }));
-  expect(screen.getByText(label)).toBeInTheDocument();
+  expect(screen.getAllByText(label)).toHaveLength(2);
 });

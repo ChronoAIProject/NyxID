@@ -121,6 +121,11 @@ pub struct UsageFunding {
 pub struct UsageMeterRow {
     #[serde(rename = "_id")]
     pub id: String,
+    /// New rows enter the indexed live tail. Missing legacy markers are also
+    /// pending; the bounded fold discovers them without a migration.
+    #[serde(default = "default_rollup_pending")]
+    pub rollup_pending: bool,
+
     pub transaction_id: String,
     pub billing_request_id: String,
     pub layer: BillingLayer,
@@ -175,4 +180,8 @@ pub struct UsageMeterRow {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+fn default_rollup_pending() -> bool {
+    true
 }

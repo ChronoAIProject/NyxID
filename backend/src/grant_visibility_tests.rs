@@ -117,6 +117,7 @@ fn grant(recipient_user_id: &str, issued_ledgered_at: Option<DateTime<Utc>>) -> 
 fn allowance() -> UsageAllowance {
     let now = Utc::now();
     UsageAllowance {
+        bundle_id: None,
         id: Uuid::new_v4().to_string(),
         service_id: Uuid::new_v4().to_string(),
         service_slug: "visibility-service".to_string(),

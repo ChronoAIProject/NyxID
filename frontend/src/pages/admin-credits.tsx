@@ -1,7 +1,4 @@
-import {
-  billingTargetLabel,
-  normalizedBillingTargets,
-} from "@/lib/billing-targets";
+import { normalizedBillingTargets } from "@/lib/billing-targets";
 import {
   changedFields,
   describeChanges,
@@ -11,35 +8,40 @@ import {
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Pencil, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { toast } from "sonner";
 import {
   useAdminAllowances,
   useAdminCreditGrants,
   useAdminCreditSchedules,
-  useCreateAllowance,
+  useCreateAllowanceBundle,
   useCreateCreditSchedule,
   useIssueCreditGrant,
   useRevokeCreditGrant,
-  useUpdateAllowance,
+  useReplaceAllowanceBundle,
+  useSetAllowanceBundleActive,
   useUpdateCreditSchedule,
 } from "@/hooks/use-billing-credits";
 import { useServices } from "@/hooks/use-services";
 import { ApiError } from "@/lib/api-client";
-import { billingMetricLabel } from "@/lib/billing-units";
+import { formatAllowancePreview } from "@/lib/billing-units";
+import { AllowancesTable } from "@/components/admin-credits/allowances-table";
 import {
-  allowanceFormSchema,
+  bundleForm,
+  groupAllowances,
+  type AllowanceBundle,
+} from "@/components/admin-credits/allowance-bundles";
+import {
+  allowanceBundleFormSchema,
   issueGrantFormSchema,
   scheduleFormSchema,
-  type AllowanceForm,
+  type AllowanceBundleForm as AllowanceForm,
   type CreditSchedule,
   type CreditGrant,
   type IssueGrantForm,
   type ScheduleForm,
-  type UsageAllowance,
 } from "@/schemas/billing-credits";
 import { useAuthStore } from "@/stores/auth-store";
-import type { DownstreamService } from "@/types/api";
 import { canAdminWrite } from "@/types/api";
 import {
   AllowanceDialog,
@@ -52,7 +54,6 @@ import { SchedulesTable } from "@/components/admin-credits/schedules-table";
 import { rolloutWarningMessage } from "@/components/admin-credits/credit-grant-visibility";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
-import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   Dialog,
@@ -63,14 +64,6 @@ import {
 } from "@/components/ui/dialog";
 import { useAppForm } from "@/components/ui/form";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const GRANT_DEFAULTS: IssueGrantForm = {
@@ -87,8 +80,7 @@ const GRANT_DEFAULTS: IssueGrantForm = {
 
 const ALLOWANCE_DEFAULTS: AllowanceForm = {
   service_ref: "",
-  quantity: 1_000,
-  recurrence: "monthly",
+  units: [{ metric: "tokens", quantity: 1_000, recurrence: "monthly" }],
   target_kind: "all_users",
   target_user_ids: [],
   target_org_ids: [],
@@ -120,15 +112,17 @@ export function AdminCreditsPage() {
   const servicesQuery = useServices();
   const issueGrant = useIssueCreditGrant();
   const revokeGrant = useRevokeCreditGrant();
-  const createAllowance = useCreateAllowance();
-  const updateAllowance = useUpdateAllowance();
+  const createAllowance = useCreateAllowanceBundle();
+  const updateAllowance = useReplaceAllowanceBundle();
+  const toggleBundle = useSetAllowanceBundleActive();
+  const bundles = groupAllowances(allowancesQuery.data?.allowances ?? []);
   const createSchedule = useCreateCreditSchedule();
   const updateSchedule = useUpdateCreditSchedule();
   const [grantOpen, setGrantOpen] = useState(false);
   const [allowanceOpen, setAllowanceOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [editingAllowance, setEditingAllowance] =
-    useState<UsageAllowance | null>(null);
+    useState<AllowanceBundle | null>(null);
   const [editingSchedule, setEditingSchedule] = useState<CreditSchedule | null>(
     null,
   );
@@ -139,7 +133,7 @@ export function AdminCreditsPage() {
     defaultValues: GRANT_DEFAULTS,
   });
   const allowanceForm = useAppForm<AllowanceForm>({
-    resolver: zodResolver(allowanceFormSchema),
+    resolver: zodResolver(allowanceBundleFormSchema),
     defaultValues: ALLOWANCE_DEFAULTS,
   });
   const scheduleForm = useAppForm<ScheduleForm>({
@@ -152,20 +146,9 @@ export function AdminCreditsPage() {
     setGrantOpen(true);
   }
 
-  function openAllowanceDialog(allowance?: UsageAllowance) {
+  function openAllowanceDialog(allowance?: AllowanceBundle) {
     setEditingAllowance(allowance ?? null);
-    allowanceForm.reset(
-      allowance
-        ? {
-            service_ref: allowance.service_id,
-            metric: allowance.metric,
-            quantity: allowance.quantity,
-            recurrence: allowance.recurrence,
-            target_kind: allowance.target_kind,
-            ...normalizedBillingTargets(allowance),
-          }
-        : ALLOWANCE_DEFAULTS,
-    );
+    allowanceForm.reset(allowance ? bundleForm(allowance) : ALLOWANCE_DEFAULTS);
     setAllowanceOpen(true);
   }
 
@@ -206,17 +189,6 @@ export function AdminCreditsPage() {
     }
   }
 
-  function allowanceProjection(row: UsageAllowance) {
-    return {
-      service_ref: row.service_id,
-      metric: row.metric,
-      quantity: row.quantity,
-      recurrence: row.recurrence,
-      target_kind: row.target_kind,
-      ...normalizedBillingTargets(row),
-      is_active: row.is_active,
-    };
-  }
   function scheduleProjection(row: CreditSchedule) {
     return {
       amount_credits: row.amount_credits,
@@ -241,16 +213,10 @@ export function AdminCreditsPage() {
       setAllowanceOpen(false);
     },
     (pending) => {
-      const live = allowancesQuery.data?.allowances.find(
-        (row) => row.id === pending.id,
-      );
+      const live = bundles.find((row) => row.id === pending.id);
       return (
         !live ||
-        hasFieldConflicts(
-          pending.before,
-          allowanceProjection(live),
-          pending.body,
-        )
+        hasFieldConflicts(pending.before, bundleForm(live), pending.body)
       );
     },
     editingAllowance?.id ?? "",
@@ -292,10 +258,43 @@ export function AdminCreditsPage() {
           ...defaults,
           ...normalizedBillingTargets(defaults),
         };
-        const body = changedFields(before, normalized);
+        const { units: _units, ...shared } = changedFields(before, normalized);
+        void _units;
+        const metrics = new Set(
+          [...before.units, ...normalized.units].map((u) => u.metric),
+        );
+        const unitChanges = [...metrics].flatMap((metric) => {
+          const oldUnit = before.units.find((u) => u.metric === metric);
+          const newUnit = normalized.units.find((u) => u.metric === metric);
+          const show = (unit: typeof oldUnit) =>
+            unit
+              ? (formatAllowancePreview(
+                  unit.quantity,
+                  unit.metric,
+                  unit.recurrence,
+                ) ?? "Invalid quantity")
+              : "Disabled";
+          const wasDisabled = editingAllowance.rows.some(
+            (row) => row.metric === metric && !row.is_active,
+          );
+          const beforeDisplay =
+            oldUnit && wasDisabled
+              ? `${show(oldUnit)} · Disabled`
+              : show(oldUnit);
+          const afterDisplay = show(newUnit);
+          return beforeDisplay === afterDisplay
+            ? []
+            : [
+                {
+                  field: metric.replaceAll("_", " "),
+                  before: beforeDisplay,
+                  after: afterDisplay,
+                },
+              ];
+        });
         allowanceReview.review(
-          { id: editingAllowance.id, body, before },
-          describeChanges(before, body),
+          { id: editingAllowance.id, body: normalized, before },
+          [...describeChanges(before, shared), ...unitChanges],
         );
         return;
       } else {
@@ -364,7 +363,7 @@ export function AdminCreditsPage() {
   }>(
     async ({ kind, id, wasActive }) => {
       const variables = { id, body: { is_active: !wasActive } };
-      if (kind === "allowance") await updateAllowance.mutateAsync(variables);
+      if (kind === "allowance") await toggleBundle.mutateAsync(variables);
       else await updateSchedule.mutateAsync(variables);
       toast.success(
         kind === "allowance"
@@ -378,14 +377,12 @@ export function AdminCreditsPage() {
     },
     ({ kind, id, wasActive }) => {
       const rows =
-        kind === "allowance"
-          ? allowancesQuery.data?.allowances
-          : schedulesQuery.data?.schedules;
+        kind === "allowance" ? bundles : schedulesQuery.data?.schedules;
       return rows?.find((row) => row.id === id)?.is_active !== wasActive;
     },
   );
 
-  function toggleAllowance(allowance: UsageAllowance) {
+  function toggleAllowance(allowance: AllowanceBundle) {
     statusReview.review(
       { kind: "allowance", id: allowance.id, wasActive: allowance.is_active },
       [
@@ -496,96 +493,14 @@ export function AdminCreditsPage() {
           ) : allowancesQuery.isLoading ? (
             <Skeleton className="h-52 w-full" />
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Service</TableHead>
-                    <TableHead>Quantity</TableHead>
-                    <TableHead>Recurrence</TableHead>
-                    <TableHead>Targets</TableHead>
-                    <TableHead>Status</TableHead>
-                    {canWrite ? (
-                      <TableHead className="text-right">Actions</TableHead>
-                    ) : null}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {(allowancesQuery.data?.allowances ?? []).map((allowance) => (
-                    <TableRow key={allowance.id}>
-                      <TableCell>
-                        <div className="font-medium">
-                          {serviceName(
-                            services,
-                            allowance.service_id,
-                            allowance.service_slug,
-                          )}
-                        </div>
-                        <div className="text-[11px] text-muted-foreground">
-                          {allowance.service_slug}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        {formatNumber(allowance.quantity)}{" "}
-                        <span className="text-[11px] text-muted-foreground">
-                          {billingMetricLabel(
-                            allowance.metric,
-                            allowance.quantity,
-                          )}
-                        </span>
-                      </TableCell>
-                      <TableCell className="capitalize">
-                        {allowance.recurrence.replace("_", " ")}
-                      </TableCell>
-                      <TableCell>{billingTargetLabel(allowance)}</TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={
-                            allowance.is_active ? "success" : "secondary"
-                          }
-                        >
-                          {allowance.is_active ? "Active" : "Disabled"}
-                        </Badge>
-                      </TableCell>
-                      {canWrite ? (
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-1">
-                            <Button
-                              type="button"
-                              size="icon"
-                              variant="ghost"
-                              title="Edit allowance"
-                              onClick={() => openAllowanceDialog(allowance)}
-                            >
-                              <Pencil className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              disabled={updateAllowance.isPending}
-                              onClick={() => void toggleAllowance(allowance)}
-                            >
-                              {allowance.is_active ? "Disable" : "Enable"}
-                            </Button>
-                          </div>
-                        </TableCell>
-                      ) : null}
-                    </TableRow>
-                  ))}
-                  {(allowancesQuery.data?.allowances.length ?? 0) === 0 ? (
-                    <TableRow>
-                      <TableCell
-                        colSpan={canWrite ? 6 : 5}
-                        className="py-10 text-center text-muted-foreground"
-                      >
-                        No usage allowances.
-                      </TableCell>
-                    </TableRow>
-                  ) : null}
-                </TableBody>
-              </Table>
-            </div>
+            <AllowancesTable
+              bundles={bundles}
+              services={services}
+              canWrite={canWrite}
+              pending={toggleBundle.isPending}
+              onEdit={openAllowanceDialog}
+              onToggle={toggleAllowance}
+            />
           )}
         </TabsContent>
 
@@ -693,16 +608,6 @@ export function AdminCreditsPage() {
   );
 }
 
-function serviceName(
-  services: readonly DownstreamService[],
-  id: string,
-  slug: string,
-) {
-  return services.find((service) => service.id === id)?.name ?? slug;
-}
-function formatNumber(value: number) {
-  return new Intl.NumberFormat().format(value);
-}
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof ApiError ? error.message : fallback;
 }
