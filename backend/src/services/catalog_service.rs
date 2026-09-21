@@ -323,7 +323,7 @@ async fn provider_platform_secret_nonempty(
 
 /// MongoDB filter for visibility that hides private services from non-owners.
 /// Public services and legacy documents without a visibility field are visible to all.
-fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
+pub(crate) fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
     doc! {
         "$or": [
             { "visibility": { "$ne": "private" } },

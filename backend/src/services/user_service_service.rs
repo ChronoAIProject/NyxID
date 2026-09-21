@@ -594,7 +594,7 @@ async fn list_user_services_with_sources_impl(
     .await
 }
 
-async fn list_user_services_with_sources_and_memberships(
+pub(crate) async fn list_user_services_with_sources_and_memberships(
     db: &mongodb::Database,
     user_id: &str,
     include_scope_denied: bool,

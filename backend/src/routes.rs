@@ -1435,7 +1435,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/{slug}/endpoints",
             get(handlers::catalog::list_catalog_endpoints),
-        );
+        )
+        .layer(middleware::from_fn(reject_service_account_tokens));
 
     let cli_pairing_routes = Router::new()
         .route("/", post(handlers::cli_pairings::create_pairing))
@@ -1763,6 +1764,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
         .merge(service_inventory_read_routes)
+        // General API keys may discover templates without proxy scope;
+        // AuthUser still rejects scheduled keys. Unlike MCP discover_services,
+        // catalog detail uses OwnerGrants::load, which requires a User actor
+        // for membership lookup. SA subjects are SA ids, not User ids, so this
+        // group retains its SA rejection rather than inheriting owner access.
+        // Shared relay/delegated layers apply; exact account:read GETs retain
+        // their existing delegated exception.
+        .nest("/catalog", catalog_routes)
         // Like authenticate_mcp: sessions, proxy-scoped access tokens, general
         // API keys (including chat keys), and non-Curation service accounts.
         // AuthUser rejects scheduled keys and Curation SAs; the handler checks
@@ -2025,7 +2034,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/users/me/primary-org",
             patch(handlers::orgs::set_primary_org),
         )
-        .nest("/catalog", catalog_routes)
         .nest("/cli-pairings", cli_pairing_routes)
         .nest("/channel-bots", channel_bot_routes)
         .nest("/channel-conversations", channel_conversation_routes)

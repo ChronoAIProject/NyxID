@@ -3578,13 +3578,23 @@ Read-only catalog of available service templates for users.
 
 List all available service templates from the admin-managed catalog.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
 
 #### GET /api/v1/catalog/{slug}
 
 Get a specific catalog template by slug.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
+
+#### GET /api/v1/catalog/{slug}/endpoints
+
+Return operations parsed from the admin-configured catalog OpenAPI spec. If no readable catalog template matches, a readable user-service slug can resolve its owner-scoped mounted spec.
+
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
+
+Service accounts remain rejected: catalog detail resolves restricted platform grants through a User actor, while SA tokens carry the SA ID.
+
+Catalog entries use template slugs, resource URIs and skills, with live platform grants determining `platform_key.available` and inference binding/status. They do not include instance overrides or connection flags. API keys can use instance-backed private catalog access and mounted-spec fallback only within their effective service allowlist, including auto-connected expansion, and active Member/Admin org scopes. Org-owned keys act as the org. Catalog discovery does not provision services or reconcile pending OAuth credentials.
 
 ---
 

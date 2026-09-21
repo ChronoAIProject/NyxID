@@ -25,6 +25,7 @@ pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;
 pub mod catalog_delegation_service;
+pub mod catalog_discovery_service;
 pub mod catalog_identity_service;
 pub mod catalog_service;
 pub mod catalog_spec_registry;
