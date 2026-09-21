@@ -1337,6 +1337,21 @@ export function composerHasDraft(text) {
   return typeof text === "string" && text.trim().length > 0;
 }
 
+// A draft this long defeats the ordinary clear. fill("") has to drive a
+// select-all and delete through React over tens of thousands of characters,
+// which does not finish inside PRE_SEND_ACTION_MS; the clear is best-effort,
+// so the timeout is swallowed and the draft survives. Model selection then
+// runs against the heavy composer and dies as operation_timeout@selecting_model
+// - and because the draft outlives a browser relaunch, every worker that picks
+// the task up is stranded the same way. Observed 2026-09-21: one 83,046
+// character prompt walked through a 15-worker pool, disabling each tab it
+// touched until the task was cancelled by hand.
+export const COMPOSER_FAST_CLEAR_CHARS = 2000;
+
+export function draftNeedsFastClear(length) {
+  return Number.isFinite(length) && length >= COMPOSER_FAST_CLEAR_CHARS;
+}
+
 export const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
@@ -1989,12 +2004,28 @@ async function clearComposerDraft(page) {
   const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
   try {
     const draft = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
-      if (Date.now() >= deadline) return "";
+      if (Date.now() >= deadline) return { head: "", length: 0 };
       window.__nyx?.discoverControls();
       const input = body.querySelector(composerSelector);
-      return input ? String(input.value ?? input.innerText ?? "").trim().slice(0, 8) : "";
+      if (!input) return { head: "", length: 0 };
+      const text = String(input.value ?? input.innerText ?? "");
+      return { head: text.trim().slice(0, 8), length: text.length };
     }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
-    if (!composerHasDraft(draft)) return;
+    if (!composerHasDraft(draft.head)) return;
+    // Drop an oversized draft in a single DOM assignment rather than typing it
+    // away; the prompt is (re)typed after selection, so nothing real is lost.
+    if (draftNeedsFastClear(draft.length)) {
+      const emptied = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
+        if (Date.now() >= deadline) return false;
+        const input = body.querySelector(composerSelector);
+        if (!input) return false;
+        if (typeof input.value === "string") input.value = "";
+        else { input.focus(); input.textContent = ""; }
+        input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+        return String(input.value ?? input.innerText ?? "").trim().length === 0;
+      }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+      if (emptied) return;
+    }
     const input = page.locator(COMPOSER_SELECTOR).first();
     await input.click(interactionOptions(budget)).catch(() => {});
     await input.fill("", interactionOptions(budget)).catch(() => {});
