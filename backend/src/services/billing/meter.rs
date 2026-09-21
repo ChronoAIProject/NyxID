@@ -505,6 +505,7 @@ async fn insert_reserved_row(
         }
     });
     let row = UsageMeterRow {
+        rollup_pending: true,
         id: Uuid::new_v4().to_string(),
         transaction_id,
         billing_request_id: ctx.billing_request_id.clone(),

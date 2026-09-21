@@ -1337,6 +1337,21 @@ export function composerHasDraft(text) {
   return typeof text === "string" && text.trim().length > 0;
 }
 
+// A draft this long defeats the ordinary clear. fill("") has to drive a
+// select-all and delete through React over tens of thousands of characters,
+// which does not finish inside PRE_SEND_ACTION_MS; the clear is best-effort,
+// so the timeout is swallowed and the draft survives. Model selection then
+// runs against the heavy composer and dies as operation_timeout@selecting_model
+// - and because the draft outlives a browser relaunch, every worker that picks
+// the task up is stranded the same way. Observed 2026-09-21: one 83,046
+// character prompt walked through a 15-worker pool, disabling each tab it
+// touched until the task was cancelled by hand.
+export const COMPOSER_FAST_CLEAR_CHARS = 2000;
+
+export function draftNeedsFastClear(length) {
+  return Number.isFinite(length) && length >= COMPOSER_FAST_CLEAR_CHARS;
+}
+
 export const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
@@ -1597,6 +1612,13 @@ export function modelSelectionDetail(result) {
 }
 
 // Use the same preference for structural pills and composer-local fallbacks.
+// Whether a picker menu offers the Pro Standard / Pro Extended split at all.
+// Some accounts no longer have it: the menu lists model versions instead, and
+// carries the tier only as an unselectable heading.
+export function splitTierOffered(items) {
+  return (items || []).some((item) => ["pro_extended", "pro_standard"].includes(effortMetadata(item?.text)));
+}
+
 export function preferredModelPillIndex(labels) {
   if (!labels.length) return -1;
   const recognized = labels.findIndex((text) => detectPillLevel(text) !== null);
@@ -1757,7 +1779,17 @@ export async function pickerSnapshot(page, budget = interactionBudget(1000)) {
       checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true",
     }));
     return {
-      candidates: candidates.map((el) => (el.innerText || el.textContent || "").trim()),
+      // Adapt a compact pill label the way readModelSwitcher and
+      // chooseSwitcherEntry already do. The composer pill renders family and
+      // tier on separate lines ("6\nPro"); every metadata helper deliberately
+      // refuses to read an un-adapted compact label, so leaving it raw makes
+      // pillShowsLevel false and effortMetadata 'unrecognized' for a pill that
+      // plainly shows Pro - the worker then skips already_selected, hunts a
+      // Pro Extended entry the menu lacks, and fails level_unavailable.
+      candidates: candidates.map((el) => {
+        const raw = (el.innerText || el.textContent || "").trim();
+        return window.__nyx?.compactModelLabel(raw) || raw;
+      }),
       structural: !!pills.length, form: !!form,
       open: menus.length > 0, items, submenu: !!window.__nyx?.modelPickerTrigger(pickerId),
     };
@@ -1946,6 +1978,22 @@ async function selectModelInner(page, targets, budget, result) {
   }
   if (!clicked) {
     interactionOptions(budget);
+    // ChatGPT has removed the Pro Standard / Pro Extended split on some
+    // accounts. The pill's menu now lists model versions - Latest, GPT-5.6,
+    // GPT-5.5 - and carries "6 Pro" only as a heading with aria-checked unset,
+    // so it cannot be clicked. modelLevelTargets still asks for Pro Extended on
+    // every Pro request (no pool setting yields a bare Pro), so the hunt can
+    // never succeed and every task dies level_unavailable while the pill sits
+    // on the requested model the whole time. Observed 2026-09-21: a 15-worker
+    // pool fully down, each task rerouted through all 15 before failing.
+    // When nothing in the menu offers the split, the pill already shows the
+    // requested level and there is nothing left to click.
+    if (targets[0] === "Pro" && pillShowsLevel(result.observed, targets) &&
+        !splitTierOffered(budget.picker?.snapshot?.items)) {
+      await closeOpenMenus(page, budget);
+      result.reason = "already_selected";
+      return;
+    }
     result.reason = "level_unavailable";
     return;
   }
@@ -1979,12 +2027,28 @@ async function clearComposerDraft(page) {
   const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
   try {
     const draft = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
-      if (Date.now() >= deadline) return "";
+      if (Date.now() >= deadline) return { head: "", length: 0 };
       window.__nyx?.discoverControls();
       const input = body.querySelector(composerSelector);
-      return input ? String(input.value ?? input.innerText ?? "").trim().slice(0, 8) : "";
+      if (!input) return { head: "", length: 0 };
+      const text = String(input.value ?? input.innerText ?? "");
+      return { head: text.trim().slice(0, 8), length: text.length };
     }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
-    if (!composerHasDraft(draft)) return;
+    if (!composerHasDraft(draft.head)) return;
+    // Drop an oversized draft in a single DOM assignment rather than typing it
+    // away; the prompt is (re)typed after selection, so nothing real is lost.
+    if (draftNeedsFastClear(draft.length)) {
+      const emptied = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
+        if (Date.now() >= deadline) return false;
+        const input = body.querySelector(composerSelector);
+        if (!input) return false;
+        if (typeof input.value === "string") input.value = "";
+        else { input.focus(); input.textContent = ""; }
+        input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+        return String(input.value ?? input.innerText ?? "").trim().length === 0;
+      }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+      if (emptied) return;
+    }
     const input = page.locator(COMPOSER_SELECTOR).first();
     await input.click(interactionOptions(budget)).catch(() => {});
     await input.fill("", interactionOptions(budget)).catch(() => {});

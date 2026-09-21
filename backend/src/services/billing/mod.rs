@@ -17,6 +17,7 @@ pub mod route_inventory;
 pub mod schedules;
 mod targets;
 pub mod topup_expiry;
+pub mod usage_rollup;
 pub mod webhook;
 
 use std::sync::Arc;

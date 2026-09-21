@@ -336,8 +336,7 @@ function ServiceTable({ services }: { services: AdminUsageService[] }) {
             <DataTableBadgeCell>
               {service.by_credential_class.map((lane) => (
                 <Badge key={lane.credential_class} variant="secondary">
-                  {credentialClassLabel(lane.credential_class)}
-                  :{" "}
+                  {credentialClassLabel(lane.credential_class)}:{" "}
                   <span className="font-mono">
                     {formatNumber(lane.requests)}
                   </span>
@@ -501,7 +500,10 @@ export function AdminUsagePage() {
   const usage = useAdminUsage(search);
   const data = usage.data;
   const change = (patch: Partial<AdminUsageSearch>) =>
-    void navigate({ to: "/admin/usage", search: { ...search, page: 1, ...patch } });
+    void navigate({
+      to: "/admin/usage",
+      search: { ...search, page: 1, ...patch },
+    });
   const rangeError =
     search.period === "custom" ? usageRangeError(search.from, search.to) : null;
   const periodChange = (period: string) => {
@@ -592,7 +594,10 @@ export function AdminUsagePage() {
         <Button
           variant="ghost"
           onClick={() =>
-            void navigate({ to: "/admin/usage", search: normalizeAdminUsageSearch({}) })
+            void navigate({
+              to: "/admin/usage",
+              search: normalizeAdminUsageSearch({}),
+            })
           }
         >
           Reset filters
@@ -649,6 +654,16 @@ export function AdminUsagePage() {
             <p className="text-[11px] text-muted-foreground">
               {new Date(data.window.from).toLocaleString()} –{" "}
               {new Date(data.window.to).toLocaleString()} ·{" "}
+              {data.freshness && (
+                <>
+                  {new Date(data.freshness.rolled_up_through) <
+                  new Date(data.window.from)
+                    ? `Backfilling history · rollups complete through ${new Date(data.freshness.rolled_up_through).toLocaleString()}`
+                    : `Live · includes ${data.freshness.tail_rows.toLocaleString()} unfolded rows`}
+                  {data.freshness.validated === false && " · Updating totals"}{" "}
+                  ·{" "}
+                </>
+              )}
               {formatNumber(data.totals.events)} metered events ·{" "}
               {formatNumber(data.totals.unique_services)} services
             </p>

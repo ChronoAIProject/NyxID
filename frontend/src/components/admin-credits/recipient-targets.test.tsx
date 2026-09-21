@@ -4,10 +4,10 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { describe, expect, it, vi } from "vitest";
 import { Form, useAppForm } from "@/components/ui/form";
 import {
-  allowanceFormSchema,
+  allowanceBundleFormSchema as allowanceFormSchema,
   issueGrantFormSchema,
   scheduleFormSchema,
-  type AllowanceForm,
+  type AllowanceBundleForm as AllowanceForm,
   type IssueGrantForm,
   type ScheduleForm,
 } from "@/schemas/billing-credits";
@@ -77,8 +77,7 @@ function Harness({
     defaultValues: {
       ...targets,
       service_ref: "service",
-      quantity: 100,
-      recurrence: "monthly",
+      units: [{ metric: "tokens", quantity: 100, recurrence: "monthly" }],
     },
   });
   const schedule = useAppForm<ScheduleForm>({
@@ -191,17 +190,30 @@ it("shared fields clear selected owners when switching to member targets", async
   expect(screen.getByText(/its shared wallet/)).toBeInTheDocument();
   await user.click(screen.getByText("Engineering"));
   await user.click(screen.getByRole("button", { name: "Submit recipients" }));
-  await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
-    expect.objectContaining({ target_kind: "selected_users", target_user_ids: ["org"] }),
-    expect.anything(),
-  ));
+  await waitFor(() =>
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target_kind: "selected_users",
+        target_user_ids: ["org"],
+      }),
+      expect.anything(),
+    ),
+  );
   onSubmit.mockClear();
   await user.click(screen.getByRole("combobox", { name: "Recipients" }));
-  await user.click(screen.getByRole("option", { name: "Organization members" }));
+  await user.click(
+    screen.getByRole("option", { name: "Organization members" }),
+  );
   await user.click(screen.getByText("Engineering"));
   await user.click(screen.getByRole("button", { name: "Submit recipients" }));
-  await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
-    expect.objectContaining({ target_kind: "org_members", target_user_ids: [], target_org_ids: ["org"] }),
-    expect.anything(),
-  ));
+  await waitFor(() =>
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target_kind: "org_members",
+        target_user_ids: [],
+        target_org_ids: ["org"],
+      }),
+      expect.anything(),
+    ),
+  );
 });

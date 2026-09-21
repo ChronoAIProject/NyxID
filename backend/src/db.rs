@@ -2459,6 +2459,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    crate::services::billing::usage_rollup::ensure_indexes(db).await?;
+
     // ── usage_meter ──
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
     usage_meter
@@ -2717,6 +2719,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    usage_allowances
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "bundle_id": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
     let allowance_periods = db.collection::<Document>(USAGE_ALLOWANCE_PERIODS);
     allowance_periods
         .create_index(

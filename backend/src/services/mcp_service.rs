@@ -4633,14 +4633,29 @@ pub async fn discover_services(
     query: Option<&str>,
     category: Option<&str>,
 ) -> AppResult<serde_json::Value> {
+    discover_services_with_scope(db, user_id, query, category, None).await
+}
+
+/// Restricted API-key discovery hides connection state outside the effective
+/// allowlist. None keeps the behavior for humans, unrestricted keys and SAs.
+pub async fn discover_services_with_scope(
+    db: &mongodb::Database,
+    user_id: &str,
+    query: Option<&str>,
+    category: Option<&str>,
+    api_key_scope: Option<&[String]>,
+) -> AppResult<serde_json::Value> {
     // Load all old-model connections so an inactive row can distinguish an
     // explicit disconnect from an auto-connected service with no row.
-    let connections: Vec<UserServiceConnection> = db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .find(doc! { "user_id": user_id })
-        .await?
-        .try_collect()
-        .await?;
+    let connections: Vec<UserServiceConnection> = if api_key_scope.is_some() {
+        vec![]
+    } else {
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .find(doc! { "user_id": user_id })
+            .await?
+            .try_collect()
+            .await?
+    };
 
     let connected_ids: HashSet<&str> = connections
         .iter()
@@ -4652,13 +4667,24 @@ pub async fn discover_services(
         .map(|connection| connection.service_id.as_str())
         .collect();
 
+    let grants =
+        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     // Load new-model AI Services -- exclude catalog services already provisioned
-    let user_services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! { "user_id": user_id, "is_active": true })
+    let user_services: Vec<UserService> = if let Some(allowed) = api_key_scope {
+        super::catalog_discovery_service::agent_services_with_memberships(
+            db,
+            user_id,
+            Some(allowed),
+            grants.memberships(),
+        )
         .await?
-        .try_collect()
-        .await?;
+    } else {
+        db.collection::<UserService>(USER_SERVICES)
+            .find(doc! { "user_id": user_id, "is_active": true })
+            .await?
+            .try_collect()
+            .await?
+    };
 
     let user_service_catalog_ids: HashSet<&str> = user_services
         .iter()
@@ -4670,6 +4696,7 @@ pub async fn discover_services(
     let mut filter = doc! {
         "is_active": true,
         "service_category": { "$ne": "provider" },
+        "$and": [super::catalog_service::visibility_filter(user_id)],
         "$nor": [
             { "service_category": "internal", "slug": { "$regex": "^platform-" } },
         ],
@@ -4689,7 +4716,7 @@ pub async fn discover_services(
         .try_collect()
         .await?;
 
-    let mut results: Vec<serde_json::Value> = all_services
+    let candidates: Vec<serde_json::Value> = all_services
         .iter()
         .filter(|svc| {
             // Already connected via old model
@@ -4733,10 +4760,9 @@ pub async fn discover_services(
         })
         .collect();
 
-    let grants =
-        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     let providers = crate::services::platform_key_service::load_providers(db).await?;
-    for result in &mut results {
+    let mut results = Vec::with_capacity(candidates.len());
+    for mut result in candidates {
         let Some(service) = all_services
             .iter()
             .find(|s| result["service_id"].as_str() == Some(&s.id))
@@ -4750,6 +4776,12 @@ pub async fn discover_services(
         let available = crate::services::platform_key_service::available_with_grants(
             service, provider, user_id, &grants,
         );
+        // The shared query admits platform-key-enabled candidates before live
+        // grant resolution. Like REST catalog listing, hide another owner's
+        // private template when that platform key is unavailable to the actor.
+        if service.visibility == "private" && service.created_by != user_id && !available {
+            continue;
+        }
         if let Some(inference) = crate::services::inference_service::view(
             service,
             provider.map(|p| p.slug.as_str()),
@@ -4767,6 +4799,7 @@ pub async fn discover_services(
                 .and_then(|b| b.byok_pricing.as_ref())
                 .map(crate::services::inference_service::LanePricingView::from)
         );
+        results.push(result);
     }
     let count = results.len();
     Ok(serde_json::json!({ "services": results, "count": count }))
@@ -6965,6 +6998,187 @@ mod tests {
             .collect();
         assert!(!discovered_ids.contains(&catalog_id.as_str()));
         assert!(!discovered_ids.contains(&user_service_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn discover_services_shares_rest_visibility_for_all_callers() {
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::test_utils::{test_app_state, test_user};
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        async fn assert_visibility(
+            state: &crate::AppState,
+            owner: &str,
+            key: &str,
+            expected: &[&str],
+        ) {
+            let direct = discover_services(&state.db, owner, None, None)
+                .await
+                .unwrap();
+            let (_, private) = crate::routes::build_router_with_state(state.clone());
+            let response = private
+                .with_state(state.clone())
+                .oneshot(
+                    Request::post("/mcp")
+                        .header("x-api-key", key)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": "nyx__discover_services", "arguments": {}}
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let via_key: serde_json::Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(via_key, direct);
+            // With no connected instances, a restricted key has the same
+            // template visibility as the owner and an unrestricted key.
+            let restricted = discover_services_with_scope(&state.db, owner, None, None, Some(&[]))
+                .await
+                .unwrap();
+            assert_eq!(restricted, direct);
+            let mut slugs: Vec<&str> = direct["services"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["slug"].as_str().unwrap())
+                .collect();
+            slugs.sort_unstable();
+            assert_eq!(slugs, expected);
+            // include_all also accepts legacy rows without service_type.
+            let mut rest: Vec<String> = crate::services::catalog_service::list_catalog_all(
+                &state.db,
+                &state.encryption_keys,
+                owner,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.slug)
+            .collect();
+            rest.sort_unstable();
+            assert_eq!(rest, expected);
+        }
+
+        let Some(db) = connect_test_database("mcp_discovery_visibility").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        for slug in ["public", "legacy", "private-template"] {
+            let mut catalog = dummy_service();
+            catalog.id = uuid::Uuid::new_v4().to_string();
+            catalog.slug = slug.to_string();
+            catalog.created_by = other.clone();
+            catalog.requires_user_credential = true;
+            if slug == "private-template" {
+                catalog.visibility = "private".to_string();
+            }
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(catalog)
+                .await
+                .unwrap();
+        }
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "legacy"},
+                doc! {"$unset": {"visibility": "", "service_type": ""}},
+            )
+            .await
+            .unwrap();
+        // The legacy HTTP-type $or must not overwrite the visibility predicate.
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "private-template"},
+                doc! {"$unset": {"service_type": ""}},
+            )
+            .await
+            .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &db,
+            &owner,
+            "Discovery",
+            "proxy",
+            /* expires_at */ None,
+            /* description */ None,
+            /* allowed_service_ids */ None,
+            /* allowed_node_ids */ None,
+            /* allow_all_services */ Some(true),
+            /* allow_auto_connected_services */ Some(false),
+            /* allow_all_nodes */ Some(true),
+            /* rate_limit_per_second */ None,
+            /* rate_limit_burst */ None,
+            /* platform */ None,
+            /* callback_url */ None,
+        )
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+        assert_visibility(&state, &owner, &key.full_key, &["legacy", "public"]).await;
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "private-template"},
+                doc! {"$set": {"created_by": &owner}},
+            )
+            .await
+            .unwrap();
+        assert_visibility(
+            &state,
+            &owner,
+            &key.full_key,
+            &["legacy", "private-template", "public"],
+        )
+        .await;
+
+        // Enabled alone is only a query candidate, not a live platform grant.
+        // Match REST before granting access, after granting it, and on revocation.
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES).update_one(
+            doc! {"slug": "private-template"}, doc! {"$set": {
+                "created_by": &other, "credential_encrypted": vec![1_i32],
+                "platform_key": {"enabled": true, "audience": "restricted", "allowed_owner_ids": []},
+            }},
+        ).await.unwrap();
+        assert_visibility(&state, &owner, &key.full_key, &["legacy", "public"]).await;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "private-template"},
+                doc! {"$set": {"platform_key.allowed_owner_ids": [&owner]}},
+            )
+            .await
+            .unwrap();
+        assert_visibility(
+            &state,
+            &owner,
+            &key.full_key,
+            &["legacy", "private-template", "public"],
+        )
+        .await;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "private-template"},
+                doc! {"$set": {"platform_key.allowed_owner_ids": []}},
+            )
+            .await
+            .unwrap();
+        assert_visibility(&state, &owner, &key.full_key, &["legacy", "public"]).await;
     }
 
     // -- generate_tool_definitions tests --

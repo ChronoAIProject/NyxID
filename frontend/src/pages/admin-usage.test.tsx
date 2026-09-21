@@ -198,6 +198,36 @@ it("shows an email as the label for a user with no display name", async () => {
   await userEvent.click(option);
   expect(mocks.navigate).toHaveBeenLastCalledWith({
     to: "/admin/usage",
-    search: expect.objectContaining({ user: "33333333-3333-4333-8333-333333333333" }),
+    search: expect.objectContaining({
+      user: "33333333-3333-4333-8333-333333333333",
+    }),
   });
+});
+
+it.each([
+  ["2026-09-17T23:59:00Z", "Backfilling history · rollups complete through"],
+  ["2026-09-18T00:00:00Z", "Live · includes 417 unfolded rows"],
+])("surfaces freshness watermark %s", (rolled_up_through, text) => {
+  const data = usageFixture();
+  data.freshness = { rolled_up_through, tail_rows: 417, validated: true };
+  setUsage({ data });
+  renderPage();
+  expect(
+    screen.getByText(
+      (_, element) =>
+        element?.tagName === "P" &&
+        Boolean(element.textContent?.includes(text)),
+    ),
+  ).toBeInTheDocument();
+});
+it("labels totals that could not be validated during a fold", () => {
+  const data = usageFixture();
+  data.freshness = {
+    rolled_up_through: data.window.from,
+    tail_rows: 417,
+    validated: false,
+  };
+  setUsage({ data });
+  renderPage();
+  expect(screen.getByText(/Updating totals/)).toBeInTheDocument();
 });

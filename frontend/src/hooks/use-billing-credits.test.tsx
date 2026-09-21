@@ -8,19 +8,22 @@ import {
   useAdminCreditSchedules,
   useCreateCreditSchedule,
   useCreateAllowance,
+  useCreateAllowanceBundle,
+  useReplaceAllowanceBundle,
   useCurrentAllowances,
   useIssueCreditGrant,
   useUpdateCreditSchedule,
 } from "./use-billing-credits";
 
-const { mockGet, mockPost, mockPatch } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockPatch, mockPut } = vi.hoisted(() => ({
   mockGet: vi.fn(),
   mockPost: vi.fn(),
   mockPatch: vi.fn(),
+  mockPut: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
-  api: { get: mockGet, post: mockPost, patch: mockPatch },
+  api: { get: mockGet, post: mockPost, patch: mockPatch, put: mockPut },
 }));
 
 function wrapperFactory() {
@@ -276,3 +279,43 @@ it.each(["org_members", "groups"] as const)(
     }
   },
 );
+
+it("normalizes stale target lists at both bundle hook boundaries", async () => {
+  const body = {
+    service_ref: "service",
+    target_kind: "all_users" as const,
+    target_user_ids: ["stale-user"],
+    target_org_ids: ["stale-org"],
+    target_group_ids: ["stale-group"],
+    units: [
+      { metric: "tokens" as const, quantity: 10, recurrence: "daily" as const },
+    ],
+  };
+  const response = { bundle_id: "bundle", allowances: [] };
+  mockPost.mockResolvedValue(response);
+  mockPut.mockResolvedValue(response);
+  const create = renderHook(() => useCreateAllowanceBundle(), {
+    wrapper: wrapperFactory(),
+  });
+  const replace = renderHook(() => useReplaceAllowanceBundle(), {
+    wrapper: wrapperFactory(),
+  });
+  create.result.current.mutate(body);
+  replace.result.current.mutate({ id: "bundle", body });
+  await waitFor(() => expect(create.result.current.isSuccess).toBe(true));
+  await waitFor(() => expect(replace.result.current.isSuccess).toBe(true));
+  const normalized = {
+    ...body,
+    target_user_ids: [],
+    target_org_ids: [],
+    target_group_ids: [],
+  };
+  expect(mockPost).toHaveBeenCalledWith(
+    "/admin/credits/allowances",
+    normalized,
+  );
+  expect(mockPut).toHaveBeenCalledWith(
+    "/admin/credits/allowances/bundles/bundle",
+    normalized,
+  );
+});

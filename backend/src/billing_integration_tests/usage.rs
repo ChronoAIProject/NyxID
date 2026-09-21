@@ -8,6 +8,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
     UsageMeterRow {
+        rollup_pending: true,
         id: id.clone(),
         transaction_id: id.clone(),
         billing_request_id: id,
@@ -144,6 +145,7 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
         if allowance_units > 0 {
             db.collection::<UsageAllowance>(ALLOWANCES)
                 .insert_one(UsageAllowance {
+                    bundle_id: None,
                     id: Uuid::new_v4().to_string(),
                     service_id: "service".into(),
                     service_slug: "llm-test".into(),

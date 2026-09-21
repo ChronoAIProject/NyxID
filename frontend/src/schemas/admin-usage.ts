@@ -46,6 +46,13 @@ export const usageRankingSchema = usageStatsSchema.extend({
   billing_owner: usageIdentitySchema.nullable(),
 });
 export const adminUsageResponseSchema = z.object({
+  freshness: z
+    .object({
+      rolled_up_through: z.iso.datetime({ offset: true }),
+      tail_rows: count,
+      validated: z.boolean().optional(),
+    })
+    .optional(),
   window: z.object({
     from: z.iso.datetime({ offset: true }),
     to: z.iso.datetime({ offset: true }),

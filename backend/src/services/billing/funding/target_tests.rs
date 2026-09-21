@@ -26,6 +26,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
         let now = Utc::now();
         db.collection::<UsageAllowance>(ALLOWANCES)
             .insert_one(UsageAllowance {
+                bundle_id: None,
                 id: "allowance".into(),
                 service_id: "service".into(),
                 service_slug: "service".into(),
@@ -104,6 +105,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             .is_empty()
         );
         let row = UsageMeterRow {
+            rollup_pending: true,
             id: "row".into(),
             transaction_id: "transaction".into(),
             billing_request_id: "request".into(),

@@ -37,6 +37,8 @@ const COUNT_FIELDS: &[&str] = &[
 #[derive(Debug, Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct AdminUsageQuery {
+    /// 24h (default), 7d, or 30d. Starts at the UTC hour at/before
+    /// now minus the duration, ends at now; exact bounds are in the response.
     pub period: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
@@ -124,7 +126,18 @@ pub struct UsageRanking {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct UsageFreshness {
+    /// Exclusive source-time watermark from the last gap-free sweep: at most
+    /// now minus 60 seconds, or an older unfolded terminal row. Initially epoch.
+    pub rolled_up_through: DateTime<Utc>,
+    pub tail_rows: i64,
+    /// False when bounded consistency retries returned a best-effort result.
+    pub validated: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AdminUsageResponse {
+    pub freshness: UsageFreshness,
     pub window: UsageWindow,
     pub totals: UsageStats,
     pub by_service: Vec<UsageService>,
@@ -178,7 +191,9 @@ impl AdminUsageQuery {
                     _ => return Err(invalid("period must be 24h, 7d, or 30d")),
                 };
                 UsageWindow {
-                    from: now - chrono::Duration::days(days),
+                    from: crate::services::billing::usage_rollup::hour(
+                        now - chrono::Duration::days(days),
+                    ),
                     to: now,
                     period,
                 }
@@ -274,9 +289,7 @@ fn legacy_cost(quantity: &str) -> Bson {
     .into()
 }
 
-/// First group at the billing display's exact/legacy rate dimensions, plus
-/// actor/owner/credential attribution. No per-row rate queries or Rust sums.
-fn base_pipeline(params: &UsageParams) -> Vec<Document> {
+pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
     let mut group = doc! {
         "_id": {
             "actor": "$actor_user_id", "owner": "$billing_owner_id",
@@ -309,6 +322,25 @@ fn base_pipeline(params: &UsageParams) -> Vec<Document> {
             doc! { "$sum": { "$toDecimal": { "$ifNull": [format!("$funding.{source}"), 0] } } },
         );
     }
+    if !legacy_dimensions {
+        let key = group.get_document_mut("_id").expect("literal group key");
+        key.remove("api_key");
+        key.remove("acked");
+    }
+    group
+}
+
+pub(crate) fn meter_flags() -> Document {
+    doc! { "$set": {
+        "primary": { "$and": [{ "$eq": ["$layer", "platform"] }, { "$eq": ["$transaction_id", { "$concat": ["$billing_request_id", ":platform"] }] }] },
+        "exact": { "$ne": [{ "$ifNull": ["$funding.total_charge_micros", null] }, null] },
+    } }
+}
+
+/// First group at the billing display's exact/legacy rate dimensions, plus
+/// actor/owner/credential attribution. No per-row rate queries or Rust sums.
+fn base_pipeline(params: &UsageParams) -> Vec<Document> {
+    let group = meter_group(true);
     let mut costs = Document::new();
     for (field, legacy) in COST_FIELDS.iter().zip([
         Bson::String("$legacy_gross".into()),
@@ -415,6 +447,7 @@ fn rollup(dimensions: &[&str]) -> Vec<Document> {
     ]
 }
 
+#[cfg(test)]
 fn summary_pipeline(params: &UsageParams) -> Vec<Document> {
     let mut pipeline = base_pipeline(params);
     pipeline.push(doc! { "$facet": {
@@ -426,6 +459,7 @@ fn summary_pipeline(params: &UsageParams) -> Vec<Document> {
     pipeline
 }
 
+#[cfg(test)]
 fn ranking_pipeline(params: &UsageParams) -> Vec<Document> {
     let mut pipeline = base_pipeline(params);
     pipeline.extend(rollup(&["actor", "owner", "service_id", "service_slug"]));
@@ -453,6 +487,7 @@ fn query_error(error: mongodb::error::Error) -> AppError {
     }
 }
 
+#[cfg(test)]
 async fn aggregate(db: &mongodb::Database, pipeline: Vec<Document>) -> AppResult<Vec<Document>> {
     db.collection::<Document>(COLLECTION_NAME)
         .aggregate(pipeline)
@@ -512,22 +547,10 @@ async fn get_usage_inner(
     db: &mongodb::Database,
     params: UsageParams,
 ) -> AppResult<AdminUsageResponse> {
-    let options = vec![
-        doc! { "$match": meter_filter(&params, false) },
-        doc! { "$group": { "_id": { "service_id": { "$ifNull": ["$service_id", null] }, "service_slug": { "$ifNull": ["$service_slug", null] } } } },
-        doc! { "$sort": { "_id.service_slug": 1, "_id.service_id": 1 } },
-    ];
-    let (summary, ranking, options) = tokio::try_join!(
-        aggregate(db, summary_pipeline(&params)),
-        aggregate(db, ranking_pipeline(&params)),
-        aggregate(db, options),
-    )?;
-    let summary = summary
-        .first()
-        .ok_or_else(|| AppError::Internal("Missing usage summary".into()))?;
-    let ranking = ranking
-        .first()
-        .ok_or_else(|| AppError::Internal("Missing usage ranking".into()))?;
+    let (result, freshness) = fast_aggregate(db, &params).await?;
+    let summary = &result;
+    let ranking = &result;
+    let options = documents(&result, "options")?;
     let rank_rows = documents(ranking, "ranking")?;
     let service_rows = documents(summary, "services")?;
     let mut user_ids = HashSet::new();
@@ -689,6 +712,7 @@ async fn get_usage_inner(
         })
         .unwrap_or(0);
     Ok(AdminUsageResponse {
+        freshness,
         window: params.window,
         totals,
         by_service,
@@ -707,6 +731,346 @@ async fn get_usage_inner(
             .collect::<AppResult<_>>()?,
         selected_user: params.user.as_deref().map(identity),
     })
+}
+
+fn source_filter(
+    params: &UsageParams,
+    bucket: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Document {
+    let mut filter = doc! { bucket: { "$gte": bson::DateTime::from_chrono(start), "$lt": bson::DateTime::from_chrono(end) } };
+    if let Some(user) = &params.user {
+        filter.insert("$or", vec![doc! { "actor": user }, doc! { "owner": user }]);
+    }
+    filter
+}
+
+fn fast_pipeline(
+    params: &UsageParams,
+    rates: Document,
+    folded_before: Option<DateTime<Utc>>,
+    daily_ready: bool,
+) -> Vec<Document> {
+    use crate::services::billing::usage_rollup::{DIMENSIONS, MEASURES, day, hour};
+    let from_hour = hour(params.window.from);
+    let start = if params.window.from == from_hour {
+        from_hour
+    } else {
+        from_hour + chrono::Duration::hours(1)
+    };
+    // The journal publishes an upper bound before any summary increment. A
+    // live end beyond that bound can include the current, partially filled
+    // bucket. Historical custom edges still read their indexed raw ranges.
+    let to_hour = hour(params.window.to);
+    let include_partial_end =
+        params.window.to > to_hour && folded_before.is_some_and(|bound| bound <= params.window.to);
+    let end = (to_hour + chrono::Duration::hours(i64::from(include_partial_end))).max(start);
+    let mut key = Document::new();
+    for field in DIMENSIONS {
+        key.insert(*field, format!("${field}"));
+    }
+    let mut raw_group = meter_group(true);
+    raw_group.insert(
+        "tail_rows",
+        doc! { "$sum": { "$cond": [{ "$eq": ["$rollup_pending", false] }, 0_i64, 1_i64] } },
+    );
+    // BSON object key order is significant to grouping. Rebuild one canonical
+    // key for both raw groups and unfolded summaries before legacy rounding.
+    let canonical_key: Document = raw_group
+        .get_document("_id")
+        .expect("literal group key")
+        .keys()
+        .map(|field| (field.clone(), Bson::String(format!("$_id.{field}"))))
+        .collect();
+    let mut regroup = doc! { "_id": "$_id", "tail_rows": { "$sum": "$tail_rows" } };
+    for field in MEASURES {
+        regroup.insert(*field, doc! { "$sum": format!("${field}") });
+    }
+    let mut initial_group = regroup.clone();
+    initial_group.insert("_id", "$single_display_key");
+    initial_group.remove("rows_folded");
+    initial_group.insert("tail_rows", doc! { "$sum": 0_i64 });
+    let mut partition_group = regroup.clone();
+    partition_group.insert("_id", canonical_key);
+    for field in COST_FIELDS {
+        initial_group.insert(*field, doc! { "$sum": format!("${field}") });
+        partition_group.insert(
+            *field,
+            doc! { "$sum": { "$toDecimal": format!("${field}") } },
+        );
+    }
+    // Persisted funding costs are nonnegative int64 (billing::amounts).
+    // Sum integers exactly until overflow; Mongo promotes an overflowing sum
+    // to double, which is necessarily >= i64::MAX and saturates here. Convert
+    // only the reduced groups to Decimal128 for the shared legacy price path.
+    // This avoids decoding/adding a Decimal128 for every hourly source value.
+    let bounded_costs: Document = COST_FIELDS
+        .iter()
+        .map(|field| {
+            (
+                (*field).to_owned(),
+                Bson::Document(doc! { "$toDecimal": { "$min": [i64::MAX, format!("${field}")] } }),
+            )
+        })
+        .collect();
+    let mut unfold = doc! { "_id": { "$mergeObjects": [key, { "$ifNull": ["$part.key", {}] }] }, "tail_rows": 0_i64 };
+    for field in MEASURES {
+        unfold.insert(*field, format!("$part.{field}"));
+    }
+    let partition_pipeline = vec![
+        doc! { "$set": { "part": { "$cond": [
+            { "$gt": [{ "$size": { "$objectToArray": { "$ifNull": ["$cost_partitions", {}] } } }, 0] },
+            { "$map": { "input": { "$objectToArray": "$cost_partitions" }, "as": "part", "in": "$$part.v" } },
+            ["$$ROOT"],
+        ] } } },
+        doc! { "$unwind": "$part" },
+        doc! { "$set": unfold },
+        doc! { "$group": partition_group },
+    ];
+    let raw_filter = |from: DateTime<Utc>, to: DateTime<Utc>, pending_only: bool| {
+        let mut filter = meter_filter(params, false);
+        // Keep status/date as one indexable range for historical raw edges.
+        filter.remove("$or");
+        filter.insert(
+            "$expr",
+            doc! { "$or": [{ "$eq": ["$status", "finalized"] }, { "$eq": ["$forwarded", true] }] },
+        );
+        filter.insert("created_at", doc! { "$gte": bson::DateTime::from_chrono(from), "$lt": bson::DateTime::from_chrono(to) });
+        if pending_only {
+            filter.insert("rollup_pending", doc! { "$in": [true, null] });
+        }
+        filter
+    };
+    // The root scan is always the pending tail so the aggregate's explicit
+    // index hint applies to it. MongoDB may otherwise choose the old status/date
+    // index inside unionWith and fetch every already-folded row in the window.
+    // An inverted/empty interior range correctly produces no root documents.
+    let mut pipeline = vec![
+        doc! { "$match": raw_filter(start.max(params.window.from), end.min(params.window.to), true) },
+        meter_flags(),
+        doc! { "$group": raw_group.clone() },
+    ];
+    let first_day = day(start) + chrono::Duration::days(i64::from(day(start) < start));
+    let last_day = day(params.window.to).min(day(end));
+    let hourly = crate::models::usage_rollup_hourly::COLLECTION_NAME;
+    let daily = crate::models::usage_rollup_daily::COLLECTION_NAME;
+    let ranges = if daily_ready && first_day < last_day {
+        vec![
+            (hourly, "hour", start, first_day),
+            (daily, "day", first_day, last_day),
+            (hourly, "hour", last_day, end),
+        ]
+    } else {
+        vec![(hourly, "hour", start, end)]
+    };
+    for (collection, bucket, from, to) in ranges {
+        if from >= to {
+            continue;
+        }
+        let mut single_filter = source_filter(params, bucket, from, to);
+        single_filter.insert("single_display_key", doc! { "$ne": null });
+        let mut partition_filter = source_filter(params, bucket, from, to);
+        partition_filter.insert("single_display_key", Bson::Null);
+        let mut partitions = vec![doc! { "$match": partition_filter }];
+        partitions.extend(partition_pipeline.clone());
+        pipeline.extend([
+            doc! { "$unionWith": { "coll": collection, "pipeline": [
+                doc! { "$match": single_filter }, doc! { "$group": initial_group.clone() }, doc! { "$set": bounded_costs.clone() },
+            ] } },
+            doc! { "$unionWith": { "coll": collection, "pipeline": partitions } },
+        ]);
+    }
+    for (from, to) in [
+        (params.window.from, start.min(params.window.to)),
+        (end.max(params.window.from), params.window.to),
+    ] {
+        if from < to {
+            pipeline.push(doc! { "$unionWith": { "coll": COLLECTION_NAME, "pipeline": [
+                doc! { "$match": raw_filter(from, to, false) }, meter_flags(), doc! { "$group": raw_group.clone() },
+            ] } });
+        }
+    }
+    pipeline.extend([
+        doc! { "$group": regroup },
+        doc! { "$set": { "rate": { "$ifNull": [
+            { "$getField": { "field": { "$concat": ["$_id.code", ":", { "$ifNull": ["$_id.model", "*"] }] }, "input": { "$literal": rates.clone() } } },
+            { "$getField": { "field": { "$concat": ["$_id.code", ":*"] }, "input": { "$literal": rates } } }, null,
+        ] } } },
+    ]);
+    let mut price = base_pipeline(params).split_off(6);
+    price[0].get_document_mut("$set").expect("price set").insert("unknown", doc! { "$and": ["$_id.billable", { "$gt": ["$legacy_quantity", 0] }, { "$eq": [{ "$ifNull": ["$rate", null] }, null] }] });
+    pipeline.extend(price);
+    let selected = || -> Vec<Document> {
+        params.service.as_ref().map(|s| vec![doc! { "$match": { "$or": [{ "_id.service_id": s }, { "_id.service_slug": s }] } }]).unwrap_or_default()
+    };
+    let reduced = |dimensions: &[&str]| {
+        let mut stages = selected();
+        stages.extend(rollup(dimensions));
+        stages
+    };
+    let sort = match params.sort.as_str() {
+        "quantity" => format!("quantities.{}", params.metric),
+        "cost" => "gross_cost_micros".into(),
+        value => value.into(),
+    };
+    let mut ranking = reduced(&["actor", "owner", "service_id", "service_slug"]);
+    ranking.extend([doc! { "$sort": { sort: -1, "_id.actor": 1, "_id.owner": 1, "_id.service_slug": 1, "_id.service_id": 1 } }, doc! { "$skip": params.offset }, doc! { "$limit": params.per_page as i64 }]);
+    let mut total = reduced(&["actor", "owner", "service_id", "service_slug"]);
+    total.push(doc! { "$count": "count" });
+    let mut freshness = selected();
+    freshness.push(doc! { "$group": { "_id": null, "tail_rows": { "$sum": "$tail_rows" } } });
+    pipeline.push(doc! { "$facet": {
+        "totals": reduced(&[]), "services": reduced(&["service_id", "service_slug"]),
+        "classes": reduced(&["class"]), "service_classes": reduced(&["service_id", "service_slug", "class"]),
+        "ranking": ranking, "total": total, "freshness": freshness,
+        "options": [ { "$group": { "_id": { "service_id": "$_id.service_id", "service_slug": "$_id.service_slug" } } }, { "$sort": { "_id.service_slug": 1, "_id.service_id": 1 } } ],
+    } });
+    pipeline
+}
+
+async fn cached_rates(db: &mongodb::Database) -> AppResult<Document> {
+    let rows: Vec<Document> = db
+        .collection::<Document>("billing_rate_cache")
+        .find(doc! {})
+        .projection(doc! { "credits_per_unit_micros": 1, "credits_per_unit_pico": 1 })
+        .max_time(QUERY_TIMEOUT)
+        .await
+        .map_err(query_error)?
+        .try_collect()
+        .await
+        .map_err(query_error)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| Some((row.get_str("_id").ok()?.to_owned(), Bson::Document(row))))
+        .collect())
+}
+
+const MAX_READ_ATTEMPTS: usize = 8;
+
+async fn fast_aggregate(
+    db: &mongodb::Database,
+    params: &UsageParams,
+) -> AppResult<(Document, UsageFreshness)> {
+    let snapshot = crate::services::billing::usage_rollup::supports_transactions(db).await?;
+    fast_aggregate_with_mode(db, params, snapshot).await
+}
+
+async fn fast_aggregate_with_mode(
+    db: &mongodb::Database,
+    params: &UsageParams,
+    snapshot: bool,
+) -> AppResult<(Document, UsageFreshness)> {
+    use crate::services::billing::usage_rollup;
+    let rates = cached_rates(db).await?;
+    let mut last_completed = None;
+    for attempt in 0..MAX_READ_ATTEMPTS {
+        let before = usage_rollup::state(db).await?;
+        let active = before.as_ref().is_some_and(|s| s.batch.is_some());
+        if !snapshot && active && attempt + 1 < MAX_READ_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        }
+        // Idle reads validate the journal; active replica-set folds use a
+        // snapshot. Neither contention nor a short snapshot history may keep
+        // a dashboard request retrying until the complete-request timeout.
+        let use_snapshot = snapshot && active;
+        let bound = before.as_ref().and_then(|s| s.folded_before);
+        let daily_ready = before.as_ref().is_some_and(|state| state.daily_ready);
+        let result =
+            run_fast_pipeline(db, params, rates.clone(), bound, daily_ready, use_snapshot).await;
+        let result = match result {
+            Err(AppError::DatabaseError(error))
+                if use_snapshot
+                    && matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if matches!(command.code, 239 | 246)) =>
+            {
+                continue;
+            }
+            result => result?,
+        };
+        let after = usage_rollup::state(db).await?;
+        // A later claim can advance the upper bound past a historical custom
+        // end. In that case rebuild with raw edges even after a snapshot read.
+        let range_safe = bound.is_none_or(|b| b > params.window.to)
+            || after
+                .as_ref()
+                .and_then(|s| s.folded_before)
+                .is_some_and(|b| b <= params.window.to);
+        if !range_safe {
+            continue;
+        }
+        let validated = use_snapshot
+            || (!active
+                && after.as_ref().is_none_or(|s| s.batch.is_none())
+                && before.as_ref().map(|s| s.sequence).unwrap_or(0)
+                    == after.as_ref().map(|s| s.sequence).unwrap_or(0));
+        let completed = with_freshness(result, after, validated)?;
+        if validated {
+            return Ok(completed);
+        }
+        last_completed = Some(completed);
+    }
+    if let Some(completed) = last_completed {
+        return Ok(completed);
+    }
+    // Persistent snapshot expiry (or advancing custom edges): one ordinary
+    // read with conservative raw boundary hours guarantees a completed result.
+    // Standalone concurrent writes can skew it by an in-flight bounded batch;
+    // freshness explicitly reports that validation was not obtained.
+    let result = run_fast_pipeline(db, params, rates, None, false, false).await?;
+    with_freshness(result, usage_rollup::state(db).await?, false)
+}
+
+async fn run_fast_pipeline(
+    db: &mongodb::Database,
+    params: &UsageParams,
+    rates: Document,
+    folded_before: Option<DateTime<Utc>>,
+    daily_ready: bool,
+    snapshot: bool,
+) -> AppResult<Document> {
+    let collection = db.collection::<Document>(COLLECTION_NAME);
+    let mut action = collection
+        .aggregate(fast_pipeline(params, rates, folded_before, daily_ready))
+        .hint(mongodb::options::Hint::Name(
+            crate::services::billing::usage_rollup::PENDING_INDEX.to_owned(),
+        ))
+        .max_time(QUERY_TIMEOUT)
+        .allow_disk_use(true);
+    if snapshot {
+        action = action.read_concern(mongodb::options::ReadConcern::snapshot());
+    }
+    let results = action
+        .await
+        .map_err(query_error)?
+        .try_collect::<Vec<Document>>()
+        .await
+        .map_err(query_error)?;
+    results
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::Internal("Missing usage summary".into()))
+}
+
+fn with_freshness(
+    result: Document,
+    state: Option<crate::models::usage_rollup_state::UsageRollupState>,
+    validated: bool,
+) -> AppResult<(Document, UsageFreshness)> {
+    let tail_rows = documents(&result, "freshness")?
+        .first()
+        .and_then(|row| row.get_i64("tail_rows").ok())
+        .unwrap_or(0);
+    Ok((
+        result,
+        UsageFreshness {
+            rolled_up_through: state
+                .map(|s| s.rolled_up_through)
+                .unwrap_or(DateTime::UNIX_EPOCH),
+            tail_rows,
+            validated,
+        },
+    ))
 }
 
 #[cfg(test)]

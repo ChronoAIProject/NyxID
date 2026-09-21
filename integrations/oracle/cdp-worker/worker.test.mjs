@@ -18,6 +18,8 @@ test("preferredModelPillIndex never selects an unlabelled control", () => {
 import {
   PRE_SEND_ACTION_MS,
   composerHasDraft,
+  draftNeedsFastClear,
+  COMPOSER_FAST_CLEAR_CHARS,
   composerVisibleHitPoint,
   retryPresendModelRead,
   usageCooldownConfig,
@@ -54,6 +56,7 @@ import {
   modelSelectionFailureReason,
   modelLevelTargets,
   pillShowsLevel,
+  splitTierOffered,
   detectPillLevel,
   dropCancelledCommand,
   resolveNpmExecutable,
@@ -587,6 +590,51 @@ test("pill text verifies the selected level without cross-matching", () => {
   assert.equal(pillShowsLevel("High", high), true);
   assert.equal(pillShowsLevel("Extra High", high), false);
   assert.equal(pillShowsLevel("", high), false);
+});
+
+test("an oversized leftover draft takes the single-assignment clear", () => {
+  // fill("") drives a select-all and delete through React; on a composer
+  // holding tens of thousands of characters that does not finish inside
+  // PRE_SEND_ACTION_MS. The clear is best-effort, so the timeout is swallowed,
+  // the draft survives a browser relaunch, and every worker that picks the task
+  // up dies as operation_timeout@selecting_model. Observed 2026-09-21 with an
+  // 83,046 character draft that walked through a 15-worker pool.
+  assert.equal(draftNeedsFastClear(83046), true);
+  assert.equal(draftNeedsFastClear(COMPOSER_FAST_CLEAR_CHARS), true);
+  // An ordinary leftover still takes the normal path.
+  assert.equal(draftNeedsFastClear(COMPOSER_FAST_CLEAR_CHARS - 1), false);
+  assert.equal(draftNeedsFastClear(12), false);
+  assert.equal(draftNeedsFastClear(0), false);
+  // A missing or unreadable length must never trigger it.
+  assert.equal(draftNeedsFastClear(undefined), false);
+  assert.equal(draftNeedsFastClear(NaN), false);
+  assert.equal(draftNeedsFastClear(Infinity), false);
+  // The emptiness check itself is unchanged.
+  assert.equal(composerHasDraft("  "), false);
+  assert.equal(composerHasDraft("Architec"), true);
+});
+
+test("a menu without the split tier is not a missing level", () => {
+  // Captured from a live Pro account 2026-09-21. The composer pill's menu now
+  // lists model versions; "6 Pro" is a heading with aria-checked unset, so it
+  // cannot be clicked. modelLevelTargets still asks for Pro Extended on every
+  // Pro request, so the hunt can never succeed - the pool went fully down with
+  // every task rerouted through all 15 workers before failing level_unavailable.
+  const liveMenu = [
+    { text: "6 Pro" }, { text: "" }, { text: "Latest" },
+    { text: "GPT-5.6 Sol" }, { text: "GPT-5.5 Leaving on October 14" },
+  ];
+  assert.equal(splitTierOffered(liveMenu), false);
+  // Where the split does exist, nothing changes: the hunt still applies.
+  assert.equal(splitTierOffered([{ text: "Pro Standard" }, { text: "Pro Extended" }]), true);
+  assert.equal(splitTierOffered([{ text: "Pro \u6269\u5c55" }]), true);
+  assert.equal(splitTierOffered([{ text: "Pro \u6807\u51c6" }]), true);
+  // A bare Pro entry is not a split tier.
+  assert.equal(splitTierOffered([{ text: "Pro" }, { text: "GPT 6 Pro" }]), false);
+  // Absent or malformed menus never claim the split.
+  assert.equal(splitTierOffered([]), false);
+  assert.equal(splitTierOffered(undefined), false);
+  assert.equal(splitTierOffered([{}, { text: null }]), false);
 });
 
 test("pill level detection prefers the longest alias", () => {

@@ -1461,8 +1461,7 @@ async fn dispatch_tools_call(
             .await;
         }
         "nyx__discover_services" => {
-            return handle_meta_discover(state, &auth.user_id, &arguments, request.id.clone())
-                .await;
+            return handle_meta_discover(state, auth, &arguments, request.id.clone()).await;
         }
         "nyx__list_connected_services" => {
             return handle_meta_list_connected(state, auth, &arguments, request.id.clone()).await;
@@ -2310,14 +2309,26 @@ async fn handle_meta_list_connected(
 
 async fn handle_meta_discover(
     state: &AppState,
-    user_id: &str,
+    auth: &McpAuthContext,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
     let query = arguments.get("query").and_then(|q| q.as_str());
     let category = arguments.get("category").and_then(|c| c.as_str());
 
-    match mcp_service::discover_services(&state.db, user_id, query, category).await {
+    let result = if auth.is_api_key && !auth.allow_all_services {
+        mcp_service::discover_services_with_scope(
+            &state.db,
+            &auth.user_id,
+            query,
+            category,
+            Some(&auth.allowed_service_ids),
+        )
+        .await
+    } else {
+        mcp_service::discover_services(&state.db, &auth.user_id, query, category).await
+    };
+    match result {
         Ok(result) => {
             let text = serde_json::to_string_pretty(&result).unwrap_or_default();
             tool_result(request_id, &text, false)
@@ -5156,3 +5167,7 @@ mod curation_auth_regressions {
 #[cfg(test)]
 #[path = "mcp_chat_authority_tests.rs"]
 mod chat_authority_tests;
+
+#[cfg(test)]
+#[path = "mcp_config_routes_tests.rs"]
+mod config_routes_tests;

@@ -146,6 +146,26 @@ Grants snapshot recipients when issued. Schedule periods freeze the recipient po
 
 Old rows default the new id lists to empty. Older replicas do not understand the new enum values: upgrade all readers/writers before using member targets (rollback requires migrating every persisted new-kind row).
 
+### Free allowance bundles
+
+Admins choose a service and recipients once, then add one or more units with their
+own quantity and recurrence. The Free allowances table groups these rows by
+`bundle_id` (legacy singletons use their own id). Each bundle lists every unit and
+shows **Active**, **Partially disabled**, or **Disabled**. Edit reviews each unit's
+before/after values. Removing a unit disables its row on save, retaining its
+consumption history. Editing loads active units only when any are active; disabled
+units stay disabled unless explicitly re-added. If all rows are disabled, editing
+loads all units so the admin can edit and re-enable them by saving. Saving enables
+only the listed units, and the change review shows their re-enablement.
+Disable/Enable applies to all rows, including previously removed units. A bundle's service cannot change.
+
+A bundle is only an admin grouping: every unit retains an independent allowance
+id, period, and exact-metric funding match. Funding order and user balances are
+unchanged; the user balance response exposes the optional bundle id read-only.
+Legacy single-row API clients remain supported. Bundle mutations use the same
+MongoDB transaction requirement as the repository's other atomic multi-document
+mutations, so standalone deployments fail closed instead of writing partial grants.
+
 ### Header
 
 | Label | Meaning | API field |
@@ -280,7 +300,9 @@ agent overrides, node credentials and no-auth traffic. **`BILLING_ENABLED` must
 be on when traffic occurs** for meters to exist; turning it on does not backfill
 past usage. No Lago connection or per-user billing rollout is required to read it.
 
-The default window is the last 24 hours; presets are 24h, 7d and 30d. Custom
+The default window is 24h; presets are 24h, 7d and 30d. Preset starts round down
+to the UTC hour (`hour(now − duration)`), with `to = now`; they may include up
+to 59 additional minutes. The footer shows the exact from/to timestamps. Custom
 RFC 3339 windows use `[from, to)` and must be positive and at most 31 days;
 inverted or longer windows are rejected. The user picker searches names/emails
 and matches either the actor or billing owner, so selecting an organization shows
@@ -311,11 +333,69 @@ A quantity ranking never adds unlike metrics. Expanding a user shows all their
 services in the exact response window. The service picker retains all options in
 the selected window/user scope when a service is selected.
 
-All reductions, rate joins, ranking sorts and paging run in MongoDB with a 20-second
-server limit (and a 22-second complete-request guard); timeouts return HTTP 503.
-One additive non-unique status/date index bounds the reporting scans, at the cost
-of another index update on meter inserts and status transitions. No existing index,
-meter lifecycle, charging rule, or ledger format changes.
+Daily operational rollups supply whole UTC days; hourly rollups supply the
+remaining edge hours and the partially filled live hour. The worker folds stable
+rows older than **60 seconds**, regardless of hour completion; only the most recent one or two minutes ordinarily remain raw. A
+journal timestamp bound, published before increments, lets a reader safely use
+a partially filled end bucket. Custom windows retain index-supported raw scans
+for partial edge hours that contain folded data beyond their boundaries; their
+cost scales with those edge rows. One aggregation combines totals, ranking,
+service options and live-tail counts. Covering indexes reduce common hourly and
+daily summaries without fetching their documents. Rates are read once and joined
+through a MongoDB literal lookup map. Legacy per-display-group truncation and
+missing-rate masking remain intact through internal cost partitions; API keys
+and ack state are not dimensions of either tier’s primary key.
+
+The footer says **Backfilling history · rollups complete through <time>** when
+`freshness.rolled_up_through` precedes the window start; otherwise it says
+**Live · includes N unfolded rows**. The watermark is an exclusive source-time
+bound, no longer hour-aligned: after a gap-free sweep it reaches `now − 60 s`,
+or the oldest unfolded terminal timestamp if an unstable row still blocks it.
+It starts at the Unix epoch during initial backfill. Exact charged rows fold
+after reservation release and funding settlement without waiting for Lago ack,
+so a Lago outage does not grow their tail. Legacy charged rows still need ack
+or terminal dead-letter status to freeze their display partition. Unacked
+charged rows without `forwarded = true` remain live: a later dead-letter
+transition could remove them from the dashboard predicate. Forwarding is
+monotonic in the meter lifecycle.
+
+The worker uses the billing reconcile interval capped at 60 seconds; zero disables
+it. Raw batches contain at most 2,000 rows; hourly-to-daily bootstrap batches
+contain at most 200 hourly documents. Both claims are capped at 4 MiB of
+serialized BSON, including source IDs and increments. Bootstrap stops at the
+largest fitting prefix; oversized raw claims halve their source count and
+recompute the increments before publication. Sources outside the claimed prefix
+remain pending for subsequent batches. Ticks have a 45-second inter-batch
+budget while the watermark is over two hours behind or the daily bootstrap is
+incomplete, and 20 seconds once caught up (at most 100 batches either way). Invalid journal state returns an error and
+the worker logs a metadata-only warning and retries on the next tick.
+
+Each source batch increments both tiers under the same journal sequence and
+`last_batch` fences, then marks its raw sources. Replica-set folds commit both
+tiers and source marks atomically. Reporting validates the journal around idle
+reads and uses snapshots during active folds. Standalone readers validate the
+journal around their aggregation. Contention and snapshot-expiry retries are
+bounded to eight attempts; the last completed result (or one ordinary read if
+snapshots never completed) is returned with `freshness.validated = false`. The
+footer then adds **Updating totals**. Such results can temporarily include an
+in-flight fold; they are not presented as validated. The durable ordered journal
+and monotonic sequence fences still provide exactly-once persisted folding on
+standalone MongoDB. An interrupted write between tiers replays the same batch;
+a fence prevents either increment from being applied twice. Existing hourly-only
+history is copied to daily summaries automatically in bounded batches through
+that same journal, even if its raw events have expired. Old in-flight hourly-only
+batches finish first. Readers keep using hourly summaries until the journal
+publishes `daily_ready`; new folds then maintain both tiers together. Journal
+reads use majority concern so a reader cannot activate the daily tier before
+its completed backfill is available to snapshot reads. This needs no operator
+migration or new configuration. Every index is additive. Both tiers have no TTL,
+while raw rows retain their existing TTL. Historical whole-hour windows remain exact
+from rollups after raw expiration. Exact arbitrary partial-hour boundaries need
+retained raw rows; expired event timestamps cannot be reconstructed from hourly
+summaries.
+
+The existing 20-second server limit and 22-second complete-request guard remain;
+timeouts return HTTP 503 and the client does not automatically retry.
 
 ---
 

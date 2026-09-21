@@ -33,12 +33,13 @@ fn grant_and_allowance_target_dtos_preserve_new_fields_and_legacy_defaults() {
         );
         let now = Utc::now();
         let allowance = UsageAllowance {
+            bundle_id: None,
             id: "allowance".into(),
             service_id: "service".into(),
             service_slug: "service".into(),
             metric: BillingMetric::Requests,
-            quantity: request.quantity,
-            recurrence: request.recurrence,
+            quantity: request.quantity.flatten().unwrap(),
+            recurrence: request.recurrence.flatten().unwrap(),
             target_kind: request.target_kind,
             target_user_ids: request.target_user_ids,
             target_org_ids: request.target_org_ids,
