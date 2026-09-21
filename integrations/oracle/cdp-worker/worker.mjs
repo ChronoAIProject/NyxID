@@ -1757,7 +1757,17 @@ export async function pickerSnapshot(page, budget = interactionBudget(1000)) {
       checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true",
     }));
     return {
-      candidates: candidates.map((el) => (el.innerText || el.textContent || "").trim()),
+      // Adapt a compact pill label the way readModelSwitcher and
+      // chooseSwitcherEntry already do. The composer pill renders family and
+      // tier on separate lines ("6\nPro"); every metadata helper deliberately
+      // refuses to read an un-adapted compact label, so leaving it raw makes
+      // pillShowsLevel false and effortMetadata 'unrecognized' for a pill that
+      // plainly shows Pro - the worker then skips already_selected, hunts a
+      // Pro Extended entry the menu lacks, and fails level_unavailable.
+      candidates: candidates.map((el) => {
+        const raw = (el.innerText || el.textContent || "").trim();
+        return window.__nyx?.compactModelLabel(raw) || raw;
+      }),
       structural: !!pills.length, form: !!form,
       open: menus.length > 0, items, submenu: !!window.__nyx?.modelPickerTrigger(pickerId),
     };
