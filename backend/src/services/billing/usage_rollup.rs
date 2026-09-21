@@ -1,4 +1,4 @@
-//! Bounded, newest-first, exactly-once hourly fold, including automatic legacy
+//! Bounded, newest-first, exactly-once hourly/daily fold, including automatic legacy
 //! discovery. The durable batch is the claim. Replicas may help finish it;
 //! monotonic per-summary sequence fences make every write replay-safe.
 //!
@@ -23,7 +23,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         usage_meter::COLLECTION_NAME as METERS,
-        usage_rollup_hourly::COLLECTION_NAME as ROLLUPS,
+        usage_rollup_daily::{COLLECTION_NAME as DAILY, UsageRollupDaily},
+        usage_rollup_hourly::{COLLECTION_NAME as ROLLUPS, UsageRollupHourly},
         usage_rollup_state::{
             COLLECTION_NAME as STATE, STATE_ID, UsageRollupBatch, UsageRollupState,
         },
@@ -32,6 +33,7 @@ use crate::{
 
 pub const BATCH_SIZE: i64 = 2_000;
 pub const PENDING_INDEX: &str = "usage_rollup_pending_window";
+const DAILY_PENDING_INDEX: &str = "usage_rollup_daily_pending";
 const MAX_BATCHES_PER_TICK: usize = 100;
 const TICK_BUDGET: Duration = Duration::from_secs(20);
 const BACKFILL_TICK_BUDGET: Duration = Duration::from_secs(45);
@@ -72,6 +74,10 @@ pub fn hour(time: DateTime<Utc>) -> DateTime<Utc> {
         - chrono::Duration::nanoseconds(i64::from(time.nanosecond()))
 }
 
+pub fn day(time: DateTime<Utc>) -> DateTime<Utc> {
+    hour(time) - chrono::Duration::hours(i64::from(time.hour()))
+}
+
 pub fn cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
     now - chrono::Duration::seconds(60)
 }
@@ -108,59 +114,73 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             )
             .await?;
     }
-    for keys in [
-        doc! { "hour": 1 },
-        doc! { "actor": 1, "hour": 1 },
-        doc! { "owner": 1, "hour": 1 },
-    ] {
-        db.collection::<Document>(ROLLUPS)
-            .create_index(IndexModel::builder().keys(keys).build())
-            .await?;
-    }
-    // Cover the common single-partition reduction: fetching tens of thousands
-    // of hourly BSON documents defeats the production dashboard budget even
-    // after removing raw edge scans. All values are scalar or embedded objects
-    // (never arrays), so these indexes can answer the reduction without FETCH.
-    for (name, mut keys) in [
-        ("usage_rollup_reduce_window", doc! { "hour": 1 }),
-        (
-            "usage_rollup_reduce_actor",
-            doc! { "actor": 1, "hour": 1, "owner": 1 },
-        ),
-        (
-            "usage_rollup_reduce_owner",
-            doc! { "owner": 1, "hour": 1, "actor": 1 },
-        ),
-    ] {
-        keys.insert("single_display_key", 1);
-        for field in MEASURES.iter().filter(|field| **field != "rows_folded") {
-            keys.insert(*field, 1);
-        }
-        db.collection::<Document>(ROLLUPS)
-            .create_index(
-                IndexModel::builder()
-                    .keys(keys)
-                    .options(IndexOptions::builder().name(name.to_owned()).build())
-                    .build(),
-            )
-            .await?;
-    }
-    // Most summaries contain one display partition and use the main hour
-    // index. This small partial index prevents scanning them a second time
-    // when expanding multi-partition (or older unaccelerated) summaries.
     db.collection::<Document>(ROLLUPS)
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "hour": 1 })
+                .keys(doc! { "daily_pending": 1, "hour": -1 })
                 .options(
                     IndexOptions::builder()
-                        .name("usage_rollup_partitioned_hour".to_owned())
-                        .partial_filter_expression(doc! { "single_display_key": null })
+                        .name(DAILY_PENDING_INDEX.to_owned())
                         .build(),
                 )
                 .build(),
         )
         .await?;
+    for (collection, bucket) in [(ROLLUPS, "hour"), (DAILY, "day")] {
+        for keys in [
+            doc! { bucket: 1 },
+            doc! { "actor": 1, bucket: 1 },
+            doc! { "owner": 1, bucket: 1 },
+        ] {
+            db.collection::<Document>(collection)
+                .create_index(IndexModel::builder().keys(keys).build())
+                .await?;
+        }
+        // Cover the common single-partition reduction: fetching tens of thousands
+        // of hourly BSON documents defeats the production dashboard budget even
+        // after removing raw edge scans. All values are scalar or embedded objects
+        // (never arrays), so these indexes can answer the reduction without FETCH.
+        for (name, mut keys) in [
+            ("usage_rollup_reduce_window", doc! { bucket: 1 }),
+            (
+                "usage_rollup_reduce_actor",
+                doc! { "actor": 1, bucket: 1, "owner": 1 },
+            ),
+            (
+                "usage_rollup_reduce_owner",
+                doc! { "owner": 1, bucket: 1, "actor": 1 },
+            ),
+        ] {
+            keys.insert("single_display_key", 1);
+            for field in MEASURES.iter().filter(|field| **field != "rows_folded") {
+                keys.insert(*field, 1);
+            }
+            db.collection::<Document>(collection)
+                .create_index(
+                    IndexModel::builder()
+                        .keys(keys)
+                        .options(IndexOptions::builder().name(name.to_owned()).build())
+                        .build(),
+                )
+                .await?;
+        }
+        // Most summaries contain one display partition and use the main hour
+        // index. This small partial index prevents scanning them a second time
+        // when expanding multi-partition (or older unaccelerated) summaries.
+        db.collection::<Document>(collection)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { bucket: 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .name(format!("usage_rollup_partitioned_{bucket}"))
+                            .partial_filter_expression(doc! { "single_display_key": null })
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
     Ok(())
 }
 
@@ -191,8 +211,15 @@ pub fn pending_filter(cutoff: DateTime<Utc>) -> Document {
 }
 
 pub async fn state(db: &Database) -> AppResult<Option<UsageRollupState>> {
+    // Readers must not enable the daily tier from a local, not-yet-committed
+    // readiness marker and then aggregate an older majority snapshot.
     let state = db
-        .collection::<UsageRollupState>(STATE)
+        .collection_with_options::<UsageRollupState>(
+            STATE,
+            mongodb::options::CollectionOptions::builder()
+                .read_concern(mongodb::options::ReadConcern::majority())
+                .build(),
+        )
         .find_one(doc! { "_id": STATE_ID })
         .await?;
     if state.as_ref().is_some_and(|s| {
@@ -200,6 +227,7 @@ pub async fn state(db: &Database) -> AppResult<Option<UsageRollupState>> {
             || s.sequence == i64::MAX
             || s.batch.as_ref().is_some_and(|batch| {
                 batch.sequence != s.sequence + 1
+                    || (batch.hourly_sources && !batch.daily)
                     || batch.row_ids.is_empty()
                     || batch.row_ids.len() > BATCH_SIZE as usize
                     || batch.increments.is_empty()
@@ -234,6 +262,38 @@ async fn claim(
     current: &UsageRollupState,
     cutoff: DateTime<Utc>,
 ) -> AppResult<Option<UsageRollupBatch>> {
+    if !current.daily_ready {
+        let increments: Vec<UsageRollupHourly> = db
+            .collection::<UsageRollupHourly>(ROLLUPS)
+            .find(doc! { "daily_pending": { "$in": [true, null] } })
+            .hint(mongodb::options::Hint::Name(DAILY_PENDING_INDEX.to_owned()))
+            .sort(doc! { "hour": -1 })
+            .limit(BATCH_SIZE)
+            .await?
+            .try_collect()
+            .await?;
+        if !increments.is_empty() {
+            let batch = UsageRollupBatch {
+                sequence: current.sequence + 1,
+                daily: true,
+                hourly_sources: true,
+                row_ids: increments.iter().map(|row| row.id.clone()).collect(),
+                increments,
+                claimed_at: Utc::now(),
+            };
+            return publish_batch(db, current, batch, None).await;
+        }
+        let result = db
+            .collection::<Document>(STATE)
+            .update_one(
+                doc! { "_id": STATE_ID, "sequence": current.sequence, "batch": null },
+                doc! { "$set": { "daily_ready": true } },
+            )
+            .await?;
+        if result.matched_count == 0 {
+            return Ok(None);
+        }
+    }
     let rows: Vec<Document> = db
         .collection::<Document>(METERS)
         .find(pending_filter(cutoff))
@@ -360,17 +420,35 @@ async fn claim(
         .collect::<AppResult<Vec<_>>>()?;
     let batch = UsageRollupBatch {
         sequence: current.sequence + 1,
+        daily: true,
+        hourly_sources: false,
         row_ids: ids,
         increments,
         claimed_at: Utc::now(),
     };
+    publish_batch(db, current, batch, Some(cutoff)).await
+}
+
+async fn publish_batch(
+    db: &Database,
+    current: &UsageRollupState,
+    batch: UsageRollupBatch,
+    cutoff: Option<DateTime<Utc>>,
+) -> AppResult<Option<UsageRollupBatch>> {
+    let mut update = doc! { "$set": {
+        "batch": bson::to_bson(&batch).map_err(|e| AppError::Internal(e.to_string()))?,
+    } };
+    if let Some(cutoff) = cutoff {
+        update.insert(
+            "$max",
+            doc! { "folded_before": bson::DateTime::from_chrono(cutoff) },
+        );
+    }
     let result = db
         .collection::<Document>(STATE)
         .update_one(
             doc! { "_id": STATE_ID, "sequence": current.sequence, "batch": null },
-            doc! { "$set": {
-                "batch": bson::to_bson(&batch).map_err(|e| AppError::Internal(e.to_string()))?,
-            }, "$max": { "folded_before": bson::DateTime::from_chrono(cutoff) } },
+            update,
         )
         .await?;
     Ok((result.modified_count == 1).then_some(batch))
@@ -421,33 +499,129 @@ async fn apply(
     batch: &UsageRollupBatch,
     mut session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<()> {
-    let mut inserts = Vec::with_capacity(batch.increments.len());
-    let mut deltas = Document::new();
-    let mut ids = Vec::with_capacity(batch.increments.len());
-    for increment in &batch.increments {
-        let mut initial =
+    if !batch.hourly_sources {
+        let increments = batch
+            .increments
+            .iter()
+            .map(bson::to_document)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        apply_increments(
+            db,
+            ROLLUPS,
+            batch.sequence,
+            increments,
+            batch.daily,
+            session.as_deref_mut(),
+        )
+        .await?;
+    }
+    if batch.daily {
+        let increments = daily_increments(&batch.increments)?
+            .iter()
+            .map(bson::to_document)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        apply_increments(db, DAILY, batch.sequence, increments, false, session).await?;
+    }
+    Ok(())
+}
+
+/// Collapse hours within one immutable batch, preserving every legacy cost
+/// partition. The per-day fence is the SAME global sequence as the hourly tier.
+fn daily_increments(increments: &[UsageRollupHourly]) -> AppResult<Vec<UsageRollupDaily>> {
+    let mut combined = std::collections::BTreeMap::<String, Document>::new();
+    for increment in increments {
+        let mut group =
             bson::to_document(increment).map_err(|e| AppError::Internal(e.to_string()))?;
+        group.remove("hour");
+        group.insert("day", bson::DateTime::from_chrono(day(increment.hour)));
+        let mut key = Document::new();
+        for field in DIMENSIONS.iter().chain([&"exact", &"day"]) {
+            key.insert(*field, group.get(*field).cloned().unwrap_or(Bson::Null));
+        }
+        let hash = hex::encode(Sha256::digest(
+            bson::to_vec(&key).map_err(|e| AppError::Internal(e.to_string()))?,
+        ));
+        group.insert("_id", &hash);
+        if let Some(existing) = combined.get_mut(&hash) {
+            add_measures(existing, &group);
+            let parts = group
+                .get_document("cost_partitions")
+                .map_err(|_| AppError::Internal("Invalid usage cost partitions".into()))?;
+            let existing_parts = existing
+                .get_document_mut("cost_partitions")
+                .map_err(|_| AppError::Internal("Invalid usage cost partitions".into()))?;
+            for (key, value) in parts {
+                let value = value
+                    .as_document()
+                    .ok_or_else(|| AppError::Internal("Invalid usage cost partition".into()))?;
+                if let Ok(existing) = existing_parts.get_document_mut(key) {
+                    add_measures(existing, value);
+                } else {
+                    existing_parts.insert(key, value.clone());
+                }
+            }
+        } else {
+            combined.insert(hash, group);
+        }
+    }
+    combined
+        .into_values()
+        .map(|group| bson::from_document(group).map_err(|e| AppError::Internal(e.to_string())))
+        .collect()
+}
+
+fn add_measures(existing: &mut Document, delta: &Document) {
+    for field in MEASURES {
+        existing.insert(
+            *field,
+            integer(existing.get(*field)).saturating_add(integer(delta.get(*field))),
+        );
+    }
+}
+
+async fn apply_increments(
+    db: &Database,
+    collection: &str,
+    sequence: i64,
+    increments: Vec<Document>,
+    daily_complete: bool,
+    mut session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<()> {
+    let mut inserts = Vec::with_capacity(increments.len());
+    let mut deltas = Document::new();
+    let mut ids = Vec::with_capacity(increments.len());
+    for mut initial in increments {
+        let id = initial
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Missing usage increment id".into()))?
+            .to_owned();
         initial.remove("_id");
-        deltas.insert(&increment.id, initial.clone());
-        ids.push(increment.id.clone());
+        deltas.insert(&id, initial.clone());
+        ids.push(id.clone());
         for field in MEASURES {
             initial.insert(*field, 0_i64);
         }
         initial.insert("cost_partitions", Document::new());
         initial.insert("last_batch", 0_i64);
-        inserts.push(doc! { "q": { "_id": &increment.id }, "u": { "$setOnInsert": initial }, "upsert": true });
+        inserts
+            .push(doc! { "q": { "_id": &id }, "u": { "$setOnInsert": initial }, "upsert": true });
     }
     // Small idempotent initializers avoid generating a distinct arithmetic
     // program for each summary. The shared update below is compiled once.
     for chunk in inserts.chunks(100) {
         write_command(
             db,
-            doc! { "update": ROLLUPS, "updates": chunk.to_vec(), "ordered": false },
+            doc! { "update": collection, "updates": chunk.to_vec(), "ordered": false },
             session.as_deref_mut(),
         )
         .await?;
     }
-    let mut set = doc! { "last_batch": batch.sequence };
+    let mut set = doc! { "last_batch": sequence };
+    if daily_complete {
+        set.insert("daily_pending", false);
+    }
     for field in MEASURES {
         set.insert(
             *field,
@@ -500,8 +674,8 @@ async fn apply(
         } },
         "query_costs": query_costs,
     };
-    let command = doc! { "update": ROLLUPS, "updates": [{
-        "q": { "_id": { "$in": ids }, "last_batch": { "$lt": batch.sequence } },
+    let command = doc! { "update": collection, "updates": [{
+        "q": { "_id": { "$in": ids }, "last_batch": { "$lt": sequence } },
         "u": [
             { "$set": { "delta": { "$getField": { "field": "$_id", "input": { "$literal": deltas } } } } },
             { "$set": set }, { "$set": accelerators }, { "$unset": "delta" },
@@ -515,12 +689,22 @@ async fn finish(
     batch: &UsageRollupBatch,
     mut session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<()> {
-    let meters = db.collection::<Document>(METERS);
-    let action = meters.update_many(
-        doc! { "_id": { "$in": &batch.row_ids }, "rollup_pending": { "$in": [true, null] } },
-        doc! { "$set": {
-            "rollup_pending": false, "rolled_up_at": bson::DateTime::from_chrono(batch.claimed_at),
-        } },
+    let sources = db.collection::<Document>(if batch.hourly_sources {
+        ROLLUPS
+    } else {
+        METERS
+    });
+    let (marker, update) = if batch.hourly_sources {
+        ("daily_pending", doc! { "$set": { "daily_pending": false } })
+    } else {
+        (
+            "rollup_pending",
+            doc! { "$set": { "rollup_pending": false, "rolled_up_at": bson::DateTime::from_chrono(batch.claimed_at) } },
+        )
+    };
+    let action = sources.update_many(
+        doc! { "_id": { "$in": &batch.row_ids }, marker: { "$in": [true, null] } },
+        update,
     );
     match session.as_deref_mut() {
         Some(session) => action.session(session).await?,
@@ -612,6 +796,7 @@ pub fn spawn_worker(db: Database, config: Arc<AppConfig>) -> Option<tokio::task:
             let budget = match state(&db).await {
                 Ok(state) => tick_budget(
                     state
+                        .filter(|s| s.daily_ready)
                         .map(|s| s.rolled_up_through)
                         .unwrap_or(DateTime::UNIX_EPOCH),
                     Utc::now(),
@@ -641,4 +826,4 @@ pub fn spawn_worker(db: Database, config: Arc<AppConfig>) -> Option<tokio::task:
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

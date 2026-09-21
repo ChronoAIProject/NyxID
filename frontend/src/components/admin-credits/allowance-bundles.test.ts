@@ -39,10 +39,21 @@ describe("allowance bundles", () => {
       "tokens",
     ]);
   });
-  it("loads no inactive units when the whole bundle is disabled", () => {
-    const bundle = groupAllowances([{ ...row, is_active: false }])[0]!;
+  it("loads all units when the whole bundle is disabled so saving can re-enable it", () => {
+    const bundle = groupAllowances([
+      { ...row, bundle_id: "bundle", is_active: false },
+      {
+        ...row,
+        id: "images",
+        bundle_id: "bundle",
+        metric: "images",
+        is_active: false,
+      },
+    ])[0]!;
     expect(bundleStatus(bundle)).toBe("Disabled");
-    expect(bundleForm(bundle).units).toEqual([]);
+    const form = bundleForm(bundle);
+    expect(form.units.map((unit) => unit.metric)).toEqual(["tokens", "images"]);
+    expect(allowanceBundleFormSchema.safeParse(form).success).toBe(true);
   });
   it("rejects duplicate, empty, excessive and invalid units", () => {
     const form = bundleForm(groupAllowances([row])[0]!);

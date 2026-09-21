@@ -260,3 +260,118 @@ No review finding or verification failure remains open. Custom partial edge hour
 - `frontend/src/pages/admin-usage.test.tsx`
 - `frontend/src/pages/admin-usage.tsx`
 - `frontend/src/schemas/admin-usage.ts`
+
+
+## Review round 2
+
+Both findings on `aa2226ab` are resolved. This section supersedes the earlier three-day benchmark's claims about 7-day and 31-day performance, and the earlier fully disabled editor behavior.
+
+### Design and changes
+
+- **Full population first:** the ignored benchmark now retains 72 hours plus 17 minutes of raw traffic at 25,000 events/hour, plus 125 extra live rows (**1,807,209 raw rows**). It seeds the preceding **672 hours** directly from a complete, actually folded generator hour. This preserves **2,620 summaries per full hour** across all 744 hours of the exact 31-day window; an assertion checks that full-range population. The completed fixture has **1,951,303 hourly documents** and **83,840 daily documents**, including the partial current hour. The raw oracle independently aggregates the retained generator hour, multiplies its additive measures for older hours, combines them with the recent raw scan, then applies the original pricing/rounding stages. It never uses a stored summary as the oracle. This represents the same repeated generator without folding 18.6 million raw events.
+- **Daily tier required:** the expanded hourly-only baseline missed both longer-window budgets. Unfiltered 7 days took **1,877.5 ms** over **442,726 keys**; unfiltered 31 days took **8,060.4 ms** over **1,949,283 keys**. The new permanent `usage_rollup_daily` model retains the hourly dimensions, measures, exactness flag, and legacy cost partitions with a UTC day replacing the hour. Whole UTC days read this tier; remaining hours use hourly summaries, with the existing disjoint indexed raw edges and live tail. Both tiers share the covering reduction and pricing/facet logic. No API fields change in this round.
+- **Exactly-once writes and automatic bootstrap:** each raw batch derives daily increments from its immutable hourly increments. Both tiers use the same global `last_batch` fence and commit with the source marks in the same replica-set transaction; standalone recovery replays each fenced update safely, including a crash between tiers. Existing hourly-only in-flight batches finish first. Existing hourly history is then copied in batches of at most 2,000 documents using the same journal and an additive `daily_pending` index, even after raw TTL expiry. New raw folding waits for this bootstrap, and readers retain the hourly path until `daily_ready` is published. Majority journal reads prevent early activation against an older snapshot. Bootstrap uses the 45-second tick budget. All previous indexes remain unchanged; new daily indexes mirror the existing covering layouts.
+- **Proof of parity and recovery:** added tests cover crashes after only the hourly write and after both writes, a partially recovered old hourly-only batch, concurrent bootstrap helpers, raw retention expiry, later arrivals in copied hours, transaction abort visibility for both tiers, full summary/ranking parity across daily/hourly/tail sources, filters, paging, custom edges, and all six covering index layouts. The density benchmark additionally asserts that the naturally selected actor/owner OR plans fetch **zero summary documents**. A first test incorrectly forced one index for the two-branch OR, producing a FETCH; the corrected layout checks test each equality prefix, while the benchmark verifies the actual OR query.
+- **Fully disabled bundles:** the editor uses active rows when any exist, otherwise loads all rows. Saving an edited disabled bundle re-enables its listed units. Inline text and the glossary state this behavior; the review shows disabled-to-enabled changes even for unchanged quantities. Form and page tests cover the all-disabled case, while the existing partial-disable/re-add tests still pass. Whole-bundle Enable/Disable remains available.
+
+Production's supplied observation was **38 actor×service ranking rows across 14 users and 17 services in two hours**, with roughly **3 metrics, 2 credential classes, and a few models**. That observation suggests substantially lower cardinality but is not an upper bound. The benchmark establishes its own explicit, higher density: 2,620 summaries/hour with 15 users, 17 services, 6 credential classes, and 5 metrics, including component/resale and exact/legacy rows. Exact charged rows remain deliberately unacknowledged.
+
+### Verification
+
+| Command | Review round 2 result |
+|---|---|
+| `cargo fmt --all -- --check` | Passed. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed; final run 2m 11s. |
+| `NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27019/?replicaSet=nyxid1530&directConnection=true' cargo test -p nyxid --bin nyxid-server -- --test-threads 2` | **6,414 passed**, 0 failed, 2 intentionally ignored; **357.53s**. No existing test removed. |
+| `cargo test -p nyxid-cli` | **1,277 passed**: 1,246 unit tests plus integration suites 10 + 5 + 13 + 2 + 1. |
+| `npm --prefix frontend run lint` | Passed; 0 errors, 27 existing warnings. |
+| `npm --prefix frontend run test` | **346 files / 3,499 tests passed**; final run **83.59 s**. |
+| `npm --prefix frontend run build` | Passed, including credential-accept and mock-footprint checks. |
+| `npm --prefix frontend run build:wizard` | Passed; generated artifacts and source manifest/hash remain unchanged. |
+| `cargo test -p nyxid-cli --test wizard_bundle_freshness` | **1 passed**. |
+| Ignored production-density benchmark below | **1 passed**; **1529.60s**, including all 12 cases and 60 oracle comparisons. |
+| Actual standalone regressions below | **4 passed**, 0 failed; **1.58 s**. Temporary server stopped and removed. |
+| `git diff --check` | Passed. |
+
+The initial full-population hourly-only benchmark intentionally failed its longer-window budget assertions; all totals matched the oracle. Its compact evidence is preserved in [`allowance-bundles-usage-hourly-baseline.json`](allowance-bundles-usage-hourly-baseline.json). The final dual-tier benchmark passes. Final evidence, including execution plans and exact request bounds, is in [`allowance-bundles-usage-benchmark.json`](allowance-bundles-usage-benchmark.json).
+
+Exact benchmark commands:
+
+```sh
+# Hourly-only baseline, after extending the benchmark to the full 31 days:
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27019/?replicaSet=nyxid1530&directConnection=true' cargo test -p nyxid --bin nyxid-server hourly_rollup_production_density_benchmark -- --ignored --nocapture --test-threads 1
+# Final dual-tier implementation, refolding the retained disposable raw fixture:
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27019/nyxid_benchmark_707e698600044f739e22181fbbded147?replicaSet=nyxid1530&directConnection=true' cargo test -p nyxid --bin nyxid-server hourly_rollup_production_density_benchmark -- --ignored --nocapture --test-threads 1
+```
+
+Before the final run, the disposable fixture's derived documents and journal were deleted, raw fold markers reset, and prior fold timing/history-seed metadata cleared. Its raw event contents and all indexes were retained. The final run folds all eligible raw rows into both tiers, then directly seeds days 4–31 into both tiers from the identical hourly generator. No other heavy verification overlaps this final benchmark. Environment: Apple M2 / 16 GiB, MongoDB 8.0.23 replica set `nyxid1530`, 256 MiB WiredTiger cache; settings unchanged. `df -h /System/Volumes/Data` ran before long Cargo commands: 46 GiB initially, 40 GiB before the final benchmark.
+
+Actual standalone verification used these commands:
+
+```sh
+mkdir /tmp/nyxid-review2-standalone
+mongod --dbpath /tmp/nyxid-review2-standalone --port 27020 --bind_ip 127.0.0.1 --wiredTigerCacheSizeGB 0.25 --logpath /tmp/nyxid-review2-standalone/mongod.log --pidfilepath /tmp/nyxid-review2-standalone/mongod.pid --fork
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27020/?directConnection=true' target/debug/deps/nyxid_server-8697d3d03a01e14a --exact services::billing::usage_rollup::tests::daily_crash_between_tiers_and_before_source_mark_replays_once services::billing::usage_rollup::tests::pre_tier_hourly_history_bootstraps_after_legacy_batch_recovery_and_raw_expiry services::admin_usage_service::tests::daily_hourly_edges_and_tail_match_raw_summary_and_ranking services::admin_usage_service::tests::hourly_and_daily_reductions_have_covering_indexes --nocapture
+```
+
+### Hourly-only baseline on the full population
+
+| Window | Filter | p50 ms | Max ms | Documents examined | Keys examined |
+|---|---|---:|---:|---:|---:|
+| 24 h | none | 373.6 | 557.9 | 542 | 65,446 |
+| 24 h | user | 61.5 | 151.9 | 542 | 9,215 |
+| 24 h | service | 352.2 | 417.1 | 542 | 65,446 |
+| 24 h | both | 61.7 | 73.7 | 542 | 9,215 |
+| 7 d | none | 1877.5 | 2259.7 | 542 | 442,726 |
+| 7 d | user | 258.3 | 421.2 | 542 | 59,615 |
+| 7 d | service | 1853.4 | 2123.4 | 542 | 442,726 |
+| 7 d | both | 249.3 | 321.9 | 542 | 59,615 |
+| 31 d | none | 8060.4 | 8582.6 | 0 | 1,949,283 |
+| 31 d | user | 1013.6 | 1262.4 | 0 | 260,404 |
+| 31 d | service | 8133.5 | 8286.3 | 0 | 1,949,283 |
+| 31 d | both | 1001.2 | 1268.2 | 0 | 260,404 |
+
+### Final dual-tier benchmark on the full population
+
+| Window | Filter | p50 ms | Max ms | Documents examined | Keys examined |
+|---|---|---:|---:|---:|---:|
+| 24 h | none | 373.3 | 438.9 | 542 | 65,446 |
+| 24 h | user | 62.3 | 81.3 | 542 | 9,215 |
+| 24 h | service | 350.6 | 403.8 | 542 | 65,446 |
+| 24 h | both | 57.3 | 63.7 | 542 | 9,215 |
+| 7 d | none | 491.9 | 540.6 | 542 | 81,168 |
+| 7 d | user | 79.8 | 108.0 | 542 | 11,319 |
+| 7 d | service | 478.0 | 488.0 | 542 | 81,168 |
+| 7 d | both | 71.6 | 74.0 | 542 | 11,319 |
+| 31 d | none | 717.8 | 782.8 | 0 | 141,485 |
+| 31 d | user | 111.3 | 133.8 | 0 | 18,908 |
+| 31 d | service | 685.4 | 737.9 | 0 | 141,485 |
+| 31 d | both | 105.8 | 122.8 | 0 | 18,908 |
+
+Worst p50s across all filters are **373.3 / 491.9 / 717.8 ms**, below **500 / 1,000 / 2,000 ms**. All 60 comparisons match the raw-generator oracle. The 24-hour and 7-day presets include the current partial hour and examine exactly **542 raw tail documents**; the exact 31-day custom window ends on the preceding hour boundary and examines **zero raw documents**. Neither tier fetches summary documents in this fixture. Custom non-hour-aligned boundaries remain covered by the separate raw-edge parity tests and can cost more than presets.
+
+The worker folded **1,806,667 rows** into both tiers in **1239.26 s**, or **1457.9 rows/s**. At the 45/60-second backfill duty cycle, that extrapolates to **1093.4 rows/s**, before scheduling overhead. This measures the additional daily writes as well as hourly writes. The 31-day query represents 18.6 million generated events; the stored source fixture remains bounded to the last three days plus the partial current hour. The successful benchmark dropped its disposable database; deletion was verified afterward.
+
+### Scope and known gaps
+
+No review finding or verification failure remains open. No new environment variable, operator migration, version bump, money-path change, index removal, push, or PR is included. Existing retention and custom partial-hour limitations remain as documented in round 1; whole-hour history survives raw expiry. Fully disabled bundle editing now has an explicit, tested re-enablement path.
+
+### Files changed in this review
+
+- `.claude-brief/ALLOWANCE_BUNDLES_USAGE_PERF_REPORT.md`
+- `.claude-brief/allowance-bundles-usage-benchmark.json`
+- `.claude-brief/allowance-bundles-usage-hourly-baseline.json`
+- `backend/src/models/mod.rs`
+- `backend/src/models/usage_rollup_daily.rs`
+- `backend/src/models/usage_rollup_hourly.rs`
+- `backend/src/models/usage_rollup_state.rs`
+- `backend/src/services/admin_usage_service.rs`
+- `backend/src/services/admin_usage_service/tests.rs`
+- `backend/src/services/billing/usage_rollup.rs`
+- `backend/src/services/billing/usage_rollup/tests.rs`
+- `docs/BILLING_UI_GLOSSARY.md`
+- `frontend/src/components/admin-credits/allowance-bundles.test.ts`
+- `frontend/src/components/admin-credits/allowance-bundles.ts`
+- `frontend/src/components/admin-credits/credits-dialogs.tsx`
+- `frontend/src/pages/admin-credits-safety.test.tsx`
+- `frontend/src/pages/admin-credits.tsx`

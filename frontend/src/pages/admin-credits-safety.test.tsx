@@ -177,9 +177,9 @@ it.each([false, true])(
       await user.click(screen.getByRole("button", { name: "Add unit" }));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     // Only an explicitly re-added unit appears as a disabled -> active change.
-    expect(screen.queryByText("images", { selector: "p.font-medium" }) !== null).toBe(
-      reAdd,
-    );
+    expect(
+      screen.queryByText("images", { selector: "p.font-medium" }) !== null,
+    ).toBe(reAdd);
     await user.click(screen.getByRole("button", { name: "Confirm changes" }));
     await waitFor(() => expect(mock.replaceAllowance).toHaveBeenCalledOnce());
     expect(mock.replaceAllowance.mock.calls[0]![0].body.units).toEqual([
@@ -190,3 +190,37 @@ it.each([false, true])(
     ]);
   },
 );
+
+it("editing a fully disabled bundle loads all units and reviews their re-enablement", async () => {
+  mock.allowanceActive = false;
+  mock.extraDisabled = true;
+  const user = userEvent.setup();
+  render(<AdminCreditsPage />);
+  await user.click(screen.getByRole("tab", { name: "Free allowances" }));
+  await user.click(
+    screen.getAllByRole("button", { name: "Edit test allowance" })[0]!,
+  );
+  expect(screen.getAllByRole("combobox", { name: "Unit" })).toHaveLength(2);
+  expect(
+    screen.getByText(/Saving re-enables the listed units/),
+  ).toBeInTheDocument();
+  fireEvent.change(
+    screen.getAllByRole("spinbutton", { name: "Free quantity" })[0]!,
+    {
+      target: { value: "15" },
+    },
+  );
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(
+    screen.getByText("requests", { selector: "p.font-medium" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText("images", { selector: "p.font-medium" }),
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Confirm changes" }));
+  await waitFor(() => expect(mock.replaceAllowance).toHaveBeenCalledOnce());
+  expect(mock.replaceAllowance.mock.calls[0]![0].body.units).toEqual([
+    { metric: "requests", quantity: 15, recurrence: "monthly" },
+    { metric: "images", quantity: 20, recurrence: "daily" },
+  ]);
+});

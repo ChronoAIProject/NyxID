@@ -33,6 +33,10 @@ pub struct UsageRollupHourly {
     pub single_display_key: Option<bson::Document>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_costs: Option<bson::Document>,
+    /// Missing on older hourly-only summaries; the daily bootstrap discovers
+    /// them through its additive pending index. New folds set this to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_pending: Option<bool>,
     /// Globally ordered batches make a single monotonic fence sufficient;
     /// no unbounded or unsafely evicted applied-batch-id array is needed.
     pub last_batch: i64,

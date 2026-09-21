@@ -274,9 +274,12 @@ export function AdminCreditsPage() {
                   unit.recurrence,
                 ) ?? "Invalid quantity")
               : "Disabled";
-          // Defaults contain active units only. An absent previous unit is
-          // either new or explicitly re-added; untouched disabled rows stay out.
-          const beforeDisplay = show(oldUnit);
+          // A fully disabled bundle preloads all units, but their persisted
+          // status must still appear as Disabled in the change review.
+          const wasActive = editingAllowance.rows.some(
+            (row) => row.metric === metric && row.is_active,
+          );
+          const beforeDisplay = show(wasActive ? oldUnit : undefined);
           const afterDisplay = show(newUnit);
           return beforeDisplay === afterDisplay
             ? []

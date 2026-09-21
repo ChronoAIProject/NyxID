@@ -733,8 +733,13 @@ async fn get_usage_inner(
     })
 }
 
-fn source_filter(params: &UsageParams, start: DateTime<Utc>, end: DateTime<Utc>) -> Document {
-    let mut filter = doc! { "hour": { "$gte": bson::DateTime::from_chrono(start), "$lt": bson::DateTime::from_chrono(end) } };
+fn source_filter(
+    params: &UsageParams,
+    bucket: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Document {
+    let mut filter = doc! { bucket: { "$gte": bson::DateTime::from_chrono(start), "$lt": bson::DateTime::from_chrono(end) } };
     if let Some(user) = &params.user {
         filter.insert("$or", vec![doc! { "actor": user }, doc! { "owner": user }]);
     }
@@ -745,8 +750,9 @@ fn fast_pipeline(
     params: &UsageParams,
     rates: Document,
     folded_before: Option<DateTime<Utc>>,
+    daily_ready: bool,
 ) -> Vec<Document> {
-    use crate::services::billing::usage_rollup::{DIMENSIONS, MEASURES, hour};
+    use crate::services::billing::usage_rollup::{DIMENSIONS, MEASURES, day, hour};
     let from_hour = hour(params.window.from);
     let start = if params.window.from == from_hour {
         from_hour
@@ -808,16 +814,11 @@ fn fast_pipeline(
             )
         })
         .collect();
-    let mut single_filter = source_filter(params, start, end);
-    single_filter.insert("single_display_key", doc! { "$ne": null });
-    let mut partition_filter = source_filter(params, start, end);
-    partition_filter.insert("single_display_key", Bson::Null);
     let mut unfold = doc! { "_id": { "$mergeObjects": [key, { "$ifNull": ["$part.key", {}] }] }, "tail_rows": 0_i64 };
     for field in MEASURES {
         unfold.insert(*field, format!("$part.{field}"));
     }
     let partition_pipeline = vec![
-        doc! { "$match": partition_filter },
         doc! { "$set": { "part": { "$cond": [
             { "$gt": [{ "$size": { "$objectToArray": { "$ifNull": ["$cost_partitions", {}] } } }, 0] },
             { "$map": { "input": { "$objectToArray": "$cost_partitions" }, "as": "part", "in": "$$part.v" } },
@@ -849,11 +850,37 @@ fn fast_pipeline(
         doc! { "$match": raw_filter(start.max(params.window.from), end.min(params.window.to), true) },
         meter_flags(),
         doc! { "$group": raw_group.clone() },
-        doc! { "$unionWith": { "coll": crate::models::usage_rollup_hourly::COLLECTION_NAME, "pipeline": [
-            doc! { "$match": single_filter }, doc! { "$group": initial_group }, doc! { "$set": bounded_costs },
-        ] } },
-        doc! { "$unionWith": { "coll": crate::models::usage_rollup_hourly::COLLECTION_NAME, "pipeline": partition_pipeline } },
     ];
+    let first_day = day(start) + chrono::Duration::days(i64::from(day(start) < start));
+    let last_day = day(params.window.to).min(day(end));
+    let hourly = crate::models::usage_rollup_hourly::COLLECTION_NAME;
+    let daily = crate::models::usage_rollup_daily::COLLECTION_NAME;
+    let ranges = if daily_ready && first_day < last_day {
+        vec![
+            (hourly, "hour", start, first_day),
+            (daily, "day", first_day, last_day),
+            (hourly, "hour", last_day, end),
+        ]
+    } else {
+        vec![(hourly, "hour", start, end)]
+    };
+    for (collection, bucket, from, to) in ranges {
+        if from >= to {
+            continue;
+        }
+        let mut single_filter = source_filter(params, bucket, from, to);
+        single_filter.insert("single_display_key", doc! { "$ne": null });
+        let mut partition_filter = source_filter(params, bucket, from, to);
+        partition_filter.insert("single_display_key", Bson::Null);
+        let mut partitions = vec![doc! { "$match": partition_filter }];
+        partitions.extend(partition_pipeline.clone());
+        pipeline.extend([
+            doc! { "$unionWith": { "coll": collection, "pipeline": [
+                doc! { "$match": single_filter }, doc! { "$group": initial_group.clone() }, doc! { "$set": bounded_costs.clone() },
+            ] } },
+            doc! { "$unionWith": { "coll": collection, "pipeline": partitions } },
+        ]);
+    }
     for (from, to) in [
         (params.window.from, start.min(params.window.to)),
         (end.max(params.window.from), params.window.to),
@@ -949,7 +976,9 @@ async fn fast_aggregate_with_mode(
         // a dashboard request retrying until the complete-request timeout.
         let use_snapshot = snapshot && active;
         let bound = before.as_ref().and_then(|s| s.folded_before);
-        let result = run_fast_pipeline(db, params, rates.clone(), bound, use_snapshot).await;
+        let daily_ready = before.as_ref().is_some_and(|state| state.daily_ready);
+        let result =
+            run_fast_pipeline(db, params, rates.clone(), bound, daily_ready, use_snapshot).await;
         let result = match result {
             Err(AppError::DatabaseError(error))
                 if use_snapshot
@@ -988,7 +1017,7 @@ async fn fast_aggregate_with_mode(
     // read with conservative raw boundary hours guarantees a completed result.
     // Standalone concurrent writes can skew it by an in-flight bounded batch;
     // freshness explicitly reports that validation was not obtained.
-    let result = run_fast_pipeline(db, params, rates, None, false).await?;
+    let result = run_fast_pipeline(db, params, rates, None, false, false).await?;
     with_freshness(result, usage_rollup::state(db).await?, false)
 }
 
@@ -997,11 +1026,12 @@ async fn run_fast_pipeline(
     params: &UsageParams,
     rates: Document,
     folded_before: Option<DateTime<Utc>>,
+    daily_ready: bool,
     snapshot: bool,
 ) -> AppResult<Document> {
     let collection = db.collection::<Document>(COLLECTION_NAME);
     let mut action = collection
-        .aggregate(fast_pipeline(params, rates, folded_before))
+        .aggregate(fast_pipeline(params, rates, folded_before, daily_ready))
         .hint(mongodb::options::Hint::Name(
             crate::services::billing::usage_rollup::PENDING_INDEX.to_owned(),
         ))

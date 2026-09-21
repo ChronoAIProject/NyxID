@@ -185,6 +185,13 @@ async fn aborted_transaction_leaves_sources_and_increments_uncommitted() {
             .unwrap(),
         0
     );
+    assert_eq!(
+        db.collection::<Document>(DAILY)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
     fold_once(&db, now).await.unwrap();
     assert_eq!(
         read(&db, now - chrono::Duration::days(1), now)
@@ -298,4 +305,222 @@ async fn current_hour_exact_unacked_folds_while_legacy_and_unforwarded_remain_li
     assert_eq!(read(&db, hour(now), at).await.totals.events, 0);
     assert_eq!(read(&db, hour(now), now).await.totals.events, 3);
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn daily_crash_between_tiers_and_before_source_mark_replays_once() {
+    for after_daily in [false, true] {
+        let db = connect_test_database("rollup_daily_crash").await.unwrap();
+        ensure_indexes(&db).await.unwrap();
+        let now = day(Utc::now());
+        db.collection::<Document>(METERS)
+            .insert_many([
+                row(now - chrono::Duration::hours(2)),
+                row(now - chrono::Duration::hours(1)),
+            ])
+            .await
+            .unwrap();
+        initialize(&db).await.unwrap();
+        let batch = claim(&db, &required_state(&db).await.unwrap(), cutoff(now))
+            .await
+            .unwrap()
+            .unwrap();
+        if after_daily {
+            apply(&db, &batch, None).await.unwrap();
+        } else {
+            apply_increments(
+                &db,
+                ROLLUPS,
+                batch.sequence,
+                batch
+                    .increments
+                    .iter()
+                    .map(|r| bson::to_document(r).unwrap())
+                    .collect(),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        // No source mark exists at either crash point. A new worker must
+        // resume both tiers from the durable batch, using one sequence fence.
+        assert_eq!(
+            db.collection::<Document>(METERS)
+                .count_documents(doc! { "rollup_pending": false })
+                .await
+                .unwrap(),
+            0
+        );
+        fold_once(&db, now).await.unwrap();
+        fold_once(&db, now).await.unwrap();
+        let daily = db
+            .collection::<UsageRollupDaily>(DAILY)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(daily.measures.events, 2);
+        assert_eq!(daily.measures.rows_folded, 2);
+        assert_eq!(daily.last_batch, batch.sequence);
+        assert_eq!(daily.day, now - chrono::Duration::days(1));
+        // Prove the completed whole-day read really uses the daily tier.
+        db.collection::<Document>(METERS)
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        db.collection::<Document>(ROLLUPS)
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        let result = read(&db, now - chrono::Duration::days(1), now).await;
+        assert_eq!(result.totals.events, 2);
+        assert_eq!(result.totals.quantities["tokens"], 200);
+        assert!(result.freshness.validated);
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pre_tier_hourly_history_bootstraps_after_legacy_batch_recovery_and_raw_expiry() {
+    let db = connect_test_database("rollup_daily_bootstrap")
+        .await
+        .unwrap();
+    ensure_indexes(&db).await.unwrap();
+    let now = day(Utc::now());
+    initialize(&db).await.unwrap();
+    // Simulate an older worker with one completed batch and one interrupted
+    // hourly-only batch, then raw retention expiry before this deployment.
+    for n in [1, 2] {
+        db.collection::<Document>(METERS)
+            .insert_one(row(now - chrono::Duration::hours(n)))
+            .await
+            .unwrap();
+        let mut batch = claim(&db, &required_state(&db).await.unwrap(), cutoff(now))
+            .await
+            .unwrap()
+            .unwrap();
+        batch.daily = false;
+        db.collection::<Document>(STATE)
+            .update_one(
+                doc! { "_id": STATE_ID },
+                doc! { "$set": { "batch": bson::to_bson(&batch).unwrap(), "daily_ready": false } },
+            )
+            .await
+            .unwrap();
+        apply(&db, &batch, None).await.unwrap();
+        if n == 1 {
+            finish(&db, &batch, None).await.unwrap();
+        }
+        // Avoid bootstrapping until the simulated legacy writes finish.
+        if n == 1 {
+            db.collection::<Document>(STATE)
+                .update_one(
+                    doc! { "_id": STATE_ID },
+                    doc! { "$set": { "daily_ready": true } },
+                )
+                .await
+                .unwrap();
+        }
+    }
+    db.collection::<Document>(METERS)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    assert_eq!(
+        read(&db, now - chrono::Duration::days(1), now)
+            .await
+            .totals
+            .events,
+        2
+    );
+    fold_once(&db, now).await.unwrap(); // finish old immutable batch first
+    let batch = claim(&db, &required_state(&db).await.unwrap(), cutoff(now))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(batch.hourly_sources);
+    apply(&db, &batch, None).await.unwrap(); // crash before marking hourly sources
+    assert!(!required_state(&db).await.unwrap().daily_ready);
+    assert_eq!(
+        read(&db, now - chrono::Duration::days(1), now)
+            .await
+            .totals
+            .events,
+        2
+    );
+    let (a, b) = tokio::join!(fold_once(&db, now), fold_once(&db, now));
+    a.unwrap();
+    b.unwrap();
+    fold_once(&db, now).await.unwrap();
+    assert!(required_state(&db).await.unwrap().daily_ready);
+    // Later arrivals in a previously copied hour increment both tiers once.
+    db.collection::<Document>(METERS)
+        .insert_one(row(now - chrono::Duration::hours(1)))
+        .await
+        .unwrap();
+    fold_once(&db, now).await.unwrap();
+    let daily = db
+        .collection::<UsageRollupDaily>(DAILY)
+        .find_one(doc! {})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(daily.measures.events, 3);
+    assert_eq!(daily.measures.rows_folded, 3);
+    assert_eq!(
+        read(&db, now - chrono::Duration::days(1), now)
+            .await
+            .totals
+            .events,
+        3
+    );
+    db.drop().await.unwrap();
+}
+
+/// Only synthetic benchmark history uses direct tier seeding. Real history
+/// always uses claim/apply/finish above. Repeating a generated hour preserves
+/// cardinality while avoiding a prohibitively expensive 18M-row raw fixture.
+pub(crate) async fn seed_benchmark_day(
+    db: &Database,
+    template: &[Document],
+    at: DateTime<Utc>,
+    hours: i64,
+) {
+    let increments: Vec<UsageRollupHourly> = template
+        .iter()
+        .map(|row| {
+            let mut row = row.clone();
+            row.insert("hour", bson::DateTime::from_chrono(at));
+            for field in MEASURES {
+                row.insert(*field, integer(row.get(*field)) * hours);
+            }
+            let partitions = row.get_document_mut("cost_partitions").unwrap();
+            for (_, value) in partitions.iter_mut() {
+                let part = value.as_document_mut().unwrap();
+                for field in MEASURES {
+                    part.insert(*field, integer(part.get(*field)) * hours);
+                }
+            }
+            bson::from_document(row).unwrap()
+        })
+        .collect();
+    let sequence = required_state(db).await.unwrap().sequence + 1;
+    let daily: Vec<Document> = daily_increments(&increments)
+        .unwrap()
+        .iter()
+        .map(|r| bson::to_document(r).unwrap())
+        .collect();
+    for chunk in daily.chunks(BATCH_SIZE as usize) {
+        apply_increments(db, DAILY, sequence, chunk.to_vec(), false, None)
+            .await
+            .unwrap();
+    }
+    db.collection::<Document>(STATE)
+        .update_one(
+            doc! { "_id": STATE_ID },
+            doc! { "$set": { "sequence": sequence } },
+        )
+        .await
+        .unwrap();
 }

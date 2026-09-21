@@ -28,16 +28,17 @@ export function bundleStatus(bundle: AllowanceBundle) {
       : "Disabled";
 }
 export function bundleForm(bundle: AllowanceBundle): AllowanceBundleForm {
+  const activeRows = bundle.rows.filter((row) => row.is_active);
   return {
     service_ref: bundle.service_id,
     target_kind: bundle.target_kind,
     ...normalizedBillingTargets(bundle),
-    units: bundle.rows
-      .filter((row) => row.is_active)
-      .map(({ metric, quantity, recurrence }) => ({
+    units: (activeRows.length ? activeRows : bundle.rows).map(
+      ({ metric, quantity, recurrence }) => ({
         metric,
         quantity,
         recurrence,
-      })),
+      }),
+    ),
   };
 }

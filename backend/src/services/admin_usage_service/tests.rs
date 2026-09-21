@@ -931,10 +931,10 @@ async fn hourly_cost_partitions_preserve_legacy_rounding_and_unknown_masking() {
     db.drop().await.unwrap();
 }
 
-/// Production-density seed: 72 * 25,000 rows, plus a live tail. Use a disposable
+/// Production-density seed: 31 days of summaries, with 72h17m of raw rows. Use a disposable
 /// replica-set DB via NYXID_TEST_DATABASE_URL. No production data is touched.
 #[tokio::test]
-#[ignore = "seeds 1.8M meters, folds history, checks oracle and latency budgets"]
+#[ignore = "seeds 31 days of summaries and 1.8M raw meters; checks oracle and latency budgets"]
 async fn hourly_rollup_production_density_benchmark() {
     use crate::services::billing::usage_rollup::{self, fold_once, hour};
     use serde_json::json;
@@ -963,7 +963,7 @@ async fn hourly_rollup_production_density_benchmark() {
         .as_ref()
         .map(|s| s.get_datetime("end").unwrap().to_chrono())
         .unwrap_or_else(|| hour(Utc::now()) + chrono::Duration::minutes(17));
-    let first = end - chrono::Duration::hours(72);
+    let first = hour(end) - chrono::Duration::hours(72);
     let actors: Vec<String> = previous
         .as_ref()
         .map(|s| {
@@ -1007,11 +1007,17 @@ async fn hourly_rollup_production_density_benchmark() {
                 .unwrap();
         }
         let seeded = Instant::now();
-        for bucket in 0..72 {
+        for bucket in 0..73 {
             for chunk in 0..5 {
                 let mut rows = Vec::with_capacity(5_000);
                 for n in 0..5_000 {
                     let i = chunk * 5_000 + n;
+                    let at = first
+                        + chrono::Duration::hours(bucket)
+                        + chrono::Duration::milliseconds(i as i64 * 144);
+                    if at >= end {
+                        break;
+                    }
                     let service = format!("service-{:02}", i % 17);
                     let actor = &actors[i % 15];
                     let mut row = meter(
@@ -1024,14 +1030,7 @@ async fn hourly_rollup_production_density_benchmark() {
                         &service,
                         (i % 90 + 1) as i64,
                     );
-                    row.insert(
-                        "created_at",
-                        bson::DateTime::from_chrono(
-                            first
-                                + chrono::Duration::hours(bucket)
-                                + chrono::Duration::milliseconds(i as i64 * 144),
-                        ),
-                    );
+                    row.insert("created_at", bson::DateTime::from_chrono(at));
                     row.insert("credential_class", classes[i % 6]);
                     row.insert("metric", metrics[i % 5]);
                     row.insert("lago_metric_code", metrics[i % 5]);
@@ -1065,10 +1064,12 @@ async fn hourly_rollup_production_density_benchmark() {
                     }
                     rows.push(row);
                 }
-                db.collection::<Document>(COLLECTION_NAME)
-                    .insert_many(rows)
-                    .await
-                    .unwrap();
+                if !rows.is_empty() {
+                    db.collection::<Document>(COLLECTION_NAME)
+                        .insert_many(rows)
+                        .await
+                        .unwrap();
+                }
             }
             if bucket % 12 == 11 {
                 println!(
@@ -1124,7 +1125,7 @@ async fn hourly_rollup_production_density_benchmark() {
         .count_documents(doc! { "rollup_pending": true })
         .await
         .unwrap() as usize;
-    assert_eq!(folded + tail, 1_800_125);
+    assert_eq!(folded + tail, 1_807_209);
     assert!(
         tail < 1_000,
         "only one minute of production traffic plus 125 live rows stays raw"
@@ -1140,13 +1141,74 @@ async fn hourly_rollup_production_density_benchmark() {
         )
         .await
         .unwrap();
+    // Every generated hour repeats the same dimensions and quantities. Copy a
+    // completely folded hour for days 4–31; no raw sources are needed there.
+    // The oracle below independently groups a raw hour and scales additive
+    // measures BEFORE pricing/rounding, never using these summaries as truth.
+    let rollups = db.collection::<Document>(crate::models::usage_rollup_hourly::COLLECTION_NAME);
+    let template: Vec<Document> = rollups
+        .find(doc! { "hour": bson::DateTime::from_chrono(first) })
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let summaries_per_hour = template.len();
+    if !previous
+        .as_ref()
+        .is_some_and(|s| s.get_bool("history_seeded").unwrap_or(false))
+    {
+        let history_started = Instant::now();
+        let mut daily_hours = BTreeMap::<DateTime<Utc>, i64>::new();
+        for n in 1..=28 * 24 {
+            let at = first - chrono::Duration::hours(n);
+            *daily_hours.entry(usage_rollup::day(at)).or_default() += 1;
+            let rows: Vec<Document> = template
+                .iter()
+                .map(|r| {
+                    let mut r = r.clone();
+                    r.insert("_id", format!("history-{n}-{}", r.get_str("_id").unwrap()));
+                    r.insert("hour", bson::DateTime::from_chrono(at));
+                    r
+                })
+                .collect();
+            rollups.insert_many(rows).await.unwrap();
+            if n % 168 == 0 {
+                println!(
+                    "seeded {n} historical hours ({:.1}s)",
+                    history_started.elapsed().as_secs_f64()
+                );
+            }
+        }
+        for (day, hours) in daily_hours {
+            usage_rollup::tests::seed_benchmark_day(&db, &template, day, hours).await;
+        }
+        metadata
+            .update_one(
+                doc! { "_id": "seed" },
+                doc! { "$set": { "history_seeded": true } },
+            )
+            .await
+            .unwrap();
+    }
+    let hourly_documents = rollups.count_documents(doc! {}).await.unwrap();
+    let daily_documents = db
+        .collection::<Document>(crate::models::usage_rollup_daily::COLLECTION_NAME)
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    assert_eq!(rollups.count_documents(doc! { "hour": { "$gte": bson::DateTime::from_chrono(hour(end) - chrono::Duration::days(31)), "$lt": bson::DateTime::from_chrono(hour(end)) } }).await.unwrap(), 31 * 24 * summaries_per_hour as u64);
+    println!(
+        "31-day population: {summaries_per_hour} summaries/full hour; production observed 38 actor×service rows across 14 users/17 services in 2h (~3 metrics, 2 classes, a few models)"
+    );
     let mut measurements = Vec::new();
+    let mut failures = Vec::new();
     for (days, budget_ms) in [(1, 500.0), (7, 1_000.0), (31, 2_000.0)] {
         for filter in ["none", "user", "service", "both"] {
             let make_query = || AdminUsageQuery {
                 period: (days != 31).then(|| if days == 1 { "24h".into() } else { "7d".into() }),
-                from: (days == 31).then(|| (end - chrono::Duration::days(days)).to_rfc3339()),
-                to: (days == 31).then(|| end.to_rfc3339()),
+                from: (days == 31).then(|| (hour(end) - chrono::Duration::days(days)).to_rfc3339()),
+                to: (days == 31).then(|| hour(end).to_rfc3339()),
                 user: matches!(filter, "user" | "both").then(|| actors[0].clone()),
                 service: matches!(filter, "service" | "both").then(|| "service-00".into()),
                 ..Default::default()
@@ -1154,9 +1216,33 @@ async fn hourly_rollup_production_density_benchmark() {
             let params = make_query().validate(end).unwrap();
             // The oracle intentionally has a generous bound: this is exactly
             // the slow raw scan being replaced, not an endpoint SLA assertion.
+            let mut oracle_pipeline = summary_pipeline(&params);
+            let old_hours = (first - params.window.from).num_hours().max(0);
+            if old_hours > 0 {
+                let mut template_filter = meter_filter(&params, true);
+                template_filter.insert("created_at", doc! { "$gte": bson::DateTime::from_chrono(first), "$lt": bson::DateTime::from_chrono(first + chrono::Duration::hours(1)) });
+                let mut scale = doc! { "_id": 1 };
+                let mut combine = doc! { "_id": "$_id" };
+                for field in usage_rollup::MEASURES
+                    .iter()
+                    .filter(|f| **f != "rows_folded")
+                {
+                    scale.insert(
+                        *field,
+                        doc! { "$multiply": [format!("${field}"), old_hours] },
+                    );
+                    combine.insert(*field, doc! { "$sum": format!("${field}") });
+                }
+                oracle_pipeline.splice(3..3, [
+                    doc! { "$unionWith": { "coll": COLLECTION_NAME, "pipeline": [
+                        { "$match": template_filter }, meter_flags(), { "$group": meter_group(true) }, { "$project": scale },
+                    ] } },
+                    doc! { "$group": combine },
+                ]);
+            }
             let oracle: Vec<Document> = db
                 .collection::<Document>(COLLECTION_NAME)
-                .aggregate(summary_pipeline(&params))
+                .aggregate(oracle_pipeline)
                 .max_time(Duration::from_secs(180))
                 .allow_disk_use(true)
                 .await
@@ -1185,7 +1271,7 @@ async fn hourly_rollup_production_density_benchmark() {
                 );
             }
             ms.sort_by(f64::total_cmp);
-            let explain = db.run_command(doc! { "explain": { "aggregate": COLLECTION_NAME, "pipeline": fast_pipeline(&params, cached_rates(&db).await.unwrap(), usage_rollup::state(&db).await.unwrap().and_then(|s| s.folded_before)), "cursor": {}, "hint": usage_rollup::PENDING_INDEX }, "verbosity": "executionStats" }).await.unwrap();
+            let explain = db.run_command(doc! { "explain": { "aggregate": COLLECTION_NAME, "pipeline": fast_pipeline(&params, cached_rates(&db).await.unwrap(), usage_rollup::state(&db).await.unwrap().and_then(|s| s.folded_before), usage_rollup::state(&db).await.unwrap().is_some_and(|s| s.daily_ready)), "cursor": {}, "hint": usage_rollup::PENDING_INDEX }, "verbosity": "executionStats" }).await.unwrap();
             let mut docs = 0_i64;
             let mut keys = 0_i64;
             fn examined(value: &Bson, docs: &mut i64, keys: &mut i64) {
@@ -1228,10 +1314,10 @@ async fn hourly_rollup_production_density_benchmark() {
                 "{days}d {filter}: p50 {:.1}ms, max {:.1}ms, docs {docs}, keys {keys}",
                 ms[2], ms[4]
             );
-            measurements.push(json!({ "days": days, "filter": filter, "p50_ms": ms[2], "max_ms": ms[4], "docs_examined": docs, "keys_examined": keys, "oracle_equal": true, "explain": explain }));
+            measurements.push(json!({ "days": days, "filter": filter, "from": params.window.from, "to": params.window.to, "p50_ms": ms[2], "max_ms": ms[4], "docs_examined": docs, "keys_examined": keys, "oracle_equal": true, "explain": explain }));
             // Save evidence before asserting, so failed performance runs remain
             // inspectable and can guide optimization.
-            let evidence = json!({ "rows": folded + tail, "tail_rows": tail, "effective_backfill_rows_per_second": folded as f64 / fold_seconds * 0.75, "users": 15, "services": 17, "credential_classes": 6, "metrics": 5, "fold_seconds": fold_seconds, "fold_rows_per_second": folded as f64 / fold_seconds, "fold_explain": fold_explain, "measurements": measurements });
+            let evidence = json!({ "population_days": 31, "hourly_documents": hourly_documents, "daily_documents": daily_documents, "summaries_per_full_hour": summaries_per_hour, "direct_history_hours": 28 * 24, "production_observed": "38 actor×service rows across 14 users and 17 services in 2h; ~3 metrics, 2 classes, a few models (not an upper bound)", "rows": folded + tail, "tail_rows": tail, "effective_backfill_rows_per_second": folded as f64 / fold_seconds * 0.75, "users": 15, "services": 17, "credential_classes": 6, "metrics": 5, "fold_seconds": fold_seconds, "fold_rows_per_second": folded as f64 / fold_seconds, "fold_explain": fold_explain, "measurements": measurements });
             std::fs::write(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .parent()
@@ -1240,19 +1326,32 @@ async fn hourly_rollup_production_density_benchmark() {
                 serde_json::to_string_pretty(&evidence).unwrap(),
             )
             .unwrap();
+            // The generator has one display partition per summary. Neither
+            // tier should fetch documents, including Mongo's natural actor/owner
+            // OR plan (forcing one index for that OR would disable coverage).
+            assert_eq!(
+                docs,
+                if days == 31 { 0 } else { tail as i64 },
+                "summary reductions must be covered: {days}d {filter}"
+            );
             if days == 1 {
                 assert!(
                     docs < 5_000,
                     "24h must examine tail-scale documents, got {docs}"
                 );
             }
-            assert!(
-                ms[2] < budget_ms,
-                "latency budget exceeded: {days}d {filter} {:.1}ms",
-                ms[2]
-            );
+            if ms[2] >= budget_ms {
+                failures.push(format!(
+                    "{days}d {filter}: {:.1}ms exceeds {budget_ms}ms",
+                    ms[2]
+                ));
+            }
         }
     }
+    assert!(
+        failures.is_empty(),
+        "latency budgets exceeded: {failures:?}"
+    );
     db.drop().await.unwrap();
 }
 
@@ -1388,6 +1487,210 @@ async fn hourly_integer_cost_reduction_is_exact_below_saturation_and_clamps_over
             serde_json::to_value(stats(&documents(&oracle[0], "totals").unwrap()[0]).unwrap())
                 .unwrap()
         );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn daily_hourly_edges_and_tail_match_raw_summary_and_ranking() {
+    use crate::services::billing::usage_rollup::{self, day, fold_once};
+    let db = connect_test_database("usage_daily_parity").await.unwrap();
+    usage_rollup::ensure_indexes(&db).await.unwrap();
+    let end = day(Utc::now()) + chrono::Duration::hours(17) + chrono::Duration::minutes(17);
+    let first = day(end) - chrono::Duration::days(8);
+    let actors = [
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    ];
+    db.collection::<Document>("billing_rate_cache")
+        .insert_one(doc! { "_id": "tokens:*", "credits_per_unit_pico": 600_001_i64 })
+        .await
+        .unwrap();
+    let mut rows = vec![];
+    for day in 0..9 {
+        for hour in [0, 1, 6, 12, 23] {
+            let at = first + chrono::Duration::days(day) + chrono::Duration::hours(hour);
+            if at >= end {
+                continue;
+            }
+            for n in 0..12 {
+                let mut row = meter(
+                    &actors[n % 2],
+                    &actors[(n / 2) % 2],
+                    if n % 3 == 0 { "other" } else { "service" },
+                    1,
+                );
+                row.insert(
+                    "created_at",
+                    bson::DateTime::from_chrono(at + chrono::Duration::minutes(n as i64)),
+                );
+                row.insert("api_key_id", format!("key-{}", n % 3));
+                row.insert("wallet_id", "wallet");
+                row.insert("released", true);
+                row.insert("lago_acked", n % 4 != 0);
+                if n % 4 == 0 {
+                    row.insert("status", "dead_letter");
+                }
+                if n % 3 == 0 {
+                    row.insert("funding", doc! { "settled": true, "total_charge_micros": 17_i64, "wallet_funded_micros": 9_i64, "grant_funded_micros": 5_i64, "allowance_funded_micros": 3_i64 });
+                }
+                if n % 5 == 0 {
+                    row.insert("lago_metric_code", "missing");
+                }
+                if n % 7 == 0 {
+                    row.insert("layer", "resale");
+                }
+                rows.push(row);
+            }
+        }
+    }
+    let mut live = meter(&actors[0], &actors[1], "service", 7);
+    live.insert(
+        "created_at",
+        bson::DateTime::from_chrono(end - chrono::Duration::seconds(1)),
+    );
+    rows.push(live);
+    db.collection::<Document>(COLLECTION_NAME)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    while fold_once(&db, end).await.unwrap() > 0 {}
+    assert!(usage_rollup::state(&db).await.unwrap().unwrap().daily_ready);
+    // Compare the complete raw reductions (not just totals), including cost
+    // partitions crossing daily/hourly/live sources, custom edges and paging.
+    let canonical = |rows: Vec<Document>| -> BTreeMap<String, serde_json::Value> {
+        rows.into_iter()
+            .map(|r| {
+                (
+                    serde_json::to_string(id(&r).unwrap()).unwrap(),
+                    serde_json::to_value(stats(&r).unwrap()).unwrap(),
+                )
+            })
+            .collect()
+    };
+    for (from, to) in [
+        (first, end),
+        (first + chrono::Duration::hours(6), end),
+        (
+            first + chrono::Duration::minutes(5),
+            end - chrono::Duration::hours(25),
+        ),
+        (first, first + chrono::Duration::days(1)),
+        (
+            first + chrono::Duration::minutes(2),
+            first + chrono::Duration::minutes(9),
+        ),
+    ] {
+        for user in [None, Some(actors[0].clone())] {
+            for service in [None, Some("service".to_owned())] {
+                let params = AdminUsageQuery {
+                    from: Some(from.to_rfc3339()),
+                    to: Some(to.to_rfc3339()),
+                    user: user.clone(),
+                    service,
+                    sort: Some("cost".into()),
+                    per_page: Some(2),
+                    ..Default::default()
+                }
+                .validate(end)
+                .unwrap();
+                let raw = aggregate(&db, summary_pipeline(&params)).await.unwrap();
+                let (fast, freshness) = fast_aggregate(&db, &params).await.unwrap();
+                assert!(freshness.validated);
+                for field in ["totals", "services", "classes", "service_classes"] {
+                    assert_eq!(
+                        canonical(documents(&fast, field).unwrap()),
+                        canonical(documents(&raw[0], field).unwrap()),
+                        "{field} {from}..{to}"
+                    );
+                }
+                let raw_rank = aggregate(&db, ranking_pipeline(&params)).await.unwrap();
+                assert_eq!(
+                    documents(&fast, "ranking")
+                        .unwrap()
+                        .iter()
+                        .map(|r| id(r).unwrap())
+                        .collect::<Vec<_>>(),
+                    documents(&raw_rank[0], "ranking")
+                        .unwrap()
+                        .iter()
+                        .map(|r| id(r).unwrap())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    canonical(documents(&fast, "ranking").unwrap()),
+                    canonical(documents(&raw_rank[0], "ranking").unwrap())
+                );
+                assert_eq!(
+                    documents(&fast, "total").unwrap(),
+                    documents(&raw_rank[0], "total").unwrap()
+                );
+            }
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn hourly_and_daily_reductions_have_covering_indexes() {
+    use crate::services::billing::usage_rollup::{self, day, fold_once};
+    let db = connect_test_database("usage_daily_covering").await.unwrap();
+    usage_rollup::ensure_indexes(&db).await.unwrap();
+    let end = day(Utc::now());
+    let mut row = meter("actor", "owner", "service", 1);
+    row.insert(
+        "created_at",
+        bson::DateTime::from_chrono(end - chrono::Duration::hours(2)),
+    );
+    insert(&db, row).await;
+    fold_once(&db, end).await.unwrap();
+    for (collection, bucket) in [
+        (crate::models::usage_rollup_hourly::COLLECTION_NAME, "hour"),
+        (crate::models::usage_rollup_daily::COLLECTION_NAME, "day"),
+    ] {
+        for index in [
+            "usage_rollup_reduce_window",
+            "usage_rollup_reduce_actor",
+            "usage_rollup_reduce_owner",
+        ] {
+            let mut group = doc! { "_id": "$single_display_key" };
+            for field in usage_rollup::MEASURES
+                .iter()
+                .filter(|f| **f != "rows_folded")
+            {
+                group.insert(*field, doc! { "$sum": format!("${field}") });
+            }
+            let mut filter = doc! { bucket: { "$gte": bson::DateTime::from_chrono(end - chrono::Duration::days(1)), "$lt": bson::DateTime::from_chrono(end) }, "single_display_key": { "$ne": null } };
+            match index {
+                "usage_rollup_reduce_actor" => {
+                    filter.insert("actor", "actor");
+                }
+                "usage_rollup_reduce_owner" => {
+                    filter.insert("owner", "owner");
+                }
+                _ => (),
+            }
+            let explain = db.run_command(doc! { "explain": { "aggregate": collection, "pipeline": [{ "$match": filter }, { "$group": group }], "hint": index, "cursor": {} }, "verbosity": "executionStats" }).await.unwrap();
+            fn covered(value: &Bson) -> bool {
+                match value {
+                    Bson::Document(d) if d.contains_key("totalDocsExamined") => {
+                        d.get_i32("totalDocsExamined")
+                            .ok()
+                            .map(i64::from)
+                            .or_else(|| d.get_i64("totalDocsExamined").ok())
+                            == Some(0)
+                    }
+                    Bson::Document(d) => d.values().any(covered),
+                    Bson::Array(a) => a.iter().any(covered),
+                    _ => false,
+                }
+            }
+            assert!(
+                covered(&explain.clone().into()),
+                "{collection} / {index}: {explain}"
+            );
+            assert!(serde_json::to_string(&explain).unwrap().contains("IXSCAN"));
+        }
     }
     db.drop().await.unwrap();
 }
