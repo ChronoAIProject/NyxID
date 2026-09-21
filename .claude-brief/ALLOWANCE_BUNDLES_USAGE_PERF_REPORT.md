@@ -375,3 +375,43 @@ No review finding or verification failure remains open. No new environment varia
 - `frontend/src/components/admin-credits/credits-dialogs.tsx`
 - `frontend/src/pages/admin-credits-safety.test.tsx`
 - `frontend/src/pages/admin-credits.tsx`
+
+## Review round 3
+
+Both findings on `602d5bdf` are addressed in the fold worker. The dashboard query, indexes, response contract, and allowance code are unchanged.
+
+### Design and regression coverage
+
+- **Bound new journal claims by bytes and count.** Bootstrap reads at most **200 hourly documents** and stops before the next source would put the serialized batch over **4 MiB (4,194,304 bytes)**. Accounting includes both BSON arrays, their index keys, the source IDs, increments, and batch metadata. Each candidate is serialized once for sizing; publication independently checks the complete serialized batch before writing the journal. Raw claims retain their 2,000-row ceiling, but halve the candidate source list and reaggregate exactly that list until the batch fits. Unclaimed rows stay pending. The halving loop is bounded; it never retains increments for discarded source IDs. Existing durable batches still replay under the previous state validation, including older bootstrap batches larger than the new 200-source ceiling.
+- **Clean daily increment inputs.** An explicit allowlist copies dimensions, exactness, additive measures, and legacy cost partitions, then derives the UTC day and deterministic daily ID. The initializer uses a fresh zero fence; applying the batch sets the correct journal sequence and regenerates the query accelerators. No hourly timestamp, bootstrap marker, old fence, or stale accelerator is copied into daily accounting data.
+- **Regression tests.** A pure unit test constructs enough legacy partitions to overflow the byte budget, splits them, and verifies exact BSON-size accounting and that every increment is retained. Database tests exercise both the 200-document bootstrap ceiling and byte-driven splitting, resume each batch after an apply-before-mark crash, prove every hourly source completes and `daily_ready` is published, and verify daily totals and clean stored BSON. A raw-source regression uses oversized legacy display partitions to force reaggregation, verifies that each batch's counts/partitions match precisely its source IDs, and checks exactly-once totals in both tiers after replay. The existing pre-tier bootstrap/recovery test also checks the daily increment allowlist and asserts that stored daily documents contain neither `daily_pending` nor `hour`.
+
+A single source whose required increment alone exceeds 4 MiB cannot be reduced by source-count splitting: it returns a metadata-only `AppError` before publication, leaving the source pending and preserving its data. The guard never silently truncates partitions or writes an oversized journal. This is the remaining pathological single-source size limit; ordinary multi-source overflow is automatically split and drained by the tested path.
+
+### Verification
+
+`df -h /System/Volumes/Data` showed **43 GiB free** before the focused Cargo run and **42 GiB free** before full verification. Command output is retained in `/tmp/nyxid-review3-*.log`.
+
+| Command | Review round 3 result |
+|---|---|
+| `cargo fmt --all -- --check` | Passed. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed; **45.58 s**. |
+| `NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27019/?replicaSet=nyxid1530&directConnection=true' cargo test -p nyxid --bin nyxid-server services::billing::usage_rollup::tests -- --test-threads 2` | **11 passed**, 0 failed; **9.88 s**. |
+| `NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27019/?replicaSet=nyxid1530&directConnection=true' cargo test -p nyxid --bin nyxid-server -- --test-threads 2` | **6,417 passed**, 0 failed, 2 intentionally ignored; **370.01 s**. |
+| `cargo test -p nyxid-cli` | **1,277 passed**: 1,246 unit tests plus integration suites 10 + 5 + 13 + 2 + 1, including wizard bundle freshness. |
+| `npm --prefix frontend run lint` | Passed; 0 errors, 27 existing warnings. |
+| `npm --prefix frontend run test` | **346 files / 3,499 tests passed**; **65.76 s**. |
+| `npm --prefix frontend run build` | Passed, including credential-accept output and mock-footprint checks. |
+| Wizard rebuild | Not required: no bundled source, build configuration, manifest, or dependency file changed. The full CLI suite includes `wizard_bundle_freshness`. |
+| `git diff --check` | Passed. |
+
+The ignored benchmark was **not rerun**, as requested for round 3 when the query path is unchanged. The full 31-day population evidence and benchmark table from round 2 remain applicable: worst p50 **373.3 / 491.9 / 717.8 ms** for 24 hours / 7 days / 31 days; documents examined **542 / 542 / 0** and unfiltered keys examined **65,446 / 81,168 / 141,485**. These are explicitly retained round-2 measurements, not new round-3 measurements.
+
+### Files changed
+
+- `backend/src/services/billing/usage_rollup.rs`
+- `backend/src/services/billing/usage_rollup/tests.rs`
+- `docs/BILLING_UI_GLOSSARY.md`
+- `.claude-brief/ALLOWANCE_BUNDLES_USAGE_PERF_REPORT.md`
+
+No existing test was removed. No new environment variables, operator migrations, version changes, index removals, money-path changes, push, or PR are included.

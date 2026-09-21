@@ -32,6 +32,10 @@ use crate::{
 };
 
 pub const BATCH_SIZE: i64 = 2_000;
+const BOOTSTRAP_BATCH_SIZE: i64 = 200;
+// Leave ample room under MongoDB's 16 MiB document limit for the journal
+// envelope and the update commands derived from the immutable increments.
+const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 pub const PENDING_INDEX: &str = "usage_rollup_pending_window";
 const DAILY_PENDING_INDEX: &str = "usage_rollup_daily_pending";
 const MAX_BATCHES_PER_TICK: usize = 100;
@@ -263,24 +267,28 @@ async fn claim(
     cutoff: DateTime<Utc>,
 ) -> AppResult<Option<UsageRollupBatch>> {
     if !current.daily_ready {
-        let increments: Vec<UsageRollupHourly> = db
+        let mut sources = db
             .collection::<UsageRollupHourly>(ROLLUPS)
             .find(doc! { "daily_pending": { "$in": [true, null] } })
             .hint(mongodb::options::Hint::Name(DAILY_PENDING_INDEX.to_owned()))
             .sort(doc! { "hour": -1 })
-            .limit(BATCH_SIZE)
-            .await?
-            .try_collect()
+            .limit(BOOTSTRAP_BATCH_SIZE)
             .await?;
-        if !increments.is_empty() {
-            let batch = UsageRollupBatch {
-                sequence: current.sequence + 1,
-                daily: true,
-                hourly_sources: true,
-                row_ids: increments.iter().map(|row| row.id.clone()).collect(),
-                increments,
-                claimed_at: Utc::now(),
-            };
+        let mut batch = UsageRollupBatch {
+            sequence: current.sequence + 1,
+            daily: true,
+            hourly_sources: true,
+            row_ids: Vec::new(),
+            increments: Vec::new(),
+            claimed_at: Utc::now(),
+        };
+        let mut bytes = serialized_batch_size(&batch)?;
+        while let Some(increment) = sources.try_next().await? {
+            if !append_bootstrap_increment(&mut batch, &mut bytes, increment)? {
+                break;
+            }
+        }
+        if !batch.increments.is_empty() {
             return publish_batch(db, current, batch, None).await;
         }
         let result = db
@@ -335,6 +343,70 @@ async fn claim(
                 .map_err(|e| AppError::Internal(e.to_string()))
         })
         .collect::<AppResult<_>>()?;
+    let mut batch = UsageRollupBatch {
+        sequence: current.sequence + 1,
+        daily: true,
+        hourly_sources: false,
+        row_ids: ids,
+        increments: Vec::new(),
+        claimed_at: Utc::now(),
+    };
+    loop {
+        batch.increments = raw_increments(db, &batch.row_ids, batch.sequence).await?;
+        if serialized_batch_size(&batch)? <= MAX_BATCH_BYTES {
+            return publish_batch(db, current, batch, Some(cutoff)).await;
+        }
+        if batch.row_ids.len() == 1 {
+            return Err(oversized_source_error());
+        }
+        // Reaggregate precisely this prefix; truncating only the source IDs
+        // would leave unclaimed rows in the increments and double count later.
+        // Halving bounds even a pathological claim to at most 12 aggregations.
+        batch.row_ids.truncate(batch.row_ids.len() / 2);
+    }
+}
+
+fn oversized_source_error() -> AppError {
+    AppError::Internal("Single usage rollup source exceeds journal byte budget".into())
+}
+
+fn serialized_batch_size(batch: &UsageRollupBatch) -> AppResult<usize> {
+    bson::to_vec(batch)
+        .map(|bytes| bytes.len())
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Account for both BSON array entries without serializing the entire prefix
+/// for every candidate. Publication verifies the actual complete BSON size.
+fn append_bootstrap_increment(
+    batch: &mut UsageRollupBatch,
+    bytes: &mut usize,
+    increment: UsageRollupHourly,
+) -> AppResult<bool> {
+    let increment_bytes = bson::to_vec(&increment)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .len();
+    // Each array element has a type byte and a nul-terminated decimal index;
+    // the row ID string also has an i32 length and a nul terminator.
+    let entry_overhead = 2 + batch.row_ids.len().to_string().len();
+    let next_bytes = *bytes + 2 * entry_overhead + 5 + increment.id.len() + increment_bytes;
+    if next_bytes > MAX_BATCH_BYTES {
+        if batch.row_ids.is_empty() {
+            return Err(oversized_source_error());
+        }
+        return Ok(false);
+    }
+    batch.row_ids.push(increment.id.clone());
+    batch.increments.push(increment);
+    *bytes = next_bytes;
+    Ok(true)
+}
+
+async fn raw_increments(
+    db: &Database,
+    ids: &[String],
+    sequence: i64,
+) -> AppResult<Vec<UsageRollupHourly>> {
     let mut group = meter_group(true);
     let key = group
         .get_document_mut("_id")
@@ -348,7 +420,7 @@ async fn claim(
     let mut groups: Vec<Document> = db
         .collection::<Document>(METERS)
         .aggregate(vec![
-            doc! { "$match": { "_id": { "$in": &ids } } },
+            doc! { "$match": { "_id": { "$in": ids } } },
             meter_flags(),
             doc! { "$group": group },
         ])
@@ -371,7 +443,7 @@ async fn claim(
         ));
         group.extend(key);
         group.insert("_id", &hash);
-        group.insert("last_batch", current.sequence + 1);
+        group.insert("last_batch", sequence);
         // Mongo sums of exact micros use Decimal128. Clamp as integers before
         // persistence, never by round-tripping through floating point.
         for field in MEASURES {
@@ -414,19 +486,10 @@ async fn claim(
             combined.insert(hash, group.clone());
         }
     }
-    let increments = combined
+    combined
         .into_values()
         .map(|group| bson::from_document(group).map_err(|e| AppError::Internal(e.to_string())))
-        .collect::<AppResult<Vec<_>>>()?;
-    let batch = UsageRollupBatch {
-        sequence: current.sequence + 1,
-        daily: true,
-        hourly_sources: false,
-        row_ids: ids,
-        increments,
-        claimed_at: Utc::now(),
-    };
-    publish_batch(db, current, batch, Some(cutoff)).await
+        .collect()
 }
 
 async fn publish_batch(
@@ -435,6 +498,11 @@ async fn publish_batch(
     batch: UsageRollupBatch,
     cutoff: Option<DateTime<Utc>>,
 ) -> AppResult<Option<UsageRollupBatch>> {
+    if serialized_batch_size(&batch)? > MAX_BATCH_BYTES {
+        return Err(AppError::Internal(
+            "Usage rollup batch exceeds journal byte budget".into(),
+        ));
+    }
     let mut update = doc! { "$set": {
         "batch": bson::to_bson(&batch).map_err(|e| AppError::Internal(e.to_string()))?,
     } };
@@ -532,10 +600,23 @@ async fn apply(
 fn daily_increments(increments: &[UsageRollupHourly]) -> AppResult<Vec<UsageRollupDaily>> {
     let mut combined = std::collections::BTreeMap::<String, Document>::new();
     for increment in increments {
-        let mut group =
+        let mut source =
             bson::to_document(increment).map_err(|e| AppError::Internal(e.to_string()))?;
-        group.remove("hour");
+        // Copy only accounting data. Hourly bootstrap markers, sequence fences
+        // and query accelerators are not daily increment inputs; apply sets the
+        // batch fence and recomputes accelerators from the resulting daily sums.
+        let mut group = Document::new();
+        for field in DIMENSIONS
+            .iter()
+            .chain(MEASURES)
+            .chain([&"exact", &"cost_partitions"])
+        {
+            if let Some(value) = source.remove(*field) {
+                group.insert(*field, value);
+            }
+        }
         group.insert("day", bson::DateTime::from_chrono(day(increment.hour)));
+        group.insert("last_batch", 0_i64);
         let mut key = Document::new();
         for field in DIMENSIONS.iter().chain([&"exact", &"day"]) {
             key.insert(*field, group.get(*field).cloned().unwrap_or(Bson::Null));

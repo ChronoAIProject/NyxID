@@ -360,7 +360,12 @@ transition could remove them from the dashboard predicate. Forwarding is
 monotonic in the meter lifecycle.
 
 The worker uses the billing reconcile interval capped at 60 seconds; zero disables
-it. Each batch contains at most 2,000 rows. Ticks have a 45-second inter-batch
+it. Raw batches contain at most 2,000 rows; hourly-to-daily bootstrap batches
+contain at most 200 hourly documents. Both claims are capped at 4 MiB of
+serialized BSON, including source IDs and increments. Bootstrap stops at the
+largest fitting prefix; oversized raw claims halve their source count and
+recompute the increments before publication. Sources outside the claimed prefix
+remain pending for subsequent batches. Ticks have a 45-second inter-batch
 budget while the watermark is over two hours behind or the daily bootstrap is
 incomplete, and 20 seconds once caught up (at most 100 batches either way). Invalid journal state returns an error and
 the worker logs a metadata-only warning and retries on the next tick.
