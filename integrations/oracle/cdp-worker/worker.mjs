@@ -1612,6 +1612,13 @@ export function modelSelectionDetail(result) {
 }
 
 // Use the same preference for structural pills and composer-local fallbacks.
+// Whether a picker menu offers the Pro Standard / Pro Extended split at all.
+// Some accounts no longer have it: the menu lists model versions instead, and
+// carries the tier only as an unselectable heading.
+export function splitTierOffered(items) {
+  return (items || []).some((item) => ["pro_extended", "pro_standard"].includes(effortMetadata(item?.text)));
+}
+
 export function preferredModelPillIndex(labels) {
   if (!labels.length) return -1;
   const recognized = labels.findIndex((text) => detectPillLevel(text) !== null);
@@ -1971,6 +1978,22 @@ async function selectModelInner(page, targets, budget, result) {
   }
   if (!clicked) {
     interactionOptions(budget);
+    // ChatGPT has removed the Pro Standard / Pro Extended split on some
+    // accounts. The pill's menu now lists model versions - Latest, GPT-5.6,
+    // GPT-5.5 - and carries "6 Pro" only as a heading with aria-checked unset,
+    // so it cannot be clicked. modelLevelTargets still asks for Pro Extended on
+    // every Pro request (no pool setting yields a bare Pro), so the hunt can
+    // never succeed and every task dies level_unavailable while the pill sits
+    // on the requested model the whole time. Observed 2026-09-21: a 15-worker
+    // pool fully down, each task rerouted through all 15 before failing.
+    // When nothing in the menu offers the split, the pill already shows the
+    // requested level and there is nothing left to click.
+    if (targets[0] === "Pro" && pillShowsLevel(result.observed, targets) &&
+        !splitTierOffered(budget.picker?.snapshot?.items)) {
+      await closeOpenMenus(page, budget);
+      result.reason = "already_selected";
+      return;
+    }
     result.reason = "level_unavailable";
     return;
   }

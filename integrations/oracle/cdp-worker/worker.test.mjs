@@ -56,6 +56,7 @@ import {
   modelSelectionFailureReason,
   modelLevelTargets,
   pillShowsLevel,
+  splitTierOffered,
   detectPillLevel,
   dropCancelledCommand,
   resolveNpmExecutable,
@@ -611,6 +612,29 @@ test("an oversized leftover draft takes the single-assignment clear", () => {
   // The emptiness check itself is unchanged.
   assert.equal(composerHasDraft("  "), false);
   assert.equal(composerHasDraft("Architec"), true);
+});
+
+test("a menu without the split tier is not a missing level", () => {
+  // Captured from a live Pro account 2026-09-21. The composer pill's menu now
+  // lists model versions; "6 Pro" is a heading with aria-checked unset, so it
+  // cannot be clicked. modelLevelTargets still asks for Pro Extended on every
+  // Pro request, so the hunt can never succeed - the pool went fully down with
+  // every task rerouted through all 15 workers before failing level_unavailable.
+  const liveMenu = [
+    { text: "6 Pro" }, { text: "" }, { text: "Latest" },
+    { text: "GPT-5.6 Sol" }, { text: "GPT-5.5 Leaving on October 14" },
+  ];
+  assert.equal(splitTierOffered(liveMenu), false);
+  // Where the split does exist, nothing changes: the hunt still applies.
+  assert.equal(splitTierOffered([{ text: "Pro Standard" }, { text: "Pro Extended" }]), true);
+  assert.equal(splitTierOffered([{ text: "Pro \u6269\u5c55" }]), true);
+  assert.equal(splitTierOffered([{ text: "Pro \u6807\u51c6" }]), true);
+  // A bare Pro entry is not a split tier.
+  assert.equal(splitTierOffered([{ text: "Pro" }, { text: "GPT 6 Pro" }]), false);
+  // Absent or malformed menus never claim the split.
+  assert.equal(splitTierOffered([]), false);
+  assert.equal(splitTierOffered(undefined), false);
+  assert.equal(splitTierOffered([{}, { text: null }]), false);
 });
 
 test("pill level detection prefers the longest alias", () => {
