@@ -999,9 +999,9 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
     rows.push({
       status: "done",
       label: "Verification",
-      hint: bot.setup_instructions?.length
-        ? `Use the ${bot.webhook_secret_label ?? "verification secret"} shown once at creation in the platform dashboard.`
-        : `Handled automatically by the ${getPlatform(bot.platform).label} webhook secret.`,
+      hint: bot.webhook_secret_label
+        ? `Use the ${bot.webhook_secret_label} shown once at creation in the platform dashboard.`
+        : "NyxID verifies incoming requests using the credentials supplied during setup.",
     });
   }
 
