@@ -463,7 +463,7 @@ async fn load_active_conversation(
     state
         .db
         .collection::<ChannelConversation>(CONVERSATIONS)
-        .find_one(doc! { "_id": conversation_id, "is_active": true })
+        .find_one(doc! { "_id": conversation_id, "is_active": true, "retired_by_transfer": { "$ne": true } })
         .await?
         .ok_or_else(|| {
             AppError::NotFound(format!(
@@ -1051,6 +1051,7 @@ async fn deliver_initiated_message(
         auth_user.api_key_id.as_deref(),
     );
     let send_result = async {
+        crate::services::ownership_transfer_service::require_current_bot(&state.db, bot).await?;
         let attachments = channel_media_service::materialize(
             &body.message.attachments,
             state.config.channel_media_max_bytes,
@@ -1282,6 +1283,7 @@ async fn deliver_async_reply(
     };
 
     validate_message_bot_scope(&original, &conversation, &bot)?;
+    crate::services::ownership_transfer_service::require_current_bot(&state.db, &bot).await?;
     // Validate reply content against the target platform's capabilities.
     // Runs after bot lookup so we can reject card-only replies destined
     // for platforms (Telegram/Discord) that would otherwise emit an empty
@@ -1583,6 +1585,7 @@ async fn edit_resolved_reply(
         metadata: body.reply.metadata,
     };
 
+    crate::services::ownership_transfer_service::require_current_bot(&state.db, &bot).await?;
     adapter
         .edit_reply(
             &state.http_client,
@@ -3604,6 +3607,7 @@ mod tests {
 
         let bot = ChannelBot {
             last_verification: None,
+            ownership_version: 0,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             platform: "telegram".to_string(),
@@ -4112,6 +4116,7 @@ mod tests {
         let now = Utc::now();
         let other_bot = ChannelBot {
             last_verification: None,
+            ownership_version: 0,
             id: Uuid::new_v4().to_string(),
             user_id: fixture.bot.user_id.clone(),
             platform: "lark".to_string(),

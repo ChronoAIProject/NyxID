@@ -499,6 +499,7 @@ mod tests {
     fn compatible_service() -> DownstreamService {
         DownstreamService {
             destination_targets: Default::default(),
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: "svc-1".to_string(),

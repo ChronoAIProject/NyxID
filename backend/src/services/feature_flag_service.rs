@@ -10,19 +10,19 @@
 //! authority over; reintroduce an org surface only for genuinely org-scoped
 //! features).
 //!
-//! Precedence, most-specific first (org context):
-//! `user override` → `role override` → `org override` → `global` → `code default`.
+//! Precedence, least-specific first: `code default` → `global` → `org` → `user`.
 //! Role- and user-scoped org rows are legacy (the removed self-serve surface
-//! wrote them); startup migration drops them, but resolution still honors the
-//! ordering for defense in depth.
+//! wrote them); startup migration drops them, but resolution still applies
+//! them after org overrides and before platform user overrides.
 //!
-//! Personal (non-org) surfaces are **grant-union** over the user's active org
-//! memberships: a flag is on when the platform baseline (`global` → default)
-//! enables it OR any org the user belongs to grants it (that org's own
-//! `user → role → org` chain resolving to enabled). An org-level disable only
-//! withholds that org's grant — it never revokes the platform baseline or
-//! another org's grant. A platform personal `user` override is the final
-//! per-person allow/deny and beats everything.
+//! Personal (non-org) surfaces resolve the same specificity chain as org
+//! surfaces. The platform baseline (`global` → default) is followed by the
+//! most-specific matching scope from the user's active org memberships
+//! (`org` → `role` → org-scoped `user`), and a platform personal `user`
+//! override is the final per-person allow/deny. When a user belongs to more
+//! than one org and multiple rows at the same scope apply, an explicit disable
+//! wins that same-scope tie so an org kill switch cannot be bypassed by another
+//! membership.
 //!
 //! Adding a new flag = add a [`FeatureFlagDef`] entry here (ships with a deploy)
 //! and consume its key on the frontend. Toggling an existing flag globally /
@@ -249,11 +249,10 @@ fn pick_override(
 /// Compute the enabled-flag keys for a member in an org context.
 ///
 /// Pure and DB-free so precedence is unit-testable. Per flag, most-specific
-/// wins: `default → global → org → role(matching `role`) → user(matching
-/// `member_user_id`)`. `global` rows come from the platform-level set; the org,
-/// role, and user rows from the org's set.
+/// wins: `default → global → org → legacy role → legacy org user → platform user`.
+/// Both user scopes match `member_user_id`; legacy role rows match `role`.
 pub fn resolve_from_overrides(
-    global: &[FeatureFlagOverride],
+    platform: &[FeatureFlagOverride],
     org: &[FeatureFlagOverride],
     member_user_id: &str,
     role: OrgRole,
@@ -261,7 +260,7 @@ pub fn resolve_from_overrides(
     let mut enabled_keys = Vec::new();
     for def in FEATURE_FLAGS {
         let mut enabled = def.default_enabled;
-        if let Some(v) = pick_override(global, def.key, FlagTargetKind::Global, None) {
+        if let Some(v) = pick_override(platform, def.key, FlagTargetKind::Global, None) {
             enabled = v;
         }
         if let Some(v) = pick_override(org, def.key, FlagTargetKind::Org, None) {
@@ -271,6 +270,14 @@ pub fn resolve_from_overrides(
             enabled = v;
         }
         if let Some(v) = pick_override(org, def.key, FlagTargetKind::User, Some(member_user_id)) {
+            enabled = v;
+        }
+        if let Some(v) = pick_override(
+            platform,
+            def.key,
+            FlagTargetKind::User,
+            Some(member_user_id),
+        ) {
             enabled = v;
         }
         if enabled {
@@ -300,36 +307,55 @@ fn pick_org_override(
         .map(|o| o.enabled)
 }
 
-/// Whether one org grants `flag_key` to this member: that org's
-/// `user → role → org` chain, most-specific present value wins. An absent
-/// chain (no rows) grants nothing; an explicit `false` merely withholds this
-/// org's grant.
-fn org_grants_flag(
+/// Resolve the most-specific matching org-scoped override for a member across
+/// all active memberships. The returned value is `None` when no org row
+/// applies. If multiple memberships have a row at the same specificity, an
+/// explicit disable wins that tie; this keeps a disabled org from being
+/// bypassed by another membership while preserving the normal specificity
+/// ordering (`user` > `role` > `org`).
+fn resolve_org_membership_override(
     org_rows: &[FeatureFlagOverride],
-    org_user_id: &str,
     flag_key: &str,
+    memberships: &[(String, OrgRole)],
     user_id: &str,
-    role: OrgRole,
-) -> bool {
-    let kinds = [
-        (FlagTargetKind::User, Some(user_id)),
-        (FlagTargetKind::Role, Some(role.as_str())),
-        (FlagTargetKind::Org, None),
-    ];
-    for (kind, key) in kinds {
-        if let Some(v) = pick_org_override(org_rows, org_user_id, flag_key, kind, key) {
-            return v;
+) -> Option<bool> {
+    for kind in [
+        FlagTargetKind::User,
+        FlagTargetKind::Role,
+        FlagTargetKind::Org,
+    ] {
+        let mut found = false;
+        let mut enabled = false;
+        let mut disabled = false;
+        for (org_id, role) in memberships {
+            let key = match kind {
+                FlagTargetKind::User => Some(user_id),
+                FlagTargetKind::Role => Some(role.as_str()),
+                FlagTargetKind::Org => None,
+                FlagTargetKind::Global => None,
+            };
+            if let Some(value) = pick_org_override(org_rows, org_id, flag_key, kind, key) {
+                found = true;
+                enabled |= value;
+                if !value {
+                    // A disable wins conflicts at the same specificity.
+                    disabled = true;
+                }
+            }
+        }
+        if found {
+            return Some(enabled && !disabled);
         }
     }
-    false
+    None
 }
 
 /// Compute the enabled-flag keys for a user in the **personal** (non-org)
 /// context — the resolution behind `/users/me` and every non-org surface
 /// (sidebar, `/assistant`, …).
 ///
-/// Grant-union per flag:
-/// `personal user override ?? (baseline(global ?? default) || any org grant)`.
+/// Per-flag precedence:
+/// `default → global → org → role → org-scoped user → personal user`.
 /// `memberships` are the user's **active** org memberships as
 /// `(org_user_id, role)`; `org_rows` are override rows across those orgs.
 ///
@@ -342,13 +368,18 @@ pub fn resolve_personal_from_overrides(
 ) -> Vec<String> {
     let mut enabled_keys = Vec::new();
     for def in FEATURE_FLAGS {
-        let baseline = pick_override(platform, def.key, FlagTargetKind::Global, None)
+        let mut enabled = pick_override(platform, def.key, FlagTargetKind::Global, None)
             .unwrap_or(def.default_enabled);
-        let org_granted = memberships
-            .iter()
-            .any(|(org_id, role)| org_grants_flag(org_rows, org_id, def.key, user_id, *role));
-        let enabled = pick_override(platform, def.key, FlagTargetKind::User, Some(user_id))
-            .unwrap_or(baseline || org_granted);
+        if let Some(org_value) =
+            resolve_org_membership_override(org_rows, def.key, memberships, user_id)
+        {
+            enabled = org_value;
+        }
+        if let Some(personal_value) =
+            pick_override(platform, def.key, FlagTargetKind::User, Some(user_id))
+        {
+            enabled = personal_value;
+        }
         if enabled {
             enabled_keys.push(def.key.to_string());
         }
@@ -357,7 +388,7 @@ pub fn resolve_personal_from_overrides(
 }
 
 /// Resolve enabled-flag keys for a member of an org (org context). Applies the
-/// platform-global baseline plus the org's own overrides.
+/// platform-global baseline, the org's own overrides, and platform user overrides.
 pub async fn resolve_enabled_features(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -370,9 +401,11 @@ pub async fn resolve_enabled_features(
 }
 
 /// Resolve enabled-flag keys for a user in the personal (non-org) context.
-/// Delivered on `GET /users/me`. Org-aware: unions in grants from every org
-/// the user is an active member of (see the module docs for precedence), so
-/// enabling a flag for an org lights up non-org surfaces for its members.
+/// Delivered on `GET /users/me`. Org-aware: evaluates matching rows from every
+/// org the user is an active member of, applying the same specificity
+/// precedence as org-context resolution. An org-level disable therefore
+/// overrides a global enable for that member unless a more-specific user
+/// override applies.
 pub async fn resolve_personal_features(
     db: &mongodb::Database,
     user_id: &str,
@@ -410,10 +443,9 @@ pub async fn resolve_personal_features(
 
 /// Whether the billing rollout flag is enabled for a billing owner.
 ///
-/// The owner is a person for personal wallets (grant-union resolution, so
-/// members of a flagged org are covered on personal surfaces too) or an org
-/// user id for org wallets (that org's own `user -> role -> org` chain with
-/// the acting member, on top of the platform baseline).
+/// Personal wallets use the person's active org memberships; org wallets use
+/// that org's overrides. Both apply `default -> global -> org -> user`, including
+/// the acting person's platform user override as the final value.
 pub async fn billing_rollout_enabled(
     db: &mongodb::Database,
     billing_owner_id: &str,
@@ -450,9 +482,8 @@ pub async fn billing_recipient_rollout_enabled(
 /// Whether the Aevatar chat wire-log diagnostic is enabled for the acting user.
 ///
 /// Assistant chat is a **personal** surface, so this resolves through the same
-/// grant-union chain as `/users/me`: a platform-global rollout, a grant from
-/// any org the user belongs to, or a personal per-user override all light it
-/// up, and a personal per-user override is the final allow/deny.
+/// specificity chain as `/users/me`: default, global, matching org scopes,
+/// and finally a personal per-user override.
 ///
 /// Callers gate a diagnostic that exposes raw upstream payloads to the
 /// browser, so a resolution error must be treated as disabled — never as
@@ -1133,6 +1164,63 @@ mod tests {
     }
 
     #[test]
+    fn precedence_matrix_matches_in_personal_and_org_contexts() {
+        // Exercise absent, disabled, and enabled overrides over both defaults.
+        for flag in ["example_ui", BILLING_FLAG_KEY] {
+            for global in [None, Some(false), Some(true)] {
+                for org in [None, Some(false), Some(true)] {
+                    for user in [None, Some(false), Some(true)] {
+                        let mut platform = Vec::new();
+                        if let Some(value) = global {
+                            platform.push(override_row(
+                                None,
+                                flag,
+                                FlagTargetKind::Global,
+                                None,
+                                value,
+                            ));
+                        }
+                        if let Some(value) = user {
+                            platform.push(override_row(
+                                None,
+                                flag,
+                                FlagTargetKind::User,
+                                Some("user-1"),
+                                value,
+                            ));
+                        }
+                        let org_rows: Vec<_> = org
+                            .map(|value| {
+                                override_row(Some("org"), flag, FlagTargetKind::Org, None, value)
+                            })
+                            .into_iter()
+                            .collect();
+                        let expected = user
+                            .or(org)
+                            .or(global)
+                            .unwrap_or(find_flag(flag).unwrap().default_enabled);
+                        let personal = resolve_personal_from_overrides(
+                            &platform,
+                            &org_rows,
+                            &[member("org", OrgRole::Member)],
+                            "user-1",
+                        );
+                        let explicit_org =
+                            resolve_from_overrides(&platform, &org_rows, "user-1", OrgRole::Member);
+                        for resolved in [personal, explicit_org] {
+                            assert_eq!(
+                                resolved.iter().any(|key| key == flag),
+                                expected,
+                                "{flag}: global={global:?}, org={org:?}, user={user:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn personal_default_off() {
         assert!(!personal_enabled(&[], &[], &[], "user-1"));
     }
@@ -1177,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn org_disable_withholds_grant_but_never_revokes() {
+    fn org_disable_overrides_global_and_same_scope_grants() {
         let global_on = vec![override_row(
             None,
             "example_ui",
@@ -1192,15 +1280,16 @@ mod tests {
             None,
             false,
         )];
-        // Org disable does not revoke the platform-global grant on a
-        // personal surface.
-        assert!(personal_enabled(
+        // An org disable is more specific than the platform-global enable,
+        // including on personal surfaces such as /users/me and the sidebar.
+        assert!(!personal_enabled(
             &global_on,
             &org_off,
             &[member("org-a", OrgRole::Member)],
             "user-1"
         ));
-        // Org A disable does not revoke org B's grant.
+        // When multiple memberships have the same specificity, a disable
+        // wins the tie so another org cannot bypass the kill switch.
         let mixed = vec![
             override_row(
                 Some("org-a"),
@@ -1211,7 +1300,7 @@ mod tests {
             ),
             override_row(Some("org-b"), "example_ui", FlagTargetKind::Org, None, true),
         ];
-        assert!(personal_enabled(
+        assert!(!personal_enabled(
             &[],
             &mixed,
             &[
@@ -1220,13 +1309,124 @@ mod tests {
             ],
             "user-1"
         ));
-        // With only the disabling org, nothing grants.
+        assert!(!personal_enabled(
+            &global_on,
+            &mixed.iter().rev().cloned().collect::<Vec<_>>(),
+            &[
+                member("org-b", OrgRole::Member),
+                member("org-a", OrgRole::Member)
+            ],
+            "user-1"
+        ));
+        let user_on = [override_row(
+            None,
+            "example_ui",
+            FlagTargetKind::User,
+            Some("user-1"),
+            true,
+        )];
+        assert!(personal_enabled(
+            &user_on,
+            &mixed,
+            &[
+                member("org-a", OrgRole::Member),
+                member("org-b", OrgRole::Member)
+            ],
+            "user-1"
+        ));
+        // With only the disabling org, the flag remains off.
         assert!(!personal_enabled(
             &[],
             &org_off,
             &[member("org-a", OrgRole::Member)],
             "user-1"
         ));
+    }
+
+    #[test]
+    fn personal_resolution_uses_each_specificity_level_in_order() {
+        let global_on = vec![override_row(
+            None,
+            "example_ui",
+            FlagTargetKind::Global,
+            None,
+            true,
+        )];
+        let org_rows = vec![
+            override_row(
+                Some("org-a"),
+                "example_ui",
+                FlagTargetKind::Org,
+                None,
+                false,
+            ),
+            override_row(
+                Some("org-a"),
+                "example_ui",
+                FlagTargetKind::Role,
+                Some("member"),
+                true,
+            ),
+            override_row(
+                Some("org-a"),
+                "example_ui",
+                FlagTargetKind::User,
+                Some("user-1"),
+                false,
+            ),
+        ];
+        let memberships = [member("org-a", OrgRole::Member)];
+
+        // Org-scoped user (off) beats role (on), org (off), and global (on).
+        assert!(!personal_enabled(
+            &global_on,
+            &org_rows,
+            &memberships,
+            "user-1"
+        ));
+        // Without the org-scoped user row, role (on) beats org (off).
+        let without_org_user: Vec<_> = org_rows
+            .iter()
+            .filter(|row| row.target_kind != FlagTargetKind::User)
+            .cloned()
+            .collect();
+        assert!(personal_enabled(
+            &global_on,
+            &without_org_user,
+            &memberships,
+            "user-1"
+        ));
+        // Without role or org rows, the global value beats the code default.
+        assert!(personal_enabled(&global_on, &[], &memberships, "user-1"));
+        // A platform user override is the final, most-specific value.
+        let personal_off = vec![
+            global_on[0].clone(),
+            override_row(
+                None,
+                "example_ui",
+                FlagTargetKind::User,
+                Some("user-1"),
+                false,
+            ),
+        ];
+        assert!(!personal_enabled(
+            &personal_off,
+            &without_org_user,
+            &memberships,
+            "user-1"
+        ));
+        // Platform user overrides also win over legacy org user rows in org context.
+        let personal_on = [override_row(
+            None,
+            "example_ui",
+            FlagTargetKind::User,
+            Some("user-1"),
+            true,
+        )];
+        assert!(
+            resolve_from_overrides(&personal_on, &org_rows, "user-1", OrgRole::Member)
+                .contains(&"example_ui".to_string())
+        );
     }
 
     #[test]

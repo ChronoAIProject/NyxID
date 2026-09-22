@@ -73,7 +73,7 @@ pub async fn list_anonymous_endpoints(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<AnonymousEndpointListResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
     Ok(Json(AnonymousEndpointListResponse {
         endpoints: service
             .anonymous_endpoints
@@ -90,7 +90,7 @@ pub async fn create_anonymous_endpoint(
     Json(body): Json<CreateAnonymousEndpointRequest>,
 ) -> AppResult<Json<AnonymousEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     let rule =
         anonymous_endpoint_service::build_rule(anonymous_endpoint_service::AnonymousRuleInput {
@@ -128,7 +128,7 @@ pub async fn update_anonymous_endpoint(
     Json(body): Json<UpdateAnonymousEndpointRequest>,
 ) -> AppResult<Json<AnonymousEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     let mut rules = service.anonymous_endpoints.clone();
     let index = rules
@@ -171,7 +171,7 @@ pub async fn delete_anonymous_endpoint(
     Path((service_id, rule_id)): Path<(String, String)>,
 ) -> AppResult<Json<AnonymousEndpointListResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     let mut rules = service.anonymous_endpoints.clone();
     let before = rules.len();
@@ -234,6 +234,7 @@ mod tests {
     fn catalog_service(created_by: &str, identity_propagating: bool) -> DownstreamService {
         DownstreamService {
             destination_targets: Default::default(),
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: Uuid::new_v4().to_string(),

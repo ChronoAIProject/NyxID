@@ -10,6 +10,9 @@ pub struct ChannelBot {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    /// Monotonic ownership generation; operational status updates do not change it.
+    #[serde(default)]
+    pub ownership_version: i64,
     /// Platform identifier: "telegram", "discord", "lark", "feishu", "slack", "whatsapp"
     pub platform: String,
     pub label: String,
@@ -223,6 +226,7 @@ mod tests {
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
             last_verification: None,
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),

@@ -280,6 +280,7 @@ mod tests {
     fn service() -> DownstreamService {
         DownstreamService {
             destination_targets: Default::default(),
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: "svc-1".to_string(),
@@ -416,6 +417,7 @@ mod tests {
         fn public_service(slug: &str, base_url: &str, daily_quota: u32) -> DownstreamService {
             DownstreamService {
                 destination_targets: Default::default(),
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: Uuid::new_v4().to_string(),

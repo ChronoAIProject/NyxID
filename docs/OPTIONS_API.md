@@ -1,6 +1,6 @@
 # Reusable options API
 
-`GET /api/v1/options/{option_set}` supplies suggestions for editable fields. The first registered set is `service-scope`; unknown sets return 404. Suggestions are optional prefill data, not an exhaustive vocabulary or a new authorization mechanism. Service-account scope create/update, token subset validation, and runtime permission checks retain their existing behavior.
+`GET /api/v1/options/{option_set}` supplies suggestions for editable fields. Registered sets are `service-scope`, `service-history-action`, and `service-history-field`; unknown sets return 404. Suggestions are optional prefill data, not an exhaustive vocabulary or a new authorization mechanism. Service-account scope create/update, token subset validation, and runtime permission checks retain their existing behavior.
 
 ## Service-account context
 
@@ -13,16 +13,16 @@ This is a management read. Service-account credentials are rejected. Human crede
 
 The new endpoint requires a global admin creating under their own personal owner ID, or an actual admin of the requested organization. For editing, include `service_account_id=<uuid>`: the existing account must match the owner, and the caller must be a global admin or an admin of that owning organization. This endpoint's owner validation does not change existing management routes or grant cross-owner listing.
 
-`principal_type=service_account` is required. Owner/account IDs must be UUIDs. Optional `search` is at most 200 bytes and matches labels, values, and descriptions case-insensitively. `limit` is 1–100 (default 50), and `offset` is 0–10003 (default 0). Unknown query fields are rejected.
+`principal_type=service_account` is required. Owner/account IDs must be UUIDs. Optional `search` is at most 200 bytes and matches labels, values, and descriptions case-insensitively. `limit` is 1–100 (default 50), and `offset` is 0–10007 (default 0). Unknown query fields are rejected.
 
 ## Sources and response
 
 The resolver merges two sources:
 
-- Code-defined suggestions for existing checks: `proxy`, `llm:proxy`, and `roles`.
+- Code-defined suggestions for existing checks: `proxy`, `proxy:*`, `llm:proxy`, `roles`, `groups`, `catalog:skills:read`, and `catalog:skills:write`. All seven are available before any account has used them. Using the catalog skill scopes still requires a platform-admin-issued curation grant for exact catalog services.
 - Scope tokens already configured on service accounts belonging to the authorized effective owner, including disabled accounts. Ownership follows `owner_user_id`, falling back to `created_by` for older records. Values are deduplicated and sorted; known definitions retain their descriptive labels. Other values use `source: "configured_scope"` and are explicitly described as previously configured custom values.
 
-The `proxy:*` alias and `groups` can appear when configured, with descriptions of their existing behavior. UserService IDs, provider OAuth menus, API-key scope vocabularies, and operation catalogs are not sources for this menu. No exact-service permission is generated.
+The `proxy:*` suggestion is labeled as an alias of `proxy`, and `groups` states that service accounts return an empty group list. These seven definitions cover the current service-account checks; new checks must update this registry. Custom scope strings remain supported, so suggestions are not a closed allowlist. UserService IDs, provider OAuth menus, API-key scope vocabularies, and operation catalogs are not sources for this menu. No exact-service permission is generated.
 
 ```json
 {
@@ -44,9 +44,9 @@ The `proxy:*` alias and `groups` can appear when configured, with descriptions o
   "selected_items": [],
   "total": 1,
   "next_offset": null,
-  "version": "service-account-suggestions-v1:<content-hash>",
+  "version": "service-account-suggestions-v3:<content-hash>",
   "freshness": {
-    "definitions_version": "service-account-suggestions-v1",
+    "definitions_version": "service-account-suggestions-v3",
     "resources": "live",
     "evaluated_at": "2026-09-17T00:00:00+00:00",
     "max_age_seconds": 0
@@ -83,3 +83,12 @@ To add a set, register an explicit variant and resolver in `services/options_ser
 ## Local mock preview
 
 From `frontend/`, run `node scripts/preview-service-scopes.mjs`, then open `http://127.0.0.1:53226/scope-preview`. The development-only page uses the actual shared picker with mocked HTTP responses for available, empty, and unavailable suggestions and a local save simulation. It does not add a production route or modify real service accounts.
+
+
+## Static service-history definitions
+
+`GET /api/v1/options/service-history-action` and `GET /api/v1/options/service-history-field` expose the shared typed backend history registry. Existing route authentication applies; these static definitions add no owner/service-account permission check. They reject `owner_id`, `principal_type` and `service_account_id`, including empty values. Optional `search` is at most 200 bytes, `limit` is 1–100 (default 50), and `offset` is 0–1000. Unknown query fields are rejected.
+
+Responses contain `option_set`, `items`, `total`, `next_offset`, `version` and `freshness`, without scope-context fields or `selected_items`. Items have `source: "backend_definition"` and null owner/resource IDs. `freshness.resources` is `"static"`; scope suggestions remain `"live"`. The full definition content determines the version, independent of search or page. Next offsets must advance and remain strictly below total.
+
+Frontend response schemas and contexts discriminate on the registered set. History filters use closed choices and backend labels; the service-scope picker preserves editable custom values. Cache keys include authenticated identity, set and applicable context. Version changes restart pagination, and invalid context/pagination or permission failures hide stale choices. History responses embed the same definitions' labels, so capture and timeline rendering work when the options endpoint is unavailable. Retired codes remain filterable; unknown event codes have a generic presentation fallback. Labels are independent of the safe-value persistence allowlist.

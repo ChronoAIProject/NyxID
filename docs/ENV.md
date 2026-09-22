@@ -10,7 +10,7 @@ For deployment-specific guidance on these variables, see [DEPLOYMENT.md](DEPLOYM
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `DATABASE_URL` | MongoDB connection string | `mongodb://localhost:27017/nyxid` |
+| `DATABASE_URL` | MongoDB connection string | `mongodb://localhost:27017/nyxid?replicaSet=nyxid-rs&directConnection=true` |
 | `ENCRYPTION_KEY` | 32-byte hex-encoded AES-256 key (64 hex chars) | Output of `openssl rand -hex 32` |
 
 ## Encryption
@@ -537,3 +537,7 @@ See [ORACLE_RELAY.md](ORACLE_RELAY.md) for the full design.
 `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED` defaults to `false`. This temporary gate orders upgraded readers before the catalog writer. Deploying with the default does not activate Workspace's 13 Docs, Sheets, and Slides operations. The hosted Workspace spec always lists all 38 operations; before activation, editor calls return HTTP 503, code 12300, `workspace_destinations_not_activated`, with operator instructions.
 
 On the first startup with `true`, NyxID compares and sets the known default Workspace policy and absent destination map, then additively synchronizes the 13 editor endpoints. Admin-edited policies/maps are preserved. The writes are idempotent, and leaving the gate enabled afterward is safe. Turning it off does not undo activation. The gate is scheduled for removal once every environment has activated. Upgrade all backend readers and the participating node agents before enabling it; see [Google Workspace OAuth](GOOGLE_WORKSPACE_OAUTH.md) for the rollout and approval window.
+
+## Service-history database topology
+
+All service-instance writes require transactions. Startup rejects standalone MongoDB before indexes or migrations. Use MongoDB 8 on a replica set or mongos. Bundled Compose creates authenticated `nyxid-rs` with a persistent internal keyfile and a primary-election initializer; backend startup waits for it. Local host connections to Compose use `directConnection=true`; external databases must use their actual replica-set/mongos URI. Existing data volumes require a coordinated backup and maintenance migration; see [SERVICE_HISTORY.md](SERVICE_HISTORY.md#mongodb-deployment-prerequisite). There is no new history environment variable or TTL.

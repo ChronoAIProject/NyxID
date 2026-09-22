@@ -77,32 +77,34 @@ pub async fn push_credential_to_node_if_owned(
     api_key_id: &str,
     actor_scope: ActorScope,
 ) {
-    let services: Vec<UserService> = match db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": user_id,
-            "api_key_id": api_key_id,
-            "node_id": { "$ne": null },
-            "is_active": true,
-            "auth_method": { "$ne": "none" },
-        })
-        .await
-    {
-        Ok(cursor) => cursor.try_collect().await.unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to query UserServices for owned credential push");
-            return;
-        }
-    };
+    let services: Vec<UserService> =
+        match crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": user_id,
+                "api_key_id": api_key_id,
+                "node_id": { "$ne": null },
+                "is_active": true,
+                "auth_method": { "$ne": "none" },
+            })
+            .await
+        {
+            Ok(cursor) => cursor.try_collect().await.unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query UserServices for owned credential push");
+                return;
+            }
+        };
 
     if services.is_empty() {
         return;
     }
 
-    let api_key = match db
-        .collection::<UserApiKey>(USER_API_KEYS)
-        .find_one(doc! { "_id": api_key_id })
-        .await
+    let api_key = match crate::services::service_history::collection::<UserApiKey>(
+        db,
+        USER_API_KEYS,
+    )
+    .find_one(doc! { "_id": api_key_id })
+    .await
     {
         Ok(Some(k)) => k,
         _ => {
@@ -174,14 +176,14 @@ pub async fn push_credential_to_node_if_owned(
             continue;
         }
 
-        let target_url = match db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
-            .find_one(doc! { "_id": &svc.endpoint_id })
-            .await
-        {
-            Ok(Some(ep)) if !ep.url.is_empty() => Some(ep.url),
-            _ => None,
-        };
+        let target_url =
+            match crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                .find_one(doc! { "_id": &svc.endpoint_id })
+                .await
+            {
+                Ok(Some(ep)) if !ep.url.is_empty() => Some(ep.url),
+                _ => None,
+            };
         let params = build_credential_params(svc, &credential, target_url);
         if let Err(e) = node_ws_manager
             .send_credential_update_clustered(node_id, &params)
@@ -213,39 +215,41 @@ pub async fn push_credential_to_node_if_routed(
     // Exclude services downgraded to `auth_method: "none"`: pushing the
     // rotated secret would silently re-enable injection on a node for a
     // service the user explicitly turned off. Nineteenth-round Codex P2.
-    let services: Vec<UserService> = match db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": user_id,
-            "api_key_id": api_key_id,
-            "node_id": { "$ne": null },
-            "is_active": true,
-            "auth_method": { "$ne": "none" },
-        })
-        .await
-    {
-        Ok(cursor) => match cursor.try_collect().await {
-            Ok(svcs) => svcs,
+    let services: Vec<UserService> =
+        match crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": user_id,
+                "api_key_id": api_key_id,
+                "node_id": { "$ne": null },
+                "is_active": true,
+                "auth_method": { "$ne": "none" },
+            })
+            .await
+        {
+            Ok(cursor) => match cursor.try_collect().await {
+                Ok(svcs) => svcs,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to query UserServices for credential push");
+                    return;
+                }
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to query UserServices for credential push");
                 return;
             }
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to query UserServices for credential push");
-            return;
-        }
-    };
+        };
 
     if services.is_empty() {
         return;
     }
 
     // Load the UserApiKey to get the decrypted credential
-    let api_key = match db
-        .collection::<UserApiKey>(USER_API_KEYS)
-        .find_one(doc! { "_id": api_key_id })
-        .await
+    let api_key = match crate::services::service_history::collection::<UserApiKey>(
+        db,
+        USER_API_KEYS,
+    )
+    .find_one(doc! { "_id": api_key_id })
+    .await
     {
         Ok(Some(k)) => k,
         Ok(None) => {
@@ -274,14 +278,14 @@ pub async fn push_credential_to_node_if_routed(
         };
 
         // Load endpoint URL for target_url field
-        let target_url = match db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
-            .find_one(doc! { "_id": &svc.endpoint_id })
-            .await
-        {
-            Ok(Some(ep)) if !ep.url.is_empty() => Some(ep.url),
-            _ => None,
-        };
+        let target_url =
+            match crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                .find_one(doc! { "_id": &svc.endpoint_id })
+                .await
+            {
+                Ok(Some(ep)) if !ep.url.is_empty() => Some(ep.url),
+                _ => None,
+            };
 
         let params = build_credential_params(svc, &credential, target_url);
 
@@ -346,8 +350,7 @@ pub async fn push_credential_to_node_strict(
     api_key_id: &str,
     target: StrictPushTarget<'_>,
 ) -> AppResult<()> {
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": api_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| {
@@ -525,19 +528,19 @@ pub async fn push_oauth_credential_to_nodes(
     provider_config_id: &str,
 ) {
     // Find UserApiKeys linked to this provider
-    let api_keys: Vec<UserApiKey> = match db
-        .collection::<UserApiKey>(USER_API_KEYS)
-        .find(doc! {
-            "user_id": user_id,
-            "provider_config_id": provider_config_id,
-            "status": "active",
-            "credential_type": { "$ne": "node_managed" },
-        })
-        .await
-    {
-        Ok(cursor) => cursor.try_collect().await.unwrap_or_default(),
-        Err(_) => return,
-    };
+    let api_keys: Vec<UserApiKey> =
+        match crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+            .find(doc! {
+                "user_id": user_id,
+                "provider_config_id": provider_config_id,
+                "status": "active",
+                "credential_type": { "$ne": "node_managed" },
+            })
+            .await
+        {
+            Ok(cursor) => cursor.try_collect().await.unwrap_or_default(),
+            Err(_) => return,
+        };
 
     for api_key in &api_keys {
         push_credential_to_node_if_routed(
@@ -977,6 +980,9 @@ mod tests {
     #[test]
     fn build_params_from_user_service_delegates_correctly() {
         let svc = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "svc-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "openai".to_string(),

@@ -473,6 +473,27 @@ it("re-seeds scope when reopening Add Bot after changing the list scope", async 
 });
 
 
+it.each(["lark", "feishu"])("registers %s with app credentials and no bot token input", async (platform) => {
+  post.mockResolvedValue({ id: "app-bot", platform, status: "active" });
+  const user = userEvent.setup();
+  await setup(`/channel-bots?connect=${platform}`);
+  const dialog = within(await screen.findByRole("dialog"));
+  await dialog.findByLabelText("app_id");
+  expect(dialog.queryByLabelText("Bot token")).not.toBeInTheDocument();
+  await user.type(dialog.getByLabelText("Label", { exact: true }), "Support");
+  await user.type(dialog.getByLabelText("app_id"), "cli_test");
+  await user.type(dialog.getByLabelText("app_secret"), "app-secret");
+  const submit = dialog.getByRole("button", { name: "Add Bot" });
+  expect(submit).toBeDisabled();
+  await user.type(dialog.getByLabelText("verification_token"), "verification-token");
+  await waitFor(() => expect(submit).toBeEnabled());
+  await user.click(submit);
+  await waitFor(() => expect(post).toHaveBeenCalledExactlyOnceWith("/channel-bots", {
+    platform, label: "Support", target_org_id: undefined,
+    app_id: "cli_test", app_secret: "app-secret", verification_token: "verification-token",
+  }));
+});
+
 it("renders and validates required secret fields from the catalog, including new fields", async () => {
   const getDefault = get.getMockImplementation()!;
   get.mockImplementation(async (path: string) => {

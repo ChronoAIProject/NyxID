@@ -227,6 +227,7 @@ pub struct ServiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_app_ids: Option<Vec<String>>,
     pub created_by: String,
+    pub owner_user_id: String,
     pub created_at: String,
     pub updated_at: String,
 
@@ -879,7 +880,7 @@ pub async fn list_services(
         "$or": [
             { "visibility": { "$ne": "private" } },
             { "visibility": { "$exists": false } },
-            { "visibility": "private", "created_by": &user_id_str },
+            { "$and": [{ "visibility": "private" }, crate::services::ownership_transfer_service::catalog_owner_filter(&user_id_str)] },
         ],
     };
     if let Some(ref category) = query.category {
@@ -1141,6 +1142,7 @@ async fn create_service_inner(
                     "query" => "api_key".to_string(),
                     "path" => "bot".to_string(),
                     "ifttt_webhook" => "key".to_string(),
+                    "ifttt_mcp" => "Authorization".to_string(),
                     "none" => String::new(),
                     _ => "X-API-Key".to_string(),
                 });
@@ -1160,6 +1162,7 @@ async fn create_service_inner(
             "none",
             "aws_sigv4",
             "ifttt_webhook",
+            "ifttt_mcp",
         ];
         if !valid_methods.contains(&auth_method.as_str()) {
             return Err(AppError::ValidationError(format!(
@@ -1206,16 +1209,31 @@ async fn create_service_inner(
         };
 
         validate_base_url(base_url)?;
-        if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
-            nyxid_service_adapters::ifttt::validate_destination(base_url)
-                .map_err(|error| AppError::ValidationError(error.to_string()))?;
-            if !credential.is_empty() {
+        if matches!(
+            auth_method.as_str(),
+            nyxid_service_adapters::ifttt::AUTH_METHOD
+                | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+        ) {
+            if auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+                nyxid_service_adapters::ifttt_mcp::validate_destination(base_url)
+                    .map_err(|error| AppError::ValidationError(error.to_string()))?;
+            } else {
+                nyxid_service_adapters::ifttt::validate_destination(base_url)
+                    .map_err(|error| AppError::ValidationError(error.to_string()))?;
+            }
+            user_service_service::validate_ifttt_identity(
+                &auth_method,
+                "none",
+                body.forward_access_token,
+                false,
+            )?;
+            if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD && !credential.is_empty() {
                 nyxid_service_adapters::ifttt::validate_credential(&credential)
                     .map_err(|error| AppError::ValidationError(error.to_string()))?;
             }
             if !body.ws_frame_injections.is_empty() {
                 return Err(AppError::ValidationError(
-                    "IFTTT Webhooks does not support WebSocket frame injection".into(),
+                    "IFTTT does not support WebSocket frame injection".into(),
                 ));
             }
         }
@@ -1429,6 +1447,7 @@ async fn create_service_inner(
     )?;
     let new_service = DownstreamService {
         destination_targets,
+        owner_user_id: None,
         recommended_skill_refs: None,
         skills_revision: 0,
         id: id.clone(),
@@ -1599,7 +1618,7 @@ pub async fn delete_service(
 ) -> AppResult<Json<DeleteServiceResponse>> {
     // CR-4: Use shared require_admin_or_creator helper instead of inline check
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     let now = Utc::now();
     state
@@ -1700,6 +1719,8 @@ pub async fn get_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     let viewer_id = auth_user.user_id.to_string();
+    crate::services::catalog_service::enforce_catalog_read_access(&state.db, &viewer_id, &service)
+        .await?;
     // Issue #416: surface the viewer's own routing for this catalog row
     // so /services/$id can render the editable Routing section.
     let mut viewer_routing =
@@ -1757,7 +1778,7 @@ async fn update_service_inner(
     let skill_fingerprint_input = serde_json::to_value(&body)
         .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
     if body.destination_targets.is_some() {
         require_admin(&state, &auth_user).await?;
     }
@@ -1868,11 +1889,18 @@ async fn update_service_inner(
     }
 
     // Build the $set document with only provided fields
-    if service.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
-        nyxid_service_adapters::ifttt::validate_destination(
-            body.base_url.as_deref().unwrap_or(&service.base_url),
-        )
-        .map_err(|error| AppError::ValidationError(error.to_string()))?;
+    if matches!(
+        service.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
+        let base_url = body.base_url.as_deref().unwrap_or(&service.base_url);
+        if service.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+            nyxid_service_adapters::ifttt_mcp::validate_destination(base_url)
+                .map_err(|error| AppError::ValidationError(error.to_string()))?;
+        } else {
+            nyxid_service_adapters::ifttt::validate_destination(base_url)
+                .map_err(|error| AppError::ValidationError(error.to_string()))?;
+        }
         user_service_service::validate_ifttt_identity(
             &service.auth_method,
             body.identity_propagation_mode
@@ -1890,7 +1918,7 @@ async fn update_service_inner(
             .is_empty()
         {
             return Err(AppError::ValidationError(
-                "IFTTT Webhooks does not support WebSocket frame injection".into(),
+                "IFTTT does not support WebSocket frame injection".into(),
             ));
         }
     }
@@ -2940,7 +2968,7 @@ pub async fn get_oidc_credentials(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<OidcCredentialsResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(
@@ -3023,7 +3051,7 @@ pub async fn update_redirect_uris(
     Json(body): Json<UpdateRedirectUrisRequest>,
 ) -> AppResult<Json<RedirectUrisResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(
@@ -3121,7 +3149,7 @@ pub async fn regenerate_oidc_secret(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<RegenerateSecretResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     if service.auth_method != "oidc" {
         return Err(AppError::BadRequest(

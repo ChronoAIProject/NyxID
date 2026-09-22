@@ -361,3 +361,11 @@ describe("AdminAuditLogPage", () => {
     expect(headers.slice(0, 2)).toEqual(["event_type", "created_at"]);
   });
 });
+
+  it("retains a service UUID history link on mirrored audit entries", async () => {
+    const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    mockUseAdminAuditLog.mockReturnValue({ data: { ...auditResponse, entries: [{ ...auditResponse.entries[0]!, event_type: "service_change_recorded", event_data: { service_id: id } }] }, isLoading: false, isFetching: false, isPlaceholderData: false, error: null, refetch: mockRefetch });
+    render(<AdminAuditLogPage />);
+    await userEvent.click(screen.getByRole("button", { name: "View service history" }));
+    expect(mockNavigate).toHaveBeenCalledWith({ to: "/keys/$keyId", params: { keyId: id } });
+  });

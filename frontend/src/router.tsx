@@ -1,3 +1,4 @@
+import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
@@ -870,6 +871,12 @@ const adminOAuthClientsRoute = createRoute({
   validateSearch: normalizeAdminOAuthClientSearch,
 });
 
+const adminOwnershipRoute = createRoute({
+  path: "ownership",
+  getParentRoute: () => adminLayout,
+  component: AdminOwnershipPage,
+});
+
 const adminNodesRoute = createRoute({
   path: "nodes",
   getParentRoute: () => adminLayout,
@@ -1002,6 +1009,7 @@ const routeTree = rootRoute.addChildren([
     orgServiceAccountDetailRoute,
     orgDeveloperAppDetailRoute,
     adminLayout.addChildren([
+      adminOwnershipRoute,
       adminUsersRoute,
       adminUserDetailRoute,
       adminRolesRoute,

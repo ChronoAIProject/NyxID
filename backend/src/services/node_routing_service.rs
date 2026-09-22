@@ -213,14 +213,14 @@ async fn resolve_from_user_service(
     service_id: &str,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Option<String>> {
-    let user_service: Option<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "user_id": owner_user_id,
-            "catalog_service_id": service_id,
-            "is_active": true,
-        })
-        .await?;
+    let user_service: Option<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find_one(doc! {
+                "user_id": owner_user_id,
+                "catalog_service_id": service_id,
+                "is_active": true,
+            })
+            .await?;
 
     let node_id = match user_service.and_then(|s| s.node_id) {
         Some(nid) if !nid.is_empty() => nid,
@@ -262,14 +262,14 @@ pub async fn user_service_has_explicit_node(
     service_id: &str,
 ) -> AppResult<bool> {
     let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
-    let user_service: Option<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "user_id": owner_user_id,
-            "catalog_service_id": service_id,
-            "is_active": true,
-        })
-        .await?;
+    let user_service: Option<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find_one(doc! {
+                "user_id": owner_user_id,
+                "catalog_service_id": service_id,
+                "is_active": true,
+            })
+            .await?;
 
     Ok(user_service
         .and_then(|s| s.node_id)
@@ -351,17 +351,17 @@ async fn load_dispatchable_user_service_catalog_ids_filtered<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": user_id,
-            "catalog_service_id": { "$type": "string" },
-            "node_id": { "$type": "string", "$ne": "" },
-            "is_active": true,
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": user_id,
+                "catalog_service_id": { "$type": "string" },
+                "node_id": { "$type": "string", "$ne": "" },
+                "is_active": true,
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     if services.is_empty() {
         return Ok(vec![]);

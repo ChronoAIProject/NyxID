@@ -33,12 +33,11 @@ async fn load_readable_endpoint(
     endpoint_id: &str,
     api_key_scope: Option<&[String]>,
 ) -> AppResult<UserEndpoint> {
-    let endpoint = state
-        .db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
-        .find_one(doc! { "_id": endpoint_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
+    let endpoint =
+        crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+            .find_one(doc! { "_id": endpoint_id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
 
     let access = org_service::resolve_owner_access(&state.db, actor, &endpoint.user_id).await?;
     if !access.can_read() {
@@ -88,9 +87,10 @@ async fn endpoint_is_only_node_routed(
     owner_id: &str,
     endpoint_id: &str,
 ) -> AppResult<bool> {
-    let services = state
-        .db
-        .collection::<mongodb::bson::Document>(USER_SERVICES);
+    let services = crate::services::service_history::collection::<mongodb::bson::Document>(
+        &state.db,
+        USER_SERVICES,
+    );
     let total_count = services
         .count_documents(doc! { "user_id": owner_id, "endpoint_id": endpoint_id })
         .await?;

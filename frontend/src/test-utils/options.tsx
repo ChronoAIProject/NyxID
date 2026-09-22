@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
 import type { OptionsResponse } from "@/types/options";
 
-export function optionsResponse(url: string, overrides: Partial<OptionsResponse> = {}): OptionsResponse {
+export function optionsResponse(url: string, overrides: Partial<Extract<OptionsResponse, { option_set: "service-scope" }>> = {}): Extract<OptionsResponse, { option_set: "service-scope" }> {
   const params = new URL(url, "http://localhost").searchParams;
   return {
     option_set: "service-scope", principal_type: "service_account",

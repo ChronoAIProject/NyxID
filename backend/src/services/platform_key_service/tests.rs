@@ -1134,6 +1134,7 @@ fn automatic_platform_grants_require_active_direct_owners() {
     let grants = OwnerGrants {
         actor_id: "person".into(),
         active_owner_ids: ["person".into(), "org".into()].into(),
+        readable_owner_ids: ["person".into(), "org".into()].into(),
         org_owner_ids: ["org".into()].into(),
         memberships: vec![],
     };
@@ -1504,6 +1505,7 @@ fn owner_grant_intersection_is_independent_of_allowlist_size() {
         org_owner_ids: HashSet::new(),
         actor_id: "person".into(),
         memberships: vec![],
+        readable_owner_ids: HashSet::new(),
         active_owner_ids: ["person", "org-1", "org-2", "org-3"]
             .into_iter()
             .map(str::to_string)
@@ -2091,6 +2093,13 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
     let db = connect_transaction_test_database("keys_grant_batch").await;
     let state = crate::test_utils::test_app_state(db.clone());
     let (person, orgs, _) = listing_fixture(&db).await;
+    db.collection::<OrgMembership>(MEMBERSHIPS)
+        .update_one(
+            doc! {"org_user_id": &orgs[1], "member_user_id": &person},
+            doc! {"$set": {"scope_source": "inherit"}},
+        )
+        .await
+        .unwrap();
     let keys = profile_listing(&db, async {
         let providers = load_providers(&db).await?;
         unified_key_service::list_keys(&db, &state.encryption_keys, &person, &providers).await
@@ -2115,6 +2124,34 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
     )
     .await;
     assert_eq!(response.0.keys.len(), 12);
+    assert_eq!(
+        response
+            .0
+            .keys
+            .iter()
+            .filter(|key| key.authorship.is_some())
+            .count(),
+        6,
+        "only personal services and the admin's org expose history summaries"
+    );
+
+    let mut inventory_auth = crate::test_utils::test_auth_user(&person);
+    inventory_auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+    let response = profile_listing(
+        &db,
+        crate::handlers::keys::list_keys(State(state.clone()), inventory_auth),
+    )
+    .await;
+    assert_eq!(response.0.keys.len(), 12);
+    assert_eq!(
+        response
+            .0
+            .keys
+            .iter()
+            .filter(|key| key.authorship.is_some())
+            .count(),
+        6
+    );
 
     db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
         .update_many(
@@ -2125,7 +2162,10 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
         .unwrap();
     let response = profile_listing(
         &db,
-        crate::handlers::keys::list_keys(State(state), crate::test_utils::test_auth_user(&person)),
+        crate::handlers::keys::list_keys(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&person),
+        ),
     )
     .await;
     assert_eq!(
@@ -2139,6 +2179,59 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
             .await
             .unwrap(),
         0
+    );
+    crate::services::org_role_scope_service::set_scope(
+        &db,
+        &orgs[1],
+        OrgRole::Admin,
+        Some(vec![]),
+        &person,
+    )
+    .await
+    .unwrap();
+    let response = profile_listing(
+        &db,
+        crate::handlers::keys::list_keys(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&person),
+        ),
+    )
+    .await;
+    assert_eq!(
+        response
+            .0
+            .keys
+            .iter()
+            .filter(|key| key.authorship.is_some())
+            .count(),
+        3,
+        "a live admin scope restriction hides org history without another membership read"
+    );
+    db.collection::<OrgMembership>(MEMBERSHIPS)
+        .update_one(
+            doc! {"org_user_id": &orgs[1], "member_user_id": &person},
+            doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let response = profile_listing(
+        &db,
+        crate::handlers::keys::list_keys(State(state), crate::test_utils::test_auth_user(&person)),
+    )
+    .await;
+    assert_eq!(
+        response.0.keys.len(),
+        6,
+        "the next request observes membership revocation"
+    );
+    assert_eq!(
+        response
+            .0
+            .keys
+            .iter()
+            .filter(|key| key.authorship.is_some())
+            .count(),
+        3
     );
     db.drop().await.unwrap();
 }

@@ -462,8 +462,15 @@ async fn org_credential_request(platform_key: bool) {
             .await
             .unwrap();
     }
-    assert_eq!(
+    // An explicit person override also wins when acting for an org.
+    assert!(
         flags::billing_rollout_enabled(&db, &org, &actor)
+            .await
+            .unwrap()
+    );
+    // The org-wide recipient baseline has no acting person's override.
+    assert_eq!(
+        flags::billing_recipient_rollout_enabled(&db, &test_user(&org, UserType::Org))
             .await
             .unwrap(),
         !platform_key

@@ -726,6 +726,73 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
   });
 });
 
+describe("AddKeyDialog — IFTTT OAuth", () => {
+  it("connects with the required scope before client registration and clears a prefilled node", async () => {
+    catalog.entries = [
+      {
+        ...OAUTH_ENTRY,
+        slug: "api-ifttt-mcp",
+        name: "IFTTT",
+        base_url: "https://ifttt.com/mcp",
+        auth_method: "ifttt_mcp",
+        credential_mode: "admin",
+        has_platform_oauth_credentials: false,
+        default_scopes: ["mcp"],
+        scope_catalog: [
+          {
+            scope: "mcp",
+            label: "IFTTT tools",
+            description: "Use IFTTT tools",
+            sensitive: true,
+            required: true,
+          },
+        ],
+        platform_scope_allowlist: ["mcp"],
+      },
+    ];
+    initiateOAuthMutateAsync.mockResolvedValue({
+      authorization_url: "https://ifttt.com/oauth/authorize?state=test",
+    });
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="api-ifttt-mcp"
+        prefillNodeId="old-node"
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: /Via Node/i }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Next: Connect" }));
+    expect(screen.queryByLabelText(/Client Secret/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /IFTTT tools/i })).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: "Connect with IFTTT" }),
+    );
+
+    await waitFor(() =>
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerId: "provider-oauth",
+          keyId: "created-service-1",
+          scopeOverride: ["mcp"],
+        }),
+      ),
+    );
+    expect(createKeyMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ service_slug: "api-ifttt-mcp" }),
+    );
+    expect(createKeyMutateAsync.mock.calls[0]?.[0].node_id).toBeUndefined();
+    expect(await screen.findByRole("link", { name: /IFTTT/i })).toHaveAttribute(
+      "href",
+      "https://ifttt.com/oauth/authorize?state=test",
+    );
+  });
+});
+
 describe("AddKeyDialog — reconnect path", () => {
   it.each(["api-google-gmail", "api-google-workspace"])(
     "adds required send permission when reconnecting %s with an old read-only grant",

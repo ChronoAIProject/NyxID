@@ -60,6 +60,7 @@ import ApiTelnyxIcon from "./api-telnyx";
 import ApiTwilioIcon from "./api-twilio";
 import ApiAurinkoIcon from "./api-aurinko";
 import ApiIftttIcon from "./api-ifttt";
+import ApiIftttMcpIcon from "./api-ifttt-mcp";
 
 import AwsCostExplorerIcon from "./aws-cost-explorer";
 
@@ -114,6 +115,7 @@ export const SPEC_CATALOG_SLUGS = [
   "api-twilio",
   "api-aurinko",
   "api-ifttt",
+  "api-ifttt-mcp",
 
   "aws-cost-explorer",
 ] as const;
@@ -168,6 +170,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-aurinko": ApiAurinkoIcon,
   aurinko: ApiAurinkoIcon,
   "api-ifttt": ApiIftttIcon,
+  "api-ifttt-mcp": ApiIftttMcpIcon,
 
   "aws-cost-explorer": AwsCostExplorerIcon,
 } satisfies Readonly<Record<Slug | "telnyx" | "platform-telnyx" | "aurinko", IconComponent>>;

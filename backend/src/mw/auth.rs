@@ -620,6 +620,7 @@ impl FromRequestParts<AppState> for AuthUser {
         state: &AppState,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         async move {
+            let authenticated = async {
             let request_ip = extract_request_ip(parts);
             let request_ua = extract_request_user_agent(parts);
             // Try Bearer token first
@@ -1127,6 +1128,21 @@ impl FromRequestParts<AppState> for AuthUser {
             Err(AppError::Unauthorized(
                 "No valid authentication credentials provided".to_string(),
             ))
+            }.await?;
+            let history_path = parts
+                .extensions
+                .get::<axum::extract::OriginalUri>()
+                .map_or_else(|| parts.uri.path(), |original| original.0.path());
+            if (parts.method != axum::http::Method::GET && parts.method != axum::http::Method::HEAD
+                || history_path.ends_with("/connect/oauth"))
+                && !["/api/v1/proxy/", "/api/v1/llm/", "/mcp"]
+                    .iter()
+                    .any(|prefix| history_path.starts_with(prefix))
+            {
+                crate::services::service_history::context::authenticated(&state.db, &authenticated)
+                    .await?;
+            }
+            Ok(authenticated)
         }
     }
 }

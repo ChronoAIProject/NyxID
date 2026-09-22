@@ -8,6 +8,8 @@ pub struct OAuthState {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_context: Option<crate::models::service_change_event::HistoryContext>,
     pub provider_config_id: String,
     pub code_verifier: Option<String>,
     /// Encrypted device_auth_id (OpenAI) or device_code (RFC 8628) for polling
@@ -80,6 +82,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let state = OAuthState {
+            history_context: crate::services::service_history::context::current(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -112,6 +115,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_device_code_flow() {
         let state = OAuthState {
+            history_context: crate::services::service_history::context::current(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
@@ -142,6 +146,7 @@ mod tests {
         let sa_id = uuid::Uuid::new_v4().to_string();
         let redirect = "/admin/service-accounts/some-sa-id".to_string();
         let state = OAuthState {
+            history_context: crate::services::service_history::context::current(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),

@@ -626,8 +626,7 @@ async fn google_product_for_connection(
     let Some(connection_id) = connection_id else {
         return Ok(None);
     };
-    let key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! {
             "connection_id": connection_id,
             "user_id": owner_id,
@@ -635,8 +634,7 @@ async fn google_product_for_connection(
         })
         .await?
         .ok_or_else(|| AppError::NotFound("Google connection not found".into()))?;
-    let service = db
-        .collection::<UserService>(USER_SERVICES)
+    let service = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(doc! { "api_key_id": &key.id, "user_id": owner_id })
         .await?;
     let Some(catalog_id) = service.and_then(|s| s.catalog_service_id) else {
@@ -682,6 +680,9 @@ pub async fn initiate_oauth_connect(
         ));
     }
 
+    let provider =
+        super::ifttt_oauth_service::ensure_registered(db, encryption_keys, base_url, provider)
+            .await?;
     ensure_oauth_provider_configured(&provider)?;
     ensure_additional_scopes_supported(&provider, additional_scopes)?;
     // A non-empty override is still subject to the same provider-type guard
@@ -754,6 +755,13 @@ pub async fn initiate_oauth_connect(
         .flatten();
     if let Some(product) = google_product {
         product.validate_scopes(scope_param.as_deref())?;
+    }
+    if provider.slug == super::ifttt_oauth_service::PROVIDER_SLUG
+        && scope_param.as_deref() != Some("mcp")
+    {
+        return Err(AppError::ValidationError(
+            "IFTTT OAuth requires the mcp scope".into(),
+        ));
     }
 
     // Platform-client scope allowlist (spec D5/B4): a request riding NyxID's
@@ -841,6 +849,7 @@ pub async fn initiate_oauth_connect(
     };
 
     let oauth_state = OAuthState {
+        history_context: crate::services::service_history::context::current(),
         id: state_id.clone(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
@@ -928,6 +937,9 @@ pub async fn initiate_oauth_connect(
             "nonce",
         ];
         for (key, value) in extra {
+            if provider.slug == super::ifttt_oauth_service::PROVIDER_SLUG && key == "resource" {
+                continue;
+            }
             if !BLOCKLIST.contains(&key.as_str()) && key != cid_param {
                 auth_url.push_str(&format!(
                     "&{}={}",
@@ -936,6 +948,13 @@ pub async fn initiate_oauth_connect(
                 ));
             }
         }
+    }
+
+    if provider.slug == super::ifttt_oauth_service::PROVIDER_SLUG {
+        auth_url.push_str(&format!(
+            "&resource={}",
+            urlencoding::encode(nyxid_service_adapters::ifttt_mcp::BASE_URL)
+        ));
     }
 
     tracing::info!(
@@ -1151,6 +1170,7 @@ pub async fn request_device_code(
     let expires_at = now + Duration::seconds(expires_in);
 
     let oauth_state = OAuthState {
+        history_context: crate::services::service_history::context::current(),
         id: state_id.clone(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
@@ -1235,6 +1255,9 @@ pub async fn poll_device_code(
     }
 
     // When admin-on-behalf flow, store tokens under the target SA's ID
+    if let Some(context) = oauth_state.history_context.clone() {
+        crate::services::service_history::context::replace(context);
+    }
     let effective_user_id = oauth_state.target_user_id.as_deref().unwrap_or(user_id);
 
     // Decrypt device_auth_id
@@ -1722,6 +1745,9 @@ pub async fn handle_oauth_callback(
     }
 
     // When admin-on-behalf flow, store tokens under the target SA's ID
+    if let Some(context) = oauth_state.history_context.clone() {
+        crate::services::service_history::context::replace(context);
+    }
     let effective_user_id = oauth_state
         .target_user_id
         .as_deref()
@@ -2277,7 +2303,7 @@ fn same_user_api_key_refresh_revision(expected: &UserApiKey, current: &UserApiKe
 }
 
 async fn load_user_api_key(db: &mongodb::Database, api_key_id: &str) -> AppResult<UserApiKey> {
-    db.collection::<UserApiKey>(USER_API_KEYS)
+    crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": api_key_id })
         .await?
         .ok_or_else(|| AppError::NotFound("OAuth credential no longer exists".to_string()))
@@ -2636,8 +2662,7 @@ async fn refresh_user_api_key_under_lease(
         set_doc.insert("token_scopes", scope);
     }
 
-    let update = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let update = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .update_one(
             doc! {
                 "_id": &api_key.id,
@@ -2652,10 +2677,10 @@ async fn refresh_user_api_key_under_lease(
             },
             doc! { "$set": set_doc },
         )
+        .routine_refresh()
         .await?;
 
-    let refreshed = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let refreshed = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &api_key.id })
         .await?
         .ok_or_else(|| {
@@ -2729,18 +2754,18 @@ pub async fn refresh_expiring_oauth_keys(
         tracing::warn!("Pending channel connection expiry failed; continuing OAuth refresh sweep");
     }
     let deadline = Utc::now() + window;
-    let candidates: Vec<UserApiKey> = db
-        .collection::<UserApiKey>(USER_API_KEYS)
-        .find(doc! {
-            "credential_type": "oauth2",
-            "status": "active",
-            "connection_id": { "$ne": null },
-            "refresh_token_encrypted": { "$ne": null },
-            "expires_at": { "$ne": null, "$lte": bson::DateTime::from_chrono(deadline) },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let candidates: Vec<UserApiKey> =
+        crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+            .find(doc! {
+                "credential_type": "oauth2",
+                "status": "active",
+                "connection_id": { "$ne": null },
+                "refresh_token_encrypted": { "$ne": null },
+                "expires_at": { "$ne": null, "$lte": bson::DateTime::from_chrono(deadline) },
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     let mut report = RefreshSweepReport {
         considered: candidates.len(),

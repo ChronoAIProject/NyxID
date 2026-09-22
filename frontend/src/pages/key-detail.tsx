@@ -1,3 +1,4 @@
+import { ServiceHistory, ServiceAuthorshipFooter } from "@/components/dashboard/service-history";
 import { CredentialBindingCard } from "@/components/dashboard/credential-binding-card";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -16,6 +17,7 @@ import {
   useCatalogEntry,
 } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
+import { useAuthStore } from "@/stores/auth-store";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
 import { GrantCascadeDialog } from "@/components/shared/grant-cascade-dialog";
 import { grantRevocationDescription } from "@/schemas/oauth-revocation";
@@ -1637,6 +1639,7 @@ function DeleteKeyDialog({
           response?.upstream_revocation_scheduled === true
             ? "Removed from NyxID. Upstream revocation scheduled."
             : "Removed from NyxID. Upstream access remains active.",
+          { action: { label: "View history", onClick: () => { void navigate({ to: "/keys/$keyId", params: { keyId } }); } }, duration: 15000 },
         );
         close();
         void navigate({ to: "/keys", search: {} });
@@ -2171,6 +2174,11 @@ function WsFrameInjectionsSection({
 
 export function KeyDetailPage() {
   const { keyId } = useParams({ strict: false }) as { keyId: string };
+  const identity = useAuthStore((state) => state.user?.id);
+  return <KeyDetailView key={JSON.stringify([identity, keyId])} keyId={keyId} />;
+}
+
+function KeyDetailView({ keyId }: { readonly keyId: string }) {
   const navigate = useNavigate();
   const search = useSearch({ strict: false }) as {
     readonly provider_status?: string;
@@ -2217,7 +2225,7 @@ export function KeyDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search.provider_status]);
 
-  if (isLoading) {
+  if (isLoading && !keyInfo) {
     return (
       <div className="space-y-8">
         <Skeleton className="h-20 w-full" />
@@ -2230,18 +2238,21 @@ export function KeyDetailPage() {
     );
   }
 
-  if (error || !keyInfo) {
+  if (!keyInfo) {
+    const retainedHistory = /^[0-9a-f-]{36}$/i.test(keyId);
+    const detailsMissing = retainedHistory && error instanceof ApiError && error.status === 404;
     return (
       <div className="space-y-8">
-        <PageHeader title="Key Not Found" />
-        <ErrorBanner
+        <PageHeader title={detailsMissing ? "Service history" : "Service details unavailable"} />
+        {retainedHistory && <ServiceHistory serviceId={keyId} />}
+        {!detailsMissing && <ErrorBanner
           message={
             error instanceof ApiError
               ? error.message
               : "Failed to load key details."
           }
           onRetry={refetch}
-        />
+        />}
       </div>
     );
   }
@@ -2308,6 +2319,12 @@ export function KeyDetailPage() {
 
   return (
     <div className="space-y-8">
+      {error && (
+        <ErrorBanner
+          message="Unable to refresh service details. Your unsaved edits are preserved."
+          onRetry={refetch}
+        />
+      )}
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
@@ -2429,8 +2446,11 @@ export function KeyDetailPage() {
 
       {keyInfo.catalog_service_id && <CredentialBindingCard service={keyInfo} catalog={catalogEntry} readOnly={readOnly} />}
 
+      <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
-        <>
+        <Tabs defaultValue="overview" className="space-y-6">
+          <TabsList><TabsTrigger value="overview">Overview</TabsTrigger>{keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}</TabsList>
+          <TabsContent value="overview" className="space-y-4">
           <Card>
             <CardHeader>
               <CardTitle className="text-[15px]">Service Details</CardTitle>
@@ -2549,12 +2569,15 @@ export function KeyDetailPage() {
               </div>
             </details>
           )}
-        </>
+          </TabsContent>
+          {keyInfo.authorship && <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>}
+        </Tabs>
       ) : (
-        <Tabs defaultValue="overview" className="space-y-4">
+        <Tabs defaultValue="overview" className="space-y-6">
           <TabsList className="w-full max-w-full">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="advanced">Advanced</TabsTrigger>
+            {keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4">
@@ -2707,6 +2730,7 @@ export function KeyDetailPage() {
                 />
               )}
           </TabsContent>
+          {keyInfo.authorship && <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>}
         </Tabs>
       )}
 

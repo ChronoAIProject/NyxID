@@ -714,7 +714,7 @@ pub(crate) fn credential_header_name(target: &ProxyTarget) -> Option<String> {
                 Some(trimmed.to_string())
             }
         }
-        "bearer" | "bot_bearer" | "basic" => Some("authorization".to_string()),
+        "bearer" | "bot_bearer" | "basic" | "ifttt_mcp" => Some("authorization".to_string()),
         // SigV4 sets Authorization plus several `X-Amz-*` headers; the only
         // one a caller-supplied or catalog default header could collide with
         // is `Authorization`, so we strip just that. The `X-Amz-*` headers
@@ -861,7 +861,17 @@ pub(crate) fn validate_ifttt_request(
     body: Option<&[u8]>,
     node_routed: bool,
 ) -> AppResult<()> {
-    use nyxid_service_adapters::ifttt;
+    use nyxid_service_adapters::{ifttt, ifttt_mcp};
+    if target.auth_method == ifttt_mcp::AUTH_METHOD {
+        validate_ifttt_configuration(target)?;
+        if node_routed {
+            return Err(AppError::BadRequest(
+                "IFTTT OAuth connections use server routing".into(),
+            ));
+        }
+        ifttt_mcp::validate_request(&target.base_url, method, path, query, body)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    }
     if target.auth_method == ifttt::AUTH_METHOD {
         validate_ifttt_configuration(target)?;
         let base_url = if node_routed && target.base_url.is_empty() {
@@ -882,7 +892,7 @@ fn validate_ifttt_configuration(target: &ProxyTarget) -> AppResult<()> {
         || !target.ws_frame_injections.is_empty()
     {
         return Err(AppError::BadRequest(
-            "IFTTT Webhooks does not support identity, access-token, delegation-token, or WebSocket frame injection".into(),
+            "IFTTT does not support identity, access-token, delegation-token, or WebSocket frame injection".into(),
         ));
     }
     Ok(())
@@ -892,9 +902,13 @@ pub(crate) fn validate_ifttt_delegation(
     target: &ProxyTarget,
     delegated: &[DelegatedCredential],
 ) -> AppResult<()> {
-    if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD && !delegated.is_empty() {
+    if matches!(
+        target.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && !delegated.is_empty()
+    {
         return Err(AppError::BadRequest(
-            "IFTTT Webhooks does not support delegated provider credentials".into(),
+            "IFTTT does not support delegated provider credentials".into(),
         ));
     }
     Ok(())
@@ -2032,12 +2046,11 @@ pub async fn guard_slug_against_viewer_orgs(
             "user_id": &membership.org_user_id,
             "$or": us_or,
         };
-        let us_hit = db
-            .collection::<crate::models::user_service::UserService>(
-                crate::models::user_service::COLLECTION_NAME,
-            )
-            .count_documents(us_query)
-            .await?;
+        let us_hit = crate::services::service_history::collection::<
+            crate::models::user_service::UserService,
+        >(db, crate::models::user_service::COLLECTION_NAME)
+        .count_documents(us_query)
+        .await?;
         if us_hit > 0 {
             return Err(AppError::OrgRoleInsufficient(
                 "your role in the owning org does not permit using this service".to_string(),
@@ -2700,8 +2713,7 @@ async fn finish_resolution(
     verify_auto_provision_eligibility(db, &user_service, effective_owner_id).await?;
 
     // Load the endpoint
-    let endpoint = db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
+    let endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
         .find_one(doc! { "_id": &user_service.endpoint_id })
         .await?
         .ok_or_else(|| {
@@ -2871,8 +2883,7 @@ async fn finish_resolution(
         AppError::Internal("Data integrity error: api_key_id missing".to_string())
     })?;
 
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": ak_id })
         .await?
         .ok_or_else(|| {
@@ -2883,6 +2894,10 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
+    super::ifttt_oauth_service::validate_credential_route(
+        db, api_key.provider_config_id.as_deref(), &user_service.auth_method,
+        &endpoint.url, user_service.node_id.as_deref(),
+    ).await?;
     let api_key = if materialize_credentials {
         maybe_refresh_provider_backed_api_key(
             db,
@@ -3207,6 +3222,7 @@ pub async fn resolve_agent_credential_override(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<String>> {
     Ok(resolve_agent_credential_override_identity(
@@ -3215,6 +3231,7 @@ pub async fn resolve_agent_credential_override(
         user_id,
         api_key_id,
         user_service_id,
+        target,
         connection_expiry_notifier,
     )
     .await?
@@ -3239,6 +3256,7 @@ pub async fn read_agent_credential_override_identity(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
 ) -> AppResult<Option<AgentCredentialOverrideIdentity>> {
     let Some(override_key_id) = agent_binding_service::resolve_credential_override(
         db,
@@ -3250,11 +3268,18 @@ pub async fn read_agent_credential_override_identity(
     else {
         return Ok(None);
     };
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::Internal("Bound credential not found".to_string()))?;
+    super::ifttt_oauth_service::validate_credential_route(
+        db,
+        api_key.provider_config_id.as_deref(),
+        &target.auth_method,
+        &target.base_url,
+        None,
+    )
+    .await?;
     if api_key.status != "active" || !credential_is_materializable(db, &api_key).await? {
         return Err(AppError::BadRequest(
             "Bound credential is not executable".to_string(),
@@ -3272,6 +3297,7 @@ pub async fn resolve_agent_credential_override_identity(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<AgentCredentialOverride>> {
     let override_key_id = agent_binding_service::resolve_credential_override(
@@ -3286,8 +3312,7 @@ pub async fn resolve_agent_credential_override_identity(
         return Ok(None);
     };
 
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| {
@@ -3298,6 +3323,14 @@ pub async fn resolve_agent_credential_override_identity(
             AppError::Internal("Bound credential not found".to_string())
         })?;
 
+    super::ifttt_oauth_service::validate_credential_route(
+        db,
+        api_key.provider_config_id.as_deref(),
+        &target.auth_method,
+        &target.base_url,
+        None,
+    )
+    .await?;
     let api_key = maybe_refresh_provider_backed_api_key(
         db,
         encryption_keys,
@@ -3435,10 +3468,14 @@ async fn maybe_refresh_provider_backed_api_key(
     .await
     {
         Ok(_) => {
-            user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
-                .await?;
+            user_api_key_service::sync_refreshed_provider_token_to_api_keys(
+                db,
+                user_id,
+                provider_config_id,
+            )
+            .await?;
 
-            db.collection::<UserApiKey>(USER_API_KEYS)
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .find_one(doc! { "_id": &api_key.id })
                 .await?
                 .ok_or_else(|| {
@@ -3611,6 +3648,7 @@ fn build_minimal_downstream_service(
 
     DownstreamService {
         destination_targets: Default::default(),
+        owner_user_id: None,
         recommended_skill_refs: None,
         skills_revision: 0,
         id: user_service
@@ -3781,12 +3819,16 @@ pub async fn forward_request(
 pub(crate) enum ForwardRequestError {
     Application(AppError),
     Transport(reqwest::Error),
+    OutcomeUnknown,
 }
 
 impl ForwardRequestError {
     pub(crate) fn into_app_error(self) -> AppError {
         match self {
             Self::Application(error) => error,
+            Self::OutcomeUnknown => AppError::Conflict(
+                "Provider outcome is unknown; check the provider before retrying".into(),
+            ),
             Self::Transport(error) => {
                 tracing::error!(
                     timeout = error.is_timeout(),
@@ -3859,7 +3901,10 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         path,
         &delegated_credentials,
     )?;
-    if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+    if matches!(
+        target.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
         validate_ifttt_configuration(target)?;
     }
     validate_ifttt_delegation(target, &delegated_credentials)?;
@@ -3945,6 +3990,32 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
                     ForwardRequestError::Transport(error)
                 }
                 _ => ForwardRequestError::Application(AppError::BadRequest(error.to_string())),
+            });
+    }
+    if target.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+        let ProxyBody::Buffered(body) = body;
+        return nyxid_service_adapters::ifttt_mcp::client()
+            .forward(
+                &target.base_url,
+                &method,
+                path,
+                query,
+                &target.credential,
+                body.as_deref(),
+            )
+            .await
+            .map_err(|error| match error {
+                nyxid_service_adapters::ifttt_mcp::Error::Transport(error) => {
+                    ForwardRequestError::Transport(error)
+                }
+                nyxid_service_adapters::ifttt_mcp::Error::OutcomeUnknown => {
+                    ForwardRequestError::OutcomeUnknown
+                }
+                nyxid_service_adapters::ifttt_mcp::Error::Request
+                | nyxid_service_adapters::ifttt_mcp::Error::Destination => {
+                    ForwardRequestError::Application(AppError::BadRequest(error.to_string()))
+                }
+                _ => ForwardRequestError::Application(AppError::Internal(error.to_string())),
             });
     }
     for (name, value) in &outbound_headers {
@@ -5588,6 +5659,7 @@ mod tests {
             &user_id,
             &api_key_id,
             &user_service_id,
+            &make_proxy_target("https://example.com".into()),
             None,
         )
         .await
@@ -5615,6 +5687,7 @@ mod tests {
             &user_id,
             &api_key_id,
             &user_service_id,
+            &make_proxy_target("https://example.com".into()),
             None,
         )
         .await
@@ -5642,11 +5715,16 @@ mod tests {
             .await
             .unwrap();
 
-        let read_only_identity =
-            read_agent_credential_override_identity(&db, &user_id, &api_key_id, &user_service_id)
-                .await
-                .expect("read-only override authority resolves from durable refresh material")
-                .expect("bound refresh-only override identity");
+        let read_only_identity = read_agent_credential_override_identity(
+            &db,
+            &user_id,
+            &api_key_id,
+            &user_service_id,
+            &make_proxy_target("https://example.com".into()),
+        )
+        .await
+        .expect("read-only override authority resolves from durable refresh material")
+        .expect("bound refresh-only override identity");
         assert_eq!(read_only_identity.api_key_id, override_credential_id);
         assert_eq!(read_only_identity.credential_epoch, 1);
     }
@@ -5744,6 +5822,7 @@ mod tests {
             credential: String::new(),
             service: DownstreamService {
                 destination_targets: Default::default(),
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -5803,6 +5882,56 @@ mod tests {
             ws_frame_injections: Vec::new(),
             connection_id: None,
         }
+    }
+
+    #[test]
+    fn ifttt_mcp_preflight_enforces_destination_routing_and_identity() {
+        use nyxid_service_adapters::ifttt_mcp;
+        let mut target = make_proxy_target(ifttt_mcp::BASE_URL.into());
+        target.auth_method = ifttt_mcp::AUTH_METHOD.into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_ok()
+        );
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, true)
+                .is_err()
+        );
+        target.service.forward_access_token = true;
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.forward_access_token = false;
+        target.service.inject_delegation_token = true;
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.inject_delegation_token = false;
+        target.service.identity_propagation_mode = "headers".into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.identity_propagation_mode = "none".into();
+        target.base_url = "https://other.invalid".into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        assert!(
+            validate_ifttt_delegation(
+                &target,
+                &[DelegatedCredential {
+                    provider_slug: "another".into(),
+                    injection_method: "header".into(),
+                    injection_key: "x-key".into(),
+                    credential: "fixture".into(),
+                }]
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -6946,6 +7075,7 @@ mod tests {
             credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
             service: DownstreamService {
                 destination_targets: Default::default(),
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -7146,6 +7276,9 @@ mod tests {
 
     fn make_user_service_token_exchange() -> crate::models::user_service::UserService {
         crate::models::user_service::UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "us-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "api-lark-bot".to_string(),
@@ -7285,6 +7418,7 @@ mod tests {
             credential: "super-secret".to_string(),
             service: DownstreamService {
                 destination_targets: Default::default(),
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -7514,6 +7648,7 @@ mod tests {
             credential,
             service: DownstreamService {
                 destination_targets: Default::default(),
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -7760,6 +7895,7 @@ mod tests {
     fn test_minimal_downstream() -> DownstreamService {
         DownstreamService {
             destination_targets: Default::default(),
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: "ds-test".into(),

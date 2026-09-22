@@ -3417,6 +3417,9 @@ mod tests {
     async fn insert_user_service(db: &mongodb::Database, user_id: &str, slug: &str) -> UserService {
         let now = Utc::now();
         let service = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             slug: slug.to_string(),
@@ -3452,7 +3455,7 @@ mod tests {
             state_version: 1,
             rotation_predecessor_id: None,
         };
-        db.collection::<UserService>(USER_SERVICES)
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .insert_one(&service)
             .await
             .expect("insert user service");
@@ -3473,7 +3476,7 @@ mod tests {
             None,
             None,
         );
-        db.collection::<UserService>(USER_SERVICES)
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .insert_one(&service)
             .await
             .expect("insert test service");
@@ -5552,7 +5555,7 @@ mod tests {
         .expect("insert catalog docs");
 
         let user_service_id = Uuid::new_v4().to_string();
-        db.collection::<UserService>(USER_SERVICES)
+        crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
             .insert_one(crate::test_utils::test_user_service(
                 &user_service_id,
                 &user_id,

@@ -122,6 +122,12 @@ pub(crate) async fn process_inbound_messages(
             }
         };
 
+        if route.conversation.user_id != bot.user_id {
+            complete = false;
+            continue;
+        }
+        super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
+
         // Store the inbound message
         let stored = if adapter.atomic_inbound_admission() {
             let metadata = channel_relay_service::inbound_metadata(
@@ -289,6 +295,7 @@ pub(crate) async fn process_inbound_messages(
             .await;
             continue;
         }
+        super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
         let delivery = channel_relay_service::forward_to_agent(
             state.http_client,
             state.config,
