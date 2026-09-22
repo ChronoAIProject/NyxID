@@ -25,6 +25,8 @@ import {
   diagnosticFileName,
   diagnosticsToPrune,
   settleDom,
+  familyFromModelRadios,
+  switcherMetadataMatches,
   PROMPT_FILL_CHARS_PER_MS,
   PROMPT_FILL_MAX_MS,
   composerHasDraft,
@@ -1319,4 +1321,32 @@ test("settleDom resolves on a quiet page and falls back to a short sleep when it
   assert.ok(Date.now() - started >= 150, "fallback sleeps for min(maxMs, 500)");
   const crashed = { evaluate: async () => { throw new Error("Target crashed"); } };
   await assert.rejects(settleDom(crashed, { quietMs: 50, maxMs: 200 }), /Target crashed/);
+});
+
+test("the checked version radio is the family evidence below Pro", () => {
+  const radios = (checked) => [
+    { text: "Latest", checked: checked === "Latest" },
+    { text: "GPT-5.6 Sol", checked: checked === "GPT-5.6 Sol" },
+    { text: "GPT-5.5\nLeaving on October 14", checked: checked === "GPT-5.5" },
+  ];
+  assert.equal(familyFromModelRadios(radios("Latest")), "gpt_latest");
+  assert.equal(familyFromModelRadios(radios("GPT-5.6 Sol")), "gpt_5_6");
+  assert.equal(familyFromModelRadios(radios("GPT-5.5")), "gpt_5_5");
+  assert.equal(familyFromModelRadios(radios("none")), "absent");
+  assert.equal(familyFromModelRadios([{ text: "Latest", checked: false }, { text: "Log out", checked: true }]), "absent");
+  assert.equal(familyFromModelRadios([]), "absent");
+  assert.equal(familyFromModelRadios(null), "absent");
+  // Latest satisfies a request that names no minor version, never an older pin.
+  assert.equal(switcherMetadataMatches("gpt_latest", "chatgpt-6-high"), true);
+  assert.equal(switcherMetadataMatches("gpt_latest", "chatgpt-6-pro"), true);
+  assert.equal(switcherMetadataMatches("gpt_latest", "pro"), true);
+  assert.equal(switcherMetadataMatches("gpt_latest", "chatgpt-5.5-high"), false);
+  assert.equal(switcherMetadataMatches("gpt_latest", "gpt-5.6-sol"), false);
+  // Numbered radios compare family and minor version like the header does.
+  assert.equal(switcherMetadataMatches("gpt_5_6", "chatgpt-5.6-high"), true);
+  assert.equal(switcherMetadataMatches("gpt_5_6", "chatgpt-5.5-high"), false);
+  assert.equal(switcherMetadataMatches("gpt_5_6", "chatgpt-6-high"), false);
+  assert.equal(switcherMetadataMatches("gpt_6_pro", "chatgpt-6-pro"), true);
+  assert.equal(switcherMetadataMatches("absent", "chatgpt-6-high"), false);
+  assert.equal(switcherMetadataMatches(null, "chatgpt-6-high"), false);
 });
