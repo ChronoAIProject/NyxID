@@ -32,6 +32,7 @@ pub enum SecretPatch<'a> {
 }
 
 pub struct UpdateBotParams<'a> {
+    pub x_events: Option<&'a [crate::models::channel_bot::XChannelEvent]>,
     pub bot_token: Option<&'a str>,
     pub label: Option<&'a str>,
     pub verification_token: Option<&'a str>,
@@ -260,6 +261,7 @@ async fn persist_verified_bot(
 
     let now = Utc::now();
     let bot = ChannelBot {
+        x_events: None,
         last_verification: None,
         ownership_version: 0,
         id: uuid::Uuid::new_v4().to_string(),
@@ -672,6 +674,12 @@ async fn reconnect_bot_inner(
     if !bot.is_active || bot.credential_source != "connection" {
         return Err(super::channel_managed::unavailable());
     }
+    let required_scopes =
+        if bot.platform == "x" && super::channel_adapters::x::public_events_enabled(bot) {
+            super::channel_adapters::x::PUBLIC_SCOPES
+        } else {
+            required_scopes
+        };
     let token = super::channel_credentials::connection_token(
         db,
         keys,
@@ -691,40 +699,43 @@ async fn reconnect_bot_inner(
             "Reconnect the same platform account to preserve its conversation routes".to_string(),
         ));
     }
-    let (cursor, backoff, last_polled_at) =
-        if bot.webhook_registered || (billing.billing_enabled() && bot.platform == "x") {
-            (
-                bot.poll_cursor.clone(),
+    let (cursor, backoff, last_polled_at) = if bot.webhook_registered
+        || (bot.platform == "x"
+            && (billing.billing_enabled()
+                || super::channel_adapters::x::public_events_enabled(bot)))
+    {
+        (
+            bot.poll_cursor.clone(),
+            None,
+            bot.last_polled_at.map(bson::DateTime::from_chrono),
+        )
+    } else if let Some(cursor) = &bot.poll_cursor {
+        // Resume from the last committed event so DMs received during failure remain eligible.
+        (
+            Some(cursor.clone()),
+            None,
+            bot.last_polled_at.map(bson::DateTime::from_chrono),
+        )
+    } else {
+        let outcome = adapter
+            .poll_inbound(
+                http,
+                &BotCredentials {
+                    billing: None,
+                    token: &token,
+                    platform_bot_id: Some(&identity.platform_bot_id),
+                    platform_secrets: None,
+                },
                 None,
-                bot.last_polled_at.map(bson::DateTime::from_chrono),
             )
-        } else if let Some(cursor) = &bot.poll_cursor {
-            // Resume from the last committed event so DMs received during failure remain eligible.
-            (
-                Some(cursor.clone()),
-                None,
-                bot.last_polled_at.map(bson::DateTime::from_chrono),
+            .await?;
+        let cursor = outcome.cursor.ok_or_else(|| {
+            AppError::ChannelPlatformError(
+                "Initial channel poll was rate limited; retry later".to_string(),
             )
-        } else {
-            let outcome = adapter
-                .poll_inbound(
-                    http,
-                    &BotCredentials {
-                        billing: None,
-                        token: &token,
-                        platform_bot_id: Some(&identity.platform_bot_id),
-                        platform_secrets: None,
-                    },
-                    None,
-                )
-                .await?;
-            let cursor = outcome.cursor.ok_or_else(|| {
-                AppError::ChannelPlatformError(
-                    "Initial channel poll was rate limited; retry later".to_string(),
-                )
-            })?;
-            (Some(cursor), outcome.backoff, Some(bson::DateTime::now()))
-        };
+        })?;
+        (Some(cursor), outcome.backoff, Some(bson::DateTime::now()))
+    };
     let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
         doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true, "connection_id": &bot.connection_id, "poll_cursor": &bot.poll_cursor, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
         doc! { "$set": {
@@ -889,6 +900,22 @@ pub async fn update_bot(
     user_id: &str,
     params: UpdateBotParams<'_>,
 ) -> AppResult<ChannelBot> {
+    if params.x_events.is_some() {
+        return super::channel_connection_webhook_service::serialized(
+            db,
+            adapter.platform_id(),
+            update_bot_inner(
+                db,
+                encryption_keys,
+                http_client,
+                adapter,
+                bot_id,
+                user_id,
+                params,
+            ),
+        )
+        .await;
+    }
     super::channel_retry_ingress::with_lifecycle(
         db,
         adapter.serializes_lifecycle(),
@@ -937,6 +964,49 @@ async fn update_bot_inner(
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
     let mut unset_doc = doc! {};
+
+    if let Some(events) = params.x_events {
+        super::channel_adapters::x::validate_events(&bot.platform, events)?;
+        if !bot.is_active || bot.credential_source != "connection" {
+            return Err(AppError::ValidationError(
+                "X event selection requires an active connected account".into(),
+            ));
+        }
+        let descriptor = adapter
+            .platform_credentials()
+            .ok_or_else(super::channel_managed::unavailable)?;
+        let platform =
+            super::platform_credential_service::load_decrypted(db, encryption_keys, &descriptor)
+                .await?;
+        if !adapter.connection_webhook_configured(&platform) {
+            return Err(AppError::ValidationError(
+                "Configure X platform webhook credentials before selecting events".into(),
+            ));
+        }
+        let mut proposed = bot.clone();
+        proposed.x_events = Some(events.to_vec());
+        let scopes = if super::channel_adapters::x::public_events_enabled(&proposed) {
+            super::channel_adapters::x::PUBLIC_SCOPES
+        } else {
+            super::channel_adapters::x::REQUIRED_SCOPES
+        };
+        super::channel_credentials::connection_token(
+            db,
+            encryption_keys,
+            &bot.user_id,
+            bot.connection_id
+                .as_deref()
+                .ok_or_else(super::channel_managed::unavailable)?,
+            "twitter",
+            scopes,
+        )
+        .await?;
+        set_doc.insert(
+            "x_events",
+            bson::to_bson(events)
+                .map_err(|_| AppError::Internal("Unable to encode X events".into()))?,
+        );
+    }
 
     if let Some(label) = params.label {
         if label.is_empty() || label.len() > 200 {
@@ -1860,6 +1930,7 @@ mod tests {
 
     async fn make_lark_bot(encryption_keys: &EncryptionKeys, bot_token: &str) -> ChannelBot {
         ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
@@ -1919,6 +1990,7 @@ mod tests {
             &bot.id,
             &bot.user_id,
             UpdateBotParams {
+                x_events: None,
                 label: Some("Renamed"),
                 bot_token: None,
                 app_id: None,
@@ -1966,6 +2038,7 @@ mod tests {
         };
         let bot = make_lark_bot(&encryption_keys, "old_app:old_secret").await;
         let params = UpdateBotParams {
+            x_events: None,
             bot_token: None,
             label: None,
             verification_token: None,
@@ -1998,6 +2071,7 @@ mod tests {
         };
         let bot = make_lark_bot(&encryption_keys, "old_app:old_secret").await;
         let params = UpdateBotParams {
+            x_events: None,
             bot_token: None,
             label: None,
             verification_token: None,
@@ -2030,6 +2104,7 @@ mod tests {
         };
         let bot = make_lark_bot(&encryption_keys, "old_app:old_secret").await;
         let params = UpdateBotParams {
+            x_events: None,
             bot_token: None,
             label: None,
             verification_token: None,
@@ -2062,6 +2137,7 @@ mod tests {
         };
         let bot = make_lark_bot(&encryption_keys, "old_app:old_secret").await;
         let params = UpdateBotParams {
+            x_events: None,
             bot_token: None,
             label: Some("New Label"),
             verification_token: None,
@@ -2216,6 +2292,7 @@ mod tests {
         bot.platform = "telegram".to_string();
 
         let params = UpdateBotParams {
+            x_events: None,
             bot_token: None,
             label: None,
             verification_token: None,

@@ -92,7 +92,11 @@ pub async fn bootstrap(
         } = adapter.credential_resolution()
         {
             response.provider_slug = Some(provider_slug);
-            response.required_scopes = required_scopes;
+            response.required_scopes = if platform == "x" {
+                crate::services::channel_adapters::x::PUBLIC_SCOPES
+            } else {
+                required_scopes
+            };
             let provider = state
                 .db
                 .collection::<crate::models::provider_config::ProviderConfig>(

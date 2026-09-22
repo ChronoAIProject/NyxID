@@ -766,9 +766,9 @@ mod tests {
             )
             .unwrap();
             assert!(adapter.dedup_inbound_by_platform_message_id());
-            assert!(!adapter.atomic_inbound_admission());
+            assert!(adapter.atomic_inbound_admission());
             let message = crate::services::channel_platform::InboundMessage {
-                platform_message_id: "x-dm-1".into(),
+                platform_message_id: "500".into(),
                 conversation_id: "15551234567".into(),
                 conversation_type: "private".into(),
                 sender_platform_id: "15551234567".into(),
@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn x_lookup_dedup_still_admits_and_dispatches_one_dm() {
+    async fn x_atomic_dedup_still_admits_and_dispatches_one_dm() {
         assert_duplicate_delivery_counts("x", 1, false, "delivered", false).await;
     }
 
@@ -1360,6 +1360,7 @@ mod tests {
         let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
 
         let bot = crate::models::channel_bot::ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: bot_id.clone(),

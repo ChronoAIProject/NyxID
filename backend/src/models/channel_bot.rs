@@ -3,8 +3,19 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "channel_bots";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XChannelEvent {
+    Dm,
+    Mentions,
+    Replies,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
+    /// Absent on legacy X channels, which receive DMs only.
+    #[serde(default)]
+    pub x_events: Option<Vec<XChannelEvent>>,
     #[serde(default)]
     pub last_verification: Option<BotVerification>,
     #[serde(rename = "_id")]
@@ -225,6 +236,7 @@ mod tests {
 
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),

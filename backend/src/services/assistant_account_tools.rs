@@ -747,6 +747,7 @@ impl AccountTools<'_> {
                         &bot.id,
                         user,
                         channel_bot_service::UpdateBotParams {
+                            x_events: None,
                             label: args["label"].as_str(),
                             app_id: args["app_id"].as_str(),
                             bot_token: None,

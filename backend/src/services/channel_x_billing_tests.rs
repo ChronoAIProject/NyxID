@@ -71,7 +71,7 @@ impl LagoApi for FakeLago {
     }
 }
 
-async fn enable_billing(state: &mut AppState, owner: &str) -> String {
+pub(crate) async fn enable_billing(state: &mut AppState, owner: &str) -> String {
     state.config.billing_enabled = true;
     state.billing = Arc::new(BillingService::new_with_lago(
         state.db.clone(),
@@ -165,7 +165,7 @@ async fn rows(state: &AppState) -> Vec<UsageMeterRow> {
         .unwrap()
 }
 
-async fn settled(state: &AppState) -> Vec<UsageMeterRow> {
+pub(crate) async fn settled(state: &AppState) -> Vec<UsageMeterRow> {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let rows = rows(state).await;
