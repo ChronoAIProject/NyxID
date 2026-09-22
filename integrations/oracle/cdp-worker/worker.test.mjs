@@ -26,6 +26,7 @@ import {
   diagnosticsToPrune,
   settleDom,
   familyFromModelRadios,
+  pillLabelPending,
   switcherMetadataMatches,
   PROMPT_FILL_CHARS_PER_MS,
   PROMPT_FILL_MAX_MS,
@@ -1349,4 +1350,19 @@ test("the checked version radio is the family evidence below Pro", () => {
   assert.equal(switcherMetadataMatches("gpt_6_pro", "chatgpt-6-pro"), true);
   assert.equal(switcherMetadataMatches("absent", "chatgpt-6-high"), false);
   assert.equal(switcherMetadataMatches(null, "chatgpt-6-high"), false);
+});
+
+test("a structural pill whose label is swapped out while its menu closes is retried, not trusted", () => {
+  assert.equal(pillLabelPending({ structural: true, pill: null, observed: null }), true);
+  assert.equal(pillLabelPending({ structural: true, pill: { index: 0 }, observed: "" }), true);
+  assert.equal(pillLabelPending({ structural: true, pill: { index: 0 }, observed: "Thinking effort" }), true);
+  assert.equal(pillLabelPending({ structural: true, pill: { index: 0 }, observed: "GPT 6 Pro" }), false);
+  assert.equal(pillLabelPending({ structural: true, pill: { index: 0 }, observed: "High" }), false);
+  // A composer form with no visible pill and no labelled stand-in is a pill still rendering.
+  assert.equal(pillLabelPending({ structural: false, form: true, pill: null, observed: null, candidates: [""] }), true);
+  assert.equal(pillLabelPending({ structural: false, form: true, pill: null, observed: null, candidates: [] }), true);
+  // A labelled fallback control, or no composer form at all, is not.
+  assert.equal(pillLabelPending({ structural: false, form: true, pill: { index: 0 }, observed: "GPT-5.5 High", candidates: ["GPT-5.5 High"] }), false);
+  assert.equal(pillLabelPending({ structural: false, form: false, pill: null, observed: null, candidates: [] }), false);
+  assert.equal(pillLabelPending(null), false);
 });
