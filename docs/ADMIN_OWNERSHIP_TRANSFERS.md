@@ -166,6 +166,9 @@ credential is active, belongs to the bot's current owner, uses the platform
 OAuth application, has `source: "channel_onboarding"`, and is dedicated to that
 bot. The encrypted access and refresh tokens stay on the same row; the transfer
 does not duplicate credentials or copy a refresh token to another connection.
+Required OAuth scopes follow the bot's selected X events, including public
+posting permission when mentions or replies are enabled. Event selections stay
+with the bot.
 The internal OAuth callback handle changes so a stale authorization callback
 cannot overwrite the transferred connection. The bot's credential-row ID stays
 the same.

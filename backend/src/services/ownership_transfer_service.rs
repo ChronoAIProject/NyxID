@@ -193,16 +193,18 @@ async fn inspect_x_credential(
         blockers.push("The X OAuth credential is not active with live refresh access".into());
         candidate = false;
     }
-    if crate::services::channel_adapters::x::REQUIRED_SCOPES
-        .iter()
-        .any(|required| {
-            !key.token_scopes
-                .as_deref()
-                .unwrap_or_default()
-                .split_whitespace()
-                .any(|scope| scope == *required)
-        })
-    {
+    let required_scopes = if crate::services::channel_adapters::x::public_events_enabled(bot) {
+        crate::services::channel_adapters::x::PUBLIC_SCOPES
+    } else {
+        crate::services::channel_adapters::x::REQUIRED_SCOPES
+    };
+    if required_scopes.iter().any(|required| {
+        !key.token_scopes
+            .as_deref()
+            .unwrap_or_default()
+            .split_whitespace()
+            .any(|scope| scope == *required)
+    }) {
         blockers.push("The X OAuth credential is missing required channel permissions".into());
         candidate = false;
     }

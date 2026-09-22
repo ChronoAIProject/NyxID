@@ -904,6 +904,66 @@ async fn x_transfer_rejects_invalid_or_pending_credentials_without_partial_moves
 }
 
 #[tokio::test]
+async fn x_public_event_transfer_requires_public_scopes_and_preserves_selected_events() {
+    use crate::models::channel_bot::XChannelEvent;
+    use crate::services::channel_adapters::x::PUBLIC_SCOPES;
+
+    let f = fixture("ownership_x_public_events").await;
+    let (bot, key) = insert_x_bot(&f).await;
+    f.db.collection::<Document>(BOTS)
+        .update_one(
+            doc! { "_id": &bot.id },
+            doc! { "$set": { "x_events": ["dm", "mentions", "replies"] } },
+        )
+        .await
+        .unwrap();
+    assert_x_transfer_blocked(&f, &bot, "required channel permissions").await;
+    f.db.collection::<Document>(USER_API_KEYS)
+        .update_one(
+            doc! { "_id": &key.id },
+            doc! { "$set": { "token_scopes": PUBLIC_SCOPES.join(" ") } },
+        )
+        .await
+        .unwrap();
+    let reviewed = preview(
+        &f.db,
+        &f.admin,
+        ResourceKind::ChannelBot,
+        &bot.id,
+        &f.destination,
+        5,
+    )
+    .await
+    .unwrap();
+    assert!(reviewed.blockers.is_empty(), "{:?}", reviewed.blockers);
+    move_resource(
+        &f,
+        ResourceKind::ChannelBot,
+        &bot.id,
+        &f.destination,
+        &reviewed.version,
+        &Uuid::new_v4().to_string(),
+    )
+    .await
+    .unwrap();
+    let moved =
+        f.db.collection::<ChannelBot>(BOTS)
+            .find_one(doc! { "_id": &bot.id })
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(moved.user_id, f.destination);
+    assert_eq!(
+        moved.x_events,
+        Some(vec![
+            XChannelEvent::Dm,
+            XChannelEvent::Mentions,
+            XChannelEvent::Replies
+        ])
+    );
+}
+
+#[tokio::test]
 async fn x_transfer_versions_shared_and_inflight_dependencies_including_inactive_consumers() {
     let f = fixture("ownership_x_dependencies").await;
     let (bot, key) = insert_x_bot(&f).await;
