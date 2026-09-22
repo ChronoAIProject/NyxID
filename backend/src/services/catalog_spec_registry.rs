@@ -221,33 +221,39 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = L
                 (*key, Arc::new(parsed))
             })
             .collect();
-        // Workspace publishes the same operations as its individual products.
-        let mut workspace = (*specs["google-drive"]).clone();
-        workspace["info"]["title"] = "Google Workspace".into();
-        workspace["info"]["description"] =
-            "Google Workspace uses one Google OAuth connection for Drive, Calendar, Gmail, Docs, Sheets, and Slides. The root server https://www.googleapis.com serves Drive, Calendar, and Gmail; Docs, Sheets, and Slides paths declare their respective https://docs.googleapis.com, https://sheets.googleapis.com, and https://slides.googleapis.com servers. Standard OpenAPI server precedence applies: operation servers override path servers, which override the root server. During the operator-controlled upgrade window, editor requests return workspace_destinations_not_activated (12300) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
+        // Drive owns the editor bundle; Workspace adds Calendar and Gmail.
+        let mut drive = (*specs["google-drive"]).clone();
+        drive["info"]["description"] =
+            "Google Drive file operations and Docs, Sheets, and Slides editing through one Google OAuth connection. Editor paths declare their Google API servers and accept the full Drive scope, subject to file permissions. During the upgrade window, editor requests return workspace_destinations_not_activated (12300) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
                 .into();
-        for key in ["google-calendar", "google-gmail"] {
-            workspace["paths"]
-                .as_object_mut()
-                .expect("Drive paths")
-                .extend(
-                    specs[key]["paths"]
-                        .as_object()
-                        .expect("Product paths")
-                        .clone(),
-                );
-        }
         for key in ["google-docs", "google-sheets", "google-slides"] {
             let servers = specs[key]["servers"].clone();
             for (path, item) in specs[key]["paths"].as_object().expect("Product paths") {
                 let mut item = item.clone();
                 item["servers"] = servers.clone();
                 assert!(
+                    drive["paths"]
+                        .as_object_mut()
+                        .expect("Drive paths")
+                        .insert(path.clone(), item)
+                        .is_none(),
+                    "Duplicate Drive path"
+                );
+            }
+        }
+        specs.insert("google-drive", Arc::new(drive.clone()));
+        let mut workspace = drive;
+        workspace["info"]["title"] = "Google Workspace".into();
+        workspace["info"]["description"] =
+            "Google Workspace uses one Google OAuth connection for Drive, Calendar, Gmail, Docs, Sheets, and Slides. The root server https://www.googleapis.com serves Drive, Calendar, and Gmail; Docs, Sheets, and Slides paths declare their respective https://docs.googleapis.com, https://sheets.googleapis.com, and https://slides.googleapis.com servers. Standard OpenAPI server precedence applies: operation servers override path servers, which override the root server. During the operator-controlled upgrade window, editor requests return workspace_destinations_not_activated (12300) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
+                .into();
+        for key in ["google-calendar", "google-gmail"] {
+            for (path, item) in specs[key]["paths"].as_object().expect("Product paths") {
+                assert!(
                     workspace["paths"]
                         .as_object_mut()
                         .expect("Workspace paths")
-                        .insert(path.clone(), item)
+                        .insert(path.clone(), item.clone())
                         .is_none(),
                     "Duplicate Workspace path"
                 );
@@ -428,15 +434,14 @@ mod tests {
             drive["paths"].as_object().unwrap().len()
                 + calendar["paths"].as_object().unwrap().len()
                 + gmail["paths"].as_object().unwrap().len()
-                + ["google-docs", "google-sheets", "google-slides"]
-                    .iter()
-                    .map(|key| spec_for_key(key).unwrap()["paths"]
-                        .as_object()
-                        .unwrap()
-                        .len())
-                    .sum::<usize>()
         );
         assert_eq!(workspace["servers"][0]["url"], "https://www.googleapis.com");
+        assert_eq!(
+            openapi_parser::parse_openapi_spec_value(&drive)
+                .unwrap()
+                .len(),
+            22
+        );
         assert_eq!(
             crate::services::openapi_parser::parse_openapi_spec_value(&workspace)
                 .unwrap()
@@ -449,6 +454,7 @@ mod tests {
                 let mut expected = item.clone();
                 expected["servers"] = product["servers"].clone();
                 assert_eq!(paths[path], expected);
+                assert_eq!(drive["paths"][path], expected);
             }
         }
         for spec in [drive, calendar, gmail] {

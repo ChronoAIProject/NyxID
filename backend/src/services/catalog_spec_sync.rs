@@ -230,7 +230,9 @@ fn seeded_endpoint_inputs(slug: &str) -> AppResult<Vec<EndpointInput>> {
         .as_str()
         .unwrap_or("https://example.com")
         .into();
-    if slug == "api-google-workspace" {
+    if super::google_workspace::GoogleProduct::from_slug(slug)
+        .is_some_and(|product| product.has_editor_destinations())
+    {
         service.destination_targets = super::destination_routing::workspace_targets();
     }
     hosted_endpoint_inputs(&service, true)
@@ -243,7 +245,10 @@ fn hosted_endpoint_inputs(
     let spec = catalog_spec_registry::spec_for_slug(&service.slug)
         .ok_or_else(|| crate::errors::AppError::Internal("Missing hosted catalog spec".into()))?;
     let mut spec = (*spec).clone();
-    if !enable_workspace_destinations && service.slug == "api-google-workspace" {
+    if !enable_workspace_destinations
+        && super::google_workspace::GoogleProduct::from_slug(&service.slug)
+            .is_some_and(|product| product.has_editor_destinations())
+    {
         for key in ["google-docs", "google-sheets", "google-slides"] {
             for path in catalog_spec_registry::spec_for_key(key).expect("editor spec")["paths"]
                 .as_object()
@@ -252,7 +257,7 @@ fn hosted_endpoint_inputs(
             {
                 spec["paths"]
                     .as_object_mut()
-                    .expect("Workspace paths")
+                    .expect("Google product paths")
                     .remove(path);
             }
         }

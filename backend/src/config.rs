@@ -479,7 +479,7 @@ pub struct AppConfig {
     /// Enable HMAC request signing for node proxy requests (default: true)
     pub node_hmac_signing_enabled: bool,
     /// Temporary reader-before-writer rollout gate; remove after all environments activate.
-    /// First true startup installs the known-default Workspace map/policy and adds 13 endpoints.
+    /// First true startup installs each known-default Drive/Workspace map/policy and adds 13 endpoints.
     /// Idempotent, safe to leave enabled; false never reverses persisted activation.
     pub google_workspace_multi_origin_enabled: bool,
 
