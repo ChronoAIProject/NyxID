@@ -533,7 +533,7 @@ pub trait PlatformAdapter: Send + Sync {
         &self,
         _http: &reqwest::Client,
         _credentials: &BotCredentials<'_>,
-        _bot_id: &str,
+        _bot: &crate::models::channel_bot::ChannelBot,
         _webhook_url: &str,
     ) -> AppResult<()> {
         Err(super::channel_managed::unavailable())

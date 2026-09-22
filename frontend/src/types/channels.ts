@@ -57,6 +57,7 @@ export interface ChannelBotListResponse {
 }
 
 export interface ChannelBotDetail extends ChannelBotItem {
+  readonly x_events?: readonly XChannelEvent[];
   readonly last_verification?: BotVerification | null;
   readonly webhook_ingestion?: boolean;
   readonly connection_id?: string | null;
@@ -122,7 +123,8 @@ export interface CreateChannelBotRequest {
 }
 
 export interface UpdateChannelBotRequest {
-  readonly [field: string]: string | undefined;
+  readonly [field: string]: string | readonly XChannelEvent[] | undefined;
+  readonly x_events?: readonly XChannelEvent[];
   readonly bot_token?: string;
   readonly label?: string;
   readonly verification_token?: string;
@@ -130,6 +132,8 @@ export interface UpdateChannelBotRequest {
   readonly app_id?: string;
   readonly app_secret?: string;
 }
+
+export type XChannelEvent = "dm" | "mentions" | "replies";
 
 export interface CreateChannelBotResponse {
   readonly credential_source?: "user" | "platform" | "connection" | "telegram_manager";

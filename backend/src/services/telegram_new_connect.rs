@@ -91,6 +91,7 @@ impl TelegramNewService<'_> {
             }
             let secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
             let bot = ChannelBot {
+                x_events: None,
                 last_verification: None,
                 ownership_version: 0,
                 id: id.into(),

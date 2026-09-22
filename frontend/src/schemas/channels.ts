@@ -92,6 +92,15 @@ export const updateChannelBotSchema = z.object({
 
 export type UpdateChannelBotFormData = z.infer<typeof updateChannelBotSchema>;
 
+export const xChannelEventsSchema = z.object({
+  events: z.array(z.enum(["dm", "mentions", "replies"]))
+    .min(1, "Select at least one event type")
+    .max(3)
+    .refine((events) => new Set(events).size === events.length, "Select each event only once"),
+});
+
+export type XChannelEventsFormData = z.infer<typeof xChannelEventsSchema>;
+
 export const createChannelConversationSchema = z.object({
   channel_bot_id: z.string().uuid("Invalid bot ID"),
   agent_api_key_id: z.string().uuid("Invalid API key ID"),

@@ -307,6 +307,7 @@ mod tests {
 
     fn make_test_bot() -> ChannelBot {
         ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
