@@ -61,7 +61,8 @@ pub async fn configure(
     if !supports(adapter) {
         return Ok(false);
     }
-    let result = serialized(db, adapter.platform_id(), async {
+    // Keep provider setup state off the shared channel verification stack.
+    let result = serialized(db, adapter.platform_id(), Box::pin(async {
         let current = super::channel_bot_service::get_bot(db, &bot.id).await?;
         if !current.is_active || current.connection_id != bot.connection_id {
             return Err(AppError::Conflict("Channel connection changed during webhook setup".into()));
@@ -73,7 +74,7 @@ pub async fn configure(
                 "Webhook or billing setup needs attention. Restore credits and configuration, then select Verify.").await?;
         }
         result
-    }).await;
+    })).await;
     if result.is_err()
         && bot.platform == "x"
         && (billing.billing_enabled()
