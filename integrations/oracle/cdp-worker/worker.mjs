@@ -1557,6 +1557,20 @@ export const PRE_SEND_ACTION_MS = 5000;
 export const PROMPT_FILL_CHARS_PER_MS = 5;
 export const PROMPT_FILL_MAX_MS = 60000;
 
+// An attachment needs longer than the flat pre-send allowance before its send
+// control becomes clickable. ChatGPT finishes wiring the composer after the
+// upload reports "attached", and a promo card can sit over the button while it
+// does. The trial click then expires exactly on the 5s boundary and the task
+// fails send_button_not_found - while the failure probe taken moments later
+// records send_found=true, because the button was there all along, just not
+// hittable yet. Observed 2026-09-22: "attachment attached (2s)" at 09:19:02,
+// "browser failure ... send_button_not_found" at 09:19:07.
+export const SEND_READY_TIMEOUT_MS = 20000;
+
+export function sendReadyTimeout(hasAttachment) {
+  return hasAttachment ? SEND_READY_TIMEOUT_MS : PRE_SEND_ACTION_MS;
+}
+
 export function promptFillTimeout(length) {
   const n = Number(length);
   const scaled = Number.isFinite(n) && n > 0 ? Math.ceil(n / PROMPT_FILL_CHARS_PER_MS) : 0;
@@ -3067,7 +3081,8 @@ async function handlePrompt(runtime, page, task, recovering) {
   await ensureComposerUnobstructed(page);
   // Resolve actionability while still pre-send. The actual click is the
   // only operation after the durable uncertainty fence.
-  try { await sendBtn.click({ trial: true, timeout: PRE_SEND_ACTION_MS }); }
+  const sendWait = sendReadyTimeout(!task.is_followup && !!(task.pdf_base64 || task.attachment_base64));
+  try { await sendBtn.click({ trial: true, timeout: sendWait }); }
   catch (error) {
     if (stableErrorCode(error) === 'page_crashed') throw error;
     throw Object.assign(new Error('send_button_not_found'), { code: 'send_button_not_found' });

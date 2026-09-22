@@ -28,6 +28,8 @@ import {
   familyFromModelRadios,
   pillLabelPending,
   switcherMetadataMatches,
+  sendReadyTimeout,
+  SEND_READY_TIMEOUT_MS,
   PROMPT_FILL_CHARS_PER_MS,
   PROMPT_FILL_MAX_MS,
   composerHasDraft,
@@ -686,6 +688,36 @@ test("the prompt fill allowance scales with the prompt", () => {
   assert.equal(promptFillTimeout(NaN), PRE_SEND_ACTION_MS);
   assert.equal(promptFillTimeout(Infinity), PRE_SEND_ACTION_MS);
   assert.equal(promptFillTimeout(-1), PRE_SEND_ACTION_MS);
+});
+
+test("an attachment gets longer for its send control to become clickable", () => {
+  // ChatGPT finishes wiring the composer after the upload reports "attached",
+  // and a promo card can sit over the send button while it does. The flat
+  // allowance expired exactly on the 5s boundary: "attachment attached (2s)"
+  // at 09:19:02, "browser failure ... send_button_not_found" at 09:19:07 -
+  // while the probe recorded send_found=true, because the button was present
+  // all along, just not hittable. Observed 2026-09-22.
+  assert.equal(sendReadyTimeout(true), SEND_READY_TIMEOUT_MS);
+  assert.ok(SEND_READY_TIMEOUT_MS > PRE_SEND_ACTION_MS);
+  // A plain prompt keeps the existing allowance exactly.
+  assert.equal(sendReadyTimeout(false), PRE_SEND_ACTION_MS);
+  assert.equal(sendReadyTimeout(undefined), PRE_SEND_ACTION_MS);
+  assert.equal(sendReadyTimeout(null), PRE_SEND_ACTION_MS);
+});
+
+test("an attachment gets longer for its send control to become clickable", () => {
+  // ChatGPT finishes wiring the composer after the upload reports "attached",
+  // and a promo card can sit over the send button while it does. The flat
+  // allowance expired exactly on the 5s boundary: "attachment attached (2s)"
+  // at 09:19:02, "browser failure ... send_button_not_found" at 09:19:07 -
+  // while the probe recorded send_found=true, because the button was present
+  // all along, just not hittable. Observed 2026-09-22.
+  assert.equal(sendReadyTimeout(true), SEND_READY_TIMEOUT_MS);
+  assert.ok(SEND_READY_TIMEOUT_MS > PRE_SEND_ACTION_MS);
+  // A plain prompt keeps the existing allowance exactly.
+  assert.equal(sendReadyTimeout(false), PRE_SEND_ACTION_MS);
+  assert.equal(sendReadyTimeout(undefined), PRE_SEND_ACTION_MS);
+  assert.equal(sendReadyTimeout(null), PRE_SEND_ACTION_MS);
 });
 
 test("pill level detection prefers the longest alias", () => {
