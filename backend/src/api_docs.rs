@@ -5,6 +5,8 @@
         crate::handlers::service_history::get_history,
         crate::handlers::service_history::get_archived,
         crate::handlers::admin_ownership::list_resources,
+        crate::handlers::admin_ownership::authorization,
+        crate::handlers::admin_ownership::destinations,
         crate::handlers::admin_ownership::preview,
         crate::handlers::admin_ownership::transfer,
         crate::handlers::admin_usage::get_usage,

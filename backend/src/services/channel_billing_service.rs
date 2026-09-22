@@ -119,6 +119,14 @@ impl ChannelBilling {
     }
 
     pub async fn received(&self, event_id: &str) -> AppResult<()> {
+        self.received_event(event_id, "x-dm-received").await
+    }
+
+    pub async fn received_post(&self, post_id: &str) -> AppResult<()> {
+        self.received_event(post_id, "x-post-received").await
+    }
+
+    async fn received_event(&self, event_id: &str, operation: &str) -> AppResult<()> {
         if !self.billing.billing_enabled() {
             return Ok(());
         }
@@ -126,7 +134,7 @@ impl ChannelBilling {
             .bot_id
             .as_deref()
             .ok_or_else(|| AppError::Internal("X inbound billing requires a channel".into()))?;
-        let request_id = format!("x-dm-received:{bot_id}:{event_id}");
+        let request_id = format!("{operation}:{bot_id}:{event_id}");
         super::channel_connection_webhook_service::serialized(&self.db, &request_id, async {
             // A redelivery must not need fresh funds or the current catalog price.
             if self
@@ -148,12 +156,27 @@ impl ChannelBilling {
     }
 
     pub async fn send(&self, request: reqwest::RequestBuilder) -> AppResult<reqwest::Response> {
+        self.send_event(request, "x-dm-send").await
+    }
+
+    pub async fn send_post(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> AppResult<reqwest::Response> {
+        self.send_event(request, "x-post-reply").await
+    }
+
+    async fn send_event(
+        &self,
+        request: reqwest::RequestBuilder,
+        operation: &str,
+    ) -> AppResult<reqwest::Response> {
         if self.billing.billing_enabled() && !self.webhook_registered {
             return Err(AppError::BillingNotConfigured(
                 "Paid X channels require webhook delivery; select Verify first".into(),
             ));
         }
-        self.request(request, "x-dm-send").await
+        self.request(request, operation).await
     }
 
     pub async fn verify_account(

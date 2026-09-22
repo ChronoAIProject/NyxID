@@ -3194,7 +3194,13 @@ List all user's keys (combined endpoint + key + service view).
 
 #### GET /api/v1/keys/{id}
 
-Get a single key's combined view.
+Get a single key's combined view for existing human/API-key/delegated callers. Service accounts receive a smaller nonsecret metadata response and must use an exact UserService UUID.
+
+**SA auth:** `user-services:read` in both the token and live account scopes, an unexpired exact key read grant, and current SA-owner access. Curation accounts also require their live Curation grant. Listing, slug access, HEAD, upgrades, and key writes are not included.
+
+The SA response includes identity/label, service type and active state, catalog association, effective `recommended_skills`/`recommended_skill_refs`, `skills_revision`, and `skills_manifest_digest`. It excludes credentials, raw URLs, headers, frame injections, and routing/authentication configuration. No credential resolution or OAuth reconciliation occurs.
+
+Platform admins manage exact grants with `PUT`/`DELETE /api/v1/admin/service-accounts/{sa_id}/key-read-grant`; admins/operators can inspect them with `GET`. PUT accepts `{"user_service_ids":["<uuid>"],"expires_at":"<optional future RFC3339>"}` and replaces all targets. See [Connection metadata reads](SERVICE_ACCOUNTS.md#connection-metadata-reads) for setup and lifecycle.
 
 **Auth:** Required
 
@@ -7887,6 +7893,14 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 ```
 
 ---
+
+## X channel event selection
+
+Human owners and owning-org admins can `PATCH /api/v1/channel-bots/{id}` with `{"x_events":["dm","mentions","replies"]}`. Choose any nonempty, unique subset. New and legacy X bots default to `dm`; omitting `x_events` preserves it. The field is X-only and appears on bot detail responses.
+
+`mentions` receives explicit @mentions; `replies` receives direct replies to the connected account's posts. Public events require configured X webhook credentials and user OAuth permission `tweet.write` in addition to the DM channel scopes. A missing scope fails before saving. After validation, NyxID saves the desired selection and reconciles X subscriptions; an upstream failure can therefore return an error with the selection already saved. Refresh bot detail for current status and use `POST /api/v1/channel-bots/{id}/verify` to retry after correcting the cause.
+
+Public messages use `post:<conversation_id>` addresses. Agents use `POST /api/v1/channel-relay/reply` with the callback's NyxID `message_id` and reply token. Replies are text-only and target that incoming post; caller metadata cannot change the target. Public callbacks omit owner access tokens. Public initiated sends and edits are unsupported. See [X channel setup and limitations](CHANNEL_BOT_RELAY.md#select-mentions-and-replies) for the CLI, routing, scope and billing details.
 
 ## Telegram New Channel Creation
 

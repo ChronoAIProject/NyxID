@@ -308,15 +308,28 @@ async fn non_api_key_authentication_classes_preserve_inventory_behavior() {
         1,
         "delegated listing must retain provisioning"
     );
-    let (sa, _) = jwt::generate_service_account_token(
-        &f.state.jwt_keys,
-        &f.state.config,
-        &Uuid::new_v4().to_string(),
+    let (sa_account, secret) = crate::services::service_account_service::create_service_account(
+        &f.state.db,
+        "Inventory denial regression",
+        None,
         "account:read",
-        60,
-        0,
+        &[],
+        None,
+        &f.person,
     )
+    .await
     .unwrap();
+    let sa = crate::services::service_account_service::authenticate_client_credentials(
+        &f.state.db,
+        &f.state.config,
+        &f.state.jwt_keys,
+        &sa_account.client_id,
+        &secret,
+        None,
+    )
+    .await
+    .unwrap()
+    .access_token;
     let key = f.key(&f.person, None, false).await;
     let relay = jwt::generate_relay_access_token(
         &f.state.jwt_keys,

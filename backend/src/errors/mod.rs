@@ -236,7 +236,7 @@ pub enum AppError {
     NodeHttpSignatureUnsupported,
 
     #[error(
-        "workspace_destinations_not_activated (12300): Google Docs, Sheets, and Slides destinations are not activated for this service. Ask the NyxID operator to enable GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading backend readers and node agents, then retry."
+        "workspace_destinations_not_activated (12300): Google Docs, Sheets, and Slides routing is not activated for this service. Startup reconciliation did not complete for this catalog row; check the server log for 'Google editor destinations were not activated' and the service's policy, destination map, and provider requirement."
     )]
     WorkspaceDestinationsNotActivated,
 

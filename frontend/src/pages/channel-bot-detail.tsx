@@ -35,6 +35,7 @@ import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
+import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -999,9 +1000,9 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
     rows.push({
       status: "done",
       label: "Verification",
-      hint: bot.setup_instructions?.length
-        ? `Use the ${bot.webhook_secret_label ?? "verification secret"} shown once at creation in the platform dashboard.`
-        : `Handled automatically by the ${getPlatform(bot.platform).label} webhook secret.`,
+      hint: bot.webhook_secret_label
+        ? `Use the ${bot.webhook_secret_label} shown once at creation in the platform dashboard.`
+        : "NyxID verifies incoming requests using the credentials supplied during setup.",
     });
   }
 
@@ -1276,6 +1277,17 @@ export function ChannelBotDetailPage() {
       {showEditNameDialog && (
         <EditBotNameDialog key={bot.id} bot={bot} onOpenChange={setShowEditNameDialog} />
       )}
+      <OwnershipTransferCard
+        kind="channel_bot"
+        resource={{
+          id: bot.id,
+          name: bot.label,
+          owner_user_id: bot.user_id,
+          platform: bot.platform,
+          slug: null,
+        }}
+        onTransferred={() => void navigate({ to: "/channel-bots" })}
+      />
       {/* Delete Confirmation */}
       <DeleteBotDialog
         deletionNote={bot.credential_source === "telegram_manager" ? TELEGRAM_MANAGER_DELETION_NOTE : bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined}

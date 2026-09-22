@@ -51,7 +51,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12000-12004 one-time login codes: 12000 `LoginCodeInvalid`, 12001 `LoginCodeExpired`, 12002 `LoginCodeCancelled`, 12003 `LoginCodeRedeemed`, 12004 `LoginCodeRateLimited`
 - 12100 `AssistantTurnActive` (HTTP 409, `turn_active`): a persisted NyxAgent conversation already has an active turn.
 - 12200 `AdminUsageQueryTimeout` (HTTP 503): bounded admin usage aggregation timed out; retry with a narrower window or filters.
-- 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): temporary Drive/Workspace editor activation gate; expected rollout state, excluded from proxy-fault telemetry
+- 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): incomplete automatic Drive/Workspace editor reconciliation; excluded from proxy-fault telemetry
 
 ### 4. Frontend Patterns
 
@@ -129,6 +129,8 @@ Services/connections/providers were unified into 3 user-managed collections plus
 - Legacy models kept for migration: DownstreamService (now the read-only catalog), UserServiceConnection, UserProviderToken, UserProviderCredentials, NodeServiceBinding (node routing absorbed into `UserService.node_id`)
 - Lifecycle is exactly two actions, named **Disable/Enable** (reversible, sets `UserService.is_active`) and **Delete** (hard-deletes credential + endpoint, leaves an `is_active: false` tombstone). Do not introduce further synonyms; `revoked` is a credential *status*, not a button verb. `GET /keys` is the one listing that returns disabled services — consumers MUST read `is_active` rather than assume every row is usable, and MUST NOT render `status` (the credential's) as the service's state. Every credential-resolving or catalog path keeps the active-only `list_user_services_with_sources`; only `list_keys` uses the `_including_disabled` variant, with effective service-allowlist filtering on top for restricted API keys. `/keys/{id_or_slug}` resolves a disabled row by UUID but deliberately not by slug — full rationale and the two known gaps in `docs/AI_SERVICES_ARCHITECTURE.md`.
 - AI-service inventory GETs under `/api/v1` (`/keys`, `/keys/{id_or_slug}`, `/keys/{id_or_slug}/authorization`, `/user-services`, `/endpoints`, `/endpoints/{id}/authorization`, `/endpoints/{id}/openapi-endpoints`, `/api-keys/external`, `/api-keys/external/{id}/authorization`, `/mcp/config`, `/catalog`, `/catalog/{slug}`, `/catalog/{slug}/endpoints`) accept general API keys without provisioning or lazy pending-OAuth reconciliation. `/mcp/config` requires `proxy` or `proxy:*` scope and matches stateless MCP discovery, including chat acknowledgement semantics. Restricted keys use their effective service allowlist and backing endpoint/credential references; org-owned keys act as the org (`credential_source.type: "personal"`), personal keys use active Member/Admin memberships and effective role scopes. Inventory writes and NyxID `/api-keys` management stay human-only for API keys; delegated `account:read` parity is unchanged.
+
+Service accounts can read a narrow metadata response from exact `GET /api/v1/keys/{uuid}` with `user-services:read` in both the token and live SA configuration, plus a platform-admin-issued key read grant for that connection. Every read rechecks the owner's ACL and resource ownership. This grants no inventory listing, credential access, or writes. See `docs/SERVICE_ACCOUNTS.md`.
 
 Key files: `services/unified_key_service.rs`, `services/catalog_service.rs` (`list_catalog_all`), `handlers/keys.rs`, `handlers/catalog.rs`, `models/user_{endpoint,api_key,service}.rs`.
 
@@ -489,7 +491,6 @@ INVITE_CODE_REQUIRED=true           # Gate registration behind invite codes (iss
 AUTO_VERIFY_EMAIL=false             # Dev only: skip email verification on registration
 
 # Optional
-GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=false # Temporary readers-before-writer upgrade gate. First true startup CAS-installs each known-default Drive/Workspace destination map/policy and additively syncs 13 editor endpoints per service. Idempotent; safe to leave true. Remove after every environment activates.
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET
 SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_ADDRESS

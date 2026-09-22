@@ -3619,7 +3619,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: Some(
-            "Google Drive files and folders, calendars, events, availability, and Gmail read/send access.",
+            "Google Drive files and folders, calendars, events, availability, Gmail read/send access, and Docs, Sheets, and Slides editing.",
         ),
         default_request_headers: None,
         service_category: "connection",
@@ -3629,7 +3629,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
             "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read and send access. Gmail sending permission (gmail.send) is required; existing connections need renewed consent.",
         ),
         known_limitations: Some(
-            "Workspace bundles Drive, Calendar, and Gmail read/send access. Gmail deletion, trash, mailbox changes, and draft management are not supported. Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
+            "Workspace bundles Drive, Calendar, Gmail read/send, Docs, Sheets, and Slides through the published HTTP operations. Gmail deletion, trash, mailbox changes, draft management, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
         ),
     },
     DefaultServiceSeed {
@@ -3665,7 +3665,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: Some(
-            "Read, upload, create, edit, export, and delete Google Drive files and folders.",
+            "Read, upload, create, edit, export, and delete Google Drive files and folders; create, read, and edit Docs, Sheets, and Slides.",
         ),
         default_request_headers: None,
         service_category: "connection",
@@ -3675,7 +3675,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
             "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive access to existing and newly created files, subject to the account's file permissions.",
         ),
         known_limitations: Some(
-            "API access is limited to the published Drive operations. Native Docs/Sheets document editing requires their separate APIs. Google may revoke sibling connections using the same account and client together.",
+            "Drive includes Docs, Sheets, and Slides through the published HTTP operations. Full Drive scope covers existing files subject to file permissions; drive.file is limited to app-authorized files and drive.readonly does not grant write access. Calendar, Gmail, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
         ),
     },
     DefaultServiceSeed {
@@ -4811,7 +4811,9 @@ async fn reconcile_google_workspace_seed(
         (
             "description",
             "Google Drive files and folders, calendars, events, and availability.",
-            seed.description,
+            Some(
+                "Google Drive files and folders, calendars, events, availability, and Gmail read/send access.",
+            ),
         ),
         (
             "auth_notes",
@@ -4821,7 +4823,9 @@ async fn reconcile_google_workspace_seed(
         (
             "known_limitations",
             "Workspace bundles Drive and Calendar only. Gmail, Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
-            seed.known_limitations,
+            Some(
+                "Workspace bundles Drive, Calendar, and Gmail read/send access. Gmail deletion, trash, mailbox changes, and draft management are not supported. Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
+            ),
         ),
     ] {
         services
@@ -4832,10 +4836,10 @@ async fn reconcile_google_workspace_seed(
             .await?;
     }
 
-    let mut old_rules = GoogleProduct::Drive.legacy_operation_policy()?.rules;
-    old_rules.extend(GoogleProduct::Calendar.operation_policy()?.rules);
-    let old_policy =
-        super::proxy_authorization::normalize_policy(ProxyOperationPolicy { rules: old_rules })?;
+    let old_policy: ProxyOperationPolicy = serde_json::from_str(include_str!(
+        "../../specs/fixtures/google-workspace-pre-gmail-legacy-policy.json"
+    ))
+    .map_err(|error| AppError::Internal(format!("Invalid historical Workspace policy: {error}")))?;
     let old_policy = bson::to_bson(&old_policy)
         .map_err(|e| AppError::Internal(format!("Failed to serialize Workspace policy: {e}")))?;
     let legacy_workspace = GoogleProduct::Workspace.legacy_operation_policy()?;
@@ -4901,28 +4905,24 @@ async fn reconcile_google_mail_send_seed(
 
 /// Compare-and-set only the exact known Workspace and Drive policies and absent maps.
 /// An operator's policy or destination map is never overwritten by startup.
-/// The temporary GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED gate orders upgraded
-/// readers before this writer. Activation installs map/policy here and adds the
-/// 13 endpoints during catalog sync. It is idempotent and safe to leave enabled;
-/// remove the gate after every environment has activated.
 async fn reconcile_workspace_destinations(
     db: &mongodb::Database,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<()> {
     use super::google_workspace::GoogleProduct;
     let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
-    for (slug, product, description, limitations) in [
+    for (slug, product, old_description, old_limitations) in [
         (
             "api-google-workspace",
             GoogleProduct::Workspace,
-            "Google Drive files and folders, calendars, events, availability, Gmail read/send access, and Docs, Sheets, and Slides editing.",
-            "Workspace bundles Drive, Calendar, Gmail read/send, Docs, Sheets, and Slides through the published HTTP operations. Gmail deletion, trash, mailbox changes, draft management, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
+            "Google Drive files and folders, calendars, events, availability, and Gmail read/send access.",
+            "Workspace bundles Drive, Calendar, and Gmail read/send access. Gmail deletion, trash, mailbox changes, and draft management are not supported. Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
         ),
         (
             "api-google-drive",
             GoogleProduct::Drive,
-            "Read, upload, create, edit, export, and delete Google Drive files and folders; create, read, and edit Docs, Sheets, and Slides.",
-            "Drive includes Docs, Sheets, and Slides through the published HTTP operations. Full Drive scope covers existing files subject to file permissions; drive.file is limited to app-authorized files and drive.readonly does not grant write access. Calendar, Gmail, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
+            "Read, upload, create, edit, export, and delete Google Drive files and folders.",
+            "API access is limited to the published Drive operations. Native Docs/Sheets document editing requires their separate APIs. Google may revoke sibling connections using the same account and client together.",
         ),
     ] {
         let Some(service) = services
@@ -4931,12 +4931,14 @@ async fn reconcile_workspace_destinations(
         else {
             continue;
         };
-        if !super::destination_routing::effective_catalog_auth(db, &service)
-            .await
-            .is_ok_and(|auth| auth == "bearer")
-        {
-            tracing::warn!(slug, service_id = %service.id, "Google editor destinations were not activated: effective bearer provider requirement is unavailable");
-            continue;
+        match super::destination_routing::effective_catalog_auth(db, &service).await {
+            Ok(auth) if auth == "bearer" => {}
+            Err(error @ (AppError::DatabaseError(_) | AppError::Internal(_))) => return Err(error),
+            _ => {
+                tracing::warn!(slug, service_id = %service.id, reason = "provider_requirement",
+                    "Google editor destinations were not activated: effective bearer provider requirement is unavailable");
+                continue;
+            }
         }
         let new_policy = product.operation_policy()?;
         let old_policy = product.legacy_operation_policy()?;
@@ -4960,6 +4962,14 @@ async fn reconcile_workspace_destinations(
     ).await?;
         if activation.matched_count == 0 {
             let live = services.find_one(doc! {"_id": &service.id}).await?;
+            if let Some(row) = live.as_ref()
+                && !row.destination_targets.is_empty()
+                && row.destination_targets != targets
+            {
+                let target_ids: Vec<_> = row.destination_targets.keys().take(16).collect();
+                tracing::info!(slug, service_id = %service.id, ?target_ids,
+                    "Google editor custom destination map retained");
+            }
             if live
                 .as_ref()
                 .is_none_or(|row| row.destination_targets.is_empty())
@@ -4986,8 +4996,12 @@ async fn reconcile_workspace_destinations(
         // Metadata follows persisted activation and uses its own known-default CAS
         // so an administrator's descriptions are preserved independently.
         for (field, old, new) in [
-            ("description", seed.description, description),
-            ("known_limitations", seed.known_limitations, limitations),
+            ("description", Some(old_description), seed.description),
+            (
+                "known_limitations",
+                Some(old_limitations),
+                seed.known_limitations,
+            ),
         ] {
             let metadata = services.update_one(doc! {"_id": &service.id, "destination_targets": bson::to_bson(&targets).map_err(|error| AppError::Internal(error.to_string()))?, field: old},doc! {"$set":{field:new,"updated_at":bson::DateTime::from_chrono(now)}}).await?;
             if metadata.matched_count == 0 {
@@ -5018,18 +5032,9 @@ async fn reconcile_workspace_destinations(
 ///
 /// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
 /// seeded provider that does not yet have a corresponding downstream service.
-#[cfg(test)]
 pub async fn seed_default_services(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
-) -> AppResult<()> {
-    seed_default_services_with_destinations(db, encryption_keys, true).await
-}
-
-pub async fn seed_default_services_with_destinations(
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    enable_workspace_destinations: bool,
 ) -> AppResult<()> {
     let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
     let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
@@ -5210,9 +5215,10 @@ pub async fn seed_default_services_with_destinations(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
-            destination_targets: if enable_workspace_destinations
-                && super::google_workspace::GoogleProduct::from_slug(seed.service_slug)
-                    .is_some_and(|product| product.has_editor_destinations())
+            destination_targets: if super::google_workspace::GoogleProduct::from_slug(
+                seed.service_slug,
+            )
+            .is_some_and(|product| product.has_editor_destinations())
             {
                 super::destination_routing::workspace_targets()
             } else {
@@ -5277,13 +5283,7 @@ pub async fn seed_default_services_with_destinations(
             proxy_operation_policy: super::google_workspace::GoogleProduct::from_slug(
                 seed.service_slug,
             )
-            .map(|product| {
-                let mut policy = product.operation_policy()?;
-                if !enable_workspace_destinations && product.has_editor_destinations() {
-                    policy.rules.retain(|rule| rule.target_id.is_none());
-                }
-                Ok::<_, AppError>(policy)
-            })
+            .map(|product| product.operation_policy())
             .transpose()?,
             created_at: now,
             updated_at: now,
@@ -5336,10 +5336,8 @@ pub async fn seed_default_services_with_destinations(
 
     reconcile_firecrawl_seed_metadata(&service_col, now).await?;
     reconcile_google_workspace_seed(db, now).await?;
-    if enable_workspace_destinations {
-        reconcile_workspace_destinations(db, now).await?;
-    }
     reconcile_google_mail_send_seed(db, now).await?;
+    reconcile_workspace_destinations(db, now).await?;
 
     // Replace only the incorrect metadata shipped by the initial Notion seed.
     let old_notion_limitations = "Only content the user explicitly shared with the integration is \
@@ -10262,7 +10260,7 @@ mod tests {
         super::seed_default_providers(&db, &encryption)
             .await
             .unwrap();
-        super::seed_default_services_with_destinations(&db, &encryption, false)
+        super::seed_default_services(&db, &encryption)
             .await
             .unwrap();
         let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
@@ -10343,9 +10341,7 @@ mod tests {
             .expect("local MongoDB");
         let enc = test_encryption_keys();
         super::seed_default_providers(&db, &enc).await.unwrap();
-        super::seed_default_services_with_destinations(&db, &enc, false)
-            .await
-            .unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
         let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
         let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
         let service = services
@@ -10355,29 +10351,75 @@ mod tests {
             .unwrap();
         // Pin this historical migration to Drive + Calendar -> + Gmail.
         // Workspace's current union also contains the later editor operations.
-        let old_policy = ProxyOperationPolicy {
-            rules: [GoogleProduct::Drive, GoogleProduct::Calendar]
-                .into_iter()
-                .flat_map(|product| product.legacy_operation_policy().unwrap().rules)
-                .collect(),
-        };
-        let legacy_workspace_policy = ProxyOperationPolicy {
-            rules: [
-                GoogleProduct::Drive,
-                GoogleProduct::Calendar,
-                GoogleProduct::Gmail,
-            ]
-            .into_iter()
-            .flat_map(|product| product.legacy_operation_policy().unwrap().rules)
-            .collect(),
-        };
+        // Reconstruct the later migration's concatenation from source operations,
+        // independently of the production policy fixture under test. The original
+        // seed's map composition below must produce the same order.
+        let mut old_rules = Vec::new();
+        for source in [
+            include_str!("../../specs/fixtures/google-drive-before-auto-activation.json"),
+            include_str!("../../specs/catalog/google-calendar.openapi.json"),
+        ] {
+            let spec: serde_json::Value = serde_json::from_str(source).unwrap();
+            for (path, item) in spec["paths"].as_object().unwrap() {
+                for method in ["get", "post", "put", "patch", "delete"] {
+                    if item.get(method).is_some() {
+                        old_rules.push(crate::models::downstream_service::ProxyOperationRule {
+                            method: method.to_uppercase(),
+                            path_template: path.clone(),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+        let old_policy = ProxyOperationPolicy { rules: old_rules };
         let old_scopes = vec!["openid", "email", "profile", DRIVE, CALENDAR];
-        for customized in [false, true] {
-            let policy = if customized {
-                ProxyOperationPolicy { rules: vec![] }
-            } else {
-                old_policy.clone()
-            };
+        for shape in [
+            "original_seed",
+            "migration_pin",
+            "sorted_custom",
+            "reordered",
+            "subset",
+        ] {
+            let customized = matches!(shape, "sorted_custom" | "reordered" | "subset");
+            let mut policy = old_policy.clone();
+            if shape == "original_seed" {
+                // bson enables serde_json/preserve_order in the production graph.
+                // The old seed composed Drive then Calendar into this map.
+                let mut paths = serde_json::Map::new();
+                for source in [
+                    include_str!("../../specs/fixtures/google-drive-before-auto-activation.json"),
+                    include_str!("../../specs/catalog/google-calendar.openapi.json"),
+                ] {
+                    let spec: serde_json::Value = serde_json::from_str(source).unwrap();
+                    paths.extend(spec["paths"].as_object().unwrap().clone());
+                }
+                let mut rules = Vec::new();
+                for (path, item) in paths {
+                    for method in ["get", "post", "put", "patch", "delete"] {
+                        if item.get(method).is_some() {
+                            rules.push(crate::models::downstream_service::ProxyOperationRule {
+                                method: method.to_uppercase(),
+                                path_template: path.clone(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+                policy = ProxyOperationPolicy { rules };
+                assert_eq!(
+                    policy, old_policy,
+                    "audited historical orders coincide under preserve_order"
+                );
+            } else if shape == "sorted_custom" {
+                policy
+                    .rules
+                    .sort_by(|a, b| a.path_template.cmp(&b.path_template));
+            } else if shape == "reordered" {
+                policy.rules.reverse();
+            } else if shape == "subset" {
+                policy.rules.pop();
+            }
             let description = if customized {
                 "Custom Workspace"
             } else {
@@ -10401,6 +10443,7 @@ mod tests {
             services.update_one(doc! { "_id": &service.id }, doc! { "$set": {
                 "proxy_operation_policy": bson::to_bson(&policy).unwrap(),
                 "description": description, "auth_notes": notes, "known_limitations": limitations,
+                "destination_targets": {},
             }}).await.unwrap();
             requirements
                 .update_one(
@@ -10410,9 +10453,7 @@ mod tests {
                 .await
                 .unwrap();
             for _ in 0..2 {
-                super::seed_default_services_with_destinations(&db, &enc, false)
-                    .await
-                    .unwrap();
+                super::seed_default_services(&db, &enc).await.unwrap();
                 let updated = services
                     .find_one(doc! { "_id": &service.id })
                     .await
@@ -10426,10 +10467,11 @@ mod tests {
                 let expected_policy = if customized {
                     policy.clone()
                 } else {
-                    legacy_workspace_policy.clone()
+                    GoogleProduct::Workspace.operation_policy().unwrap()
                 };
                 assert_eq!(updated.proxy_operation_policy, Some(expected_policy));
                 if customized {
+                    assert!(updated.destination_targets.is_empty());
                     assert_eq!(updated.description.as_deref(), Some(description));
                     assert_eq!(updated.auth_notes.as_deref(), Some(notes));
                     assert_eq!(updated.known_limitations.as_deref(), Some(limitations));
@@ -10437,7 +10479,11 @@ mod tests {
                     expected_scopes.push(crate::services::google_workspace::GMAIL_SEND);
                     assert_eq!(req.scopes.unwrap(), expected_scopes);
                 } else {
-                    assert!(updated.description.unwrap().contains("Gmail"));
+                    assert_eq!(
+                        updated.destination_targets,
+                        crate::services::destination_routing::workspace_targets()
+                    );
+                    assert!(updated.description.unwrap().contains("Slides"));
                     assert!(updated.auth_notes.unwrap().contains("gmail.send"));
                     assert!(
                         updated

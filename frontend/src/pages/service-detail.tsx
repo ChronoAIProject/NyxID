@@ -37,6 +37,7 @@ import { buildStandaloneCredentialAcceptUrl } from "@/lib/credential-accept-url"
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
+import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
 import { DetailRow } from "@/components/shared/detail-row";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
@@ -671,6 +672,18 @@ export function ServiceDetailPage() {
             />
           </DetailSection>
         </>
+      )}
+      {service.is_active && (
+        <OwnershipTransferCard
+          kind="service"
+          resource={{
+            id: service.id,
+            name: service.name,
+            owner_user_id: service.owner_user_id ?? service.created_by,
+            slug: service.slug,
+            platform: null,
+          }}
+        />
       )}
     </div>
   );

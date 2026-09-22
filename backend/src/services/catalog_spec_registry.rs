@@ -224,7 +224,7 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = L
         // Drive owns the editor bundle; Workspace adds Calendar and Gmail.
         let mut drive = (*specs["google-drive"]).clone();
         drive["info"]["description"] =
-            "Google Drive file operations and Docs, Sheets, and Slides editing through one Google OAuth connection. Editor paths declare their Google API servers and accept the full Drive scope, subject to file permissions. During the upgrade window, editor requests return workspace_destinations_not_activated (12300) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
+            "Google Drive file operations and Docs, Sheets, and Slides editing through one Google OAuth connection. Editor paths declare their Google API servers and accept the full Drive scope, subject to file permissions. Startup automatically activates recognized seeded editor routing. If reconciliation is incomplete, workspace_destinations_not_activated (12300) directs operators to the startup logs and service configuration."
                 .into();
         for key in ["google-docs", "google-sheets", "google-slides"] {
             let servers = specs[key]["servers"].clone();
@@ -245,7 +245,7 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = L
         let mut workspace = drive;
         workspace["info"]["title"] = "Google Workspace".into();
         workspace["info"]["description"] =
-            "Google Workspace uses one Google OAuth connection for Drive, Calendar, Gmail, Docs, Sheets, and Slides. The root server https://www.googleapis.com serves Drive, Calendar, and Gmail; Docs, Sheets, and Slides paths declare their respective https://docs.googleapis.com, https://sheets.googleapis.com, and https://slides.googleapis.com servers. Standard OpenAPI server precedence applies: operation servers override path servers, which override the root server. During the operator-controlled upgrade window, editor requests return workspace_destinations_not_activated (12300) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
+            "Google Workspace uses one Google OAuth connection for Drive, Calendar, Gmail, Docs, Sheets, and Slides. The root server https://www.googleapis.com serves Drive, Calendar, and Gmail; Docs, Sheets, and Slides paths declare their respective https://docs.googleapis.com, https://sheets.googleapis.com, and https://slides.googleapis.com servers. Standard OpenAPI server precedence applies: operation servers override path servers, which override the root server. Startup automatically activates recognized seeded editor routing. If reconciliation is incomplete, workspace_destinations_not_activated (12300) directs operators to the startup logs and service configuration."
                 .into();
         for key in ["google-calendar", "google-gmail"] {
             for (path, item) in specs[key]["paths"].as_object().expect("Product paths") {
@@ -315,7 +315,81 @@ mod tests {
     use super::*;
 
     /// Frozen from 28fd2c44, including the original eight api-google operations.
-    /// Additions are allowed; moving or editing any existing operation is not.
+    /// Six Drive contracts were deliberately corrected for automatic activation;
+    /// every other historical operation retains its original pin.
+    #[test]
+    fn google_upload_projection_and_full_http_contracts_are_pinned() {
+        let contracts: serde_json::Value = serde_json::from_str(include_str!(
+            "../../specs/fixtures/google-http-contracts.json"
+        ))
+        .unwrap();
+        for slug in ["api-google-drive", "api-google-workspace"] {
+            let spec = spec_for_slug(slug).unwrap();
+            let parsed = crate::services::openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+            assert_eq!(
+                parsed.len(),
+                if slug.ends_with("workspace") { 38 } else { 22 }
+            );
+            for endpoint in parsed {
+                let contract = &contracts[&endpoint.name];
+                let operation = &spec["paths"][&endpoint.path][endpoint.method.to_lowercase()];
+                assert_eq!(
+                    operation["parameters"], contract["parameters"],
+                    "{}",
+                    endpoint.name
+                );
+                assert_eq!(
+                    operation["requestBody"], contract["requestBody"],
+                    "{}",
+                    endpoint.name
+                );
+                assert_eq!(endpoint.method, contract["method"]);
+                assert_eq!(endpoint.path, contract["path"]);
+                if !matches!(
+                    endpoint.name.as_str(),
+                    "drive_upload_file" | "drive_upload_file_content"
+                ) {
+                    continue;
+                }
+                assert_eq!(
+                    operation["requestBody"]["content"]["multipart/related"]["schema"]["type"],
+                    "string"
+                );
+                assert!(
+                    operation["requestBody"]["content"]["multipart/related"]["schema"]["example"]
+                        .as_str()
+                        .unwrap()
+                        .contains("text/html")
+                );
+                let param = endpoint
+                    .parameters
+                    .as_ref()
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["name"] == "uploadType")
+                    .unwrap();
+                assert_eq!(param["schema"]["enum"], serde_json::json!(["media"]));
+                assert_eq!(param["x-nyxid-mcp-enum"], serde_json::json!(["media"]));
+                let full_param = operation["parameters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["name"] == "uploadType")
+                    .unwrap();
+                assert_eq!(
+                    full_param["schema"]["enum"],
+                    serde_json::json!(["media", "multipart"])
+                );
+                assert_eq!(
+                    endpoint.request_content_type.as_deref(),
+                    Some("application/octet-stream")
+                );
+            }
+        }
+    }
+
     #[test]
     fn existing_google_operation_contracts_are_additive() {
         use sha2::{Digest, Sha256};

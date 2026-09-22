@@ -60,6 +60,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { CurationGrantSection } from "./curation-grant-section";
+import { KeyReadGrantSection } from "./key-read-grant-section";
 
 type ConfirmAction = "delete" | "revoke-tokens" | null;
 
@@ -315,6 +316,7 @@ function ServiceAccountDetailEditor({
       <Separator />
 
       {showProviderSections && <CurationGrantSection account={sa} />}
+      {showProviderSections && <KeyReadGrantSection saId={saId} />}
 
       {showProviderSections ? (
         <SaConnectedServices saId={saId} />

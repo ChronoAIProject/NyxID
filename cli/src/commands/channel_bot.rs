@@ -314,6 +314,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
         }
 
         ChannelBotCommands::Update {
+            x_events,
             bot_token,
             token_env,
             app_secret_env,
@@ -346,6 +347,10 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
 
             let mut body = serde_json::json!({});
             let mut changed = false;
+            if !x_events.is_empty() {
+                body["x_events"] = serde_json::json!(x_events);
+                changed = true;
+            }
             if let Some(value) = bot_token {
                 if value.trim().is_empty() {
                     bail!("Bot access token cannot be blank");
@@ -532,6 +537,10 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Bot ID:         {bot_user_id}");
                     eprintln!("Username:       {username}");
                     eprintln!("Status:         {status}");
+                    if let Some(events) = bot["x_events"].as_array() {
+                        let names = events.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+                        eprintln!("Events:         {}", names.join(", "));
+                    }
                     if bot["webhook_ingestion"] == false {
                         eprintln!("Ingestion:      polling");
                         for (field, label) in [
@@ -1268,6 +1277,7 @@ mod tests {
             .mount(&server)
             .await;
         run(ChannelBotCommands::Update {
+            x_events: vec![],
             bot_token: Some("new-token".to_string()),
             token_env: None,
             app_secret_env: None,
@@ -1364,6 +1374,7 @@ mod tests {
             .await;
 
         run(ChannelBotCommands::Update {
+            x_events: vec![],
             bot_token: None,
             token_env: None,
             app_secret_env: None,
@@ -1390,6 +1401,7 @@ mod tests {
             std::env::remove_var("NYXID_LARK_ENCRYPT_KEY");
         }
         let result = run(ChannelBotCommands::Update {
+            x_events: vec![],
             bot_token: None,
             token_env: None,
             app_secret_env: None,
@@ -1731,6 +1743,7 @@ mod tests {
             .await;
 
         run(ChannelBotCommands::Update {
+            x_events: vec![],
             bot_token: None,
             token_env: None,
             app_secret_env: None,
@@ -1756,6 +1769,7 @@ mod tests {
             std::env::remove_var("NYXID_LARK_VERIFICATION_TOKEN");
         }
         let result = run(ChannelBotCommands::Update {
+            x_events: vec![],
             bot_token: None,
             token_env: None,
             app_secret_env: None,
@@ -2156,5 +2170,81 @@ mod aurinko_tests {
             ])
             .is_ok()
         );
+    }
+}
+
+#[cfg(test)]
+mod x_events_tests {
+    use super::*;
+    use clap::Parser;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    #[tokio::test]
+    async fn x_event_flags_validate_and_send_the_selected_subscription_set() {
+        for value in ["likes", "dm,unknown", ""] {
+            assert!(
+                crate::cli::Cli::try_parse_from([
+                    "nyxid",
+                    "channel-bot",
+                    "update",
+                    "bot",
+                    "--x-events",
+                    value
+                ])
+                .is_err()
+            );
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/channel-bots/bot"))
+            .and(body_json(
+                serde_json::json!({"x_events": ["dm", "mentions", "replies"]}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "bot"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let parsed = crate::cli::Cli::try_parse_from([
+            "nyxid",
+            "channel-bot",
+            "update",
+            "bot",
+            "--x-events",
+            "dm,mentions,replies",
+        ])
+        .unwrap();
+        if let crate::cli::Commands::ChannelBot {
+            command: ChannelBotCommands::Update { x_events, .. },
+        } = parsed.command
+        {
+            run(ChannelBotCommands::Update {
+                x_events,
+                bot_token: None,
+                token_env: None,
+                app_secret_env: None,
+                id: "bot".into(),
+                label: None,
+                verification_token: None,
+                encrypt_key: None,
+                app_id: None,
+                app_secret: None,
+                auth: crate::cli::AuthArgs {
+                    base_url: Some(server.uri()),
+                    access_token: Some("test-key".into()),
+                    access_token_env: "NYXID_X_EVENTS_TEST_TOKEN".into(),
+                    profile: None,
+                    output: OutputFormat::Json,
+                },
+            })
+            .await
+            .unwrap();
+        } else {
+            panic!("expected X event update");
+        }
     }
 }

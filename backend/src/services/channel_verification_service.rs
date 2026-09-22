@@ -546,6 +546,7 @@ mod tests {
             &bot.id,
             &bot.user_id,
             super::super::channel_bot_service::UpdateBotParams {
+                x_events: None,
                 bot_token: None,
                 label: None,
                 verification_token: None,

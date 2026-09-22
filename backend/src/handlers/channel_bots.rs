@@ -49,6 +49,8 @@ pub struct CreateChannelBotRequest {
 #[derive(Deserialize)]
 pub struct UpdateChannelBotRequest {
     #[serde(default)]
+    pub x_events: Option<Vec<crate::models::channel_bot::XChannelEvent>>,
+    #[serde(default)]
     pub bot_token: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
@@ -375,6 +377,8 @@ impl CreateChannelBotResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelConnectionState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_events: Option<Vec<crate::models::channel_bot::XChannelEvent>>,
     pub webhook_ingestion: bool,
     pub connection_id: Option<String>,
     pub poll_cursor: Option<String>,
@@ -415,6 +419,8 @@ impl ChannelConnectionState {
             _ => None,
         };
         Self {
+            x_events: (bot.platform == "x")
+                .then(|| crate::services::channel_adapters::x::selected_events(bot).to_vec()),
             webhook_ingestion: adapter.registration().webhook_ingestion
                 && (bot.credential_source != "connection" || bot.webhook_registered),
             connection_id: bot.connection_id.clone(),
@@ -749,6 +755,7 @@ pub async fn update_bot(
         &bot_id,
         &owner_id,
         crate::services::channel_bot_service::UpdateBotParams {
+            x_events: body.x_events.as_deref(),
             bot_token: body.bot_token.as_deref().map(str::trim),
             label,
             verification_token,
@@ -759,15 +766,6 @@ pub async fn update_bot(
     )
     .await?;
 
-    let conversations_count = state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
-        .count_documents(mongodb::bson::doc! {
-            "channel_bot_id": &updated.id,
-            "is_active": true,
-        })
-        .await?;
-
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -776,8 +774,32 @@ pub async fn update_bot(
             "bot_id": &updated.id,
             "platform": &updated.platform,
             "owner_user_id": &owner_id,
+            "x_events": &updated.x_events,
         })),
     );
+
+    if body.x_events.is_some() {
+        crate::services::channel_connection_webhook_service::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &updated,
+            &state.config.base_url,
+        )
+        .await?;
+        updated = channel_bot_service::get_bot(&state.db, &bot_id).await?;
+    }
+
+    let conversations_count = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .count_documents(mongodb::bson::doc! {
+            "channel_bot_id": &updated.id,
+            "is_active": true,
+        })
+        .await?;
 
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&updated);
     channel_bot_service::apply_manager_configuration_status(
@@ -1437,6 +1459,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
@@ -1512,6 +1535,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),

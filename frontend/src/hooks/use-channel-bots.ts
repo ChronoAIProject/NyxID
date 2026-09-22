@@ -122,7 +122,7 @@ export function useUpdateChannelBot() {
     }): Promise<ChannelBotDetail> => {
       return api.patch<ChannelBotDetail>(`/channel-bots/${id}`, data);
     },
-    onSuccess: (_data, variables) => {
+    onSettled: (_data, _error, variables) => {
       void queryClient.invalidateQueries({
         queryKey: channelBotsQueryKeys.detail(variables.id),
       });

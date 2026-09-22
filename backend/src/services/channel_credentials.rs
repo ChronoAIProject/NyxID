@@ -161,7 +161,11 @@ pub async fn resolve_bot_token(
             &bot.user_id,
             connection_id,
             provider_slug,
-            required_scopes,
+            if bot.platform == "x" && super::channel_adapters::x::public_events_enabled(bot) {
+                super::channel_adapters::x::PUBLIC_SCOPES
+            } else {
+                required_scopes
+            },
         )
         .await
     } else {
@@ -269,10 +273,14 @@ pub async fn start_connection(
         doc! { "$set": { "credential_source": "platform" } },
     )
     .await?;
-    let scopes = required_scopes
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
+    let scopes = if adapter.platform_id() == "x" {
+        super::channel_adapters::x::PUBLIC_SCOPES
+    } else {
+        required_scopes
+    }
+    .iter()
+    .map(|s| s.to_string())
+    .collect::<Vec<_>>();
     let result = super::user_token_service::initiate_oauth_connect(
         db,
         keys,

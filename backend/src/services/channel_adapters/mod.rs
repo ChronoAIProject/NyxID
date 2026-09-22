@@ -57,6 +57,20 @@ pub fn outbound_capabilities(
     }
 }
 
+pub fn conversation_capabilities(
+    platform: &str,
+    conversation_id: &str,
+    cache: &Arc<TokenExchangeCache>,
+) -> super::channel_platform::ChannelCapabilities {
+    let mut capabilities = outbound_capabilities(platform, cache);
+    if platform == "x" && x::is_public_conversation(conversation_id) {
+        capabilities.outbound.initiated_send = false;
+        capabilities.outbound.reply_to = true;
+        capabilities.media.outbound = &[];
+    }
+    capabilities
+}
+
 pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn PlatformAdapter>> {
     vec![
         Box::new(telegram::TelegramAdapter::default()),
