@@ -660,6 +660,63 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // Supabase Data API (per-project URL + API key)
+    if !slug_exists!("supabase") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "supabase".to_string(),
+            name: "Supabase".to_string(),
+            description: Some(
+                "Connect a Supabase project's PostgREST Data API as a personal database for AI agents."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Provide the project URL (`https://<project-ref>.supabase.co`) or full Data API \
+                 URL ending in `/rest/v1`, plus a Supabase API key. Prefer a new \
+                 `sb_secret_...` key for server-side \
+                 agent access, but note that secret keys use the `service_role` Postgres role \
+                 and bypass Row Level Security."
+                    .to_string(),
+            ),
+            api_key_url: Some(
+                "https://supabase.com/dashboard/project/_/settings/api-keys".to_string(),
+            ),
+            icon_url: None,
+            documentation_url: Some("https://supabase.com/docs/guides/api".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: true,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "supabase", "Seeded default provider: Supabase");
+        seeded_count += 1;
+    }
+
     // Telnyx (API Key)
     if !slug_exists!("telnyx") {
         let provider = ProviderConfig {
@@ -3092,7 +3149,7 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             true,
         )),
-        "api-twilio" | "api-aurinko" => Some((
+        "api-twilio" | "api-aurinko" | "api-supabase" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
                 supports_proxy_write: true,
@@ -3485,6 +3542,37 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "Twilio Media Streams are inbound WebSocket connections initiated by Twilio to a public application server and are outside this outbound credential proxy. The hosted overlay intentionally focuses on core Calls, Messages, and Recordings REST operations.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "supabase",
+        service_slug: "api-supabase",
+        service_name: "Supabase Data API",
+        // Placeholder: every connection must provide its own project URL.
+        base_url: "https://project-ref.supabase.co/rest/v1",
+        injection_method: "header",
+        injection_key: "apikey",
+        service_auth_method: Some("header"),
+        service_auth_key_name: Some("apikey"),
+        description: Some(
+            "Supabase PostgREST Data API connector for using a project database from AI agents. \
+             Supply the project URL (`https://<project-ref>.supabase.co`) or full `/rest/v1` \
+             Data API URL, and NyxID injects the encrypted Supabase key through the `apikey` header.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://supabase.com"),
+        auth_notes: Some(
+            "The credential is sent as the Supabase `apikey` header. Do not enter a \
+             `postgresql://` connection string. New `sb_secret_...` and `sb_publishable_...` \
+             keys are not bearer JWTs and must not be configured as Authorization Bearer tokens.",
+        ),
+        known_limitations: Some(
+            "This connector targets the PostgREST Data API only; it does not proxy PostgreSQL \
+             connection strings, Storage, Edge Functions, or Realtime. Secret keys and legacy \
+             `service_role` keys bypass Row Level Security. Supabase schemas are project-specific, \
+             so NyxID exposes the generic proxy tool unless the user supplies a separate OpenAPI spec.",
         ),
     },
     DefaultServiceSeed {
@@ -9539,6 +9627,7 @@ mod tests {
             "mistral",
             "cohere",
             "deepseek",
+            "supabase",
             "elevenlabs",
             "twilio",
             "twitter",
@@ -11163,6 +11252,7 @@ mod tests {
     #[test]
     fn direct_auth_seeds_have_service_auth_method() {
         let direct_auth_slugs = [
+            "api-supabase",
             "api-elevenlabs",
             "api-twilio",
             "api-github-pat",
@@ -11256,5 +11346,32 @@ mod tests {
         for field in fields {
             assert!(!raw.contains_key(field), "{field} must be absent");
         }
+    }
+
+    #[test]
+    fn supabase_seed_uses_project_url_and_direct_apikey_header() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-supabase")
+            .expect("api-supabase seed should exist");
+
+        assert_eq!(seed.provider_slug, "supabase");
+        assert_eq!(seed.base_url, "https://project-ref.supabase.co/rest/v1");
+        assert_eq!(seed.service_auth_method, Some("header"));
+        assert_eq!(seed.service_auth_key_name, Some("apikey"));
+        assert_eq!(seed.service_category, "connection");
+        assert!(seed.requires_user_credential);
+        assert!(
+            crate::services::catalog_spec_registry::spec_path_for_slug(seed.service_slug).is_none()
+        );
+
+        let (caps, streaming) = seed_capability_override("api-supabase")
+            .expect("api-supabase should have a capability override");
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(caps.supports_direct_downstream_auth);
+        assert!(!caps.supports_websocket);
+        assert!(!caps.supports_streaming);
+        assert!(!streaming);
     }
 }

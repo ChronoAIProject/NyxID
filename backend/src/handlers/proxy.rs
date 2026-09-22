@@ -236,6 +236,8 @@ const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "x-correlation-id",
     "accept-ranges",
     "content-range",
+    "content-profile",
+    "range-unit",
     "retry-after",
     "preference-applied",
     "location",
@@ -7526,6 +7528,35 @@ mod tests {
                 ),
                 "{name} must reach node-routed downstream"
             );
+        }
+    }
+
+    #[test]
+    fn node_forward_preserves_postgrest_request_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "prefer",
+            "return=representation,count=exact".parse().unwrap(),
+        );
+        headers.insert("accept-profile", "private".parse().unwrap());
+        headers.insert("content-profile", "private".parse().unwrap());
+        headers.insert("range-unit", "items".parse().unwrap());
+
+        let forwarded = node_forward_headers(&headers);
+        for expected in ["prefer", "accept-profile", "content-profile", "range-unit"] {
+            assert!(
+                forwarded
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case(expected)),
+                "PostgREST request header must reach node-routed downstream: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_response_headers_include_postgrest_metadata() {
+        for header in ["content-profile", "range-unit", "preference-applied"] {
+            assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&header));
         }
     }
 
