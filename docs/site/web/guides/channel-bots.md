@@ -137,6 +137,29 @@ The `reply_token` field in the callback payload can be used as an alternative to
 
 From the bot's detail page, open a conversation route to see recent messages and delivery status. Message records are retained for 30 days.
 
+## Transfer bot ownership
+
+The bot owner, an organization admin, or a NyxID platform admin can transfer a
+supported bot from its detail page. In the
+**Ownership transfer** card, click **Transfer ownership**, choose **Person** or
+**Organization**, and search for the destination in the owner dropdown. Click
+**Review transfer** to check the current owner, destination, effects, and any
+dependency blockers, then **Confirm transfer**.
+
+The bot keeps its credentials and webhook configuration. Existing routes are
+permanently retired, and conversation history stays with the previous owner.
+The destination must create new routes using its own Agent Keys. After the
+transfer, the console returns to Channel Bots. Organization admins need
+unrestricted management access. No mobile approval is required. An owner’s
+Agent Key with `write` or `admin` scope and unrestricted service management can
+also use the transfer API; permission to send bot messages alone is insufficient.
+
+X bots created through managed OAuth onboarding can move with their dedicated
+OAuth connection. The connection must be active and used only by that bot.
+Shared connections and authorization or refresh work in progress appear as
+specific blockers during review. Managed Telegram and Aurinko email handovers
+are not supported yet.
+
 ## Update bot credentials
 
 Bot credentials can be updated without re-registering. From the bot's detail page, click **Edit** and update any field. For Lark bots that need a Verification Token or Encrypt Key added after the fact:

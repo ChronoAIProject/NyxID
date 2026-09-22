@@ -1,40 +1,73 @@
-# Administrative ownership transfers
+# Ownership transfers
 
-NyxID platform admins can reassign custom catalog services and supported channel
-bots between active people and organizations from **Admin → Ownership transfers**
-(`/admin/ownership`). Organization admins, resource owners, and platform operators
-cannot perform transfers without the NyxID platform-admin role. A personal
-destination is an explicitly selected person, not the administrator making the
-request.
+Owners can transfer their own custom catalog services and supported channel bots.
+For organization assets, active organization admins with unrestricted management
+access can transfer them. Platform admins retain cross-owner transfer access and
+the **Admin → Ownership transfers** inventory.
 
-This feature transfers the definitions managed under Admin → Services. It does
-not transfer users' connected `UserService` / `UserEndpoint` / `UserApiKey`
-bundles, nodes, agent identities, or external provider accounts.
+The **Ownership transfer** card lives on channel bot detail pages, the existing
+**Advanced** tab of a connected service, and admin catalog service detail pages.
+Agent Keys with `write` or `admin` scope can use the same API
+under their owner's authority. Keys must be active, unexpired, general-purpose,
+and have `allow_all_services=true`: the existing limited service allowlist names
+connected `UserService` rows, not catalog definitions or channel bots. Proxy-only
+keys, scheduled-invocation keys, and keys limited to connected services cannot
+transfer these assets. A platform admin's Agent Key does not inherit cross-owner
+platform authority.
+
+There is no mobile approval or recipient acceptance step. The web flow uses a
+preview and explicit confirmation; agents submit that same preview version.
+
+For services, this feature transfers the definitions managed under Admin →
+Services. It does not transfer users' connected `UserService` / `UserEndpoint` /
+`UserApiKey` bundles, nodes, agent identities, or external provider accounts.
+For eligible X bots, the bot's dedicated OAuth credential moves with the bot as
+described below.
 
 ## Review and commit
 
-1. Choose Catalog services or Channel bots and find the resource by name, slug,
-   or ID. The inventory is available only to platform admins and excludes secrets.
-2. Select a destination person or organization. Inactive accounts and the current
-   owner cannot be selected.
+1. Open **Channel Bots → bot** (`/channel-bots/{id}`), or **AI Services → service
+   → Advanced** (`/keys/{id}`). Admin catalog service detail pages also contain
+   the card. Choose **Transfer ownership** to open the review dialog in place.
+   The server determines whether the actor has transfer authority over the bot
+   or catalog definition, independently of connected-service access.
+2. Select **Person** or **Organization** as the destination type, then choose
+   the destination account in the searchable owner dropdown. Search, results,
+   and pagination are part of the same picker. Inactive accounts and the current
+   owner cannot be selected. Owners see themselves, their organizations, and
+   members of the owning organization. An exact email or account ID can find
+   another destination without exposing the full platform directory. Platform
+   admins retain global destination search.
 3. Review the authoritative current owner, destination, effects, and blockers.
-4. Confirm. The backend rechecks the live platform-admin role, destination,
-   resource state, dependencies, and bot capacity before committing.
+4. Confirm. The backend rechecks live ownership, organization membership or
+   platform authority, Agent Key permissions, destination, dependencies, and bot
+   capacity before committing. Actor, key and membership writes participate in
+   the ownership transaction so revocation cannot be bypassed by an old preview.
+
+After a bot transfer, the UI returns to Channel Bots because the actor may no
+longer have access to the bot. The destination creates its own routes. After a
+catalog transfer, the connected-service page remains open and refreshes transfer
+authority; the connected service and its credentials remain in place. The admin
+inventory remains available and reuses the same review dialog and searchable
+destination picker.
 
 A stale preview returns 409 and requires another review. MongoDB transactions
 commit the resource change, route retirement, and an `ownership_transfers` receipt
-together. The request UUID is the receipt ID. Retrying the same request returns
+together. The request UUID is the receipt ID. Receipts bind the acting user and
+Agent Key identity (if present). Retrying the same request with that identity returns
 the committed result; reusing its UUID with different inputs is rejected. The UI
 retains this UUID after an uncertain network or server failure.
 
 The preview version includes the complete stored resource, the destination, and
-the number of routes to retire. A routine bot update, such as webhook activation,
-reconnection, or route creation, can therefore make a preview stale even when
-ownership has not changed. Review the refreshed preview before confirming again.
-This conservative review check is separate from the ownership generation used
-to fence channel delivery.
+the number of routes to retire. For X OAuth transfers it also binds the backing
+credential and its dependency state. A routine bot update, such as webhook
+activation, reconnection, credential refresh, or route creation, can therefore
+make a preview stale even when ownership has not changed. Review the refreshed
+preview before confirming again. This conservative review check is separate
+from the ownership generation used to fence channel delivery.
 
-The chained audit event `admin_ownership_transferred` includes the acting admin,
+The chained audit event retains the name `admin_ownership_transferred` for
+compatibility. It includes the actor and Agent Key identity when applicable,
 transfer ID, resource kind and ID, both owners, and retired-route count. It uses
 the existing audit append service. Audit delivery is awaited before returning
 success. If it fails after the ownership transaction committed, retrying the same
@@ -42,6 +75,20 @@ request replays the receipt and retries the audit append. Replays can produce
 multiple audit entries for the same transfer ID, but do not repeat the transfer.
 The transactional receipt remains available even if the process exits before
 the audit append.
+
+## Asset API
+
+The asset routes accept human sessions and eligible Agent Keys:
+
+- `GET /api/v1/ownership/{kind}/{id}/authorization` — current transfer capability.
+- `GET /api/v1/ownership/{kind}/{id}/destinations?user_type=person&search=...&offset=0` — compact destination search, 20 results per page.
+- `POST /api/v1/ownership/{kind}/{id}/preview` — body `{ "new_owner_user_id": "UUID" }`.
+- `POST /api/v1/ownership/{kind}/{id}/transfer` — body `{ "new_owner_user_id": "UUID", "expected_version": "preview version", "request_id": "UUID v4" }`.
+
+`kind` is `service` or `channel_bot`. The existing `/admin/ownership` inventory
+and preview/transfer aliases remain for compatibility; the admin inventory is
+still platform-admin-only. Delegated tokens and service accounts cannot commit
+transfers. All routes retain the same dependency blockers and atomic commit.
 
 ## Catalog services
 
@@ -113,11 +160,28 @@ against the bot's current owner and routes. Existing adapter-specific deduplicat
 and no-route handling still apply; there is no exactly-once delivery guarantee
 across a handover.
 
-Connection-backed OAuth bots, managed Telegram (`telegram-new`), Aurinko email,
-and other unsupported adapters are blocked because their connection,
-registration, polling, or subscription state is owner-bound. An active polling
-lease also blocks transfer. Destination limits use the same transactional
-capacity fence as bot registration.
+X bots created through managed OAuth onboarding can also be transferred. The
+transfer atomically reassigns the bot and its exact `UserApiKey` row when that
+credential is active, belongs to the bot's current owner, uses the platform
+OAuth application, has `source: "channel_onboarding"`, and is dedicated to that
+bot. The encrypted access and refresh tokens stay on the same row; the transfer
+does not duplicate credentials or copy a refresh token to another connection.
+The internal OAuth callback handle changes so a stale authorization callback
+cannot overwrite the transferred connection. The bot's credential-row ID stays
+the same.
+
+The preview reports specific blockers for shared credentials, pending or invalid
+connections, mismatched ownership or provider configuration, and OAuth work in
+progress. References from other bots, including inactive bots, connected
+services, and agent credential bindings prevent the credential from moving.
+Commit rechecks these dependencies transactionally. A running channel poll or
+OAuth refresh must finish before the transfer can proceed. Destination limits
+use the same transactional capacity fence as bot registration.
+
+Managed Telegram (`telegram-new`), Aurinko email, and other unsupported adapters
+remain blocked. Aurinko has separate owner-bound mailbox subscription, batch,
+receipt, and send records; transferring its credential alone is insufficient.
+These adapters require their own registration or subscription handover.
 
 ## API
 
@@ -163,3 +227,7 @@ dependency blockers, response redaction, audit delivery, and UI confirmation,
 cancellation, conflict recovery, and uncertain-response retry behavior.
 Additional transaction tests cover concurrent registration at the destination's
 bot limit, route creation during transfer, and organization-deletion cleanup.
+X regressions cover organization-to-person handover, destination token refresh,
+source-owner denial, stale callback rejection, shared and inactive consumers,
+pending authorization and refresh leases, stale-owner reference creation, and
+receipt replay without repeating the credential handover.

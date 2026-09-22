@@ -45,6 +45,57 @@ pub struct OAuthCallbackOutcome {
     pub connection_id: Option<String>,
 }
 
+async fn insert_oauth_state(
+    db: &mongodb::Database,
+    state: &OAuthState,
+    owner_id: &str,
+) -> AppResult<()> {
+    let Some(connection_id) = state.connection_id.clone() else {
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(state)
+            .await?;
+        return Ok(());
+    };
+    let state = state.clone();
+    let owner_id = owner_id.to_string();
+    let db = db.clone();
+    crate::services::service_history::transaction::run(&db.clone(), async move |transaction| {
+        let operation: AppResult<()> = async {
+            let key =
+                crate::services::service_history::collection::<UserApiKey>(&db, USER_API_KEYS)
+                    .find_one(doc! {
+                        "connection_id": &connection_id,
+                        "user_id": &owner_id,
+                        "provider_config_id": &state.provider_config_id,
+                    })
+                    .session(&mut *transaction)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("OAuth connection key not found".into()))?;
+            let session: &mut mongodb::ClientSession = transaction.into();
+            let fenced = crate::services::service_history::mutation::fence_backing_reference(
+                &db,
+                USER_API_KEYS,
+                &key.id,
+                &owner_id,
+                session,
+            )
+            .await?;
+            if !fenced {
+                return Err(AppError::NotFound("OAuth connection key not found".into()));
+            }
+            db.collection::<OAuthState>(OAUTH_STATES)
+                .insert_one(&state)
+                .session(session)
+                .await?;
+            Ok(())
+        }
+        .await;
+        super::api_key_mutation_service::transaction_result(operation)
+    })
+    .await
+    .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
 /// Summary for listing (no decrypted tokens).
 #[derive(Debug, serde::Serialize)]
 pub struct UserProviderTokenSummary {
@@ -869,9 +920,7 @@ pub async fn initiate_oauth_connect(
         created_at: now,
     };
 
-    db.collection::<OAuthState>(OAUTH_STATES)
-        .insert_one(&oauth_state)
-        .await?;
+    insert_oauth_state(db, &oauth_state, on_behalf_of.unwrap_or(user_id)).await?;
 
     if let (Some(connection_id), Some(nonce)) = (connection_id, attempt_nonce.as_deref())
         && let Err(error) = crate::services::user_api_key_service::begin_chat_oauth_attempt(
@@ -1190,9 +1239,7 @@ pub async fn request_device_code(
         created_at: now,
     };
 
-    db.collection::<OAuthState>(OAUTH_STATES)
-        .insert_one(&oauth_state)
-        .await?;
+    insert_oauth_state(db, &oauth_state, on_behalf_of.unwrap_or(user_id)).await?;
 
     tracing::info!(
         user_id = %user_id,
@@ -2292,7 +2339,7 @@ pub async fn refresh_user_api_key_in_place(
     .await
 }
 
-fn user_api_key_refresh_lease_name(api_key_id: &str) -> String {
+pub(crate) fn user_api_key_refresh_lease_name(api_key_id: &str) -> String {
     format!("oauth-refresh:user-api-key:{api_key_id}")
 }
 
