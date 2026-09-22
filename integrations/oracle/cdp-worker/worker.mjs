@@ -632,7 +632,7 @@ async function assertPublicTarget(rawUrl) {
 // Ported from the proven userscript extractors: KaTeX/MathJax → LaTeX, the
 // Pro-reasoning "still generating" probe, latest-answer + full-transcript
 // extraction. Installed on window.__nyx and re-installed after navigation.
-const DOM_CORE_VERSION = 5;
+export const DOM_CORE_VERSION = 5;
 const DOM_CORE = `
 window.__nyx = (function () {
   const artifactFileId = ${artifactFileId.toString()};

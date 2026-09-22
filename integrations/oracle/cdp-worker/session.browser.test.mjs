@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
-import { decryptSessionEnvelope, effortMetadata, installDomCore, pickerSnapshot, readModelSwitcher, selectModelSwitcher, switcherMatches, replaceCrashedPage } from "./worker.mjs";
+import { DOM_CORE_VERSION, decryptSessionEnvelope, effortMetadata, installDomCore, pickerSnapshot, readModelSwitcher, selectModelSwitcher, switcherMatches, replaceCrashedPage } from "./worker.mjs";
 
 const chromeExecutable = process.env.NYXID_TEST_CHROME_EXECUTABLE
   || (process.env.NYXID_TEST_BROWSER === "1" ? chromium.executablePath() : undefined);
@@ -850,6 +850,13 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
         setTimeout(() => { void cdp.send('Page.crash').catch(() => {}); }, 200);
       }
       if (body.phase === 'selecting_model') {
+        if (!body.phase_detail && config.pillDelay) {
+          await fixture.page.evaluate(delay => {
+            const pill = document.querySelector('#pill');
+            pill.style.display = 'none';
+            setTimeout(() => { pill.style.display = ''; }, delay);
+          }, config.pillDelay);
+        }
         if (!body.phase_detail && config.slowPickerClick) {
           await fixture.page.evaluate(() => setTimeout(() => document.querySelector('#picker-blocker').remove(), 1400));
         }
@@ -899,6 +906,7 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
   const process = workerProcess(fixture, [], {
     NYXID_BASE_URL: base, NYXID_WORKER_TOKEN: token,
     NYXID_MODEL_SELECT_TIMEOUT_MS: config.selectionTimeout || (config.blockPicker ? '350' : config.neverOpens ? '1500' : '5000'),
+    NYXID_PILL_LABEL_WAIT_MS: config.pillLabelWait || '1000',
     NYXID_MAX_TASK_RECOVERY_FAILURES: config.crashAfterSend ? '3' : '1',
     // Exercise final extraction after one short stability poll, leaving CI
     // time for the real browser actions and intentional failure waits.
@@ -989,6 +997,19 @@ test('reasoning: a matching header picker outside the composer is never clicked'
   const events = await assertReasoningDelivered(fixture, { model: 'chatgpt-6-pro', detail: 'picker_unavailable' });
   assert.deepEqual(events.map(item => item.event), ['typed', 'send']);
   assert.match(fixture.process.output(), /reason=picker_unavailable .*pill_source=none pill_level=unrecognized pill_text_length=0 items=0 recognized=\[\]/);
+});
+
+test('reasoning: a delayed composer pill is selected after it becomes visible', options, async (t) => {
+  const fixture = await reasoningFixture(t, { pillDelay: 1800, pillLabelWait: '3000', strict: true });
+  await assertReasoningDelivered(fixture);
+  assert.match(fixture.process.output(), /pill_label_waits=[1-9]\d*/);
+});
+
+test('reasoning: a missing pill cannot extend the selection deadline', options, async (t) => {
+  const fixture = await reasoningFixture(t, { noPill: true, selectionTimeout: '350' });
+  const events = await assertReasoningDelivered(fixture, { model: 'chatgpt-6-pro', detail: 'timeout' });
+  assert.deepEqual(events.map(item => item.event), ['typed', 'send']);
+  assert.match(fixture.process.output(), /reason=timeout .*pill_source=none/);
 });
 
 for (const noForm of [false, true]) {
@@ -1199,7 +1220,7 @@ test('compact model switcher: whole-label form discovery preserves scope, unique
       // Reconnecting to an older injected core must install the new adapter.
       await fixture.page.evaluate(() => { window.__nyx.version = 3; delete window.__nyx.compactModelLabel; });
       await installDomCore(fixture.page);
-      assert.equal(await fixture.page.evaluate(() => window.__nyx.version), 4);
+      assert.equal(await fixture.page.evaluate(() => window.__nyx.version), DOM_CORE_VERSION);
     }
     const observed = await readModelSwitcher(fixture.page);
     assert.equal(observed.metadata, entry.expected || 'absent', entry.name);
@@ -1450,7 +1471,7 @@ test('DOM core reinstalls after navigation or helper deletion and ignores persis
   await fixture.page.goto('https://chatgpt.com/');
   await installDomCore(fixture.page);
   await fixture.page.goto('https://chatgpt.com/c/aaaaaa-bbbbbb');
-  assert.equal(await fixture.page.evaluate(() => window.__nyx?.version), 4);
+  assert.equal(await fixture.page.evaluate(() => window.__nyx?.version), DOM_CORE_VERSION);
   await fixture.page.evaluate(() => { delete window.__nyx; });
   await installDomCore(fixture.page);
   assert.deepEqual(await fixture.page.evaluate(() => {
@@ -1475,7 +1496,7 @@ test('an actual crashed Chromium page is replaced and the helper installed in th
   assert.notEqual(replacement, fixture.page);
   assert.equal(fixture.page.isClosed(), true);
   assert.equal(runtime.pageCrashed, false);
-  assert.equal(await replacement.evaluate(() => window.__nyx.version), 4);
+  assert.equal(await replacement.evaluate(() => window.__nyx.version), DOM_CORE_VERSION);
   assert.equal(fixture.context.pages().length, 1);
 });
 
@@ -1646,7 +1667,7 @@ test('DOM core upgrades a helper installed by an older worker bundle', options, 
   const fixture = await browserFixture(t);
   await fixture.page.evaluate(() => { window.__nyx = {version:2}; });
   await installDomCore(fixture.page);
-  assert.equal(await fixture.page.evaluate(() => window.__nyx.version), 4);
+  assert.equal(await fixture.page.evaluate(() => window.__nyx.version), DOM_CORE_VERSION);
   assert.equal(await fixture.page.evaluate(() => typeof window.__nyx.finishNestedModelPicker), 'function');
   for (const [label, loggedIn] of [['GPT-7 Pro', true], ['GPT-6.1 Pro', true], ['Try GPT-7 Pro', false]]) {
     await fixture.page.setContent(`<header><button aria-haspopup="menu">${label}</button></header>`);
