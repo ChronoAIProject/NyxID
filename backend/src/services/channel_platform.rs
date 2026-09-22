@@ -3,6 +3,20 @@ use serde::{Deserialize, Serialize};
 pub use super::channel_registration::{BotCredentials, RegistrationDescriptor, RegistrationValues};
 use crate::errors::AppResult;
 
+/// Retains subscription-mutation evidence when setup times out or loses its lease.
+#[derive(Default)]
+pub struct WebhookSetupProgress(std::sync::atomic::AtomicBool);
+
+impl WebhookSetupProgress {
+    pub fn mark_mutation_started(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn mutation_started(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Adapter send evidence. WhatsApp returns `Err` only when no message could
 /// have been accepted. Once acceptance is possible, the outcome retains IDs
 /// and an optional failure; callers persist that evidence before returning it.
@@ -535,6 +549,7 @@ pub trait PlatformAdapter: Send + Sync {
         _credentials: &BotCredentials<'_>,
         _bot: &crate::models::channel_bot::ChannelBot,
         _webhook_url: &str,
+        _progress: &WebhookSetupProgress,
     ) -> AppResult<()> {
         Err(super::channel_managed::unavailable())
     }

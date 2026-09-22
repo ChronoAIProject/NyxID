@@ -292,6 +292,7 @@ pub(super) async fn setup(
     bot_id: &str,
     events: &[XChannelEvent],
     webhook_url: &str,
+    progress: &super::super::super::channel_platform::WebhookSetupProgress,
 ) -> AppResult<()> {
     validate_events("x", events)?;
     let app = app_token(credentials.platform_secrets.ok_or_else(protocol_error)?)?;
@@ -368,6 +369,7 @@ pub(super) async fn setup(
             .iter()
             .any(|keep| keep["subscription_id"] == row["subscription_id"])
         {
+            progress.mark_mutation_started();
             remove_subscription(http, api, app, row).await?;
         }
     }
@@ -388,6 +390,7 @@ pub(super) async fn setup(
                 .as_str()
                 .filter(|id| numeric_id(id))
                 .ok_or_else(protocol_error)?;
+            progress.mark_mutation_started();
             let body = response_json(
                 send(
                     http.put(format!("{api}/2/activity/subscriptions/{id}"))
@@ -402,6 +405,7 @@ pub(super) async fn setup(
                 return Err(protocol_error());
             }
         } else {
+            progress.mark_mutation_started();
             let body = response_json(send(http.post(format!("{api}/2/activity/subscriptions"))
                 .bearer_auth(credentials.token)
                 .json(&json!({"event_type": name, "filter": {"user_id": own_id}, "webhook_id": webhook_id, "tag": tag}))).await?).await?;

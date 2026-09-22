@@ -18,8 +18,7 @@ use super::{
 };
 use crate::models::service_change_event::HistoryContext;
 
-#[derive(Debug)]
-struct BackingReferenceOwnerChanged;
+use crate::errors::BackingReferenceOwnerChanged;
 
 /// Serialize new references with backing edits. Credentials that can move
 /// independently must still belong to the referencing owner. Preserve legacy

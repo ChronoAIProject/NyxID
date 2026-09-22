@@ -86,37 +86,53 @@ pub async fn set_scope(
         }
     };
 
-    let scope = db
-        .collection::<OrgRoleScope>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! { "org_user_id": org_user_id, "role": role.as_str() },
-            doc! {
-                "$set": {
-                    "allowed_service_ids": allowed,
-                    "updated_at": now_bson,
-                    "updated_by": actor_id,
-                },
-                "$setOnInsert": {
-                    "_id": Uuid::new_v4().to_string(),
-                    "org_user_id": org_user_id,
-                    "role": role.as_str(),
-                },
-            },
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .upsert(true)
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?
-        .ok_or_else(|| {
-            crate::errors::AppError::Internal(
-                "Role scope upsert did not return the updated row".to_string(),
+    let transaction_db = db.clone();
+    let db = db.clone();
+    let org_user_id = org_user_id.to_owned();
+    let actor_id = actor_id.to_owned();
+    super::service_history::transaction::run(&transaction_db, async move |transaction| {
+        // Also fence a previously absent role scope against ownership transfer.
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &org_user_id },
+                doc! { "$inc": { "ownership_transfer_revision": 1_i64 } },
             )
-        })?;
-
-    Ok(scope)
+            .session(&mut **transaction)
+            .await?;
+        db.collection::<OrgRoleScope>(COLLECTION_NAME)
+            .find_one_and_update(
+                doc! { "org_user_id": &org_user_id, "role": role.as_str() },
+                doc! {
+                    "$set": {
+                        "allowed_service_ids": &allowed,
+                        "updated_at": now_bson,
+                        "updated_by": &actor_id,
+                    },
+                    "$setOnInsert": {
+                        "_id": Uuid::new_v4().to_string(),
+                        "org_user_id": &org_user_id,
+                        "role": role.as_str(),
+                    },
+                },
+            )
+            .with_options(
+                FindOneAndUpdateOptions::builder()
+                    .upsert(true)
+                    .return_document(ReturnDocument::After)
+                    .build(),
+            )
+            .session(&mut **transaction)
+            .await?
+            .ok_or_else(|| {
+                super::api_key_mutation_service::abort_transaction(
+                    crate::errors::AppError::Internal(
+                        "Role scope upsert did not return the updated row".to_string(),
+                    ),
+                )
+            })
+    })
+    .await
+    .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 pub async fn clear_scope(
@@ -124,10 +140,25 @@ pub async fn clear_scope(
     org_user_id: &str,
     role: OrgRole,
 ) -> AppResult<()> {
-    db.collection::<OrgRoleScope>(COLLECTION_NAME)
-        .delete_one(doc! { "org_user_id": org_user_id, "role": role.as_str() })
-        .await?;
-    Ok(())
+    let transaction_db = db.clone();
+    let db = db.clone();
+    let org_user_id = org_user_id.to_owned();
+    super::service_history::transaction::run(&transaction_db, async move |transaction| {
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &org_user_id },
+                doc! { "$inc": { "ownership_transfer_revision": 1_i64 } },
+            )
+            .session(&mut **transaction)
+            .await?;
+        db.collection::<OrgRoleScope>(COLLECTION_NAME)
+            .delete_one(doc! { "org_user_id": &org_user_id, "role": role.as_str() })
+            .session(&mut **transaction)
+            .await?;
+        Ok(())
+    })
+    .await
+    .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 /// Resolve the service scope a membership should enforce right now.

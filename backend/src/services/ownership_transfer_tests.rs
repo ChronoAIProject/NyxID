@@ -78,6 +78,124 @@ async fn management_key(
 }
 
 #[tokio::test]
+async fn first_inherited_scope_restriction_conflicts_with_transfer_snapshot() {
+    use crate::models::org_membership::{
+        COLLECTION_NAME as MEMBERSHIPS, MemberScopeSource, OrgMembership,
+    };
+    use crate::services::{org_role_scope_service as scopes, ownership_transfer_access as access};
+    let f = fixture("ownership_first_role_scope").await;
+    let bot = insert_bot(&f).await;
+    f.db.collection::<Document>(BOTS)
+        .update_one(
+            doc! { "_id": &bot.id },
+            doc! { "$set": { "user_id": &f.destination } },
+        )
+        .await
+        .unwrap();
+    let mut member = test_utils::test_membership(&f.destination, &f.owner, OrgRole::Admin, None);
+    member.scope_source = MemberScopeSource::Inherit;
+    f.db.collection::<OrgMembership>(MEMBERSHIPS)
+        .insert_one(member)
+        .await
+        .unwrap();
+    let preview = preview(
+        &f.db,
+        &f.owner,
+        ResourceKind::ChannelBot,
+        &bot.id,
+        &f.owner,
+        5,
+    )
+    .await
+    .unwrap();
+    assert!(
+        scopes::get_scope(&f.db, &f.destination, OrgRole::Admin)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut session = f.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    access::resource_owner(&f.db, &mut session, ResourceKind::ChannelBot, &bot.id)
+        .await
+        .unwrap();
+    scopes::set_scope(
+        &f.db,
+        &f.destination,
+        OrgRole::Admin,
+        Some(vec![]),
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    let error = access::authorize(&f.db, &mut session, &f.owner, None, &f.destination, true)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, AppError::DatabaseError(ref error) if error.contains_label("TransientTransactionError"))
+    );
+    session.abort_transaction().await.unwrap();
+    assert!(matches!(
+        owner_transfer(
+            &f,
+            (&f.owner, None),
+            ResourceKind::ChannelBot,
+            &bot.id,
+            &f.owner,
+            &preview.version,
+            &Uuid::new_v4().to_string()
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert_eq!(
+        f.db.collection::<ChannelBot>(BOTS)
+            .find_one(doc! { "_id": &bot.id })
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id,
+        f.destination
+    );
+    assert_eq!(
+        f.db.collection::<Document>(TRANSFERS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    scopes::clear_scope(&f.db, &f.destination, OrgRole::Admin)
+        .await
+        .unwrap();
+    assert!(
+        scopes::list_scopes(&f.db, &f.destination)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|scope| scope.role == OrgRole::Admin)
+            .unwrap()
+            .is_default
+    );
+    owner_transfer(
+        &f,
+        (&f.owner, None),
+        ResourceKind::ChannelBot,
+        &bot.id,
+        &f.owner,
+        &preview.version,
+        &Uuid::new_v4().to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        scopes::get_scope(&f.db, &f.destination, OrgRole::Admin)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn owners_transfer_bots_and_catalog_and_replay_after_losing_access() {
     let f = fixture("ownership_owner_access").await;
     let bot = insert_bot(&f).await;
@@ -1109,7 +1227,10 @@ async fn x_transfer_rejects_stale_owner_service_references_and_preserves_missing
     let result = crate::services::service_history::collection::<UserService>(&f.db, USER_SERVICES)
         .insert_one(&service)
         .await;
-    assert!(result.is_err());
+    assert!(matches!(
+        AppError::from(result.unwrap_err()),
+        AppError::Conflict(_)
+    ));
     assert!(
         f.db.collection::<Document>(USER_SERVICES)
             .find_one(doc! {"_id": &service.id})

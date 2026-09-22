@@ -97,7 +97,7 @@ pub enum AppError {
     Internal(String),
 
     #[error("Database error: {0}")]
-    DatabaseError(#[from] mongodb::error::Error),
+    DatabaseError(#[source] mongodb::error::Error),
 
     #[error("Validation error: {0}")]
     ValidationError(String),
@@ -606,6 +606,20 @@ pub enum AppError {
 
     #[error("Billing wallet suspended")]
     WalletSuspended,
+}
+
+/// Internal transaction marker for the credential-reference ownership fence.
+#[derive(Debug)]
+pub(crate) struct BackingReferenceOwnerChanged;
+
+impl From<mongodb::error::Error> for AppError {
+    fn from(error: mongodb::error::Error) -> Self {
+        if error.get_custom::<BackingReferenceOwnerChanged>().is_some() {
+            Self::Conflict("Credential ownership changed; review the connection and retry".into())
+        } else {
+            Self::DatabaseError(error)
+        }
+    }
 }
 
 impl AppError {
@@ -1293,6 +1307,25 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;
+
+    #[test]
+    fn backing_owner_conflicts_preserve_http_classification_through_transactions() {
+        for error in [
+            AppError::from(mongodb::error::Error::custom(BackingReferenceOwnerChanged)),
+            crate::services::api_key_mutation_service::map_transaction_error(
+                mongodb::error::Error::custom(BackingReferenceOwnerChanged),
+            ),
+        ] {
+            assert_eq!(error.status_code(), StatusCode::CONFLICT);
+            assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+        }
+        let other = AppError::from(mongodb::error::Error::custom("ordinary database failure"));
+        assert!(matches!(other, AppError::DatabaseError(_)));
+        assert_eq!(
+            other.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 
     #[tokio::test]
     async fn request_body_too_large_has_structured_413_contract() {

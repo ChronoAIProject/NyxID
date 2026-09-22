@@ -39,6 +39,180 @@ pub(super) async fn provider_setup(server: &MockServer, bot: &ChannelBot) {
 }
 
 #[tokio::test]
+async fn registered_x_dm_survives_read_only_setup_failure_but_public_events_fail_closed() {
+    for (public_events, listing_status) in [(false, 503), (false, 401), (true, 503)] {
+        let (state, adapter, server, owner, connection) = fixture().await;
+        let bot = insert_bot(&state, &owner, &connection).await;
+        let events =
+            public_events.then(|| vec![crate::models::channel_bot::XChannelEvent::Mentions]);
+        state.db.collection::<ChannelBot>(BOTS).update_one(
+            doc! { "_id": &bot.id },
+            doc! { "$set": { "webhook_registered": true, "x_events": bson::to_bson(&events).unwrap() } },
+        ).await.unwrap();
+        state.db.collection::<UserApiKey>(KEYS).update_one(
+            doc! { "_id": &connection },
+            doc! { "$set": { "token_scopes": super::super::channel_adapters::x::PUBLIC_SCOPES.join(" ") } },
+        ).await.unwrap();
+        let bot = channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        credentials(&state, &adapter, &owner).await;
+        Mock::given(method("GET")).and(path("/2/webhooks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{
+                "id": "100", "valid": true, "url": "https://nyx.example/api/v1/webhooks/channel/x/platform"
+            }]}))).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2/activity/subscriptions"))
+            .respond_with(ResponseTemplate::new(listing_status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(
+            webhooks::configure(
+                &state.db,
+                &state.billing,
+                &state.encryption_keys,
+                &state.http_client,
+                &adapter,
+                &bot,
+                "https://nyx.example"
+            )
+            .await
+            .is_err()
+        );
+        let current = channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            current.status,
+            if public_events { "failed" } else { "active" }
+        );
+        assert!(current.webhook_registered);
+        if !public_events {
+            webhooks::remove_stopped(
+                &state.db,
+                &state.encryption_keys,
+                &state.http_client,
+                &adapter,
+                &current,
+            )
+            .await
+            .unwrap();
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method == "GET")
+        );
+    }
+}
+
+#[tokio::test]
+async fn registered_x_dm_fails_closed_after_uncertain_subscription_mutation() {
+    let (state, adapter, server, owner, connection) = fixture().await;
+    let bot = insert_bot(&state, &owner, &connection).await;
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! { "_id": &bot.id },
+            doc! { "$set": { "webhook_registered": true } },
+        )
+        .await
+        .unwrap();
+    let bot = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    credentials(&state, &adapter, &owner).await;
+    Mock::given(method("GET")).and(path("/2/webhooks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{
+            "id": "100", "valid": true, "url": "https://nyx.example/api/v1/webhooks/channel/x/platform"
+        }]}))).mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/2/activity/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{
+            "subscription_id": "200", "event_type": "dm.received", "filter": {"user_id": "10"},
+            "webhook_id": "99", "tag": format!("nyxid:{}", bot.id)
+        }]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/2/activity/subscriptions/200"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        webhooks::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &bot,
+            "https://nyx.example"
+        )
+        .await
+        .is_err()
+    );
+    let current = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(current.status, "failed");
+    assert!(current.webhook_registered);
+}
+
+#[tokio::test]
+async fn registered_x_dm_survives_setup_lease_contention() {
+    let (state, adapter, server, owner, connection) = fixture().await;
+    let bot = insert_bot(&state, &owner, &connection).await;
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! { "_id": &bot.id },
+            doc! { "$set": { "webhook_registered": true } },
+        )
+        .await
+        .unwrap();
+    let bot = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    let runtime = super::super::coordination_service::cluster_lease_runtime();
+    let lease = runtime
+        .acquire(&state.db, "channel-webhook:x")
+        .await
+        .unwrap()
+        .unwrap();
+    let result = webhooks::configure(
+        &state.db,
+        &state.billing,
+        &state.encryption_keys,
+        &state.http_client,
+        &adapter,
+        &bot,
+        "https://nyx.example",
+    )
+    .await;
+    super::super::coordination_service::LeaseStore::release(&state.db, &lease)
+        .await
+        .unwrap();
+    assert!(matches!(result, Err(AppError::Conflict(_))));
+    assert_eq!(
+        channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap()
+            .status,
+        "active"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn x_webhook_onboarding_avoids_polling_and_failed_setup_can_initialize_fallback() {
     for setup_ok in [true, false] {
         let (mut state, adapter, server, owner, connection) = fixture().await;
