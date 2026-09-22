@@ -1101,11 +1101,26 @@ flowchart TD
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/v1/channel-bots` | Register a new bot |
-| `GET` | `/api/v1/channel-bots` | List user's bots |
+| `GET` | `/api/v1/channel-bots` | `?scope=user` lists personal bots; `?org_id=<id>` selects an administered org; `?scope=all` combines personal and administered-org bots |
 | `GET` | `/api/v1/channel-bots/{id}` | Get bot details |
 | `PATCH` | `/api/v1/channel-bots/{id}` | Update bot label or platform verification material |
 | `DELETE` | `/api/v1/channel-bots/{id}` | Delete bot (deregisters webhook) |
 | `POST` | `/api/v1/channel-bots/{id}/verify` | Re-verify bot token and webhook |
+
+The list returns active (not deleted) bots, newest first, as `{ "bots": [...], "total": N }`.
+Each bot's `user_id` identifies its personal or organization owner. `scope=all`
+requires the same admin access as individual organization listings: member-only,
+viewer-only and revoked memberships do not contribute bots. Memberships pointing
+to missing organizations or personal accounts are excluded. `scope` and
+`org_id` are mutually exclusive (HTTP 400); unknown `scope` values also return 400.
+Omitting both parameters retains the personal listing. `scope=user` always uses
+the authenticated caller's user ID; it does not accept a target user's ID.
+Discover organization IDs through `GET /api/v1/orgs`, which returns `orgs` with
+`id`, `slug`, `display_name`, and `your_role`. Pass an `id` whose `your_role` is
+`admin` as `org_id` when listing its channel bots. A user may belong to multiple
+organizations, so clients must select the relevant organization from this list.
+Existing authentication requirements apply, including delegated `account:read`
+for metadata reads; this does not grant bot-management access to Agent Keys.
 
 ### Conversation Routes (authenticated, human-only)
 

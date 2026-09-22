@@ -19,6 +19,49 @@ This page covers the web console steps. For the full design and callback contrac
 
 Before registering a bot, you need an Agent Key with a `callback_url` configured. Create one from **AI Services → Agent Keys → Create API Key** and set the **Callback URL** field to the HTTPS endpoint where your agent receives messages.
 
+## View bots across organizations
+
+The **Scope** picker defaults to **View all**, which combines your personal bots
+and bots owned by organizations you administer. A divider separates **View all**
+from **User** (your personal bots) and the individual organizations. Each bot shows its owner in
+the combined view. Deleted bots are excluded.
+
+Choose **User** or an organization to narrow the list. **Add Bot** defaults
+to the selected organization, or to Personal when viewing all bots; you can choose
+the owner in the creation dialog. Device channels have their own scope picker.
+
+API clients can request the same combined list using an account access token:
+
+```bash
+curl "$NYXID_BASE_URL/api/v1/channel-bots?scope=all" \
+  -H "Authorization: Bearer $NYXID_ACCESS_TOKEN"
+```
+
+The response contains `bots` and `total`; each bot's `user_id` identifies its
+owner. The three selectors are:
+
+| Selector | Bots returned |
+|---|---|
+| `?scope=all` | Your personal bots and bots from organizations you administer |
+| `?scope=user` | Your personal bots only |
+| `?org_id=<id>` | Bots from the selected organization you administer |
+
+`scope=user` uses your authenticated identity, so you do not need to supply a
+user ID. Omitting both parameters also returns personal bots for compatibility.
+Combining either `scope` value with `org_id` returns HTTP 400.
+
+To find an organization's ID, list your memberships:
+
+```bash
+curl "$NYXID_BASE_URL/api/v1/orgs" \
+  -H "Authorization: Bearer $NYXID_ACCESS_TOKEN"
+```
+
+The `orgs` array includes `id`, `display_name`, `slug`, and `your_role` for each
+organization. Choose the relevant entry where `your_role` is `admin`, then pass
+its `id` as `org_id`. Organization discovery also accepts general Agent Keys;
+channel-bot management retains its existing account authentication requirements.
+
 ## Register a Telegram bot
 
 1. Create a bot with `@BotFather` on Telegram. Copy the bot token (`123456:ABCdef...`).

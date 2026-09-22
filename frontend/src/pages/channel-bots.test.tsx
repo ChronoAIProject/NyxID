@@ -32,12 +32,16 @@ vi.mock("@/components/shared/org-scope-select", () => ({
     value,
     onChange,
     disabled,
+    allowAll,
     label = "Scope",
+    personalLabel = "Personal",
   }: {
     value: string | null;
     onChange: (next: string | null) => void;
     disabled?: boolean;
+    allowAll?: boolean;
     label?: string;
+    personalLabel?: string;
   }) => (
     <select
       aria-label={label}
@@ -45,7 +49,8 @@ vi.mock("@/components/shared/org-scope-select", () => ({
       disabled={disabled}
       onChange={(event) => onChange(event.target.value || null)}
     >
-      <option value="">Personal</option>
+      {allowAll && <option value="all">View all</option>}
+      <option value="">{personalLabel}</option>
       <option value="cf8812f3-ff2a-46a9-8c6b-63f7bc1f5d65">Support team</option>
     </select>
   ),
@@ -105,6 +110,7 @@ beforeEach(() => {
   saved = null;
   available = true;
   get.mockImplementation(async (path: string) => {
+    if (path === "/orgs") return { orgs: [{ id: orgId, display_name: "Support team", your_role: "admin" }] };
     if (path === "/channel-platforms") return { platforms: platformFixtures };
     if (path.startsWith(root))
       return { available, manager_username: "NyxSetupBot", request: saved };
@@ -115,6 +121,60 @@ beforeEach(() => {
     throw new Error(`Unexpected GET ${path}`);
   });
   vi.spyOn(window, "open").mockReturnValue(null);
+});
+
+it("defaults to all bots, narrows by owner, and creates personal bots from View all", async () => {
+  const user = userEvent.setup();
+  await setup("/channel-bots");
+  const scope = screen.getByRole("combobox", { name: "Scope" });
+  expect(scope).toHaveValue("all");
+  await waitFor(() => expect(get).toHaveBeenCalledWith("/channel-bots?scope=all"));
+  await user.selectOptions(scope, "");
+  expect(within(scope).getByRole("option", { selected: true })).toHaveTextContent("User");
+  await waitFor(() => expect(get).toHaveBeenCalledWith("/channel-bots?scope=user"));
+  await user.selectOptions(scope, orgId);
+  await waitFor(() => expect(get).toHaveBeenCalledWith(`/channel-bots?org_id=${orgId}`));
+  await user.selectOptions(scope, "all");
+  const deviceScope = screen.getByRole("combobox", { name: "Device channel scope" });
+  expect(deviceScope).toHaveValue("");
+  await user.selectOptions(deviceScope, orgId);
+  await waitFor(() => expect(get).toHaveBeenCalledWith(`/channel-conversations?org_id=${orgId}`));
+  expect(scope).toHaveValue("all");
+  await user.click(screen.getByRole("button", { name: "Add Bot" }));
+  const dialog = within(await screen.findByRole("dialog"));
+  expect(dialog.getByRole("combobox", { name: "Scope" })).toHaveValue("");
+  expect(dialog.queryByRole("option", { name: "View all" })).not.toBeInTheDocument();
+});
+
+it("identifies personal and organization owners in the combined list", async () => {
+  const user = userEvent.setup();
+  const fallbackGet = get.getMockImplementation()!;
+  get.mockImplementation(async (path: string) => {
+    if (path === "/channel-bots?scope=all") return {
+      bots: [
+        { id: "personal-bot", label: "Personal bot", user_id: "actor-1" },
+        { id: "org-bot", label: "Support bot", user_id: orgId },
+      ].map((bot) => ({
+        ...bot,
+        platform: "telegram",
+        platform_bot_username: "bot",
+        credential_source: "user",
+        status: "active",
+        is_active: true,
+        webhook_registered: true,
+        created_at: "2026-09-16T10:00:00Z",
+      })),
+      total: 2,
+    };
+    return fallbackGet(path);
+  });
+  await setup("/channel-bots");
+  await screen.findAllByText("Support bot");
+  await user.click(screen.getByRole("button", { name: "Table view" }));
+  expect(within(screen.getByRole("row", { name: /Personal bot/ }))
+    .getByRole("cell", { name: "User" })).toBeInTheDocument();
+  expect(within(screen.getByRole("row", { name: /Support bot/ }))
+    .getByRole("cell", { name: "Support team" })).toBeInTheDocument();
 });
 
 it("persists a draft from the shared modal fields with replacement navigation and restores it on remount", async () => {

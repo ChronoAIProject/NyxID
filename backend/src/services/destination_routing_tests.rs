@@ -185,53 +185,99 @@ pub(crate) async fn connect(
 }
 
 #[tokio::test]
-async fn workspace_activation_preserves_every_existing_row_contract_and_generation() {
+async fn drive_and_workspace_activation_preserves_every_existing_row_contract_and_generation() {
     let db = connect_test_database("workspace_activation").await.unwrap();
     seed(&db, false).await;
-    let service = db
-        .collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
-        .find_one(doc! {"slug": "api-google-workspace"})
+    let services = db.collection::<DownstreamService>(downstream_service::COLLECTION_NAME);
+    let legacy_drive = services
+        .find_one(doc! {"slug": "api-google-drive"})
         .await
         .unwrap()
         .unwrap();
-    assert!(workspace_destinations_pending(&service));
-    let before = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
-        .await
-        .unwrap();
-    assert_eq!(before.len(), 25);
-    seed(&db, true).await;
-    let after = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
-        .await
-        .unwrap();
-    assert_eq!(after.len(), 38);
-    for old in before {
-        let new = after.iter().find(|row| row.id == old.id).unwrap();
-        assert_eq!(
-            new.operation_generation, old.operation_generation,
-            "{}",
-            old.name
-        );
-        assert_eq!(
-            durable_operation_grant_service::endpoint_contract_digest(new).unwrap(),
-            durable_operation_grant_service::endpoint_contract_digest(&old).unwrap(),
-            "{}",
-            old.name
-        );
-        assert_eq!(
-            bson::to_document(new).unwrap(),
-            bson::to_document(&old).unwrap(),
-            "untouched row {}",
-            old.name
-        );
-    }
-    seed(&db, false).await;
-    assert_eq!(
-        crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
+    for (slug, old_count, new_count) in [
+        ("api-google-workspace", 25, 38),
+        ("api-google-drive", 9, 22),
+    ] {
+        // Workspace has already activated when Drive reaches this iteration.
+        if slug == "api-google-drive" {
+            services
+                .replace_one(doc! {"_id": &legacy_drive.id}, &legacy_drive)
+                .await
+                .unwrap();
+            db.collection::<service_endpoint::ServiceEndpoint>(service_endpoint::COLLECTION_NAME)
+                .delete_many(doc! {"service_id": &legacy_drive.id, "target_id": {"$exists": true}})
+                .await
+                .unwrap();
+            let workspace = services
+                .find_one(doc! {"slug": "api-google-workspace"})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(workspace.destination_targets, workspace_targets());
+        }
+        let service = db
+            .collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
+            .find_one(doc! {"slug": slug})
             .await
             .unwrap()
-            .len(),
-        38
-    );
+            .unwrap();
+        assert!(workspace_destinations_pending(&service));
+        let before = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), old_count);
+        seed(&db, true).await;
+        let after = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
+            .await
+            .unwrap();
+        assert_eq!(after.len(), new_count);
+        for endpoint in after.iter().filter(|row| row.target_id.is_some()) {
+            let expected = if endpoint.name.starts_with("docs_") {
+                "docs"
+            } else if endpoint.name.starts_with("sheets_") {
+                "sheets"
+            } else {
+                "slides"
+            };
+            assert_eq!(endpoint.target_id.as_deref(), Some(expected));
+        }
+        let active = db
+            .collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
+            .find_one(doc! {"_id": &service.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.destination_targets, workspace_targets());
+        assert!(!workspace_destinations_pending(&active));
+        for old in before {
+            let new = after.iter().find(|row| row.id == old.id).unwrap();
+            assert_eq!(
+                new.operation_generation, old.operation_generation,
+                "{}",
+                old.name
+            );
+            assert_eq!(
+                durable_operation_grant_service::endpoint_contract_digest(new).unwrap(),
+                durable_operation_grant_service::endpoint_contract_digest(&old).unwrap(),
+                "{}",
+                old.name
+            );
+            assert_eq!(
+                bson::to_document(new).unwrap(),
+                bson::to_document(&old).unwrap(),
+                "untouched row {}",
+                old.name
+            );
+        }
+        seed(&db, false).await;
+        assert_eq!(
+            crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
+                .await
+                .unwrap()
+                .len(),
+            new_count
+        );
+    }
 }
 
 #[path = "test_fixtures/pre_multi_origin_endpoint_writer.rs"]
@@ -399,6 +445,119 @@ pub(crate) async fn rest_call(
 }
 
 #[tokio::test]
+async fn drive_and_workspace_route_all_editors_over_rest_typed_and_generic_mcp() {
+    let db = connect_test_database("drive_workspace_editors")
+        .await
+        .unwrap();
+    seed(&db, true).await;
+    let owner = uuid::Uuid::new_v4().to_string();
+    for slug in ["api-google-drive", "api-google-workspace"] {
+        connect(&db, &owner, slug).await;
+    }
+    let echo = Echo::start().await;
+    let mut state = test_app_state(db.clone());
+    state.http_client = echo.client.clone();
+    let mut catalog = mcp_service::load_operation_catalog(
+        &db,
+        &state.node_ws_manager,
+        &owner,
+        mcp_service::NodeScope::Unrestricted,
+        mcp_service::ServiceScope::Unrestricted,
+    )
+    .await
+    .unwrap();
+    crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER
+        .scope(echo.client_builder.clone(), async {
+            for slug in ["api-google-drive", "api-google-workspace"] {
+                let service = catalog
+                    .services
+                    .iter_mut()
+                    .find(|s| s.service_slug == slug)
+                    .unwrap();
+                for (operation, path, parameter, host) in [
+                    (
+                        "docs_batch_update_document",
+                        "/v1/documents/editor-id:batchUpdate",
+                        "documentId",
+                        "docs.googleapis.com",
+                    ),
+                    (
+                        "sheets_batch_update_spreadsheet",
+                        "/v4/spreadsheets/editor-id:batchUpdate",
+                        "spreadsheetId",
+                        "sheets.googleapis.com",
+                    ),
+                    (
+                        "slides_batch_update_presentation",
+                        "/v1/presentations/editor-id:batchUpdate",
+                        "presentationId",
+                        "slides.googleapis.com",
+                    ),
+                ] {
+                    let response = rest_call(&state, &owner, slug, path, false).await.unwrap();
+                    assert_eq!(response.status(), 200);
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&bytes).unwrap()["host"],
+                        host
+                    );
+                    let endpoint = service
+                        .endpoints
+                        .iter()
+                        .find(|e| e.name == operation)
+                        .unwrap();
+                    let (status, body) = mcp_call(
+                        &state,
+                        &owner,
+                        service,
+                        endpoint,
+                        &json!({parameter: "editor-id", "requests": []}),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(status, 200);
+                    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["host"], host);
+                    let index = service
+                        .endpoints
+                        .iter()
+                        .position(|e| e.name == operation)
+                        .unwrap();
+                    let mut generic_endpoint = service.endpoints.remove(index);
+                    service.is_generic_proxy = true;
+                    generic_endpoint.endpoint_id = mcp_service::GENERIC_PROXY_ENDPOINT_ID.into();
+                    generic_endpoint.target_id = None;
+                    let (status, body) = mcp_call(
+                        &state,
+                        &owner,
+                        service,
+                        &generic_endpoint,
+                        &json!({"method": "POST", "path": path, "body": {"requests": []}}),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(status, 200);
+                    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["host"], host);
+                    service.is_generic_proxy = false;
+                }
+            }
+        })
+        .await;
+    let calls = echo.calls.lock().unwrap();
+    assert_eq!(calls.len(), 18);
+    for call in calls.iter() {
+        assert!(
+            call["headers"]
+                .as_str()
+                .unwrap()
+                .contains("Bearer test-google-token")
+        );
+        assert_eq!(call["body"], r#"{"requests":[]}"#);
+    }
+}
+
+#[tokio::test]
 async fn workspace_rest_typed_generic_mcp_and_product_service_reach_real_host_without_redirects() {
     let db = connect_test_database("workspace_echo").await.unwrap();
     seed(&db, true).await;
@@ -417,7 +576,7 @@ async fn workspace_rest_typed_generic_mcp_and_product_service_reach_real_host_wi
         for slug in ["api-google-workspace","api-google-docs"] {
             let service = catalog.services.iter().find(|service| service.service_slug == slug).unwrap();
             let endpoint = service.endpoints.iter().find(|endpoint| endpoint.name == "docs_batch_update_document").unwrap();
-            let (status, body) = mcp_call(&state,&owner,service,endpoint,&json!({"documentId":"document-2", "body":{"requests":[]}})).await.unwrap();
+            let (status, body) = mcp_call(&state,&owner,service,endpoint,&json!({"documentId":"document-2", "requests":[]})).await.unwrap();
             assert_eq!(status,200); assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["host"],"docs.googleapis.com");
         }
         let service = catalog.services.iter_mut().find(|service| service.service_slug == "api-google-workspace").unwrap();
@@ -464,57 +623,59 @@ async fn workspace_rest_typed_generic_mcp_and_product_service_reach_real_host_wi
 }
 
 #[tokio::test]
-async fn workspace_inactive_errors_are_actionable_on_rest_and_mcp() {
+async fn drive_and_workspace_inactive_errors_are_actionable_on_rest_and_mcp() {
     let db = connect_test_database("workspace_inactive").await.unwrap();
     seed(&db, false).await;
-    let owner = uuid::Uuid::new_v4().to_string();
-    connect(&db, &owner, "api-google-workspace").await;
-    let state = test_app_state(db.clone());
-    let error = rest_call(
-        &state,
-        &owner,
-        "api-google-workspace",
-        "/v1/documents/document:batchUpdate",
-        false,
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(error, AppError::WorkspaceDestinationsNotActivated));
+    for slug in ["api-google-drive", "api-google-workspace"] {
+        let owner = uuid::Uuid::new_v4().to_string();
+        connect(&db, &owner, slug).await;
+        let state = test_app_state(db.clone());
+        let error = rest_call(
+            &state,
+            &owner,
+            slug,
+            "/v1/documents/document:batchUpdate",
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::WorkspaceDestinationsNotActivated));
 
-    assert_eq!(error.error_code(), 12300);
-    assert_eq!(
-        axum::response::IntoResponse::into_response(error).status(),
-        503
-    );
-    let mut catalog = mcp_service::load_operation_catalog(
-        &db,
-        &state.node_ws_manager,
-        &owner,
-        mcp_service::NodeScope::Unrestricted,
-        mcp_service::ServiceScope::Unrestricted,
-    )
-    .await
-    .unwrap();
-    assert!(mcp_service::inactive_workspace_tool(
-        "api-google-workspace__docs_batch_update_document",
-        &catalog.services
-    ));
-    let service = catalog
-        .services
-        .iter_mut()
-        .find(|service| service.service_slug == "api-google-workspace")
+        assert_eq!(error.error_code(), 12300);
+        assert_eq!(
+            axum::response::IntoResponse::into_response(error).status(),
+            503
+        );
+        let mut catalog = mcp_service::load_operation_catalog(
+            &db,
+            &state.node_ws_manager,
+            &owner,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Unrestricted,
+        )
+        .await
         .unwrap();
-    service.is_generic_proxy = true;
-    let mut endpoint = service.endpoints.remove(0);
-    endpoint.endpoint_id = mcp_service::GENERIC_PROXY_ENDPOINT_ID.into();
-    assert!(matches!(
-        mcp_service::prepare_proxy_tool_call(
-            service,
-            &endpoint,
-            &json!({"method":"POST","path":"/v1/documents/doc:batchUpdate","body":{"requests":[]}})
-        ),
-        Err(AppError::WorkspaceDestinationsNotActivated)
-    ));
+        assert!(mcp_service::inactive_workspace_tool(
+            &format!("{slug}__docs_batch_update_document"),
+            &catalog.services
+        ));
+        let service = catalog
+            .services
+            .iter_mut()
+            .find(|service| service.service_slug == slug)
+            .unwrap();
+        service.is_generic_proxy = true;
+        let mut endpoint = service.endpoints.remove(0);
+        endpoint.endpoint_id = mcp_service::GENERIC_PROXY_ENDPOINT_ID.into();
+        assert!(matches!(
+            mcp_service::prepare_proxy_tool_call(
+                service,
+                &endpoint,
+                &json!({"method":"POST","path":"/v1/documents/doc:batchUpdate","body":{"requests":[]}})
+            ),
+            Err(AppError::WorkspaceDestinationsNotActivated)
+        ));
+    }
 }
 
 #[tokio::test]
