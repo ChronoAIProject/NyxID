@@ -942,7 +942,16 @@ pub async fn create_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    Json(mut body): Json<CreateServiceRequest>,
+    Json(body): Json<CreateServiceRequest>,
+) -> AppResult<Json<ServiceResponse>> {
+    Box::pin(create_service_inner(state, auth_user, tele, body)).await
+}
+
+async fn create_service_inner(
+    state: AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    mut body: CreateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
     require_admin(&state, &auth_user).await?;
 
@@ -1730,7 +1739,20 @@ pub async fn update_service(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path(service_id): Path<String>,
-    Json(mut body): Json<UpdateServiceRequest>,
+    Json(body): Json<UpdateServiceRequest>,
+) -> AppResult<Json<ServiceResponse>> {
+    Box::pin(update_service_inner(
+        state, auth_user, tele, service_id, body,
+    ))
+    .await
+}
+
+async fn update_service_inner(
+    state: AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    service_id: String,
+    mut body: UpdateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
     let skill_fingerprint_input = serde_json::to_value(&body)
         .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
