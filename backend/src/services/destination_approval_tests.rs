@@ -24,7 +24,7 @@ async fn setup_approval(
     };
     let endpoint = state.db.collection::<crate::models::service_endpoint::ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME).find_one(doc! {"service_id":user_service.catalog_service_id.as_ref().unwrap(),"name":operation_name}).await.unwrap().unwrap();
     let args = if operation_name == "docs_batch_update_document" {
-        serde_json::json!({"documentId":"approval-doc","body":{"requests":[]}})
+        serde_json::json!({"documentId":"approval-doc","requests":[]})
     } else {
         serde_json::json!({})
     };

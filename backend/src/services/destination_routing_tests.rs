@@ -513,7 +513,7 @@ async fn drive_and_workspace_route_all_editors_over_rest_typed_and_generic_mcp()
                         &owner,
                         service,
                         endpoint,
-                        &json!({parameter: "editor-id", "body": {"requests": []}}),
+                        &json!({parameter: "editor-id", "requests": []}),
                     )
                     .await
                     .unwrap();
@@ -576,7 +576,7 @@ async fn workspace_rest_typed_generic_mcp_and_product_service_reach_real_host_wi
         for slug in ["api-google-workspace","api-google-docs"] {
             let service = catalog.services.iter().find(|service| service.service_slug == slug).unwrap();
             let endpoint = service.endpoints.iter().find(|endpoint| endpoint.name == "docs_batch_update_document").unwrap();
-            let (status, body) = mcp_call(&state,&owner,service,endpoint,&json!({"documentId":"document-2", "body":{"requests":[]}})).await.unwrap();
+            let (status, body) = mcp_call(&state,&owner,service,endpoint,&json!({"documentId":"document-2", "requests":[]})).await.unwrap();
             assert_eq!(status,200); assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["host"],"docs.googleapis.com");
         }
         let service = catalog.services.iter_mut().find(|service| service.service_slug == "api-google-workspace").unwrap();

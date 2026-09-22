@@ -23,7 +23,7 @@ async fn workspace_mcp_protocol_typed_and_universal_calls_resolve_the_same_googl
             for slug in ["api-google-workspace","api-google-drive","api-google-docs"] {
                 for universal in [false,true] {
                     let tool = format!("{slug}__docs_batch_update_document");
-                    let args = serde_json::json!({"documentId":"protocol-doc","body":{"requests":[]}});
+                    let args = serde_json::json!({"documentId":"protocol-doc","requests":[]});
                     let params = if universal { serde_json::json!({"name":"nyx__call_tool","arguments":{"tool_name":tool,"arguments_json":args.to_string()}}) } else { serde_json::json!({"name":tool,"arguments":args}) };
                     let request = JsonRpcRequest {jsonrpc:JSONRPC_VERSION.into(),id:Some(serde_json::json!(1)),method:"tools/call".into(),params:Some(params)};
                     let response = handle_tools_call(&state,&auth,None,&request,false,enforce_billing_egress_classification(Some(BillingRoutePolicy::Metered(BillingIngress::Mcp)),BillingIngress::Mcp).unwrap()).await;
