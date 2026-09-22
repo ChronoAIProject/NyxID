@@ -14,6 +14,8 @@ import {
   useDeleteChannelConversation,
 } from "@/hooks/use-channel-conversations";
 import { useApiKeys } from "@/hooks/use-api-keys";
+import { useOrgs } from "@/hooks/use-orgs";
+import { useAuthStore } from "@/stores/auth-store";
 import {
   buildCreateChannelBotSchema,
   createDeviceConversationSchema,
@@ -89,9 +91,11 @@ function statusBadgeVariant(
 
 function BotRow({
   bot,
+  ownerLabel,
   onDelete,
 }: {
   readonly bot: ChannelBotItem;
+  readonly ownerLabel?: string;
   readonly onDelete: (id: string) => void;
 }) {
   const navigate = useNavigate();
@@ -110,6 +114,7 @@ function BotRow({
         {bot.platform_bot_username || "-"}
       </TableCell>
       <TableCell className="font-medium">{bot.label}</TableCell>
+      {ownerLabel && <TableCell className="text-xs text-muted-foreground">{ownerLabel}</TableCell>}
       <TableCell>
         <Badge variant={statusBadgeVariant(bot.status)}>
           {bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
@@ -148,9 +153,11 @@ function BotRow({
 
 function BotCard({
   bot,
+  ownerLabel,
   onDelete,
 }: {
   readonly bot: ChannelBotItem;
+  readonly ownerLabel?: string;
   readonly onDelete: (id: string) => void;
 }) {
   const navigate = useNavigate();
@@ -179,6 +186,7 @@ function BotCard({
       <p className="pr-10 text-[13px] font-semibold text-foreground truncate">{bot.label}</p>
       <p className="text-[11px] text-muted-foreground">{bot.platform_bot_username || "No username"}</p>
       <div className="mt-2 flex flex-wrap gap-1.5">
+        {ownerLabel && <Badge variant="secondary">{ownerLabel}</Badge>}
         <Badge variant="secondary">{getPlatform(bot.platform).label}</Badge>
         <Badge variant={statusBadgeVariant(bot.status)}>
           {bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
@@ -194,19 +202,29 @@ function BotCard({
 
 function BotsTable({
   bots,
+  showOwner,
   onDelete,
   viewMode,
 }: {
   readonly bots: readonly ChannelBotItem[];
+  readonly showOwner: boolean;
   readonly onDelete: (id: string) => void;
   readonly viewMode: ViewMode;
 }) {
+  const { data: orgs } = useOrgs();
+  const userId = useAuthStore((state) => state.user?.id);
+  const ownerLabels = new Map(orgs?.map((org) => [org.id, org.display_name || org.id]));
+  function ownerLabel(bot: ChannelBotItem) {
+    if (!showOwner) return undefined;
+    return bot.user_id === userId ? "User" : ownerLabels.get(bot.user_id) ?? bot.user_id;
+  }
+
   return (
     <>
       {/* Mobile card view (always cards) */}
       <div className="flex flex-col gap-3 md:hidden">
         {bots.map((bot) => (
-          <BotCard key={bot.id} bot={bot} onDelete={onDelete} />
+          <BotCard key={bot.id} bot={bot} ownerLabel={ownerLabel(bot)} onDelete={onDelete} />
         ))}
       </div>
 
@@ -214,7 +232,7 @@ function BotsTable({
       {viewMode === "grid" && (
         <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {bots.map((bot) => (
-            <BotCard key={bot.id} bot={bot} onDelete={onDelete} />
+            <BotCard key={bot.id} bot={bot} ownerLabel={ownerLabel(bot)} onDelete={onDelete} />
           ))}
         </div>
       )}
@@ -228,6 +246,7 @@ function BotsTable({
                 <TableHead>Platform</TableHead>
                 <TableHead>Bot Username</TableHead>
                 <TableHead>Label</TableHead>
+                {showOwner && <TableHead>Scope</TableHead>}
                 <TableHead>Status</TableHead>
                 <TableHead>Webhook</TableHead>
                 <TableHead>Created</TableHead>
@@ -236,7 +255,7 @@ function BotsTable({
             </TableHeader>
             <TableBody>
               {bots.map((bot) => (
-                <BotRow key={bot.id} bot={bot} onDelete={onDelete} />
+                <BotRow key={bot.id} bot={bot} ownerLabel={ownerLabel(bot)} onDelete={onDelete} />
               ))}
             </TableBody>
           </Table>
@@ -929,10 +948,12 @@ function DeviceChannelRow({
 
 function DeviceChannelsSection({
   orgId,
+  onScopeChange,
   onAdd,
   viewMode,
 }: {
   readonly orgId: string | null;
+  readonly onScopeChange: (orgId: string | null) => void;
   readonly onAdd: () => void;
   readonly viewMode: ViewMode;
 }) {
@@ -967,7 +988,10 @@ function DeviceChannelsSection({
             non-bot event sources.
           </p>
         </div>
-        <div className="shrink-0">
+        <div className="flex shrink-0 flex-wrap items-center gap-3">
+          <div className="w-36 sm:w-48">
+            <OrgScopeSelect value={orgId} onChange={onScopeChange} label="Device channel scope" />
+          </div>
           <AddCtaButton label="Add Device Channel" onClick={onAdd} />
         </div>
       </div>
@@ -1052,8 +1076,12 @@ function ChannelBotsList() {
   const navigate = useNavigate();
   const telegram = useTelegramNewConfiguration(undefined, false);
   const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; label?: string; target_org_id?: string; request_id?: string };
-  const [scopeOrgId, setScopeOrgId] = useState<string | null>(search.target_org_id ?? null);
-  const { data: bots, isLoading, error, refetch } = useChannelBots({ orgId: scopeOrgId });
+  const [scope, setScope] = useState<string | null>(search.target_org_id ?? "all");
+  const scopeOrgId = scope === "all" ? null : scope;
+  const [deviceOrgId, setDeviceOrgId] = useState<string | null>(search.target_org_id ?? null);
+  const { data: bots, isLoading, error, refetch } = useChannelBots(
+    scope === "all" ? { scope: "all" } : scope === null ? { scope: "user" } : { orgId: scopeOrgId },
+  );
   const [createOpen, setCreateOpen] = useState(Boolean(search.connect));
   const [previousConnect, setPreviousConnect] = useState(search.connect);
   const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
@@ -1081,7 +1109,7 @@ function ChannelBotsList() {
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <span className="text-xs text-muted-foreground">Scope</span>
             <div className="w-36 sm:w-48">
-              <OrgScopeSelect value={scopeOrgId} onChange={setScopeOrgId} />
+              <OrgScopeSelect value={scope} onChange={setScope} allowAll personalLabel="User" />
             </div>
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
             <AddCtaButton label="Add Bot" onClick={() => setCreateOpen(true)} />
@@ -1110,11 +1138,12 @@ function ChannelBotsList() {
       ) : !bots || bots.length === 0 ? (
         <EmptyState />
       ) : (
-        <BotsTable bots={bots} onDelete={setDeleteTarget} viewMode={viewMode} />
+        <BotsTable bots={bots} showOwner={scope === "all"} onDelete={setDeleteTarget} viewMode={viewMode} />
       )}
 
       <DeviceChannelsSection
-        orgId={scopeOrgId}
+        orgId={deviceOrgId}
+        onScopeChange={setDeviceOrgId}
         onAdd={() => setCreateDeviceOpen(true)}
         viewMode={viewMode}
       />
@@ -1129,7 +1158,7 @@ function ChannelBotsList() {
       <CreateDeviceChannelDialog
         open={createDeviceOpen}
         onOpenChange={setCreateDeviceOpen}
-        defaultOrgId={scopeOrgId}
+        defaultOrgId={deviceOrgId}
       />
       <DeleteBotDialog botId={deleteTarget} deletionNote={(() => { const bot = bots?.find((bot) => bot.id === deleteTarget); return bot?.credential_source === "telegram_manager" ? TELEGRAM_MANAGER_DELETION_NOTE : bot && bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined; })()} onClose={() => setDeleteTarget(null)} />
     </div>

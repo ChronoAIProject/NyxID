@@ -1414,6 +1414,37 @@ pub async fn list_bots(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<C
     Ok(bots)
 }
 
+/// List active personal and administered-org bots in one newest-first list.
+pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec<ChannelBot>> {
+    use crate::models::user::{COLLECTION_NAME as USERS, User};
+
+    let memberships = super::org_service::list_memberships_for_member(db, actor, false).await?;
+    let org_ids: Vec<_> = memberships
+        .into_iter()
+        .filter(|membership| membership.role.can_admin())
+        .map(|membership| membership.org_user_id)
+        .collect();
+    let mut owner_ids = vec![actor.to_string()];
+    if !org_ids.is_empty() {
+        // Match the single-org ACL: a membership must still point to an org.
+        let orgs: Vec<User> = db
+            .collection::<User>(USERS)
+            .find(doc! { "_id": { "$in": org_ids }, "user_type": "org" })
+            .await?
+            .try_collect()
+            .await?;
+        owner_ids.extend(orgs.into_iter().map(|org| org.id));
+    }
+
+    Ok(db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .find(doc! { "user_id": { "$in": owner_ids }, "is_active": true })
+        .sort(doc! { "created_at": -1, "_id": 1 })
+        .await?
+        .try_collect()
+        .await?)
+}
+
 /// Get a bot by ID regardless of ownership.
 pub async fn get_bot(db: &mongodb::Database, bot_id: &str) -> AppResult<ChannelBot> {
     db.collection::<ChannelBot>(COLLECTION_NAME)
