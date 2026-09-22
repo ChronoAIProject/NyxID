@@ -24,13 +24,11 @@ use crate::{
         provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig},
         user_api_key::{COLLECTION_NAME as KEYS, UserApiKey},
     },
-    test_utils::{connect_test_database, test_app_state, test_auth_user, test_user},
+    test_utils::{connect_transaction_test_database, test_app_state, test_auth_user, test_user},
 };
 
-async fn fixture() -> (AppState, XAdapter, MockServer, String, String) {
-    let db = connect_test_database("x_channel")
-        .await
-        .expect("test MongoDB");
+pub(crate) async fn fixture() -> (AppState, XAdapter, MockServer, String, String) {
+    let db = connect_transaction_test_database("x_channel").await;
     let state = test_app_state(db);
     super::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([2u8; 32]));
     let server = MockServer::start().await;
@@ -131,7 +129,7 @@ async fn create(
     .map(|result| result.bot)
 }
 
-async fn insert_bot(state: &AppState, owner: &str, connection: &str) -> ChannelBot {
+pub(crate) async fn insert_bot(state: &AppState, owner: &str, connection: &str) -> ChannelBot {
     let bot: ChannelBot = bson::from_document(doc! {
         "_id": uuid::Uuid::new_v4().to_string(), "user_id": owner, "platform": "x", "label": "Support",
         "credential_source": "connection", "connection_id": connection, "poll_cursor": "100",
@@ -562,7 +560,10 @@ async fn oauth_start_uses_shared_client_pkce_popup_nonce_and_required_scopes() {
         .query_pairs()
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(params["client_id"], "platform-client");
-    assert_eq!(params["scope"], REQUIRED_SCOPES.join(" "));
+    assert_eq!(
+        params["scope"],
+        super::channel_adapters::x::PUBLIC_SCOPES.join(" ")
+    );
     assert_eq!(params["code_challenge_method"], "S256");
     assert_eq!(
         params["state"],
@@ -674,7 +675,10 @@ async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config()
             .unwrap();
     assert!(bootstrap.available);
     assert_eq!(bootstrap.provider_slug, Some("twitter"));
-    assert_eq!(bootstrap.required_scopes, REQUIRED_SCOPES);
+    assert_eq!(
+        bootstrap.required_scopes,
+        super::channel_adapters::x::PUBLIC_SCOPES
+    );
     admin::delete(State(state.clone()), auth, Path("x".into()))
         .await
         .unwrap();
@@ -768,7 +772,7 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
 mod review;
 
 #[path = "channel_x_webhook_tests.rs"]
-mod webhooks;
+pub(crate) mod webhooks;
 
 #[path = "channel_x_billing_tests.rs"]
-mod billing;
+pub(crate) mod billing;

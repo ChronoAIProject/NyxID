@@ -50,7 +50,7 @@ pub mod channel_routing_service;
 pub mod channel_send_service;
 pub mod channel_verification_service;
 #[cfg(test)]
-mod channel_x_tests;
+pub(crate) mod channel_x_tests;
 pub mod chatgpt_translator;
 pub mod cli_pairing_service;
 pub mod cloud_credential_verify;
@@ -123,6 +123,7 @@ pub mod org_invite_service;
 pub mod org_role_scope_service;
 pub mod org_service;
 pub mod org_slug;
+pub mod ownership_transfer_access;
 pub mod ownership_transfer_service;
 #[cfg(test)]
 mod ownership_transfer_tests;

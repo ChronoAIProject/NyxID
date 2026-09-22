@@ -10,6 +10,18 @@ Authentication resolves the live parent key for scopes, service/node restriction
 
 Login credential labels combine the sanitized client hostname and requested profile (up to 96 characters), so separate profiles on one machine remain identifiable. Public preview exposes request context and status only; key metadata is available through authenticated selection and self routes or credential delivery. Approval, denial, and delivery audits retain the actor's IP and user agent, with the request ID linking the events. A failed expiry cleanup is logged and retained for retry while the sweep continues processing other exchanges.
 
+## Asset ownership transfer
+
+General Agent Keys with `write` or `admin` scope and `allow_all_services=true`
+can transfer their owner's catalog definitions and supported channel bots through
+`/api/v1/ownership/{kind}/{id}`. An org-owned key acts as that organization;
+a personal key can also act through its owner's active, unrestricted org-admin
+membership. Platform-admin status on the key owner grants no cross-owner override.
+Proxy-only, scheduled-invocation, and limited connected-service keys cannot
+transfer these assets. There is no per-transfer mobile approval. Preview, live
+permission checks, transactional receipts and agent-attributed audit still apply.
+See [Ownership transfers](ADMIN_OWNERSHIP_TRANSFERS.md) for routes and adapter limits.
+
 ## Overview
 
 Agent isolation lets different AI agents (Claude Code, Codex, custom bots, etc.) belonging to the same NyxID user operate with independent credentials, rate limits, scopes, and audit trails. There is no separate "agent" model -- an **API key is the agent identity**.

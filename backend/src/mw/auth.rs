@@ -458,6 +458,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
         segments.first().copied(),
         Some(
             "admin"
+                | "ownership"
                 | "ssh"
                 | "assistant"
                 | "auth"
@@ -1658,6 +1659,8 @@ mod tests {
             "/api/v1/integrations/openclaw/mappings",
             "/api/v1/billing/wallet",
             "/api/v1/oracle/pools",
+            "/api/v1/ownership/service/id/authorization",
+            "/api/v1/ownership/service/id/destinations",
             "/api/v1/channel-bots",
             "/api/v1/channel-conversations/conversation-id",
             "/api/v1/nodes/ws",

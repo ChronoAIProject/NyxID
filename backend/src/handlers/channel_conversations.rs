@@ -219,8 +219,9 @@ fn conversation_to_item(
         agent_api_key_id: conv.agent_api_key_id.clone(),
         default_agent: conv.default_agent,
         allow_agent_initiated: conv.allow_agent_initiated,
-        capabilities: crate::services::channel_adapters::outbound_capabilities(
+        capabilities: crate::services::channel_adapters::conversation_capabilities(
             &conv.platform,
+            &conv.platform_conversation_id,
             &state.token_exchange_cache,
         ),
         is_active: conv.is_active,

@@ -19,12 +19,14 @@ Drive, Gmail, Docs, Sheets, or Slides connections.
 
 The full API scope prefix is `https://www.googleapis.com/auth/`. All seven also
 request `openid email profile`. Workspace bundles Drive, Calendar, Gmail,
-and, after multi-origin activation, Docs, Sheets, and Slides; Google does not have a single Workspace OAuth scope. Workspace and
+Docs, Sheets, and Slides; Google does not have a single Workspace OAuth scope. Workspace and
 Gmail require `gmail.send` for sending and replying. It is selected and locked in
 the permission picker. Both custom and managed OAuth requests must include it,
 and Google must return it in the granted scopes before authorization completes.
 Native Docs/Sheets/Slides editing is available through the three separate services
-and through Workspace after the multi-origin activation described below.
+and through both Drive and Workspace with automatic startup activation as described below.
+Drive includes the editor operations under its existing Drive permissions; Workspace
+includes that expanded Drive bundle together with Calendar and Gmail.
 Workspace administration remains outside this bundle.
 
 Gmail access is limited to `gmail.readonly` and `gmail.send`. NyxID does not
@@ -97,8 +99,8 @@ provider; creating a sign-in client alone does not provision managed services.
 ## NyxID Setup
 
 1. Startup seeds the seven service rows and their operation catalogs. This
-   product addition creates Docs, Sheets, and Slides catalog entries. Workspace
-   receives the same editor operations when its temporary activation gate is enabled. Existing
+   product addition creates Docs, Sheets, and Slides catalog entries. Drive and Workspace
+   receive the same editor operations when the shared temporary activation gate is enabled. Existing
    Google service IDs, slugs, endpoints, credentials, agent bindings, node
    configuration, resource URIs, grants, and audit/billing identities stay in
    place. Repeated startup does not duplicate entries. Legacy Google token
@@ -146,11 +148,13 @@ upgrade an existing token.
 
 ## Docs, Sheets, and Slides operations
 
-Each separate editor service has one origin. Workspace also exposes these
+Each separate editor service has one origin. Drive and Workspace also expose these
 operations after multi-origin activation. Existing `api-google`, Drive, Calendar,
 Gmail, and Workspace operations retain their original paths and request contracts;
-none are retargeted to these hosts. Connect Workspace or each desired editor
-product according to the required scope.
+none are retargeted to these hosts. Connect Drive, Workspace, or an individual editor
+product according to the required scope. An existing connection with full `drive`
+access needs no additional OAuth scope for these editor operations; the Google Cloud
+project must have the corresponding APIs enabled.
 Native `documents`, `spreadsheets`, and `presentations` OAuth scopes are not added:
 full `drive` already authorizes every published operation, subject to the user's
 file permissions. The permission picker also allows `drive.file` (app-authorized
@@ -232,7 +236,8 @@ These APIs have no account-level credential probe. The UI therefore hides the
 automatic Test Agent Key action for the three editor products. Verify with a
 read using an existing document ID, or create a temporary document with the
 user's authorization and edit it through the published operations. Drive file
-listing, moving, exporting, and deleting remain on the existing Drive service.
+listing, moving, exporting, and deleting are available alongside the editor operations
+on Drive and Workspace.
 
 ## Mixed-version rollout
 
@@ -276,7 +281,8 @@ rewritten to complete the rollout.
   `POST /upload/drive/v3/files?uploadType=media`, rename/move it with
   `PATCH /drive/v3/files/{fileId}`, download it with `alt=media`, then delete
   the temporary files and folder. Export native Google documents through
-  `/drive/v3/files/{fileId}/export?mimeType=...`.
+  `/drive/v3/files/{fileId}/export?mimeType=...`. After activation, use the same
+  Drive connection for the Docs, Sheets, and Slides paths listed above.
 - Gmail: list `/gmail/v1/users/me/messages?maxResults=1`, then read a returned
   message with `GET /gmail/v1/users/me/messages/{id}?format=full`. With the
   required `gmail.send` permission and the user's intent to send, submit a
@@ -312,13 +318,13 @@ References: [Google web-server OAuth](https://developers.google.com/identity/pro
 [Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes),
 [Gmail threads and replies](https://developers.google.com/workspace/gmail/api/guides/threads).
 
-## Workspace multi-origin routing
+## Drive and Workspace multi-origin routing
 
-`api-google-workspace` adds the same 13 editor operations as the separate Docs, Sheets, and Slides services. Those three services remain available. The public spec at `/api/v1/catalog-specs/google-workspace/openapi.json` contains 38 operations. Its root server remains `https://www.googleapis.com`; editor path items copy the product overlays' root servers. OpenAPI operation > path > root precedence identifies each destination without a vendor extension. Composition leaves the source overlays unchanged.
+`api-google-drive` includes its nine file operations plus the same 13 editor operations as the separate Docs, Sheets, and Slides services. Its public spec at `/api/v1/catalog-specs/google-drive/openapi.json` contains 22 operations. `api-google-workspace` composes that expanded Drive spec with 13 Calendar and three Gmail operations, for 38 operations at `/api/v1/catalog-specs/google-workspace/openapi.json`. The separate editor services remain available. Both combined specs keep `https://www.googleapis.com` as their root server; editor path items copy the product overlays' root servers. OpenAPI operation > path > root precedence identifies each destination without a vendor extension. Composition leaves the raw source overlays and all existing operation definitions unchanged.
 
 ### Multi-origin design and decisions
 
-Platform keys cannot be combined with a destination map, including disabled platform-key configurations and legacy catalog master credentials. A bearer injection method alone does not establish authority to send a platform-held key to additional recipients. Admin writes reject this combination; runtime catalog loading, target selection, and master-credential authorization also reject it before dispatch. Workspace continues to use user-owned Google OAuth credentials and its provider requirement supplies the effective bearer injection.
+Platform keys cannot be combined with a destination map, including disabled platform-key configurations and legacy catalog master credentials. A bearer injection method alone does not establish authority to send a platform-held key to additional recipients. Admin writes reject this combination; runtime catalog loading, target selection, and master-credential authorization also reject it before dispatch. Drive and Workspace use user-owned Google OAuth credentials; each provider requirement supplies effective bearer injection.
 
 The catalog owns `destination_targets`, mapping stable IDs (`docs`, `sheets`, `slides`) to exact
 normalized HTTPS origins. Google recipients are explicitly limited to `docs.googleapis.com`,
@@ -330,17 +336,18 @@ destination maps, including custom admin maps. Services without a map retain the
 The endpoint selector is a top-level field because older endpoint writers replace `parameters`
 wholesale. Those writers leave the independent target field intact. Absent selectors and empty maps
 are omitted from serialization; endpoint contract and catalog digests include a target only when
-present. Existing operation contracts, positive generations, identifiers, grants, resource URIs,
-connections, keys, agent bindings, node configuration, billing attribution, and audit identities are
-preserved.
+present. Adding editor routing preserves existing operation contracts and positive generations.
+The six separate Drive contract corrections described below advance their generations and require
+affected grants to be re-issued. Existing identifiers, resource URIs, connections, keys, agent
+bindings, node configuration, billing attribution, and audit identities are preserved.
 
 REST, generic MCP, typed MCP, and every exact-approval resolution mode select the operation's origin
 before dispatch or execution-authority hashing. The existing destination URL field binds the origin;
 execution consumes and revalidates that resolved target without retargeting it. The real v1 and v2
 policy projections retain their original shapes. The whole-catalog and exact-view fences have no
 special compatibility variant for the added operations: adding operations changes the catalog view
-that a human approved. Durable grants bind the endpoint contract, so existing operation grants remain
-valid. Nested execution futures are boxed to bound the size of enclosing async state machines
+that a human approved. Durable grants bind the endpoint contract, so grants on unchanged operations
+remain valid. Nested execution futures are boxed to bound the size of enclosing async state machines
 without changing execution order or stack settings.
 
 Selected operations require effective bearer injection. Google keeps its stored service
@@ -384,25 +391,26 @@ Cache inputs receive the resolved origin so different targets cannot collide. Bi
 service-keyed. Target dispatch, completion, and denial events use the existing chained audit append
 path and record the stable target ID and sanitized origin as metadata.
 
-The hosted spec always publishes 38 operations. A temporary, off-by-default writer gate orders
-readers before activation writes while keeping spec composition independent of database access.
-Before activation, editor calls return actionable HTTP 503/code 12300,
-`workspace_destinations_not_activated`; this rollout state is excluded from proxy-fault telemetry.
-Activation uses a known-default compare-and-set so administrator changes are preserved. A skipped
-activation with an empty map logs the first failed precondition at warning level; skipped metadata
-updates log at debug level. The activation order and gate removal condition are below.
+The hosted specs publish 22 Drive operations and 38 Workspace operations. Startup automatically seeds complete editor maps and policies, migrates only exact historical defaults, and additively synchronizes endpoint rows. It preserves custom policies/maps, disabled endpoints, custom endpoint names, and existing connection and credential IDs. If a recognized editor origin is missing from a custom map, sync retains ordinary operations and any mapped editors, and logs one bounded diagnostic; it never fills custom maps by guessing. Malformed and unknown origins remain errors.
 
-This design retains the separate product services and source overlays, and requires no credential or
-identity migration or billing redesign. Token-exchange targets, selected WebSocket support, and
-redirect-hop reauthorization are outside its scope.
+HTTP 503/code 12300, `workspace_destinations_not_activated`, applies only to an empty destination map with the exact legacy policy. Inspect the server log for `Google editor destinations were not activated`, then the catalog's policy, map and effective provider requirement. A partial/custom map retains its ordinary policy/destination denials. No activation environment variable is required.
 
-### Activation order and approval window
+### Upload contracts and tool projection
 
-1. Deploy the new backend readers everywhere with `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=false` (the default). No editor endpoints activate just by deploying. The hosted spec is already 38 operations; editor calls return actionable HTTP 503/code 12300, `workspace_destinations_not_activated`, during this short operator-controlled window.
-2. Upgrade every node used by Workspace, including failover candidates, and verify it advertises HTTP signature v2. Old nodes continue handling non-target operations.
-3. Set `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=true` and restart a backend writer. Startup compare-and-sets only the known default Workspace policy plus absent/empty map, then additively inserts the 13 endpoint rows. Check the materialized catalog has 38 endpoints and the three targets. An admin-edited policy/map requires an explicit administrator decision; startup never overwrites it. When activation is skipped with an empty map, startup warns with the first failed precondition name; skipped description/limitation updates are logged at debug level.
-4. Leave the gate enabled. It is idempotent and safe on subsequent restarts; disabling it does not reverse persisted activation. Remove this temporary gate once all environments have activated.
+Both existing upload routes (`POST /upload/drive/v3/files` and `PATCH /upload/drive/v3/files/{fileId}`) support HTTP `uploadType=media` or `uploadType=multipart`. Media forwards raw bytes with the caller's content type. Multipart forwards the complete body unchanged with `Content-Type: multipart/related; boundary=...`: first JSON File metadata, then content with its own content type. The hosted spec includes full HTML-to-Google-Doc import examples with metadata `mimeType: application/vnd.google-apps.document`. POST metadata may include `parents`; PATCH moves use the existing metadata update route's `addParents`/`removeParents` query parameters. POST imports a new document; PATCH replaces the existing document content. Use `docs_batch_update_document` for targeted edits.
 
-Approvals pending at activation may require one re-approval. The exact-approval lifetime defaults to 30 seconds and API settings allow at most 300 seconds, so this affects at most five minutes of outstanding API-configured approvals. The whole-catalog fence remains unchanged: if a caller's visible catalog includes Workspace, its new operations can cause `catalog_drift` on a pending exact approval for any service in that catalog. Workspace policy changes also cause `execution_authority_drift` for pending approvals carrying an execution digest; catalog drift is checked first and takes precedence when both changed. Rows predating the execution digest still enforce the catalog fence. Observation reports live drift only after human approval; a request still awaiting the human decision remains pending. Redemption enforces the same fences before provider effects. Durable operation grants bind the endpoint contract, not the catalog or union policy, and existing endpoint grants remain valid. Ordinary connection-level approvals do not gain an exact-catalog fence. Direct database edits to approval timeouts outside the supported API limits can extend the window.
+`GET /api/v1/catalog-specs/{key}/openapi.json` is the complete HTTP contract. `GET /api/v1/catalog/{slug}/endpoints` exposes the parsed execution/tool projection: `x-nyxid-mcp-enum: ["media"]` on the query parameter and `x-nyxid-mcp-media: "application/octet-stream"` on requestBody select the existing MCP media tool. These markers sit outside schemas, narrow declared choices, and grant no routing or header authority. Typed and exact MCP calls accept base64 media bodies and emit decoded octet-stream bytes. They reject multipart before approval or provider effects. Generic MCP uses a fixed `Content-Type: application/json`, including when forwarding a string body as raw bytes, and cannot construct a valid multipart request; use the REST/CLI proxy for multipart bodies. Content-Type cannot be overridden through tool header arguments.
 
-An old backend replica ignores top-level `target_id` and the policy's new target field. It matches a Docs path by method/template and sends it to the legacy `www.googleapis.com` base, where Google returns 404. This degraded request remains within the same Google provider; no credential crosses providers. That same-provider fact is the only reason this is tolerable as a rollback/mixed-version failure mode. A non-Google multi-target rollout requires a gate that excludes old readers before any target metadata is published. The supported order above upgrades readers first. Old startup endpoint writers do not remove the independent top-level target field when replacing `parameters`.
+### Rollout prerequisites and approval drift
+
+Before the first automatic startup, inventory the actual commit of every serving backend reader and the HTTP signature v2 capabilities of every participating/failover node. A version label or one load-balanced health response does not prove fleet readiness. Enable Docs, Sheets and Slides APIs in the Google Cloud project containing the OAuth client, alongside the other APIs used by that connection. Confirm the connection's granted scope and file permissions independently.
+
+A Google HTTP 403 with reason `SERVICE_DISABLED` means the API named by the provider is disabled in the `consumer` project named by that error. Enable that API in that project and allow propagation before retrying. NyxID preserves Google's status and reason. This differs from NyxID's 12300 reconciliation failure and is not repaired by reconnecting or recreating the service. API enablement does not change billing configuration, OAuth scopes, or file permissions automatically.
+
+Avoid overlapping startup writers from different releases: an older writer can restore the previous upload contracts. Require a final authoritative endpoint sync on the new build. Verify persisted maps/policies, Drive22/Workspace38, per-replica logs and stable connection IDs. Repair interrupted startup by repeating normal startup; missing seeded endpoint rows are recreated without deleting unrelated rows.
+
+Pending exact approvals retain catalog, execution-authority and operation-generation fences. The six corrected operations per service are `drive_get_file`, `drive_create_file`, `drive_update_file`, `drive_copy_file`, `drive_upload_file`, and `drive_upload_file_content`. Their IDs remain stable, contracts change, and generations advance once on settled reconciliation. Durable grants on these 12 rows fail closed with contract drift and must be re-issued through the normal human approval flow. Other existing rows retain contracts and generations; legacy installations additionally gain 13 editor rows per service. The reviewed test identity/digest/generation inventory is in `backend/specs/fixtures/google-auto-activation-contract-changes.json`; actual live IDs and grant counts must be inventoried before rollout. New catalog visibility can cause pending exact approvals for other visible services to drift as well. Ordinary connection-level approval behavior is unchanged.
+
+Pin and verify the rollback image by actual commit/content against the routing-capable baseline `6f633320` (the `v0.29.1` tag name alone is insufficient). Older images without target routing are unsupported. A baseline startup writer can restore the previous 12 contracts and advance generations again; grants issued for corrected contracts then drift until the fleet is consistent. Activated destination maps persist on rollback.
+
+Production acceptance is separate from local validation and Discovery metadata. Using the exact existing connection and dedicated test files, verify Docs create/edit/readback, Sheets formula plus calculated-value readback, HTML multipart Doc import and update/export, and a Slides host smoke through Workspace and Drive. Record the deployed commit, connection ID, destination, response/readback and test-owned resource IDs. Never treat a Discovery match or local echo response as proof that Google executed a request.

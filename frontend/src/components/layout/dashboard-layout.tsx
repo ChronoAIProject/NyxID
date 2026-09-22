@@ -92,8 +92,10 @@ export function DashboardLayout() {
   // over the dashboard. Gated on auth / `GET /users/me` settling so we never
   // flash the wrong thing.
   const onboarding = useShouldShowOnboarding();
+  // Shared channel onboarding must stay reachable through setup and bot routing.
+  const isChannelBotRoute = pathname === "/channel-bots" || pathname.startsWith("/channel-bots/");
   if (onboarding.status === "loading") return null;
-  if (onboarding.status === "show") return <OnboardingTakeover />;
+  if (onboarding.status === "show" && !isChannelBotRoute) return <OnboardingTakeover />;
 
   return (
     <RightPanelContext.Provider value={{ setRightPanel }}>
@@ -262,7 +264,9 @@ function TopBarBreadcrumbs() {
     const laterIsSidebarItem = accPaths.slice(i + 1).some((p) => p in SIDEBAR_ITEMS);
     if (laterIsSidebarItem) continue;
 
-    const label = SIDEBAR_ITEMS[segPath] ?? SEGMENT_LABELS[segment] ?? segment;
+    const label = segPath === "/channel-bots/connect"
+      ? "Setup links"
+      : SIDEBAR_ITEMS[segPath] ?? SEGMENT_LABELS[segment] ?? segment;
     const linkTo = isLast ? undefined : (ROUTE_LINK_OVERRIDES[segPath] ?? segPath);
     crumbs.push({ label, to: linkTo });
   }

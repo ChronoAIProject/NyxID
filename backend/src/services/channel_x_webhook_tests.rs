@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::channel_connection_webhook_service as webhooks;
 
-pub(super) async fn credentials(state: &AppState, adapter: &XAdapter, owner: &str) {
+pub(crate) async fn credentials(state: &AppState, adapter: &XAdapter, owner: &str) {
     platform_credential_service::update(
         &state.db,
         &state.encryption_keys,
@@ -460,4 +460,117 @@ async fn x_crc_endpoint_returns_json_using_live_platform_secret() {
         body["response_token"],
         format!("sha256={}", STANDARD.encode(mac.finalize().into_bytes()))
     );
+}
+
+#[tokio::test]
+async fn x_event_settings_require_consent_and_recover_partial_public_setup() {
+    use crate::models::channel_bot::XChannelEvent::{Dm, Mentions, Replies};
+    use crate::services::channel_bot_service::{SecretPatch, UpdateBotParams};
+    let (state, adapter, server, owner, connection) = fixture().await;
+    let bot = insert_bot(&state, &owner, &connection).await;
+    credentials(&state, &adapter, &owner).await;
+    let update = |events| {
+        channel_bot_service::update_bot(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &bot.id,
+            &owner,
+            UpdateBotParams {
+                x_events: Some(events),
+                bot_token: None,
+                label: None,
+                verification_token: None,
+                encrypt_key: SecretPatch::Unchanged,
+                app_id: None,
+                app_secret: None,
+            },
+        )
+    };
+    assert!(update(&[Dm, Mentions, Replies]).await.is_err());
+    assert!(
+        channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap()
+            .x_events
+            .is_none()
+    );
+    for events in [&[][..], &[Dm, Dm][..]] {
+        assert!(matches!(
+            update(events).await,
+            Err(AppError::ValidationError(_))
+        ));
+    }
+    state.db.collection::<bson::Document>(KEYS).update_one(doc! {"_id": &connection},
+        doc! {"$set": {"token_scopes": super::super::channel_adapters::x::PUBLIC_SCOPES.join(" ")}}).await.unwrap();
+    let current = update(&[Dm, Mentions, Replies]).await.unwrap();
+    assert_eq!(current.x_events, Some(vec![Dm, Mentions, Replies]));
+    provider_setup(&server, &bot).await;
+    let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let fail_response = fail.clone();
+    Mock::given(method("POST"))
+        .and(path("/2/activity/subscriptions"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: serde_json::Value = request.body_json().unwrap();
+            if body["event_type"] == "post.reply.create"
+                && fail_response.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                ResponseTemplate::new(403)
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data": {"subscription": {"subscription_id": "300"}}}))
+            }
+        })
+        .mount(&server)
+        .await;
+    assert!(
+        webhooks::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &current,
+            "https://nyx.example"
+        )
+        .await
+        .is_err()
+    );
+    let failed = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(failed.status, "failed");
+    assert!(
+        failed.webhook_registered,
+        "partial subscriptions remain eligible for cleanup"
+    );
+    Mock::given(path("/2/dm_events"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    channel_poll_service::poll_bot(&state, &adapter, &bot.id, 60)
+        .await
+        .unwrap();
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        webhooks::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &failed,
+            "https://nyx.example"
+        )
+        .await
+        .unwrap()
+    );
+    let recovered = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(recovered.status, "active");
+    assert!(recovered.error.is_none());
+    assert_eq!(recovered.x_events, Some(vec![Dm, Mentions, Replies]));
 }

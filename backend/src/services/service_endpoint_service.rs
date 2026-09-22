@@ -132,6 +132,29 @@ fn semantic_update_pipeline(set_doc: bson::Document) -> Vec<bson::Document> {
     vec![doc! { "$set": set_expressions }]
 }
 
+/// Concurrent startup writers may hold the same stale snapshot. Decide whether
+/// the live row needs a semantic update atomically, keeping timestamps and the
+/// generation unchanged when another writer already installed this definition.
+fn reconciliation_update_pipeline(set_doc: bson::Document) -> Vec<bson::Document> {
+    let comparisons: Vec<_> = set_doc
+        .iter()
+        .filter(|(field, _)| *field != "updated_at")
+        .map(|(field, value)| {
+            bson::Bson::Document(doc! { "$eq": [
+                {"$ifNull": [format!("${field}"), bson::Bson::Null]}, {"$literal": value.clone()}
+            ]})
+        })
+        .collect();
+    let update = semantic_update_pipeline(set_doc)
+        .remove(0)
+        .get_document("$set")
+        .expect("set expressions")
+        .clone();
+    vec![doc! { "$replaceWith": { "$cond": [
+        {"$and": comparisons}, "$$ROOT", {"$mergeObjects": ["$$ROOT", update]}
+    ]}}]
+}
+
 /// List all active endpoints for a given service.
 pub async fn list_endpoints(
     db: &mongodb::Database,
@@ -496,123 +519,174 @@ async fn upsert_one_endpoint(
         .find_one(doc! { "service_id": service_id, "name": &input.name })
         .await?;
 
-    if let Some(existing) = existing {
-        ensure_writable_operation_generation(&existing)?;
-        let response = normalize_response(input.response.clone());
-        let desired_is_active = match activation {
-            EndpointSyncActivation::ForceActive => true,
-            EndpointSyncActivation::PreserveExisting => existing.is_active,
-        };
-        let unchanged = existing.description == input.description
-            && existing.method == input.method.to_uppercase()
-            && existing.path == input.path
-            && existing.target_id == input.target_id
-            && existing.parameters == input.parameters
-            && existing.request_body_schema == input.request_body_schema
-            && existing.request_content_type == input.request_content_type
-            && existing.request_body_required == input.request_body_required
-            && existing.response_description == input.response_description
-            && existing.response == response
-            && existing.risk == input.risk
-            && existing.supports_idempotency_key == input.supports_idempotency_key
-            && existing.is_active == desired_is_active;
-        if unchanged {
-            return Ok(existing);
+    match existing {
+        Some(existing) => {
+            reconcile_existing_endpoint(coll, service_id, input, now, activation, existing).await
         }
-        // Update existing endpoint
-        let mut set_doc = doc! {
-            "description": input.description.as_deref(),
-            "method": input.method.to_uppercase(),
-            "path": &input.path,
-            "target_id": input.target_id.as_deref(),
-            "updated_at": bson::DateTime::from_chrono(now),
-        };
-        if activation == EndpointSyncActivation::ForceActive {
-            set_doc.insert("is_active", true);
-        }
+        None => insert_endpoint_or_reconcile(coll, service_id, input, now, activation).await,
+    }
+}
 
-        if let Some(ref params) = input.parameters {
-            let bson_val = bson::to_bson(params)
-                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-            set_doc.insert("parameters", bson_val);
-        } else {
-            set_doc.insert("parameters", bson::Bson::Null);
-        }
+async fn reconcile_existing_endpoint(
+    coll: &mongodb::Collection<ServiceEndpoint>,
+    service_id: &str,
+    input: EndpointInput,
+    now: chrono::DateTime<Utc>,
+    activation: EndpointSyncActivation,
+    existing: ServiceEndpoint,
+) -> AppResult<ServiceEndpoint> {
+    ensure_writable_operation_generation(&existing)?;
+    let response = normalize_response(input.response.clone());
+    let desired_is_active = match activation {
+        EndpointSyncActivation::ForceActive => true,
+        EndpointSyncActivation::PreserveExisting => existing.is_active,
+    };
+    let unchanged = existing.description == input.description
+        && existing.method == input.method.to_uppercase()
+        && existing.path == input.path
+        && existing.target_id == input.target_id
+        && existing.parameters == input.parameters
+        && existing.request_body_schema == input.request_body_schema
+        && existing.request_content_type == input.request_content_type
+        && existing.request_body_required == input.request_body_required
+        && existing.response_description == input.response_description
+        && existing.response == response
+        && existing.risk == input.risk
+        && existing.supports_idempotency_key == input.supports_idempotency_key
+        && existing.is_active == desired_is_active;
+    if unchanged {
+        return Ok(existing);
+    }
+    // Update existing endpoint
+    let mut set_doc = doc! {
+        "description": input.description.as_deref(),
+        "method": input.method.to_uppercase(),
+        "path": &input.path,
+        "target_id": input.target_id.as_deref(),
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+    if activation == EndpointSyncActivation::ForceActive {
+        set_doc.insert("is_active", true);
+    }
 
-        if let Some(ref schema) = input.request_body_schema {
-            let bson_val = bson::to_bson(schema)
-                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-            set_doc.insert("request_body_schema", bson_val);
-        } else {
-            set_doc.insert("request_body_schema", bson::Bson::Null);
-        }
-
-        if let Some(ref content_type) = input.request_content_type {
-            set_doc.insert("request_content_type", content_type.as_str());
-        } else {
-            set_doc.insert("request_content_type", bson::Bson::Null);
-        }
-        set_doc.insert("request_body_required", input.request_body_required);
-
-        if let Some(ref desc) = input.response_description {
-            set_doc.insert("response_description", desc.as_str());
-        } else {
-            set_doc.insert("response_description", bson::Bson::Null);
-        }
-        let response_bson = bson::to_bson(&response)
+    if let Some(ref params) = input.parameters {
+        let bson_val = bson::to_bson(params)
             .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-        set_doc.insert("response", response_bson);
-        match input.risk {
-            Some(risk) => {
-                set_doc.insert(
-                    "risk",
-                    bson::to_bson(&risk).map_err(|error| {
-                        AppError::Internal(format!("BSON serialization error: {error}"))
-                    })?,
-                );
-            }
-            None => {
-                set_doc.insert("risk", bson::Bson::Null);
-            }
-        }
-        set_doc.insert("supports_idempotency_key", input.supports_idempotency_key);
-
-        let mut filter = doc! { "_id": &existing.id, "service_id": service_id };
-        filter.extend(writable_operation_generation_filter());
-        coll.find_one_and_update(filter, semantic_update_pipeline(set_doc))
-            .return_document(mongodb::options::ReturnDocument::After)
-            .await?
-            .ok_or_else(|| {
-                AppError::Conflict(format!(
-                    "Endpoint {} was deleted or its operation_generation became invalid",
-                    existing.id
-                ))
-            })
+        set_doc.insert("parameters", bson_val);
     } else {
-        // Create new endpoint
-        let endpoint = ServiceEndpoint {
-            target_id: input.target_id.clone(),
-            id: Uuid::new_v4().to_string(),
-            service_id: service_id.to_string(),
-            name: input.name,
-            description: input.description,
-            method: input.method.to_uppercase(),
-            path: input.path,
-            parameters: input.parameters,
-            request_body_schema: input.request_body_schema,
-            request_content_type: input.request_content_type,
-            request_body_required: input.request_body_required,
-            response_description: input.response_description,
-            response: normalize_response(input.response),
-            risk: input.risk,
-            supports_idempotency_key: input.supports_idempotency_key,
-            is_active: true,
-            operation_generation: 1,
-            created_at: now,
-            updated_at: now,
-        };
-        coll.insert_one(&endpoint).await?;
-        Ok(endpoint)
+        set_doc.insert("parameters", bson::Bson::Null);
+    }
+
+    if let Some(ref schema) = input.request_body_schema {
+        let bson_val = bson::to_bson(schema)
+            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+        set_doc.insert("request_body_schema", bson_val);
+    } else {
+        set_doc.insert("request_body_schema", bson::Bson::Null);
+    }
+
+    if let Some(ref content_type) = input.request_content_type {
+        set_doc.insert("request_content_type", content_type.as_str());
+    } else {
+        set_doc.insert("request_content_type", bson::Bson::Null);
+    }
+    set_doc.insert("request_body_required", input.request_body_required);
+
+    if let Some(ref desc) = input.response_description {
+        set_doc.insert("response_description", desc.as_str());
+    } else {
+        set_doc.insert("response_description", bson::Bson::Null);
+    }
+    let response_bson = bson::to_bson(&response)
+        .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+    set_doc.insert("response", response_bson);
+    match input.risk {
+        Some(risk) => {
+            set_doc.insert(
+                "risk",
+                bson::to_bson(&risk).map_err(|error| {
+                    AppError::Internal(format!("BSON serialization error: {error}"))
+                })?,
+            );
+        }
+        None => {
+            set_doc.insert("risk", bson::Bson::Null);
+        }
+    }
+    set_doc.insert("supports_idempotency_key", input.supports_idempotency_key);
+
+    let mut filter = doc! { "_id": &existing.id, "service_id": service_id };
+    filter.extend(writable_operation_generation_filter());
+    coll.find_one_and_update(filter, reconciliation_update_pipeline(set_doc))
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict(format!(
+                "Endpoint {} was deleted or its operation_generation became invalid",
+                existing.id
+            ))
+        })
+}
+
+async fn insert_endpoint_or_reconcile(
+    coll: &mongodb::Collection<ServiceEndpoint>,
+    service_id: &str,
+    input: EndpointInput,
+    now: chrono::DateTime<Utc>,
+    activation: EndpointSyncActivation,
+) -> AppResult<ServiceEndpoint> {
+    let retry_input = input.clone();
+    // Create new endpoint
+    let endpoint = ServiceEndpoint {
+        target_id: input.target_id.clone(),
+        id: Uuid::new_v4().to_string(),
+        service_id: service_id.to_string(),
+        name: input.name,
+        description: input.description,
+        method: input.method.to_uppercase(),
+        path: input.path,
+        parameters: input.parameters,
+        request_body_schema: input.request_body_schema,
+        request_content_type: input.request_content_type,
+        request_body_required: input.request_body_required,
+        response_description: input.response_description,
+        response: normalize_response(input.response),
+        risk: input.risk,
+        supports_idempotency_key: input.supports_idempotency_key,
+        is_active: true,
+        operation_generation: 1,
+        created_at: now,
+        updated_at: now,
+    };
+    match coll.insert_one(&endpoint).await {
+        Ok(_) => Ok(endpoint),
+        Err(error) => {
+            let duplicate = matches!(error.kind.as_ref(),
+                    mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) if write.code == 11000);
+            if duplicate {
+                // Confirm the competing identity; an unrelated unique-index
+                // failure must retain its original error. Reconcile once.
+                if let Ok(Some(existing)) = coll
+                    .find_one(doc! {
+                        "service_id": service_id, "name": &endpoint.name
+                    })
+                    .await
+                    && existing.service_id == service_id
+                    && existing.name == endpoint.name
+                {
+                    return reconcile_existing_endpoint(
+                        coll,
+                        service_id,
+                        retry_input,
+                        now,
+                        activation,
+                        existing,
+                    )
+                    .await;
+                }
+            }
+            Err(error.into())
+        }
     }
 }
 
@@ -620,6 +694,160 @@ async fn upsert_one_endpoint(
 mod tests {
     use super::*;
     use crate::test_utils::*;
+
+    #[tokio::test]
+    async fn endpoint_duplicate_insert_reconciles_only_a_confirmed_competing_identity_once() {
+        let db = connect_test_database("endpoint_insert_race").await.unwrap();
+        let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
+        coll.create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"service_id":1,"name":1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
+        let activation = EndpointSyncActivation::PreserveExisting;
+        let old = upsert_one_endpoint(
+            &coll,
+            "service",
+            make_input("same", "GET", "/old"),
+            Utc::now(),
+            activation,
+        )
+        .await
+        .unwrap();
+        coll.update_one(doc! {"_id": &old.id}, doc! {"$set":{"is_active":false}})
+            .await
+            .unwrap();
+        // Simulate a stale find(None): the insert arm MUST hit E11000.
+        let updated = insert_endpoint_or_reconcile(
+            &coll,
+            "service",
+            make_input("same", "POST", "/new"),
+            Utc::now(),
+            activation,
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.id, old.id);
+        assert!(!updated.is_active);
+        assert_eq!(updated.operation_generation, old.operation_generation + 1);
+        assert_eq!(updated.path, "/new");
+        let repeat = insert_endpoint_or_reconcile(
+            &coll,
+            "service",
+            make_input("same", "POST", "/new"),
+            Utc::now(),
+            activation,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            bson::to_document(&repeat).unwrap(),
+            bson::to_document(&updated).unwrap()
+        );
+        assert_eq!(coll.count_documents(doc! {}).await.unwrap(), 1);
+        // An unrelated unique constraint with no intended row must propagate.
+        coll.create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! {"path":1})
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
+        let err = insert_endpoint_or_reconcile(
+            &coll,
+            "service",
+            make_input("different", "POST", "/new"),
+            Utc::now(),
+            activation,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::DatabaseError(_)));
+        // A nonduplicate write error also propagates unchanged (Mongo validator).
+        db.run_command(doc! {"collMod":COLLECTION_NAME, "validator":{"path":{"$ne":"/invalid"}}, "validationLevel":"strict"}).await.unwrap();
+        let err = insert_endpoint_or_reconcile(
+            &coll,
+            "service",
+            make_input("invalid", "POST", "/invalid"),
+            Utc::now(),
+            activation,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, AppError::DatabaseError(ref error) if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) if write.code == 121))
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_stale_reconciliation_advances_once_and_preserves_activation() {
+        let db = connect_test_database("endpoint_stale_sync").await.unwrap();
+        let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
+        let activation = EndpointSyncActivation::PreserveExisting;
+        let old = upsert_one_endpoint(
+            &coll,
+            "service",
+            make_input("same", "GET", "/old"),
+            Utc::now(),
+            activation,
+        )
+        .await
+        .unwrap();
+        coll.update_one(doc! {"_id": &old.id}, doc! {"$set":{"is_active":false}})
+            .await
+            .unwrap();
+        let input = make_input("same", "PATCH", "/new");
+        let first = reconcile_existing_endpoint(
+            &coll,
+            "service",
+            input.clone(),
+            Utc::now(),
+            activation,
+            old.clone(),
+        )
+        .await
+        .unwrap();
+        let second = reconcile_existing_endpoint(
+            &coll,
+            "service",
+            input.clone(),
+            Utc::now() + chrono::Duration::seconds(1),
+            activation,
+            old.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.operation_generation, old.operation_generation + 1);
+        assert!(!second.is_active);
+        assert_eq!(
+            bson::to_document(&first).unwrap(),
+            bson::to_document(&second).unwrap()
+        );
+        let activated = reconcile_existing_endpoint(
+            &coll,
+            "service",
+            input,
+            Utc::now(),
+            EndpointSyncActivation::ForceActive,
+            second,
+        )
+        .await
+        .unwrap();
+        assert!(activated.is_active);
+        assert_eq!(activated.operation_generation, old.operation_generation + 2);
+    }
 
     fn make_input(name: &str, method: &str, path: &str) -> EndpointInput {
         EndpointInput {

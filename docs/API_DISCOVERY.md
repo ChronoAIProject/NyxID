@@ -154,6 +154,8 @@ The `/endpoints` response includes structured endpoint data:
 }
 ```
 
+The parsed endpoint view applies declarative MCP projections: `x-nyxid-mcp-enum` on a path/query parameter narrows its declared enum, and `x-nyxid-mcp-media` on requestBody selects a declared media type. The complete hosted HTTP OpenAPI document retains all declared choices. Google upload tools therefore advertise media/base64 only while the HTTP spec also documents multipart/related.
+
 The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching.
 
 ### Rich catalog metadata

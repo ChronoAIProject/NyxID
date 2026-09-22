@@ -236,6 +236,8 @@ const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "x-correlation-id",
     "accept-ranges",
     "content-range",
+    "content-profile",
+    "range-unit",
     "retry-after",
     "preference-applied",
     "location",
@@ -7530,6 +7532,35 @@ mod tests {
     }
 
     #[test]
+    fn node_forward_preserves_postgrest_request_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "prefer",
+            "return=representation,count=exact".parse().unwrap(),
+        );
+        headers.insert("accept-profile", "private".parse().unwrap());
+        headers.insert("content-profile", "private".parse().unwrap());
+        headers.insert("range-unit", "items".parse().unwrap());
+
+        let forwarded = node_forward_headers(&headers);
+        for expected in ["prefer", "accept-profile", "content-profile", "range-unit"] {
+            assert!(
+                forwarded
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case(expected)),
+                "PostgREST request header must reach node-routed downstream: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_response_headers_include_postgrest_metadata() {
+        for header in ["content-profile", "range-unit", "preference-applied"] {
+            assert!(super::ALLOWED_RESPONSE_HEADERS.contains(&header));
+        }
+    }
+
+    #[test]
     fn node_forward_still_drops_protected_and_transport_headers() {
         // Guard against the prefix rule accidentally widening the gate for
         // protected or HTTP-client-owned headers.
@@ -9365,7 +9396,7 @@ mod proxy_resolution_integration_tests {
         crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new(
             [2u8; 32],
         ));
-        seed(&db, true).await;
+        seed(&db).await;
         let owner = Uuid::new_v4().to_string();
         let service = connect(&db, &owner, "api-google-workspace").await;
         let state = test_app_state(db.clone());

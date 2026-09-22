@@ -980,7 +980,12 @@ async fn deliver_initiated_message(
     body: SendMessageRequest,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<AsyncReplyResponse> {
-    if !adapter.outbound_capabilities().initiated_send {
+    if !adapter.outbound_capabilities().initiated_send
+        || (bot.platform == "x"
+            && crate::services::channel_adapters::x::is_public_conversation(
+                &conversation.platform_conversation_id,
+            ))
+    {
         return Err(AppError::ChannelPlatformSendUnsupported);
     }
     validate_reply_for_adapter(&body.message, adapter)?;
@@ -1217,8 +1222,9 @@ pub async fn list_agent_conversations(
         .into_iter()
         .map(|row| AgentConversationItem {
             addressable: channel_send_service::is_addressable(&row),
-            capabilities: crate::services::channel_adapters::outbound_capabilities(
+            capabilities: crate::services::channel_adapters::conversation_capabilities(
                 &row.platform,
+                &row.platform_conversation_id,
                 &state.token_exchange_cache,
             ),
             id: row.id,
@@ -1303,6 +1309,13 @@ async fn deliver_async_reply(
         .platform_conversation_id
         .as_deref()
         .unwrap_or(&conversation.platform_conversation_id);
+
+    if bot.platform == "x"
+        && crate::services::channel_adapters::x::is_public_conversation(platform_conversation_id)
+        && !body.reply.attachments.is_empty()
+    {
+        return Err(AppError::ChannelMediaUnsupported);
+    }
 
     let mut metadata = body.reply.metadata;
     adapter.reply_context(
@@ -3606,6 +3619,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: Uuid::new_v4().to_string(),
@@ -4115,6 +4129,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: Uuid::new_v4().to_string(),
@@ -5203,3 +5218,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "channel_x_public_tests.rs"]
+mod x_public_tests;

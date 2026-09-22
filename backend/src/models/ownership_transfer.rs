@@ -8,6 +8,8 @@ pub struct OwnershipTransfer {
     #[serde(rename = "_id")]
     pub id: String,
     pub actor_user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_api_key_id: Option<String>,
     pub resource_kind: String,
     pub resource_id: String,
     pub previous_owner_user_id: String,

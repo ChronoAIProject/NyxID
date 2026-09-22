@@ -461,6 +461,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "prefer",
     "x-trace-id",
     "range",
+    // PostgREST schema selection and item ranges.
+    "accept-profile",
+    "content-profile",
+    "range-unit",
     "if-range",
     "if-none-match",
     "if-modified-since",
@@ -5054,6 +5058,16 @@ mod tests {
     }
 
     #[test]
+    fn forward_allowlist_accepts_postgrest_request_headers() {
+        for header in ["prefer", "accept-profile", "content-profile", "range-unit"] {
+            assert!(
+                is_allowed_forward_header(header),
+                "PostgREST request header must be forwarded: {header}"
+            );
+        }
+    }
+
+    #[test]
     fn forward_allowlist_accepts_openclaw_scopes_header() {
         // NyxID#161: the raw header name was dropped by the proxy because
         // the allowlist did not include it.
@@ -6148,6 +6162,80 @@ mod tests {
         assert_eq!(captured.body, b"PK\x03\x04");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_supabase_preserves_postgrest_inputs_and_injects_apikey() {
+        use wiremock::matchers::{
+            body_json, header, headers as header_values, method, path, query_param,
+        };
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let row = serde_json::json!({"title": "Review audit log", "done": false});
+        Mock::given(method("POST"))
+            .and(path("/rest/v1/todos"))
+            .and(query_param("select", "id,title,done"))
+            .and(header("apikey", "sb_secret_test"))
+            .and(header("content-type", "application/json"))
+            .and(header_values(
+                "prefer",
+                vec!["return=representation", "count=exact"],
+            ))
+            .and(header("accept-profile", "analytics"))
+            .and(header("content-profile", "analytics"))
+            .and(header("range-unit", "items"))
+            .and(body_json(&row))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!([
+                {"id": 1, "title": "Review audit log", "done": false}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = crate::services::user_endpoint_service::normalize_catalog_endpoint_url(
+            Some("api-supabase"),
+            &server.uri(),
+        )
+        .unwrap();
+        let mut target = make_proxy_target(endpoint);
+        target.auth_method = "header".into();
+        target.auth_key_name = "apikey".into();
+        target.credential = "sb_secret_test".into();
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("authorization", "Bearer caller-nyxid-token"),
+            ("apikey", "caller-supplied-key"),
+            ("content-type", "application/json"),
+            ("prefer", "return=representation,count=exact"),
+            ("accept-profile", "analytics"),
+            ("content-profile", "analytics"),
+            ("range-unit", "items"),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+        }
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "todos",
+            Some("select=id,title,done"),
+            headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::from(serde_json::to_vec(&row).unwrap()))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .expect("Supabase request should succeed");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key("authorization"));
+        assert_eq!(requests[0].headers.get_all("apikey").iter().count(), 1);
     }
 
     #[tokio::test]

@@ -8,11 +8,6 @@ export interface OwnershipResource {
   readonly slug: string | null;
 }
 
-export interface OwnershipResourceList {
-  readonly items: readonly OwnershipResource[];
-  readonly next_offset: number | null;
-}
-
 export interface OwnershipTransferPreview {
   readonly resource_kind: OwnershipResourceKind;
   readonly resource_id: string;
@@ -41,4 +36,16 @@ export interface OwnershipTransferResult {
   readonly previous_owner_user_id: string;
   readonly new_owner_user_id: string;
   readonly retired_routes: number;
+}
+
+export interface OwnershipResourceList {
+  readonly items: readonly OwnershipResource[];
+  readonly next_offset: number | null;
+}
+
+export interface OwnershipDestination {
+  readonly id: string;
+  readonly display_name: string | null;
+  readonly email: string;
+  readonly is_active: boolean;
 }

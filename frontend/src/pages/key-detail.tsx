@@ -1,3 +1,5 @@
+import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
+import { useOwnershipTransferAuthorization } from "@/hooks/use-ownership-transfers";
 import { ServiceHistory, ServiceAuthorshipFooter } from "@/components/dashboard/service-history";
 import { CredentialBindingCard } from "@/components/dashboard/credential-binding-card";
 import { useEffect, useMemo, useState } from "react";
@@ -2180,11 +2182,20 @@ export function KeyDetailPage() {
 
 function KeyDetailView({ keyId }: { readonly keyId: string }) {
   const navigate = useNavigate();
+  const identity = useAuthStore((state) => state.user?.id);
   const search = useSearch({ strict: false }) as {
     readonly provider_status?: string;
     readonly message?: string;
   };
   const { data: keyInfo, isLoading, error, refetch } = useKey(keyId);
+  const { data: transferAuthorization } = useOwnershipTransferAuthorization(
+    "service",
+    keyInfo?.catalog_service_id ?? "",
+    identity,
+  );
+  const catalogTransferResource = transferAuthorization?.can_transfer
+    ? transferAuthorization.resource
+    : null;
   // Issue #416: resolve the bound node's name so the auto-connected
   // detail branch can show real routing instead of a hardcoded
   // "Direct" label. Auto-connected services don't expose a routing
@@ -2208,6 +2219,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [reconnectOpen, setReconnectOpen] = useState(false);
+  const [platformTab, setPlatformTab] = useState("overview");
 
   const catalogHeaders = useMemo<readonly DefaultRequestHeader[] | null>(() => {
     if (!catalogEntry?.default_request_headers) return null;
@@ -2448,8 +2460,16 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
 
       <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
-        <Tabs defaultValue="overview" className="space-y-6">
-          <TabsList><TabsTrigger value="overview">Overview</TabsTrigger>{keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}</TabsList>
+        <Tabs
+          value={platformTab === "advanced" && !catalogTransferResource ? "overview" : platformTab}
+          onValueChange={setPlatformTab}
+          className="space-y-6"
+        >
+          <TabsList>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            {catalogTransferResource && <TabsTrigger value="advanced">Advanced</TabsTrigger>}
+            {keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}
+          </TabsList>
           <TabsContent value="overview" className="space-y-4">
           <Card>
             <CardHeader>
@@ -2570,6 +2590,11 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
             </details>
           )}
           </TabsContent>
+          {catalogTransferResource && (
+            <TabsContent value="advanced" className="space-y-4">
+              <OwnershipTransferCard kind="service" resource={catalogTransferResource} />
+            </TabsContent>
+          )}
           {keyInfo.authorship && <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>}
         </Tabs>
       ) : (
@@ -2729,6 +2754,9 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
                   certTtlMinutes={keyInfo.ssh_certificate_ttl_minutes}
                 />
               )}
+            {catalogTransferResource && (
+              <OwnershipTransferCard kind="service" resource={catalogTransferResource} />
+            )}
           </TabsContent>
           {keyInfo.authorship && <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>}
         </Tabs>

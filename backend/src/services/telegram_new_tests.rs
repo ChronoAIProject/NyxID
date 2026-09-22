@@ -2365,6 +2365,7 @@ async fn telegram_new_manager_channel_preserves_webhook_and_configuration_lifecy
             &channel.id,
             &actor,
             super::channel_bot_service::UpdateBotParams {
+                x_events: None,
                 bot_token: Some(CHILD),
                 label: None,
                 verification_token: None,

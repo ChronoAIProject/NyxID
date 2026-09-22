@@ -128,7 +128,7 @@
             "name": "fields",
             "in": "query",
             "required": false,
-            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "description": "Fields to return, for example id,name,mimeType.",
             "schema": {
               "type": "string"
             }
@@ -214,7 +214,7 @@
             "name": "fields",
             "in": "query",
             "required": false,
-            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "description": "Fields to return, for example id,name,mimeType.",
             "schema": {
               "type": "string"
             }
@@ -283,7 +283,7 @@
             "name": "fields",
             "in": "query",
             "required": false,
-            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "description": "Fields to return, for example id,name,mimeType.",
             "schema": {
               "type": "string"
             }
@@ -332,16 +332,11 @@
                   "description": {
                     "type": "string"
                   },
-                  "parents": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
                   "trashed": {
                     "type": "boolean"
                   }
-                }
+                },
+                "description": "File metadata to update. Move files using the existing addParents and removeParents query parameters; parents cannot be updated in this body."
               }
             }
           }
@@ -420,7 +415,7 @@
             "name": "fields",
             "in": "query",
             "required": false,
-            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "description": "Fields to return, for example id,name,mimeType.",
             "schema": {
               "type": "string"
             }
@@ -528,10 +523,10 @@
     "/upload/drive/v3/files": {
       "post": {
         "operationId": "drive_upload_file",
-        "summary": "Upload a new file's raw content. Rename or move it with drive_update_file.",
+        "summary": "Create a Drive file with raw media or import HTML as a Google Doc using multipart/related metadata and content.",
         "x-aevatar-tool": {
           "name": "drive_upload_file",
-          "description": "Upload a new file's raw content. Rename or move it with drive_update_file.",
+          "description": "Create a Drive file with raw media or import HTML as a Google Doc using multipart/related metadata and content. For HTTP/CLI multipart requests set Content-Type: multipart/related; boundary=nyxid_google_doc and send JSON File metadata first, then text/html content. Set metadata mimeType to application/vnd.google-apps.document for the HTML Google Doc import. POST imports a new document; use docs_batch_update_document for targeted edits after creation. The generated MCP tool supports only uploadType=media with a base64 body and application/octet-stream.",
           "readOnly": false,
           "destructive": false,
           "requiresApproval": true
@@ -544,15 +539,20 @@
             "schema": {
               "type": "string",
               "enum": [
-                "media"
+                "media",
+                "multipart"
               ]
-            }
+            },
+            "x-nyxid-mcp-enum": [
+              "media"
+            ],
+            "description": "media sends raw content with the request Content-Type identifying the content type. multipart sends multipart/related with a boundary parameter, JSON File metadata as the first part, and content with its own Content-Type as the second part. MCP supports media only."
           },
           {
             "name": "fields",
             "in": "query",
             "required": false,
-            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "description": "Fields to return, for example id,name,mimeType.",
             "schema": {
               "type": "string"
             }
@@ -575,8 +575,16 @@
                 "type": "string",
                 "description": "Raw file bytes. MCP callers supply the binary body using the tool's base64 encoding."
               }
+            },
+            "multipart/related": {
+              "schema": {
+                "type": "string",
+                "description": "For HTTP/CLI multipart requests set Content-Type: multipart/related; boundary=nyxid_google_doc and send JSON File metadata first, then text/html content. Set metadata mimeType to application/vnd.google-apps.document for the HTML Google Doc import. POST imports a new document; use docs_batch_update_document for targeted edits after creation. The generated MCP tool supports only uploadType=media with a base64 body and application/octet-stream. POST File metadata may optionally include parents to select a folder.",
+                "example": "--nyxid_google_doc\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{\"name\":\"Imported document\",\"mimeType\":\"application/vnd.google-apps.document\"}\r\n--nyxid_google_doc\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<!doctype html><html><body><h1>Imported document</h1><p>Hello from NyxID.</p></body></html>\r\n--nyxid_google_doc--\r\n"
+              }
             }
-          }
+          },
+          "x-nyxid-mcp-media": "application/octet-stream"
         },
         "responses": {
           "200": {
@@ -590,16 +598,17 @@
               }
             }
           }
-        }
+        },
+        "description": "Create a Drive file with raw media or import HTML as a Google Doc using multipart/related metadata and content. For HTTP/CLI multipart requests set Content-Type: multipart/related; boundary=nyxid_google_doc and send JSON File metadata first, then text/html content. Set metadata mimeType to application/vnd.google-apps.document for the HTML Google Doc import. POST imports a new document; use docs_batch_update_document for targeted edits after creation. The generated MCP tool supports only uploadType=media with a base64 body and application/octet-stream."
       }
     },
     "/upload/drive/v3/files/{fileId}": {
       "patch": {
         "operationId": "drive_upload_file_content",
-        "summary": "Replace a Drive file's raw content.",
+        "summary": "Replace Drive file content with raw media or replace a Google Doc by importing HTML using multipart/related metadata and content.",
         "x-aevatar-tool": {
           "name": "drive_upload_file_content",
-          "description": "Replace a Drive file's raw content.",
+          "description": "Replace Drive file content with raw media or replace a Google Doc by importing HTML using multipart/related metadata and content. For HTTP/CLI multipart requests set Content-Type: multipart/related; boundary=nyxid_google_doc and send JSON File metadata first, then text/html content. Set metadata mimeType to application/vnd.google-apps.document for the HTML Google Doc import. This replaces the whole document; use docs_batch_update_document for targeted edits. The generated MCP tool supports only uploadType=media with a base64 body and application/octet-stream. Move files using addParents/removeParents on drive_update_file, not parents in PATCH metadata.",
           "readOnly": false,
           "destructive": false,
           "requiresApproval": true
@@ -620,15 +629,20 @@
             "schema": {
               "type": "string",
               "enum": [
-                "media"
+                "media",
+                "multipart"
               ]
-            }
+            },
+            "x-nyxid-mcp-enum": [
+              "media"
+            ],
+            "description": "media sends raw content with the request Content-Type identifying the content type. multipart sends multipart/related with a boundary parameter, JSON File metadata as the first part, and content with its own Content-Type as the second part. MCP supports media only."
           },
           {
             "name": "fields",
             "in": "query",
             "required": false,
-            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "description": "Fields to return, for example id,name,mimeType.",
             "schema": {
               "type": "string"
             }
@@ -651,8 +665,16 @@
                 "type": "string",
                 "description": "Raw file bytes. MCP callers supply the binary body using the tool's base64 encoding."
               }
+            },
+            "multipart/related": {
+              "schema": {
+                "type": "string",
+                "description": "For HTTP/CLI multipart requests set Content-Type: multipart/related; boundary=nyxid_google_doc and send JSON File metadata first, then text/html content. Set metadata mimeType to application/vnd.google-apps.document for the HTML Google Doc import. This replaces the whole document; use docs_batch_update_document for targeted edits. The generated MCP tool supports only uploadType=media with a base64 body and application/octet-stream. Move files using addParents/removeParents on drive_update_file, not parents in PATCH metadata.",
+                "example": "--nyxid_google_doc\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{\"name\":\"Updated document\",\"mimeType\":\"application/vnd.google-apps.document\"}\r\n--nyxid_google_doc\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<!doctype html><html><body><h1>Updated document</h1><p>Hello from NyxID.</p></body></html>\r\n--nyxid_google_doc--\r\n"
+              }
             }
-          }
+          },
+          "x-nyxid-mcp-media": "application/octet-stream"
         },
         "responses": {
           "200": {
@@ -666,7 +688,8 @@
               }
             }
           }
-        }
+        },
+        "description": "Replace Drive file content with raw media or replace a Google Doc by importing HTML using multipart/related metadata and content. For HTTP/CLI multipart requests set Content-Type: multipart/related; boundary=nyxid_google_doc and send JSON File metadata first, then text/html content. Set metadata mimeType to application/vnd.google-apps.document for the HTML Google Doc import. This replaces the whole document; use docs_batch_update_document for targeted edits. The generated MCP tool supports only uploadType=media with a base64 body and application/octet-stream. Move files using addParents/removeParents on drive_update_file, not parents in PATCH metadata."
       }
     }
   }

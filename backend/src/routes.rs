@@ -2081,11 +2081,33 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_service_account_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
+    let ownership_routes = Router::new()
+        .route(
+            "/ownership/{kind}/{id}/authorization",
+            get(handlers::admin_ownership::authorization),
+        )
+        .route(
+            "/ownership/{kind}/{id}/destinations",
+            get(handlers::admin_ownership::destinations),
+        )
+        .route(
+            "/ownership/{kind}/{id}/preview",
+            post(handlers::admin_ownership::preview),
+        )
+        .route(
+            "/ownership/{kind}/{id}/transfer",
+            post(handlers::admin_ownership::transfer),
+        )
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
     let api_v1 = api_v1_public
         .nest("/catalog-curation", handlers::catalog_curation::router())
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
-        .merge(api_v1_human_only);
+        .merge(api_v1_human_only)
+        .merge(ownership_routes);
 
     let well_known_routes = Router::new()
         .route(

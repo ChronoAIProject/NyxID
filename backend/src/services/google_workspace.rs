@@ -133,6 +133,24 @@ impl GoogleProduct {
         }
     }
 
+    pub fn has_editor_destinations(self) -> bool {
+        matches!(self, Self::Workspace | Self::Drive)
+    }
+
+    /// The original single-origin policy is the activation migration's CAS pin.
+    pub fn legacy_operation_policy(self) -> AppResult<ProxyOperationPolicy> {
+        let source = match self {
+            Self::Drive => include_str!("../../specs/fixtures/google-drive-legacy-policy.json"),
+            Self::Workspace => {
+                include_str!("../../specs/fixtures/google-workspace-legacy-policy.json")
+            }
+            _ => return self.operation_policy(),
+        };
+        serde_json::from_str(source).map_err(|error| {
+            AppError::Internal(format!("Invalid historical Google policy: {error}"))
+        })
+    }
+
     /// The operation catalog also defines the proxy boundary, including for
     /// tokens whose Google grant contains permissions from another product.
     pub fn operation_policy(self) -> AppResult<ProxyOperationPolicy> {
@@ -153,7 +171,7 @@ impl GoogleProduct {
                             path,
                             item[method].get("parameters"),
                         )?;
-                        if self == Self::Workspace
+                        if self.has_editor_destinations()
                             && let Some(origin) = item
                                 .get("servers")
                                 .and_then(|servers| servers[0]["url"].as_str())
@@ -165,7 +183,7 @@ impl GoogleProduct {
                                     .map(|(id, _)| id)
                                     .ok_or_else(|| {
                                         AppError::Internal(
-                                            "Workspace overlay origin is not an allowed recipient"
+                                            "Google overlay origin is not an allowed recipient"
                                                 .into(),
                                         )
                                     })?,
@@ -183,6 +201,15 @@ impl GoogleProduct {
 mod tests {
     use super::*;
     use crate::services::proxy_authorization::{CanonicalPath, authorize_proxy_operation_fields};
+
+    #[test]
+    fn legacy_google_policy_pins_preserve_production_source_order() {
+        for product in [GoogleProduct::Drive, GoogleProduct::Workspace] {
+            let mut main_policy = product.operation_policy().unwrap();
+            main_policy.rules.retain(|rule| rule.target_id.is_none());
+            assert_eq!(product.legacy_operation_policy().unwrap(), main_policy);
+        }
+    }
 
     #[test]
     fn google_product_scopes_exclude_other_apis() {
@@ -337,6 +364,30 @@ mod tests {
                     "POST",
                     "/gmail/v1/users/me/messages/send",
                     matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail),
+                ),
+                (
+                    "POST",
+                    "/v1/documents/doc:batchUpdate",
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace | GoogleProduct::Drive | GoogleProduct::Docs
+                    ),
+                ),
+                (
+                    "PUT",
+                    "/v4/spreadsheets/sheet/values/A1:B2",
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace | GoogleProduct::Drive | GoogleProduct::Sheets
+                    ),
+                ),
+                (
+                    "POST",
+                    "/v1/presentations/slides:batchUpdate",
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace | GoogleProduct::Drive | GoogleProduct::Slides
+                    ),
                 ),
                 ("DELETE", "/gmail/v1/users/me/messages/message1", false),
                 ("POST", "/gmail/v1/users/me/messages/message1/trash", false),
