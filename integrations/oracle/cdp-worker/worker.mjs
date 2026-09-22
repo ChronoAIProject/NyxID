@@ -1703,6 +1703,38 @@ export function switcherMetadata(text) {
   return `gpt_${Number(match[1])}${match[2] ? `_${Number(match[2])}` : ''}${pro ? '_pro' : ''}`;
 }
 
+// Family evidence from the picker's model-version radios ("Latest",
+// "GPT-5.6 Sol", "GPT-5.5"). At every level except Pro the composer pill and
+// the "Select model" row show only the level ("High"), so the checked radio
+// is the only place the family can be read. "Latest" carries no number and
+// is reported as gpt_latest.
+export function familyFromModelRadios(items) {
+  const checked = (items || []).find((item) => item?.checked);
+  const label = String(checked?.text || '').trim().split(/\r?\n/)[0].trim();
+  if (!label) return 'absent';
+  if (/^(latest|最新)$/i.test(label)) return 'gpt_latest';
+  const metadata = switcherMetadata(label.replace(/\s+(sol|thinking)$/i, ''));
+  return metadata === 'unrecognized' ? 'absent' : metadata;
+}
+
+// Canonical metadata compared to a request. gpt_latest satisfies a request
+// that names no minor version (chatgpt-6-high, chatgpt-6-pro) but never one
+// pinned to an older release (chatgpt-5.5-high needs the GPT-5.5 radio).
+export function switcherMetadataMatches(metadata, requested) {
+  if (!metadata || ['absent', 'unrecognized'].includes(metadata)) return false;
+  const request = String(requested || '').replace(/^openai-/, 'gpt-');
+  if (metadata === 'gpt_latest') {
+    const wanted = switcherMetadata(request);
+    if (wanted === 'unrecognized') return modelLevelTargets(request).length > 0 && !/\d+[._]\d+/.test(request);
+    return !/^gpt_\d+_\d+/.test(wanted);
+  }
+  const parse = (meta) => /^gpt_(\d+)(?:_(\d+))?(_pro)?$/.exec(meta);
+  let target = switcherMetadata(request);
+  if (target === 'unrecognized' && !/\d/.test(request) && modelLevelTargets(request)[0] === 'Pro') target = 'gpt_6_pro';
+  const wanted = parse(target), observed = parse(metadata);
+  return !!(wanted && observed && wanted[1] === observed[1] && (!wanted[2] || !observed[2] || wanted[2] === observed[2]));
+}
+
 export function switcherMatches(text, requested, familyOnly = false) {
   const request = String(requested || '').replace(/^openai-/, 'gpt-');
   let target = switcherMetadata(request);
@@ -2253,6 +2285,8 @@ async function selectEffortBySlider(page, targets, budget, result, state) {
   const plan = effortSliderPlan(state, targets[0]);
   if (plan.unavailable && plan.hint === "unsupported") return false;
   budget.picker.recognizedLevels = true;
+  // The menu is open here, so this snapshot carries the version radios.
+  budget.picker.family = familyFromModelRadios((await pickerSnapshot(page, budget)).items);
   budget.picker.slider = { min: state.min, max: state.max, before: state.value, hint: plan.hint || null };
   if (plan.unavailable) {
     await closeOpenMenus(page, budget);
@@ -2356,11 +2390,12 @@ export async function selectModel(page, modelLabel) {
     !["timeout", "menu_not_opened", "interaction_deadline", "selection_failed", "level_unavailable"].includes(result.reason) &&
     (!["pro_extended", "pro_standard"].includes(budget.picker.expectedEffort) || effortMetadata(result.observed) === budget.picker.expectedEffort);
   if (result.verified && !["timeout", "already_selected"].includes(result.reason)) result.reason = "selected";
-  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)} ${effortSliderDetail(budget.picker.slider)}`);
+  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)} ${effortSliderDetail(budget.picker.slider)} family=${budget.picker.family || 'absent'}`);
   if (LOG_PICKER_LABELS && ["level_unavailable", "unverified", "menu_not_opened", "picker_unavailable"].includes(result.reason)) {
     log(formatPickerLabels(budget.picker.snapshot));
   }
-  return { ...result, recognizedLevels: !!budget.picker.recognizedLevels, recognizedObservation: !!budget.picker.recognizedObservation };
+  return { ...result, recognizedLevels: !!budget.picker.recognizedLevels, recognizedObservation: !!budget.picker.recognizedObservation,
+    family: budget.picker.family || 'absent' };
 }
 
 async function selectModelInner(page, targets, budget, result) {
@@ -2931,13 +2966,17 @@ async function handlePrompt(runtime, page, task, recovering) {
       if (stableErrorCode(error) === "page_crashed") throw error;
       return { text: null, metadata: "absent" };
     });
-    updateTaskState(runtime.state, { observed_model_switcher: observedSwitcher.metadata,
+    // Below Pro the pill shows only the level; the checked version radio read
+    // while the picker was open is then the family evidence.
+    const familyVerified = switcherMatches(observedSwitcher.text, task.model) ||
+      (observedSwitcher.metadata === "absent" && switcherMetadataMatches(selected.family, task.model));
+    const familyMetadata = observedSwitcher.metadata === "absent" && familyVerified ? selected.family : observedSwitcher.metadata;
+    updateTaskState(runtime.state, { observed_model_switcher: familyMetadata,
       observed_model_effort: effortMetadata(selected.observed), effort_levels_exposed: selected.recognizedLevels });
     // Re-read BOTH controls after selecting effort, since either may change the other.
-    if (task.require_model_match !== false && (!switcherMatches(observedSwitcher.text, task.model) ||
-        effortSelectionMismatch(selected, task.model))) {
-      await failModelSelection(runtime, task, observedSwitcher.metadata, effortMetadata(selected.observed),
-        !switcherMatches(observedSwitcher.text, task.model) ? 'switcher_unverified' : selected.reason);
+    if (task.require_model_match !== false && (!familyVerified || effortSelectionMismatch(selected, task.model))) {
+      await failModelSelection(runtime, task, familyMetadata, effortMetadata(selected.observed),
+        !familyVerified ? 'switcher_unverified' : selected.reason);
     }
     if (await ack(runtime, task, "selecting_model", modelSelectionDetail(selected))) {
       throw new TaskFailure("cancelled");
@@ -3012,11 +3051,18 @@ async function handlePrompt(runtime, page, task, recovering) {
     const recognizedBefore = previousEffort && !['absent', 'unrecognized'].includes(previousEffort);
     const verifiedEffort = pillShowsLevel(pill.observed, modelLevelTargets(task.model)) &&
       (!['pro_extended', 'pro_standard'].includes(previousEffort) || previousEffort === observedEffort);
-    updateTaskState(runtime.state, { observed_model_switcher: header.metadata, observed_model_effort: observedEffort });
-    if (task.require_model_match !== false && (!switcherMatches(header.text, task.model) ||
+    // The family cannot change without the picker; when the pill hides it
+    // (every level below Pro) the family verified at selection still stands,
+    // provided the pill still shows the requested level.
+    const previousFamily = runtime.state.current_task?.observed_model_switcher;
+    const familyVerified = switcherMatches(header.text, task.model) ||
+      (header.metadata === 'absent' && verifiedEffort && switcherMetadataMatches(previousFamily, task.model));
+    const familyMetadata = header.metadata === 'absent' && familyVerified ? previousFamily : header.metadata;
+    updateTaskState(runtime.state, { observed_model_switcher: familyMetadata, observed_model_effort: observedEffort });
+    if (task.require_model_match !== false && (!familyVerified ||
       effortSelectionMismatch({ observed: pill.observed, verified: verifiedEffort,
         recognizedLevels: runtime.state.current_task?.effort_levels_exposed || recognizedBefore }, task.model))) {
-      await failModelSelection(runtime, task, header.metadata, observedEffort, 'presend_unverified');
+      await failModelSelection(runtime, task, familyMetadata, observedEffort, 'presend_unverified');
     }
   }
   // Watch this page's own conversation POST so a server-side rejection of the

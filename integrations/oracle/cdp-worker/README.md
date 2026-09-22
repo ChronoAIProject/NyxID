@@ -359,6 +359,11 @@ only. The deployed userscript is unchanged and simply omits generic files.
 | `NYXID_NPM_INSTALL_TIMEOUT_MS` | `300000` | Maximum dependency-install time during a pushed upgrade. |
 | `NYXID_MAX_WAIT_MS` | `7200000` | Maximum answer wait. |
 | `NYXID_ORACLE_TEMPORARY_CHAT` | `0` | `1` runs single-shot prompts in a ChatGPT Temporary Chat (fresh document per task, nothing saved to history). Off by default: a Temporary Chat has no `/c/<id>` URL, so `nyxid oracle attach` cannot pick a single-shot answer up later. Session turns, follow-ups and project-pinned pools always use persistent chats. |
+| `NYXID_MAX_PROMPT_CHARS` | `300000` | Prompts longer than this fail as `prompt_too_long` before the composer is touched (the default is what the fill allowance can type at all). `0` disables the check. |
+| `NYXID_MODEL_SELECT_MAX_MS` | `90000` | Hard ceiling for model selection. Each observed step restarts the 25s window; a page that keeps making progress may run up to this long. |
+| `NYXID_ORACLE_DIAGNOSTICS_DIR` | `<state dir>/diagnostics` | Where a structural snapshot (JSON, no prompt or answer text) is written on every task failure. |
+| `NYXID_ORACLE_DIAGNOSTICS_KEEP` | `20` | How many failure snapshots to retain. |
+| `NYXID_ORACLE_DIAGNOSTIC_SCREENSHOTS` | `0` | `1` also saves a PNG with each snapshot. Off by default because a screenshot shows conversation content. |
 | `NYXID_STABLE_INTERVAL_MS` | `8000` | Response stability poll interval, clamped to 100–60000 ms. Shorter intervals also shorten the completion stability window; browser fixtures use 500 ms. |
 | `NYXID_NO_OUTPUT_IDLE_MS` | `420000` | Non-generating wait before an empty answer fails. |
 
