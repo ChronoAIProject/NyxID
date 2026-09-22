@@ -267,7 +267,7 @@ pub async fn mint_and_store(
             // CAS on `updated_at` + `status`: don't clobber a row a
             // concurrent operation already moved off our snapshot.
             let snapshot_updated_at = bson::DateTime::from_chrono(api_key.updated_at);
-            db.collection::<UserApiKey>(USER_API_KEYS)
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .update_one(
                     doc! {
                         "_id": &api_key.id,
@@ -293,8 +293,7 @@ pub async fn mint_and_store(
         .encrypt(minted.access_token.as_bytes())
         .await?;
 
-    let write = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let write = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .update_one(
             doc! {
                 "_id": &api_key.id,
@@ -311,6 +310,7 @@ pub async fn mint_and_store(
                 "updated_at": bson::DateTime::from_chrono(now),
             }},
         )
+        .routine_refresh()
         .await?;
 
     // A concurrent revoke / terminal-failure moved the row off our
@@ -325,7 +325,7 @@ pub async fn mint_and_store(
         ));
     }
 
-    db.collection::<UserApiKey>(USER_API_KEYS)
+    crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &api_key.id })
         .await?
         .ok_or_else(|| AppError::Internal("GCP SA key disappeared after mint".to_string()))
@@ -515,11 +515,31 @@ mod tests {
             .await
             .unwrap();
 
+        let mut service = crate::test_utils::test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &key.user_id,
+            "gcp-history",
+            "endpoint",
+            None,
+            None,
+        );
+        service.api_key_id = Some(key.id.clone());
+        db.collection::<crate::models::user_service::UserService>("user_services")
+            .insert_one(&service)
+            .await
+            .unwrap();
         let refreshed = mint_and_store(&db, &encryption_keys, &key).await.unwrap();
         assert_eq!(refreshed.status, "active");
         assert!(refreshed.access_token_encrypted.is_some());
         assert!(refreshed.expires_at.is_some_and(|e| e > Utc::now()));
 
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::service_change_event::COLLECTION_NAME)
+                .count_documents(doc! { "service_id": &service.id })
+                .await
+                .unwrap(),
+            0
+        );
         let decrypted = encryption_keys
             .decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
             .await

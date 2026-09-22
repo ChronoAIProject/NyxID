@@ -145,17 +145,17 @@ async fn load_active_published_endpoint(
     allowed_node_ids: &[String],
     endpoint_id: &str,
 ) -> AppResult<Option<ServiceEndpoint>> {
-    let catalog_backed = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "_id": user_service_id,
-            "user_id": owner_user_id,
-            "is_active": true,
-            "service_type": "http",
-            "catalog_service_id": { "$type": "string", "$ne": "" },
-        })
-        .await?
-        .is_some();
+    let catalog_backed =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find_one(doc! {
+                "_id": user_service_id,
+                "user_id": owner_user_id,
+                "is_active": true,
+                "service_type": "http",
+                "catalog_service_id": { "$type": "string", "$ne": "" },
+            })
+            .await?
+            .is_some();
     if !catalog_backed {
         return Ok(None);
     }

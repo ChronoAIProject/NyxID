@@ -5,9 +5,10 @@ pub const COLLECTION_NAME: &str = "feature_flag_overrides";
 
 /// The scope a single feature-flag override applies to.
 ///
-/// Resolution applies overrides most-specific-first. Within an org context:
-/// `User` > `Role` > `Org` > `Global` > code default. In the personal (non-org)
-/// context: `User` (personal) > `Global` > code default.
+/// Resolution applies `code default -> Global -> Org -> User` in both org and
+/// personal contexts. Personal contexts consider active org memberships, with
+/// disable winning conflicts at the same scope. Legacy org `Role` and `User`
+/// rows apply after `Org` and before the platform `User` override.
 ///
 /// `Global` rows are platform-level (no org) and affect everyone, org or not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

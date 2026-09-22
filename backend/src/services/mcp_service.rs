@@ -1127,17 +1127,17 @@ async fn load_user_tools_with_grants(
         .collect();
     let mut blocked_slugs: HashSet<String> =
         executable_slugs.iter().map(|s| (*s).to_string()).collect();
-    let personal_pinned: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": user_id,
-            "is_active": true,
-            "service_type": "http",
-            "node_id": { "$type": "string", "$ne": "" },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let personal_pinned: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": user_id,
+                "is_active": true,
+                "service_type": "http",
+                "node_id": { "$type": "string", "$ne": "" },
+            })
+            .await?
+            .try_collect()
+            .await?;
     for svc in &personal_pinned {
         // Always block, even when the pinned `node_id` is out of the
         // caller's API-key scope. `execute_tool` for the platform copy
@@ -1161,17 +1161,17 @@ async fn load_user_tools_with_grants(
             let effective_scope =
                 crate::services::org_role_scope_service::effective_scope_for_membership(db, m)
                     .await?;
-            let org_pinned: Vec<UserService> = db
-                .collection::<UserService>(USER_SERVICES)
-                .find(doc! {
-                        "user_id": &m.org_user_id,
-                        "is_active": true,
-                        "service_type": "http",
-                        "node_id": { "$type": "string", "$ne": "" },
-                })
-                .await?
-                .try_collect()
-                .await?;
+            let org_pinned: Vec<UserService> =
+                crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                    .find(doc! {
+                            "user_id": &m.org_user_id,
+                            "is_active": true,
+                            "service_type": "http",
+                            "node_id": { "$type": "string", "$ne": "" },
+                    })
+                    .await?
+                    .try_collect()
+                    .await?;
             for svc in org_pinned {
                 if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
                     continue;
@@ -1255,7 +1255,7 @@ async fn load_user_tools_with_grants(
     let user_endpoints: Vec<UserEndpoint> = if user_endpoint_ids.is_empty() {
         vec![]
     } else {
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .find(doc! { "_id": { "$in": &user_endpoint_ids } })
             .await?
             .try_collect()
@@ -1661,12 +1661,12 @@ async fn load_callable_user_services(
     providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
 ) -> AppResult<Vec<ResolvedUserService>> {
     // -- Personal services --
-    let personal_services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! { "user_id": user_id, "is_active": true, "service_type": "http" })
-        .await?
-        .try_collect()
-        .await?;
+    let personal_services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! { "user_id": user_id, "is_active": true, "service_type": "http" })
+            .await?
+            .try_collect()
+            .await?;
 
     // Collect all api_key_ids from personal + org services for batch lookup
     let mut all_api_key_ids: Vec<String> = personal_services
@@ -1684,16 +1684,16 @@ async fn load_callable_user_services(
         let effective_scope =
             crate::services::org_role_scope_service::effective_scope_for_membership(db, m).await?;
 
-        let org_svcs: Vec<UserService> = db
-            .collection::<UserService>(USER_SERVICES)
-            .find(doc! {
-                "user_id": &m.org_user_id,
-                "is_active": true,
-                "service_type": "http",
-            })
-            .await?
-            .try_collect()
-            .await?;
+        let org_svcs: Vec<UserService> =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find(doc! {
+                    "user_id": &m.org_user_id,
+                    "is_active": true,
+                    "service_type": "http",
+                })
+                .await?
+                .try_collect()
+                .await?;
 
         for svc in org_svcs {
             if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
@@ -1733,7 +1733,7 @@ async fn load_callable_user_services(
     let active_api_keys: Vec<UserApiKey> = if all_api_key_ids.is_empty() {
         vec![]
     } else {
-        db.collection::<UserApiKey>(USER_API_KEYS)
+        crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
             .find(doc! { "_id": { "$in": &all_api_key_ids }, "status": "active" })
             .await?
             .try_collect()
@@ -3701,6 +3701,7 @@ pub async fn execute_tool(
                     user_id,
                     ak_id,
                     user_service_id,
+                    &resolution.target,
                     Some(connection_expiry_notifier),
                 )
                 .await?
@@ -4335,6 +4336,11 @@ pub async fn execute_tool_resolved(
     {
         Ok(response) => response,
         Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
+        Err(error @ proxy_service::ForwardRequestError::OutcomeUnknown) => {
+            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                error.into_app_error(),
+            ));
+        }
         Err(proxy_service::ForwardRequestError::Transport(error))
             if direct_transport_failure_is_pre_dispatch(&error) =>
         {
@@ -4679,7 +4685,7 @@ pub async fn discover_services_with_scope(
         )
         .await?
     } else {
-        db.collection::<UserService>(USER_SERVICES)
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .find(doc! { "user_id": user_id, "is_active": true })
             .await?
             .try_collect()
@@ -4696,7 +4702,14 @@ pub async fn discover_services_with_scope(
     let mut filter = doc! {
         "is_active": true,
         "service_category": { "$ne": "provider" },
-        "$and": [super::catalog_service::visibility_filter(user_id)],
+        "$and": [super::catalog_service::visibility_filter(
+            user_id,
+            &grants
+                .readable_owner_ids()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        )],
         "$nor": [
             { "service_category": "internal", "slug": { "$regex": "^platform-" } },
         ],
@@ -7295,6 +7308,375 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ifttt_oauth_connection_refresh_and_tool_arguments() {
+        use crate::models::downstream_service::{COLLECTION_NAME as CATALOG, DownstreamService};
+        use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
+        use crate::models::user_api_key::{COLLECTION_NAME as KEYS, UserApiKey};
+        use crate::services::{
+            catalog_spec_sync, provider_service, unified_key_service, user_token_service,
+        };
+        use nyxid_service_adapters::ifttt_mcp;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_string_contains, method, path},
+        };
+
+        let db = connect_test_database("ifttt_oauth_mcp").await.unwrap();
+        let encryption = test_encryption_keys();
+        provider_service::seed_default_providers(&db, &encryption)
+            .await
+            .unwrap();
+        provider_service::seed_default_services(&db, &encryption)
+            .await
+            .unwrap();
+        catalog_spec_sync::sync_seeded_service_endpoints(&db)
+            .await
+            .unwrap();
+        let catalog = db
+            .collection::<DownstreamService>(CATALOG)
+            .find_one(doc! {"slug":"api-ifttt-mcp"})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut provider = db
+            .collection::<ProviderConfig>(PROVIDERS)
+            .find_one(doc! {"_id": catalog.provider_config_id.as_ref().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        let token_server = MockServer::start().await;
+        provider.extra_auth_params = Some(std::collections::HashMap::from([(
+            "resource".into(),
+            "https://wrong.example".into(),
+        )]));
+        provider.token_url = Some(format!("{}/token", token_server.uri()));
+        provider.client_id_encrypted = Some(encryption.encrypt(b"fixture-client").await.unwrap());
+        provider.client_secret_encrypted =
+            Some(encryption.encrypt(b"fixture-secret").await.unwrap());
+        db.collection::<ProviderConfig>(PROVIDERS)
+            .replace_one(doc! {"_id": &provider.id}, &provider)
+            .await
+            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let connected = unified_key_service::create_key(
+            &db,
+            &encryption,
+            &owner,
+            &owner,
+            Some("api-ifttt-mcp"),
+            None,
+            "",
+            "My IFTTT",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            unified_key_service::OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+            unified_key_service::OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(connected.service.auth_method, ifttt_mcp::AUTH_METHOD);
+        let stored = db
+            .collection::<UserApiKey>(KEYS)
+            .find_one(doc! {"_id": connected.service.api_key_id.as_ref().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, "pending_auth");
+        let initiated = user_token_service::initiate_oauth_connect(
+            &db,
+            &encryption,
+            "https://nyxid.example",
+            &owner,
+            &provider.id,
+            None,
+            None,
+            &[],
+            None,
+            stored.connection_id.as_deref(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let url = reqwest::Url::parse(&initiated.authorization_url).unwrap();
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["scope"], "mcp");
+        assert_eq!(query["resource"], ifttt_mcp::BASE_URL);
+        assert_eq!(query["code_challenge_method"], "S256");
+        assert_eq!(query["client_id"], "fixture-client");
+        assert!(!query.contains_key("client_secret"));
+        for (grant, access, refresh) in [
+            ("authorization_code", "ifttt-access", "ifttt-refresh"),
+            ("refresh_token", "rotated-access", "rotated-refresh"),
+        ] {
+            Mock::given(method("POST")).and(path("/token")).and(body_string_contains(format!("grant_type={grant}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": access, "refresh_token": refresh, "token_type": "Bearer", "scope": "mcp", "expires_in": 3600,
+                }))).expect(1).mount(&token_server).await;
+        }
+        let outcome = user_token_service::handle_oauth_callback(
+            &db,
+            &encryption,
+            "https://nyxid.example",
+            &provider.id,
+            "fixture-code",
+            &query["state"],
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.connection_id, stored.connection_id);
+        assert!(
+            user_token_service::handle_oauth_callback(
+                &db,
+                &encryption,
+                "https://nyxid.example",
+                &provider.id,
+                "fixture-code",
+                &query["state"]
+            )
+            .await
+            .is_err()
+        );
+        let saved = db
+            .collection::<UserApiKey>(KEYS)
+            .find_one(doc! {"_id": &stored.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, "active");
+        assert_eq!(
+            encryption
+                .decrypt(saved.access_token_encrypted.as_ref().unwrap())
+                .await
+                .unwrap(),
+            b"ifttt-access"
+        );
+        assert_eq!(saved.token_scopes.as_deref(), Some("mcp"));
+        let refreshed =
+            user_token_service::refresh_user_api_key_in_place(&db, &encryption, &saved, None)
+                .await
+                .unwrap();
+        assert_eq!(
+            encryption
+                .decrypt(refreshed.refresh_token_encrypted.as_ref().unwrap())
+                .await
+                .unwrap(),
+            b"rotated-refresh"
+        );
+        assert_eq!(refreshed.credential_epoch, saved.credential_epoch);
+        let requests = token_server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in &requests {
+            let fields: std::collections::HashMap<_, _> =
+                url::form_urlencoded::parse(&request.body)
+                    .into_owned()
+                    .collect();
+            assert_eq!(fields["resource"], ifttt_mcp::BASE_URL);
+            assert_eq!(fields["client_id"], "fixture-client");
+            assert_eq!(fields["client_secret"], "fixture-secret");
+            if fields["grant_type"] == "authorization_code" {
+                assert_eq!(
+                    fields["redirect_uri"],
+                    "https://nyxid.example/api/v1/providers/callback"
+                );
+                assert_eq!(
+                    crate::services::oauth_flow::generate_code_challenge(&fields["code_verifier"]),
+                    query["code_challenge"]
+                );
+            } else {
+                assert_eq!(fields["refresh_token"], "ifttt-refresh");
+            }
+        }
+        let mut resolved = proxy_service::resolve_proxy_target_by_user_service_id(
+            &db,
+            &encryption,
+            &owner,
+            &connected.service.id,
+            None,
+            None,
+            proxy_service::ProxyExecutionContext::new(
+                None,
+                crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(resolved.target.credential, "rotated-access");
+        assert_eq!(resolved.target.base_url, ifttt_mcp::BASE_URL);
+        assert_eq!(resolved.target.auth_method, ifttt_mcp::AUTH_METHOD);
+        for (auth_method, endpoint_url) in [
+            (Some("bearer"), Some("https://editor.example")),
+            (Some("bearer"), None),
+            (None, Some("https://editor.example")),
+        ] {
+            assert!(matches!(
+                crate::services::user_service_service::validate_update_inputs(
+                    &db,
+                    &owner,
+                    &connected.service,
+                    auth_method,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    endpoint_url,
+                    None,
+                )
+                .await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        // Even a row changed outside the validated update path cannot redirect the token.
+        db.collection::<mongodb::bson::Document>(USER_SERVICES)
+            .update_one(
+                doc! {"_id": &connected.service.id},
+                doc! {"$set":{"auth_method":"bearer"}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            proxy_service::resolve_proxy_target_by_user_service_id(
+                &db,
+                &encryption,
+                &owner,
+                &connected.service.id,
+                None,
+                None,
+                proxy_service::ProxyExecutionContext::new(
+                    None,
+                    crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled()
+                ),
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        db.collection::<mongodb::bson::Document>(USER_SERVICES)
+            .update_one(
+                doc! {"_id": &connected.service.id},
+                doc! {"$set":{"auth_method":ifttt_mcp::AUTH_METHOD}},
+            )
+            .await
+            .unwrap();
+        let agent = uuid::Uuid::new_v4().to_string();
+        db.collection::<mongodb::bson::Document>(crate::models::agent_service_binding::COLLECTION_NAME)
+            .insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(), "api_key_id":&agent,
+                "user_id":&owner, "user_service_id":&connected.service.id, "user_api_key_id":&saved.id,
+                "created_at":mongodb::bson::DateTime::now(),"updated_at":mongodb::bson::DateTime::now()})
+            .await.unwrap();
+        let foreign_target = &mut resolved.target;
+        foreign_target.auth_method = "bearer".into();
+        foreign_target.base_url = "https://editor.example".into();
+        assert!(matches!(
+            proxy_service::resolve_agent_credential_override(
+                &db,
+                &encryption,
+                &owner,
+                &agent,
+                &connected.service.id,
+                foreign_target,
+                None,
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        assert!(matches!(
+            proxy_service::read_agent_credential_override_identity(
+                &db,
+                &owner,
+                &agent,
+                &connected.service.id,
+                foreign_target,
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        resolved.target.auth_method = ifttt_mcp::AUTH_METHOD.into();
+        resolved.target.base_url = ifttt_mcp::BASE_URL.into();
+        let rows: Vec<ServiceEndpoint> = db
+            .collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+            .find(doc! {"service_id": &catalog.id, "is_active": true})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let tools = service_endpoints_to_mcp(&rows.iter().collect::<Vec<_>>());
+        for (name, args, expected_path) in [
+            (
+                "list_tools",
+                serde_json::json!({"cursor":"page 2"}),
+                "/tools",
+            ),
+            (
+                "call_tool",
+                serde_json::json!({"tool_name":"fixture_create_applet","body":{"tool_name":"payload", "body":{"enabled":false}}}),
+                "/tools/fixture_create_applet",
+            ),
+        ] {
+            let endpoint = tools.iter().find(|tool| tool.name == name).unwrap();
+            let (method, path, query, _, body) = build_proxy_args(endpoint, &args).unwrap();
+            assert_eq!(path, expected_path.trim_start_matches('/'));
+            proxy_service::validate_ifttt_request(
+                &resolved.target,
+                &method,
+                &path,
+                query.as_deref(),
+                body.as_deref(),
+                false,
+            )
+            .unwrap();
+            if name == "call_tool" {
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(body.as_ref().unwrap()).unwrap(),
+                    args["body"]
+                );
+                assert!(build_input_schema(endpoint)["properties"]["body"].is_object());
+            }
+        }
+        assert!(
+            proxy_service::validate_ifttt_request(
+                &resolved.target,
+                &reqwest::Method::GET,
+                "tools",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            crate::services::user_service_service::validate_update_inputs(
+                &db,
+                &owner,
+                &connected.service,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("https://other.invalid"),
+                None,
+            )
+            .await
+            .is_err()
+        );
+        token_server.verify().await;
+    }
+
+    #[tokio::test]
     async fn ifttt_catalog_connection_and_mcp_calls_reach_local_tls_egress() {
         use crate::models::downstream_service::{COLLECTION_NAME as CATALOG, DownstreamService};
         use crate::models::user_api_key::{COLLECTION_NAME as KEYS, UserApiKey};
@@ -9817,6 +10199,7 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
+                owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
                 id: Uuid::new_v4().to_string(),

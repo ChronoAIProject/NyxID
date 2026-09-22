@@ -4,6 +4,7 @@ pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
 pub mod admin_nodes;
+pub mod admin_ownership;
 pub mod admin_platform_credentials;
 pub mod admin_roles;
 pub mod admin_sa_connections;
@@ -112,3 +113,5 @@ pub mod channel_platforms;
 #[cfg(test)]
 mod curation_tests;
 pub mod options;
+
+pub mod service_history;

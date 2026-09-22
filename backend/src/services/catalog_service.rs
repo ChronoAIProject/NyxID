@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 
+use super::ownership_transfer_service::{catalog_owner, catalog_owner_filter};
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
@@ -323,12 +324,13 @@ async fn provider_platform_secret_nonempty(
 
 /// MongoDB filter for visibility that hides private services from non-owners.
 /// Public services and legacy documents without a visibility field are visible to all.
-pub(crate) fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
+pub(crate) fn visibility_filter(user_id: &str, owner_ids: &[&str]) -> mongodb::bson::Document {
     doc! {
         "$or": [
             { "visibility": { "$ne": "private" } },
             { "visibility": { "$exists": false } },
-            { "visibility": "private", "created_by": user_id },
+            { "$and": [{ "visibility": "private" }, catalog_owner_filter(user_id)] },
+            { "owner_user_id": { "$in": owner_ids } },
             { "platform_key.enabled": true },
         ],
     }
@@ -383,7 +385,6 @@ pub async fn list_catalog(
                         { "service_category": crate::services::retired_service_service::RETIRED_CATEGORY },
                     ],
                 },
-                visibility_filter(user_id),
             ],
         },
     )
@@ -407,7 +408,6 @@ pub async fn list_catalog_all(
                         { "service_category": crate::services::retired_service_service::RETIRED_CATEGORY },
                 ],
             },
-            visibility_filter(user_id),
         ],
     };
     list_catalog_filtered(db, encryption_keys, user_id, filter).await
@@ -417,8 +417,18 @@ async fn list_catalog_filtered(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     user_id: &str,
-    filter: mongodb::bson::Document,
+    mut filter: mongodb::bson::Document,
 ) -> AppResult<Vec<CatalogEntry>> {
+    let grants = super::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
+    let owner_ids: Vec<&str> = grants
+        .readable_owner_ids()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    filter
+        .get_array_mut("$and")
+        .map_err(|_| AppError::Internal("Missing catalog filter".into()))?
+        .push(visibility_filter(user_id, &owner_ids).into());
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(filter)
@@ -455,7 +465,6 @@ async fn list_catalog_filtered(
             .await?
     };
 
-    let grants = super::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     let mut resolved_entries = Vec::with_capacity(services.len());
     for svc in services {
         let provider = svc
@@ -489,7 +498,11 @@ async fn list_catalog_filtered(
 
         let available =
             super::platform_key_service::available_with_grants(&svc, provider, user_id, &grants);
-        if svc.visibility == "private" && svc.created_by != user_id && !available {
+        if svc.visibility == "private"
+            && catalog_owner(&svc) != user_id
+            && !grants.readable_owner_ids().contains(catalog_owner(&svc))
+            && !available
+        {
             continue;
         }
         let inference =
@@ -562,14 +575,22 @@ pub async fn get_downstream_service_by_slug(
 /// Callers are responsible for loading `svc` first; both
 /// `get_catalog_entry` and `get_downstream_service_by_slug` use this
 /// helper so their visibility rules cannot drift.
-async fn enforce_catalog_read_access(
+pub(crate) async fn enforce_catalog_read_access(
     db: &mongodb::Database,
     user_id: &str,
     svc: &DownstreamService,
 ) -> AppResult<()> {
     if svc.visibility != "private"
-        || svc.created_by == user_id
+        || catalog_owner(svc) == user_id
         || super::platform_key_service::available(db, svc, user_id).await?
+    {
+        return Ok(());
+    }
+    if svc.owner_user_id.is_some()
+        && super::platform_key_service::OwnerGrants::load_for_listing(db, user_id)
+            .await?
+            .readable_owner_ids()
+            .contains(catalog_owner(svc))
     {
         return Ok(());
     }
@@ -590,7 +611,7 @@ async fn enforce_catalog_read_access(
     };
     if !caller_may_read_catalog_entry(
         &svc.visibility,
-        &svc.created_by,
+        catalog_owner(svc),
         user_id,
         is_admin,
         has_active_user_service,
@@ -716,8 +737,7 @@ async fn has_active_user_service_for_catalog(
     catalog_service_id: &str,
 ) -> AppResult<bool> {
     // Fast path: personal row.
-    let personal = db
-        .collection::<UserService>(USER_SERVICES)
+    let personal = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .find_one(doc! {
             "user_id": user_id,
             "catalog_service_id": catalog_service_id,
@@ -737,16 +757,16 @@ async fn has_active_user_service_for_catalog(
     }
 
     let org_user_ids: Vec<&str> = memberships.iter().map(|m| m.org_user_id.as_str()).collect();
-    let candidates: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": { "$in": &org_user_ids },
-            "catalog_service_id": catalog_service_id,
-            "is_active": true,
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let candidates: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": { "$in": &org_user_ids },
+                "catalog_service_id": catalog_service_id,
+                "is_active": true,
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     for us in candidates {
         let Some(membership) = memberships.iter().find(|m| m.org_user_id == us.user_id) else {
@@ -866,6 +886,9 @@ mod tests {
 
     fn user_service(id: &str, user_id: &str) -> UserService {
         UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
             slug: "test".to_string(),
@@ -988,6 +1011,7 @@ mod tests {
 
     fn make_catalog_service(slug: &str, name: &str, user_id: &str) -> DownstreamService {
         DownstreamService {
+            owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),

@@ -352,12 +352,11 @@ async fn resolve_write_owner(
     actor: &str,
     service_id: &str,
 ) -> AppResult<ServiceWriteAccess> {
-    let service = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": service_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
+    let service =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find_one(doc! { "_id": service_id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
 
     let access = org_service::resolve_owner_access(&state.db, actor, &service.user_id).await?;
     if !access.can_read() || !access.allows_resource(&service.id) {
@@ -501,26 +500,23 @@ async fn commit_service_update(
     let name = request.name.clone();
     let auth_method = request.auth_method.clone();
     let auth_key_name = request.auth_key_name.clone();
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let operation = apply_update_in_session(
-                &db,
-                &mut *session,
-                &owner_id,
-                &endpoint_id,
-                &service_id,
-                endpoint_url.as_deref(),
-                name.as_deref(),
-                auth_method.as_deref(),
-                auth_key_name.as_deref(),
-            )
-            .await;
-            crate::services::api_key_mutation_service::transaction_result(operation)
-        })
-        .await
-        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
+        let operation = apply_update_in_session(
+            &db,
+            &mut *session,
+            &owner_id,
+            &endpoint_id,
+            &service_id,
+            endpoint_url.as_deref(),
+            name.as_deref(),
+            auth_method.as_deref(),
+            auth_key_name.as_deref(),
+        )
+        .await;
+        crate::services::api_key_mutation_service::transaction_result(operation)
+    })
+    .await
+    .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
     mark_completed(&state.db, &receipt).await?;
     Ok(false)
 }
@@ -534,11 +530,10 @@ async fn commit_service_delete(
     receipt: crate::models::assistant_action_receipt::AssistantActionReceipt,
     was_in_progress: bool,
 ) -> AppResult<bool> {
-    let current = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": &request.user_service_id })
-        .await?;
+    let current =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find_one(doc! { "_id": &request.user_service_id })
+            .await?;
     if current.is_none() {
         if was_in_progress {
             mark_completed(&state.db, &receipt).await?;
@@ -636,27 +631,24 @@ async fn commit_service_route(
     let db = state.db.clone();
     let owner_id = access.owner_id.clone();
     let service_id = request.user_service_id.clone();
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let db = db.clone();
-            let owner_id = owner_id.clone();
-            let service_id = service_id.clone();
-            let extra = extra.clone();
-            let operation = user_service_service::commit_user_service_mutation(
-                &db,
-                &mut *session,
-                &owner_id,
-                &service_id,
-                extra,
-            )
-            .await
-            .map(|_| ());
-            crate::services::api_key_mutation_service::transaction_result(operation)
-        })
+    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
+        let db = db.clone();
+        let owner_id = owner_id.clone();
+        let service_id = service_id.clone();
+        let extra = extra.clone();
+        let operation = user_service_service::commit_user_service_mutation(
+            &db,
+            &mut *session,
+            &owner_id,
+            &service_id,
+            extra,
+        )
         .await
-        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+        .map(|_| ());
+        crate::services::api_key_mutation_service::transaction_result(operation)
+    })
+    .await
+    .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
     mark_completed(&state.db, &receipt).await?;
     Ok(false)
 }
@@ -717,35 +709,28 @@ async fn commit_service_rotate(
     let service_id = request.user_service_id.clone();
     let predecessor_id_for_tx = predecessor_id.clone();
     let successor_for_tx = successor.clone();
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let operation: AppResult<()> = async {
-                user_api_key_service::insert_api_key_in_session(
-                    &db,
-                    &mut *session,
-                    &successor_for_tx,
-                )
+    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
+        let operation: AppResult<()> = async {
+            user_api_key_service::insert_api_key_in_session(&db, &mut *session, &successor_for_tx)
                 .await?;
-                user_service_service::commit_user_service_mutation(
-                    &db,
-                    &mut *session,
-                    &owner_id,
-                    &service_id,
-                    doc! {
-                        "api_key_id": &successor_for_tx.id,
-                        "rotation_predecessor_id": &predecessor_id_for_tx,
-                    },
-                )
-                .await?;
-                Ok(())
-            }
-            .await;
-            crate::services::api_key_mutation_service::transaction_result(operation)
-        })
-        .await
-        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+            user_service_service::commit_user_service_mutation(
+                &db,
+                &mut *session,
+                &owner_id,
+                &service_id,
+                doc! {
+                    "api_key_id": &successor_for_tx.id,
+                    "rotation_predecessor_id": &predecessor_id_for_tx,
+                },
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        crate::services::api_key_mutation_service::transaction_result(operation)
+    })
+    .await
+    .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
     mark_completed(&state.db, &receipt).await?;
     Ok(false)
 }
@@ -753,7 +738,7 @@ async fn commit_service_rotate(
 #[allow(clippy::too_many_arguments)]
 async fn apply_update_in_session(
     db: &mongodb::Database,
-    session: &mut mongodb::ClientSession,
+    session: &mut crate::services::service_history::transaction::Transaction,
     owner_id: &str,
     endpoint_id: &str,
     service_id: &str,
@@ -1071,6 +1056,9 @@ mod tests {
                 "/assistant/actions",
                 get(assistant_actions::get_assistant_actions),
             )
+            .layer(axum::middleware::from_fn(
+                crate::services::service_history::context::middleware,
+            ))
             .with_state(state)
     }
 
@@ -1478,6 +1466,32 @@ mod tests {
         assert_eq!(replayed["resource"]["userServiceId"], service.id);
         assert!(replayed.get("credential").is_none());
         assert!(replayed.get("fullKey").is_none());
+        use crate::models::service_change_event::{COLLECTION_NAME, ServiceChangeEvent};
+        use futures::TryStreamExt;
+        let rows: Vec<ServiceChangeEvent> = db
+            .collection(COLLECTION_NAME)
+            .find(doc! { "service_id": &service.id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let receipt = db
+            .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+            .find_one(doc! { "action_request_id": "update-normalize", "user_id": &actor_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|e| e.change_group_id == receipt.id
+            && e.actor.person_id.as_deref() == Some(actor_id.as_str())));
+        assert_eq!(
+            rows.iter()
+                .filter(|e| e.entity_type == USER_ENDPOINTS)
+                .count(),
+            1,
+            "replay must not duplicate the actual endpoint change"
+        );
     }
 
     #[tokio::test]

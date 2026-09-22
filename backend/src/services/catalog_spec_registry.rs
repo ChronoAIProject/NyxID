@@ -24,6 +24,10 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "ifttt-mcp",
+        include_str!("../../specs/catalog/ifttt-mcp.openapi.json"),
+    ),
+    (
         "ifttt",
         include_str!("../../specs/catalog/ifttt.openapi.json"),
     ),
@@ -152,6 +156,7 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-ifttt", "ifttt"),
+    ("api-ifttt-mcp", "ifttt-mcp"),
     ("api-notion", "notion"),
     ("api-aurinko", "aurinko"),
     ("api-discord", "discord"),

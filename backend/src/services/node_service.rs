@@ -624,10 +624,7 @@ pub async fn transfer_node_owner_with_expected_state_version(
     let previous_owner_user_id = node.user_id;
     let node_name = node.name;
     let new_owner_user_id = new_owner_user_id.to_string();
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
+    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
             let operation: AppResult<TransferNodeResult> = async {
                 let current_filter = doc! {
                     "_id": &node_id,
@@ -681,8 +678,7 @@ pub async fn transfer_node_owner_with_expected_state_version(
                     )
                     .session(&mut *session)
                     .await?;
-                let service_result = db
-                    .collection::<UserService>(USER_SERVICES)
+                let service_result = crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
                     .update_many(
                         doc! {
                             "node_id": &node_id,
@@ -784,84 +780,81 @@ pub async fn delete_node_with_expected_state_version(
     let node_id = node_id.to_string();
     let tracing_node_id = node_id.clone();
     let owner_user_id = node.user_id;
-    let mut session = db.client().start_session().await?;
-    session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let operation: AppResult<()> = async {
-                let now = bson::DateTime::from_chrono(Utc::now());
-                let mut node_filter = doc! {
-                    "_id": &node_id,
-                    "user_id": &owner_user_id,
-                    "is_active": true,
-                };
-                if let Some(expected) = expected_state_version {
-                    node_filter.insert(
-                        "$or",
-                        vec![
-                            doc! { "state_version": expected },
-                            doc! { "state_version": { "$exists": false } },
-                        ],
-                    );
-                }
-                let state_version_fallback = expected_state_version.unwrap_or(0);
-                let result = db
-                    .collection::<Node>(NODES)
-                    .update_one(
-                        node_filter,
-                        vec![doc! {
-                            "$set": {
-                                "is_active": false,
-                                "status": NodeStatus::Offline.as_str(),
-                                "updated_at": &now,
-                                "state_version": {
-                                    "$add": [
-                                        { "$ifNull": ["$state_version", state_version_fallback] },
-                                        1_i64,
-                                    ]
-                                },
-                            }
-                        }],
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if result.matched_count == 0 {
-                    if expected_state_version.is_some() {
-                        return Err(AppError::Conflict(
-                            "the node changed since this action was prepared".to_string(),
-                        ));
-                    }
-                    return Err(AppError::NodeNotFound("Node not found".to_string()));
-                }
-
-                db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-                    .update_many(
-                        doc! { "node_id": &node_id, "is_active": true },
-                        doc! { "$set": { "is_active": false, "updated_at": &now } },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
-                    .delete_many(doc! { "node_id": &node_id })
-                    .session(&mut *session)
-                    .await?;
-                db.collection::<UserService>(USER_SERVICES)
-                    .update_many(
-                        doc! { "node_id": &node_id, "is_active": true },
-                        doc! {
-                            "$unset": { "node_id": "" },
-                            "$set": { "updated_at": &now },
-                        },
-                    )
-                    .session(&mut *session)
-                    .await?;
-                Ok(())
+    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
+        let operation: AppResult<()> = async {
+            let now = bson::DateTime::from_chrono(Utc::now());
+            let mut node_filter = doc! {
+                "_id": &node_id,
+                "user_id": &owner_user_id,
+                "is_active": true,
+            };
+            if let Some(expected) = expected_state_version {
+                node_filter.insert(
+                    "$or",
+                    vec![
+                        doc! { "state_version": expected },
+                        doc! { "state_version": { "$exists": false } },
+                    ],
+                );
             }
-            .await;
-            crate::services::api_key_mutation_service::transaction_result(operation)
-        })
-        .await
-        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+            let state_version_fallback = expected_state_version.unwrap_or(0);
+            let result = db
+                .collection::<Node>(NODES)
+                .update_one(
+                    node_filter,
+                    vec![doc! {
+                        "$set": {
+                            "is_active": false,
+                            "status": NodeStatus::Offline.as_str(),
+                            "updated_at": &now,
+                            "state_version": {
+                                "$add": [
+                                    { "$ifNull": ["$state_version", state_version_fallback] },
+                                    1_i64,
+                                ]
+                            },
+                        }
+                    }],
+                )
+                .session(&mut *session)
+                .await?;
+            if result.matched_count == 0 {
+                if expected_state_version.is_some() {
+                    return Err(AppError::Conflict(
+                        "the node changed since this action was prepared".to_string(),
+                    ));
+                }
+                return Err(AppError::NodeNotFound("Node not found".to_string()));
+            }
+
+            db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                .update_many(
+                    doc! { "node_id": &node_id, "is_active": true },
+                    doc! { "$set": { "is_active": false, "updated_at": &now } },
+                )
+                .session(&mut *session)
+                .await?;
+            db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+                .delete_many(doc! { "node_id": &node_id })
+                .session(&mut *session)
+                .await?;
+            crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
+                .update_many(
+                    doc! { "node_id": &node_id, "is_active": true },
+                    doc! {
+                        "$unset": { "node_id": "" },
+                        "$set": { "updated_at": &now },
+                    },
+                )
+                .session(&mut *session)
+                .await?;
+            Ok(())
+        }
+        .await;
+        crate::services::api_key_mutation_service::transaction_result(operation)
+    })
+    .await
+    .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
 
     tracing::info!(node_id = %tracing_node_id, "Node deleted");
     Ok(())
@@ -1261,15 +1254,15 @@ async fn has_active_user_service_for_node(
     service_id: &str,
     node_id: &str,
 ) -> AppResult<bool> {
-    let count = db
-        .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .count_documents(doc! {
-            "user_id": user_id,
-            "catalog_service_id": service_id,
-            "node_id": node_id,
-            "is_active": true,
-        })
-        .await?;
+    let count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_SERVICES)
+            .count_documents(doc! {
+                "user_id": user_id,
+                "catalog_service_id": service_id,
+                "node_id": node_id,
+                "is_active": true,
+            })
+            .await?;
 
     Ok(count > 0)
 }

@@ -103,7 +103,7 @@ export interface VerifyChannelBotResponse {
 export interface CreateChannelBotRequest {
   readonly [field: string]: string | undefined;
   readonly platform: ChannelPlatform;
-  readonly bot_token: string;
+  readonly bot_token?: string;
   readonly label: string;
   /** Lark/Feishu only */
   readonly app_id?: string;

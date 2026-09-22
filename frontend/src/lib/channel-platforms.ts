@@ -53,7 +53,7 @@ export function channelBotRegistrationPayload(data: CreateChannelBotRequest, des
     const value = data[name as ChannelCredentialField]?.trim();
     return value ? [[name, value]] : [];
   }));
-  return { platform: data.platform, label: data.label.trim(), bot_token: fields.bot_token ?? "", target_org_id: data.target_org_id || undefined, ...fields };
+  return { platform: data.platform, label: data.label.trim(), target_org_id: data.target_org_id || undefined, ...fields };
 }
 export type ChannelMutableField = Exclude<ChannelCredentialField, "phone_number_id" | "waba_id" | "public_key">;
 export function editableChannelFields(descriptor: ReturnType<typeof platformView>) {

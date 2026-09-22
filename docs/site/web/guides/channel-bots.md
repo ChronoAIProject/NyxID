@@ -62,6 +62,8 @@ Discord sends a `PING` challenge on first setup. NyxID handles it automatically 
 
 Lark and Feishu use the same adapter (different base URLs). Webhook registration is manual — you configure the URL in the developer console, not through NyxID.
 
+NyxID exchanges your App ID and App Secret for a tenant access token automatically. There is no separate Bot token to enter.
+
 1. In the [Lark Developer Console](https://open.larksuite.com/app) (or Feishu equivalent), create an app and enable bot capabilities.
 2. Note the **App ID**, **App Secret**, **Verification Token**, and optionally the **Encrypt Key**.
 3. In NyxID, go to **Channel Bots → Register bot**, select **Platform: Lark** (or **Feishu**).

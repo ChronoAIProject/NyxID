@@ -990,6 +990,17 @@ mod migration {
             .insert_one(doc! {"_id": "stale-route", "channel_bot_id": &old.id, "is_active": true})
             .await
             .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": "foreign-route",
+                "channel_bot_id": &old.id,
+                "user_id": "other-owner",
+                "is_active": true,
+            })
+            .await
+            .unwrap();
         assert_stale_operations_are_inert(&state, &provider, &old).await;
         let route = state
             .db
@@ -999,6 +1010,14 @@ mod migration {
             .unwrap()
             .unwrap();
         assert!(!route.get_bool("is_active").unwrap());
+        let foreign_route = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(doc! { "_id": "foreign-route" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(foreign_route.get_bool("is_active").unwrap());
         state.db.drop().await.unwrap();
     }
 

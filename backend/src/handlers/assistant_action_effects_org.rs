@@ -717,15 +717,14 @@ async fn effective_approval_service_id(
     user_id: &str,
     service_id: &str,
 ) -> AppResult<String> {
-    if let Some(service) = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "_id": service_id,
-            "user_id": user_id,
-            "is_active": true,
-        })
-        .await?
+    if let Some(service) =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find_one(doc! {
+                "_id": service_id,
+                "user_id": user_id,
+                "is_active": true,
+            })
+            .await?
     {
         return Ok(service.catalog_service_id.unwrap_or(service.id));
     }
@@ -790,17 +789,16 @@ async fn grant_for_actor(
     }
 
     let mut service_ids = Vec::new();
-    let mut cursor = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": &grant.user_id,
-            "$or": [
-                { "_id": &grant.service_id },
-                { "catalog_service_id": &grant.service_id },
-            ],
-        })
-        .await?;
+    let mut cursor =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find(doc! {
+                "user_id": &grant.user_id,
+                "$or": [
+                    { "_id": &grant.service_id },
+                    { "catalog_service_id": &grant.service_id },
+                ],
+            })
+            .await?;
     while let Some(service) = cursor.try_next().await? {
         service_ids.push(service.id);
     }

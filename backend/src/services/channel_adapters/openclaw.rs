@@ -308,6 +308,7 @@ mod tests {
     fn make_test_bot() -> ChannelBot {
         ChannelBot {
             last_verification: None,
+            ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "openclaw".to_string(),

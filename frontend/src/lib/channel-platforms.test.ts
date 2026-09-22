@@ -34,6 +34,17 @@ describe("channel catalog presentation", () => {
     expect(editableChannelFields(platforms.whatsapp!).map((f) => f.name)).toEqual(["bot_token", "app_secret"]);
     expect(editableChannelFields(platforms.telegram!)).toEqual([]);
   });
+
+  it.each(["lark", "feishu"])("omits a hidden bot token when submitting %s credentials", (platform) => {
+    const descriptor = platformFixtures.find((p) => p.platform === platform)!;
+    expect(channelBotRegistrationPayload({
+      platform, label: "Support", bot_token: "leftover-token",
+      app_id: "cli_test", app_secret: "app-secret", verification_token: "verification-token",
+    }, descriptor)).toEqual({
+      platform, label: "Support", target_org_id: undefined,
+      app_id: "cli_test", app_secret: "app-secret", verification_token: "verification-token",
+    });
+  });
 });
 
 describe("Aurinko email setup", () => {

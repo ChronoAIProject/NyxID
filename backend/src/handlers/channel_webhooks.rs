@@ -1360,6 +1360,7 @@ mod tests {
 
         let bot = crate::models::channel_bot::ChannelBot {
             last_verification: None,
+            ownership_version: 0,
             id: bot_id.clone(),
             user_id: user_id.clone(),
             platform: "lark".to_string(),

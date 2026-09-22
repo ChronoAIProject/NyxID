@@ -79,15 +79,15 @@ pub async fn compute_viewer_routing(
     }
 
     let id_strings: Vec<String> = catalog_service_ids.iter().map(|s| s.to_string()).collect();
-    let user_services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": viewer_user_id,
-            "catalog_service_id": { "$in": &id_strings },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let user_services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": viewer_user_id,
+                "catalog_service_id": { "$in": &id_strings },
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     // Group by catalog_service_id so we can detect "multiple bindings".
     let mut grouped: HashMap<String, Vec<UserService>> = HashMap::new();
@@ -142,8 +142,11 @@ pub async fn is_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<bool>
 pub async fn require_admin_or_creator(
     state: &AppState,
     auth_user: &AuthUser,
-    service_created_by: &str,
+    service: &DownstreamService,
 ) -> AppResult<()> {
+    if service.owner_user_id.is_some() {
+        return require_admin(state, auth_user).await;
+    }
     let user_id_str = auth_user.user_id.to_string();
 
     let user_model = state
@@ -154,7 +157,7 @@ pub async fn require_admin_or_creator(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
-    if !platform_role.is_admin() && service_created_by != user_id_str {
+    if !platform_role.is_admin() && service.created_by != user_id_str {
         return Err(AppError::Forbidden(
             "Only admins or the service creator can perform this action".to_string(),
         ));
@@ -223,15 +226,14 @@ pub async fn resolve_service_or_user_service(
         return Err(AppError::NotFound("Service not found".to_string()));
     }
 
-    let user_endpoint = state
-        .db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
-        .find_one(doc! {
-            "_id": &user_service.endpoint_id,
-            "user_id": &user_service.user_id,
-        })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+    let user_endpoint =
+        crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+            .find_one(doc! {
+                "_id": &user_service.endpoint_id,
+                "user_id": &user_service.user_id,
+            })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
     Ok(ResolvedService::Owned {
         owner_id: user_service.user_id.clone(),
@@ -330,6 +332,10 @@ pub async fn service_to_response_with_viewer(
         anonymous_endpoints: s.anonymous_endpoints,
         proxy_operation_policy: s.proxy_operation_policy,
         developer_app_ids: s.developer_app_ids,
+        owner_user_id: s
+            .owner_user_id
+            .clone()
+            .unwrap_or_else(|| s.created_by.clone()),
         created_by: s.created_by,
         created_at: s.created_at.to_rfc3339(),
         updated_at: s.updated_at.to_rfc3339(),
