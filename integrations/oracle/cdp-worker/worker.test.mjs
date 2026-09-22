@@ -34,6 +34,13 @@ import {
   backoffDelay,
   chooseChatPage,
   choosePromptNavigation,
+  TEMPORARY_CHAT_URL,
+  isTemporaryChatUrl,
+  promptUsesTemporaryChat,
+  effortSliderIndex,
+  parseEffortSliderState,
+  effortSliderPlan,
+  effortSliderDetail,
   classifyArtifactLink,
   decidePromptResume,
   daemonPath,
@@ -558,6 +565,13 @@ test("profile name is seeded only for a fresh profile", () => {
   assert.equal(seedProfileName("/p", "NyxID Oracle w1", fs), true);
   assert.deepEqual(writes[0][1], { profile: { name: "NyxID Oracle w1" } });
   assert.equal(seedProfileName("/p", "x", { ...fs, existsSync: () => true }), false);
+});
+
+test("extra-high accepts hyphen, dot and underscore separators", () => {
+  for (const label of ["chatgpt-6-extra-high", "gpt-6-extra_high", "extra.high", "Extra High"]) {
+    assert.equal(modelLevelTargets(label)[0], "Extra High", label);
+  }
+  assert.equal(modelLevelTargets("chatgpt-6-high")[0], "High");
 });
 
 test("model labels map to ChatGPT reasoning levels with Pro first", () => {
@@ -1157,4 +1171,68 @@ test("composerHasDraft treats only non-whitespace content as a draft to clear", 
   // Non-string reads (missing composer) are not drafts.
   assert.equal(composerHasDraft(null), false);
   assert.equal(composerHasDraft(undefined), false);
+});
+
+test("single-shot prompts use a Temporary Chat; sessions, follow-ups and projects do not", () => {
+  // Off by default: single-shot answers keep a /c/<id> URL for `nyxid oracle attach`.
+  assert.equal(promptUsesTemporaryChat({ is_followup: false }), false);
+  assert.equal(promptUsesTemporaryChat({ is_followup: false }, true), true);
+  assert.equal(promptUsesTemporaryChat({ is_followup: true, conversation_id: "c1" }, true), false);
+  assert.equal(promptUsesTemporaryChat({ is_followup: false, conversation_id: "c1" }, true), false);
+  assert.equal(promptUsesTemporaryChat({ required_project_url: "https://chatgpt.com/g/g-p-x/project" }, true), false);
+  assert.equal(promptUsesTemporaryChat({ is_followup: false }, false), false);
+  assert.equal(isTemporaryChatUrl(TEMPORARY_CHAT_URL), true);
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/c/abc123?temporary-chat=true"), true);
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/"), false);
+  assert.equal(isTemporaryChatUrl("not a url"), false);
+});
+
+test("fresh prompts navigate to the Temporary Chat surface and leave finished ones", () => {
+  const fresh = { recovering: false, isFollowup: false, persistedUrl: null, taskConversationUrl: null, requiredProjectUrl: null, temporaryChat: true };
+  assert.deepEqual(choosePromptNavigation({ ...fresh, currentUrl: "https://chatgpt.com/" }), { error: null, target: TEMPORARY_CHAT_URL });
+  assert.deepEqual(choosePromptNavigation({ ...fresh, currentUrl: "https://chatgpt.com/c/abc123?temporary-chat=true" }), { error: null, target: TEMPORARY_CHAT_URL });
+  // The URL never changes after a Temporary Chat turn, so a fresh prompt always reloads it.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, currentUrl: TEMPORARY_CHAT_URL }), { error: null, target: TEMPORARY_CHAT_URL });
+  // Post-send recovery on the same live Temporary Chat tab stays put; the transcript decides.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, recovering: true, phase: "waiting_response", persistedUrl: TEMPORARY_CHAT_URL, currentUrl: TEMPORARY_CHAT_URL }), { error: null, target: null });
+  // Post-send recovery after the tab moved elsewhere reopens the surface (the transcript then reports uncertainty, never a resend).
+  assert.deepEqual(choosePromptNavigation({ ...fresh, recovering: true, phase: "waiting_response", persistedUrl: TEMPORARY_CHAT_URL, currentUrl: "https://chatgpt.com/" }), { error: null, target: TEMPORARY_CHAT_URL });
+  // Pre-send recovery reloads the surface.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, recovering: true, phase: "page_ready", persistedUrl: TEMPORARY_CHAT_URL, currentUrl: TEMPORARY_CHAT_URL }), { error: null, target: TEMPORARY_CHAT_URL });
+  // A persistent prompt never reuses a leftover Temporary Chat surface.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, temporaryChat: false, currentUrl: TEMPORARY_CHAT_URL }), { error: null, target: "https://chatgpt.com/" });
+  assert.deepEqual(choosePromptNavigation({ ...fresh, temporaryChat: false, currentUrl: "https://chatgpt.com/" }), { error: null, target: null });
+  // Project pins outrank the Temporary Chat request.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, requiredProjectUrl: "https://chatgpt.com/g/g-p-x/project", currentUrl: "https://chatgpt.com/" }),
+    { error: null, target: "https://chatgpt.com/g/g-p-x/project" });
+  // Follow-ups still resume their pinned conversation.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, isFollowup: true, taskConversationUrl: "https://chatgpt.com/c/def456", currentUrl: TEMPORARY_CHAT_URL }),
+    { error: null, target: "https://chatgpt.com/c/def456" });
+});
+
+test("effort slider state parses only a sane ARIA range", () => {
+  assert.deepEqual(parseEffortSliderState("0", "4", "4"), { min: 0, max: 4, value: 4 });
+  assert.deepEqual(parseEffortSliderState("0", "3", "2"), { min: 0, max: 3, value: 2 });
+  assert.equal(parseEffortSliderState(null, "4", "4"), null);
+  assert.equal(parseEffortSliderState("0", "4", "5"), null);
+  assert.equal(parseEffortSliderState("0", "9", "1"), null);
+  assert.equal(parseEffortSliderState("a", "4", "1"), null);
+  assert.equal(parseEffortSliderState("0", "4", "1.5"), null);
+});
+
+test("effort slider plans step counts from the minimum and reports a hidden Pro", () => {
+  assert.equal(effortSliderIndex("Pro"), 4);
+  assert.equal(effortSliderIndex("Instant"), 0);
+  assert.equal(effortSliderIndex("custom-label"), -1);
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 4, value: 4 }, "Pro"), { steps: 0, unavailable: false, target: 4 });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 4, value: 1 }, "Pro"), { steps: 3, unavailable: false, target: 4 });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 4, value: 4 }, "High"), { steps: -2, unavailable: false, target: 2 });
+  assert.deepEqual(effortSliderPlan({ min: 1, max: 5, value: 1 }, "Medium"), { steps: 1, unavailable: false, target: 2 });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 3, value: 3 }, "Pro"), { steps: null, unavailable: true, target: 4, hint: "pro_hidden_usage_limit" });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 1, value: 0 }, "High"), { steps: null, unavailable: true, target: 2, hint: "range_too_short" });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 4, value: 0 }, "custom-label"), { steps: null, unavailable: true, hint: "unsupported" });
+  assert.deepEqual(effortSliderPlan(null, "Pro"), { steps: null, unavailable: true, hint: "unsupported" });
+  assert.equal(effortSliderDetail({ min: 0, max: 4, before: 1, after: 4, confirmed: 4 }), "slider=1>4>4/0-4");
+  assert.equal(effortSliderDetail({ min: 0, max: 3, before: 3, hint: "pro_hidden_usage_limit" }), "slider=3/0-3 hint=pro_hidden_usage_limit");
+  assert.equal(effortSliderDetail(null), "slider=absent");
 });

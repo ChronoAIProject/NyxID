@@ -310,6 +310,30 @@ export function decidePromptResume({ phase, prompt, turns, generating, transcrip
   return { action: "uncertain" };
 }
 
+// ChatGPT's Temporary Chat: not saved to history, no memory, and a fresh
+// document every time. With NYXID_ORACLE_TEMPORARY_CHAT=1 single-shot prompts
+// run there so no draft, transcript or model state from an earlier task can
+// bleed into the next one (a stale oversized draft is what stranded a
+// 15-worker pool on 2026-09-21). Off by default: a Temporary Chat has no
+// /c/<id> URL, so `nyxid oracle attach` cannot pick a single-shot answer up
+// later. Session turns, follow-ups and project-pinned pools always keep
+// persistent chats because their conversation URL must stay reachable.
+export const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+const TEMPORARY_CHAT_ENABLED = process.env.NYXID_ORACLE_TEMPORARY_CHAT === "1";
+const TEMPORARY_CHAT_ONBOARDING_SELECTOR = '[data-testid="modal-temporary-chat-onboarding"]';
+
+export function isTemporaryChatUrl(url) {
+  try {
+    return new URL(url || "").searchParams.get("temporary-chat") === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function promptUsesTemporaryChat(task, enabled = TEMPORARY_CHAT_ENABLED) {
+  return !!enabled && !task?.is_followup && !task?.conversation_id && !task?.required_project_url;
+}
+
 export function choosePromptNavigation({
   recovering,
   phase = "claimed",
@@ -318,6 +342,7 @@ export function choosePromptNavigation({
   persistedUrl,
   taskConversationUrl,
   requiredProjectUrl,
+  temporaryChat = false,
 }) {
   const currentConversationId = convId(currentUrl);
   const onConvPage = Boolean(currentConversationId);
@@ -342,6 +367,14 @@ export function choosePromptNavigation({
   if (recovering && !preSend && onConvPage && !resumeConversationId) {
     return { error: null, target: null };
   }
+  // A Temporary Chat never exposes a /c/<id> URL, so after a send the live tab
+  // is the only place the conversation exists. Keep it for post-send recovery
+  // (the transcript check decides whether the sent prompt is really there);
+  // any navigation would open an empty chat and lose the answer.
+  if (recovering && !preSend && isTemporaryChatUrl(currentUrl) && !convId(currentUrl) &&
+      isTemporaryChatUrl(persistedUrl) && !persistedConversationId && !taskConversationId) {
+    return { error: null, target: null };
+  }
   if ((isFollowup || recovering) && resumeUrl) {
     return {
       error: null,
@@ -349,8 +382,16 @@ export function choosePromptNavigation({
         !resumeConversationId || currentConversationId !== resumeConversationId ? resumeUrl : null,
     };
   }
-  const base = requiredProjectUrl || "https://chatgpt.com/";
-  return { error: null, target: onConvPage || !currentUrl.startsWith(base) ? base : null };
+  if (requiredProjectUrl) {
+    return { error: null, target: onConvPage || !currentUrl.startsWith(requiredProjectUrl) ? requiredProjectUrl : null };
+  }
+  // Every fresh Temporary Chat prompt reloads the surface: the URL does not
+  // change after a turn, so it cannot prove the document is still pristine.
+  if (temporaryChat) return { error: null, target: TEMPORARY_CHAT_URL };
+  // A persistent prompt must never reuse a Temporary Chat surface left behind
+  // by an earlier task: that conversation would vanish with the tab.
+  const base = "https://chatgpt.com/";
+  return { error: null, target: onConvPage || isTemporaryChatUrl(currentUrl) || !currentUrl.startsWith(base) ? base : null };
 }
 
 export function taskRecoveryDecision({
@@ -1281,7 +1322,7 @@ export function modelLevelTargets(label) {
   if (/\bpro\b|pro$|专业/.test(lower) || compact.endsWith("pro")) {
     return ["Pro", "Pro Extended", "Pro 扩展", "扩展"];
   }
-  if (/extra\s*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
+  if (/extra[\s._-]*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
   if (/\bhigh\b|高级|advanced/.test(lower)) return ["High", "高级"];
   if (/medium|balanced|均衡/.test(lower)) return ["Medium", "均衡"];
   if (/instant|fast|极速/.test(lower)) return ["Instant", "极速"];
@@ -1910,13 +1951,152 @@ async function closeOpenMenus(page, budget) {
   }
 }
 
+// ── Reasoning-effort slider ──────────────────────────────────────────────
+// The current composer picker exposes the reasoning level as a Radix slider
+// (role="slider", aria-valuemin/max/now) under a "Power" menu item, with the
+// model family/version in a separate "Select model" submenu. Driving the
+// slider by its ARIA state is what codex-chatgpt-web (MIT) does; it survives
+// label, layout and locale changes that broke every text-matching path here.
+// Levels are ordered Instant, Medium, High, Extra High, Pro from the minimum.
+// A range shorter than five entries hides the top levels (Pro disappears when
+// its usage limit is reached), never the bottom ones.
+const EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider]';
+const EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"]';
+const EFFORT_SLIDER_LEVELS = ["Instant", "Medium", "High", "Extra High", "Pro"];
+const EFFORT_SLIDER_STEP_MS = 1000;
+
+export function effortSliderIndex(level) {
+  return EFFORT_SLIDER_LEVELS.indexOf(level);
+}
+
+function safeIntegerAttribute(value) {
+  if (value === null || value === undefined || !/^-?\d+$/.test(String(value))) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+export function parseEffortSliderState(rawMin, rawMax, rawValue) {
+  const min = safeIntegerAttribute(rawMin);
+  const max = safeIntegerAttribute(rawMax);
+  const value = safeIntegerAttribute(rawValue);
+  if (min === undefined || max === undefined || value === undefined) return null;
+  const options = max - min + 1;
+  if (options < 1 || options > EFFORT_SLIDER_LEVELS.length) return null;
+  if (value < min || value > max) return null;
+  return { min, max, value };
+}
+
+// How to move a parsed slider onto a canonical level: the signed number of
+// single-step key presses, or unavailable when the range does not reach it.
+export function effortSliderPlan(state, level) {
+  const index = effortSliderIndex(level);
+  if (!state || index < 0) return { steps: null, unavailable: true, hint: "unsupported" };
+  const target = state.min + index;
+  if (target > state.max) {
+    return { steps: null, unavailable: true, target,
+      hint: level === "Pro" && state.max - state.min === 3 ? "pro_hidden_usage_limit" : "range_too_short" };
+  }
+  return { steps: target - state.value, unavailable: false, target };
+}
+
+function effortSliderLocators(page) {
+  const container = page.locator(EFFORT_SLIDER_CONTAINER_SELECTOR).filter({ visible: true }).last();
+  const slider = container.locator('[role="slider"]');
+  return { container, slider, control: slider.locator("xpath=ancestor::*[@role='menuitem'][1]") };
+}
+
+// Read the slider inside this picker's own menus only; null when absent.
+async function effortSliderState(page, budget) {
+  return boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { deadline, pickerId, selector }) => {
+    if (Date.now() >= deadline) return null;
+    const menus = window.__nyx?.modelPickerMenus(pickerId) || [];
+    const slider = [...body.querySelectorAll(selector)].find((el) => {
+      const container = el.closest("[data-model-reasoning-effort-slider]");
+      const rect = container?.getBoundingClientRect();
+      return rect && rect.width > 0 && rect.height > 0 && menus.includes(el.closest('[role="menu"], [role="listbox"]'));
+    });
+    if (!slider) return { absent: true };
+    return { absent: false, min: slider.getAttribute("aria-valuemin"), max: slider.getAttribute("aria-valuemax"),
+      value: slider.getAttribute("aria-valuenow") };
+  }, { deadline: Date.now() + timeout, pickerId: budget.picker?.id, selector: EFFORT_SLIDER_SELECTOR },
+  interactionOptions(budget, 1000))).then((read) => (read.absent ? null : parseEffortSliderState(read.min, read.max, read.value)));
+}
+
+async function waitForEffortSliderValue(page, budget, previous, until) {
+  let state;
+  do {
+    state = await effortSliderState(page, budget);
+    if (state && state.value !== previous) return state;
+    await budgetPause(budget, 50);
+  } while (Date.now() < until);
+  return state;
+}
+
+// Returns false when the open menu has no slider (legacy picker: caller falls
+// back to text matching). Otherwise sets result.reason and returns true.
+async function selectEffortBySlider(page, targets, budget, result, state) {
+  const plan = effortSliderPlan(state, targets[0]);
+  if (plan.unavailable && plan.hint === "unsupported") return false;
+  budget.picker.recognizedLevels = true;
+  budget.picker.slider = { min: state.min, max: state.max, before: state.value, hint: plan.hint || null };
+  if (plan.unavailable) {
+    await closeOpenMenus(page, budget);
+    result.reason = "level_unavailable";
+    return true;
+  }
+  if (plan.steps === 0) {
+    await closeOpenMenus(page, budget);
+    result.reason = "already_selected";
+    return true;
+  }
+  const { control } = effortSliderLocators(page);
+  const key = plan.steps > 0 ? "ArrowRight" : "ArrowLeft";
+  const direction = plan.steps > 0 ? 1 : -1;
+  let current = state;
+  while (current.value !== plan.target) {
+    const previous = current.value;
+    await control.press(key, interactionOptions(budget));
+    current = await waitForEffortSliderValue(page, budget, previous, Math.min(budget.deadline, Date.now() + EFFORT_SLIDER_STEP_MS));
+    if (!current || current.value !== previous + direction) {
+      // The slider moved unexpectedly or stalled: stop and let the pill decide.
+      await closeOpenMenus(page, budget);
+      result.reason = "unverified";
+      return true;
+    }
+  }
+  budget.picker.slider.after = current.value;
+  await closeOpenMenus(page, budget);
+  // Reopen once: ChatGPT can drop a keyboard selection when the menu closes.
+  await budgetPause(budget, 200);
+  const before = await pickerSnapshot(page, budget);
+  if (before.pill) {
+    await pickerLocator(page, before.pill).click(interactionOptions(budget));
+    const reopened = await waitForEffortSliderValue(page, budget, null, Math.min(budget.deadline, Date.now() + 3000));
+    budget.picker.slider.confirmed = reopened?.value ?? null;
+    await closeOpenMenus(page, budget);
+    if (!reopened || reopened.value !== plan.target) {
+      result.reason = "unverified";
+      return true;
+    }
+  }
+  result.reason = "unverified"; // promoted to "selected" once the pill agrees
+  return true;
+}
+
+export function effortSliderDetail(slider) {
+  if (!slider) return "slider=absent";
+  const range = `${slider.min}-${slider.max}`;
+  const path = [slider.before, slider.after, slider.confirmed].filter((v) => v !== undefined && v !== null).join(">");
+  return `slider=${path}/${range}${slider.hint ? ` hint=${slider.hint}` : ""}`;
+}
+
 // Returns { level, verified, observed, reason }. Only the actual pill can
 // verify a level or populate observed. Selection never throws into the task
 // flow. Abort cancels Playwright actions, and the deadline is checked before
 // EVERY interaction, including after reads that resolve late. The backstop
 // drains the inner promise before menu cleanup; no detached selection loop
 // can race prompt typing or Send.
-async function selectModel(page, modelLabel) {
+export async function selectModel(page, modelLabel) {
   await installDomCore(page);
   const targets = modelLevelTargets(modelLabel);
   const result = { level: targets[0] || null, verified: false, observed: null, reason: "picker_unavailable" };
@@ -1962,7 +2142,7 @@ async function selectModel(page, modelLabel) {
     !["timeout", "menu_not_opened", "interaction_deadline", "selection_failed", "level_unavailable"].includes(result.reason) &&
     (!["pro_extended", "pro_standard"].includes(budget.picker.expectedEffort) || effortMetadata(result.observed) === budget.picker.expectedEffort);
   if (result.verified && !["timeout", "already_selected"].includes(result.reason)) result.reason = "selected";
-  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)}`);
+  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)} ${effortSliderDetail(budget.picker.slider)}`);
   if (LOG_PICKER_LABELS && ["level_unavailable", "unverified", "menu_not_opened", "picker_unavailable"].includes(result.reason)) {
     log(formatPickerLabels(budget.picker.snapshot));
   }
@@ -1990,6 +2170,20 @@ async function selectModelInner(page, targets, budget, result) {
     if (error?.name !== "TimeoutError") throw error;
     result.reason = menuWait.timeout < 5000 ? "timeout" : "menu_not_opened";
     return;
+  }
+  // Prefer the ARIA slider; fall back to text matching on an older picker.
+  await budgetPause(budget, 100);
+  const slider = await effortSliderState(page, budget);
+  if (slider && (await selectEffortBySlider(page, targets, budget, result, slider))) {
+    if (result.reason !== "unverified") return;
+    const verifyUntil = Math.min(budget.deadline, Date.now() + 1000);
+    while (true) {
+      const after = await pickerSnapshot(page, budget);
+      interactionOptions(budget);
+      result.observed = after.observed;
+      if (pillShowsLevel(result.observed, targets) || Date.now() >= verifyUntil) return;
+      await budgetPause(budget, 100);
+    }
   }
   let clicked = await clickMatchingLevel(page, targets, budget);
   if (!clicked && (await pickerSnapshot(page, budget)).submenu) {
@@ -2032,6 +2226,31 @@ async function selectModelInner(page, targets, budget, result) {
     await budgetPause(budget, 100);
   }
   result.reason = "unverified";
+}
+
+// Dismiss ChatGPT's Temporary Chat onboarding modal (a native <dialog> that
+// intercepts every pointer event until Continue is pressed). Best-effort: if
+// it stays, ensureComposerUnobstructed fails the task pre-send as before.
+export async function dismissTemporaryChatOnboarding(page) {
+  const modal = page.locator(TEMPORARY_CHAT_ONBOARDING_SELECTOR).last();
+  try {
+    if (!(await modal.isVisible().catch(() => false))) return false;
+    const actions = [
+      modal.getByRole("button", { name: "Continue", exact: true }).last(),
+      modal.locator('button:not([data-testid="close-button"])').last(),
+      modal.locator('button[data-testid="close-button"]').last(),
+    ];
+    for (const action of actions) {
+      if (!(await action.isVisible().catch(() => false))) continue;
+      await action.click({ force: true, timeout: PRE_SEND_ACTION_MS });
+      await modal.waitFor({ state: "hidden", timeout: PRE_SEND_ACTION_MS });
+      log("temporary_chat onboarding dismissed");
+      return true;
+    }
+  } catch (error) {
+    if (stableErrorCode(error) === "page_crashed") throw error;
+  }
+  return false;
 }
 
 // Clear overlays before typing and again immediately before Send. Never force
@@ -2333,7 +2552,9 @@ async function submitPromptResult(
       response,
       images: downloadedImages.items,
       files: downloadedFiles.items,
-      chatgpt_url: page.url(),
+      // A Temporary Chat has no conversation URL worth storing; the bare
+      // ?temporary-chat=true address would only open an empty chat.
+      chatgpt_url: promptUsesTemporaryChat(task) && !convId(page.url()) ? null : page.url(),
       // Observations are canonical metadata, never raw picker labels.
       model: reportedPromptModel(task),
       observed_model_switcher: runtime.state.current_task?.observed_model_switcher,
@@ -2367,6 +2588,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   // otherwise we'd type into the previous conversation.
   const persistedUrl = runtime.state.current_task?.conversation_url;
   const priorPhase = runtime.state.current_task?.phase || "claimed";
+  const temporaryChat = promptUsesTemporaryChat(task);
   const navigation = choosePromptNavigation({
     recovering,
     phase: priorPhase,
@@ -2375,6 +2597,7 @@ async function handlePrompt(runtime, page, task, recovering) {
     persistedUrl,
     taskConversationUrl: task.conversation_url,
     requiredProjectUrl: task.required_project_url,
+    temporaryChat,
   });
   if (navigation.error) throw new TaskFailure(navigation.error);
   const navTarget = navigation.target;
@@ -2383,6 +2606,7 @@ async function handlePrompt(runtime, page, task, recovering) {
     await installDomCore(page);
     await page.bringToFront().catch(() => {});
     await sleep(2500);
+    if (temporaryChat) await dismissTemporaryChatOnboarding(page);
   }
 
   updateTaskState(runtime.state, {
@@ -2460,13 +2684,20 @@ async function handlePrompt(runtime, page, task, recovering) {
     await failModelSelection(runtime, task, header.metadata, effortMetadata(pill.observed), 'model_unavailable');
   }
   if (readyError) throw new TaskFailure(readyError);
+  // The Temporary Chat onboarding modal can appear a few seconds after the
+  // composer renders; it intercepts every click until Continue is pressed.
+  if (temporaryChat) await dismissTemporaryChatOnboarding(page);
   // A stale draft from a prior attempt makes model selection time out; clear
   // it so each attempt selects the model against a light, empty composer.
   await clearComposerDraft(page);
   if (task.model && task.model !== "unknown") {
     if (await ack(runtime, task, "selecting_model")) throw new TaskFailure("cancelled");
     const headerSelection = await selectModelSwitcher(page, task.model);
-    if (task.require_model_match !== false && !headerSelection.verified) {
+    // The current composer shows the family only on the Pro pill ("6 Pro");
+    // parked on High or Instant it reads just the level, so no switcher can
+    // be found before the effort is selected. Defer the family check to the
+    // post-selection read-back instead of failing every task on such a tab.
+    if (task.require_model_match !== false && !headerSelection.verified && headerSelection.metadata !== "absent") {
       const pill = await pickerSnapshot(page, interactionBudget(PRE_SEND_ACTION_MS));
       await failModelSelection(runtime, task, headerSelection.metadata, effortMetadata(pill.observed), headerSelection.reason);
     }

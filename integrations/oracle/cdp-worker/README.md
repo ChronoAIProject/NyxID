@@ -358,6 +358,7 @@ only. The deployed userscript is unchanged and simply omits generic files.
 | `NYXID_NPM_EXECUTABLE` | `npm` | npm executable used by pushed upgrades. |
 | `NYXID_NPM_INSTALL_TIMEOUT_MS` | `300000` | Maximum dependency-install time during a pushed upgrade. |
 | `NYXID_MAX_WAIT_MS` | `7200000` | Maximum answer wait. |
+| `NYXID_ORACLE_TEMPORARY_CHAT` | `0` | `1` runs single-shot prompts in a ChatGPT Temporary Chat (fresh document per task, nothing saved to history). Off by default: a Temporary Chat has no `/c/<id>` URL, so `nyxid oracle attach` cannot pick a single-shot answer up later. Session turns, follow-ups and project-pinned pools always use persistent chats. |
 | `NYXID_STABLE_INTERVAL_MS` | `8000` | Response stability poll interval, clamped to 100–60000 ms. Shorter intervals also shorten the completion stability window; browser fixtures use 500 ms. |
 | `NYXID_NO_OUTPUT_IDLE_MS` | `420000` | Non-generating wait before an empty answer fails. |
 
