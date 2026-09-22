@@ -1353,6 +1353,27 @@ export function draftNeedsFastClear(length) {
 }
 
 export const PRE_SEND_ACTION_MS = 5000;
+
+// Typing the prompt must not share the flat pre-send allowance. fill() drives
+// the whole prompt through the composer's React handlers, and five seconds is
+// ample for a chat message but not for a long one. When it overruns, the error
+// carries "timeout", stableErrorCode maps it to operation_timeout, and the last
+// acked phase is still selecting_model - so a task that selected its model
+// perfectly reports operation_timeout@selecting_model, with the partly typed
+// prompt left in the composer. That leftover then strands the tab for the next
+// pickup. Observed 2026-09-22: task 9a6d7697 carried a 50,432 character prompt,
+// logged "already_selected selected=Pro", then died ~8s later on every worker it
+// reached, leaving an identical draft on four machines.
+// Scale the allowance with the prompt and keep a ceiling so a pathological one
+// still fails promptly rather than hanging the attempt.
+export const PROMPT_FILL_CHARS_PER_MS = 5;
+export const PROMPT_FILL_MAX_MS = 60000;
+
+export function promptFillTimeout(length) {
+  const n = Number(length);
+  const scaled = Number.isFinite(n) && n > 0 ? Math.ceil(n / PROMPT_FILL_CHARS_PER_MS) : 0;
+  return Math.min(PROMPT_FILL_MAX_MS, Math.max(PRE_SEND_ACTION_MS, scaled));
+}
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
 const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible:not([data-nyx-switcher])';
@@ -2484,7 +2505,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   }
   await ensureComposerUnobstructed(page);
   await input.click({ timeout: PRE_SEND_ACTION_MS });
-  await input.fill(task.prompt, { timeout: PRE_SEND_ACTION_MS });
+  await input.fill(task.prompt, { timeout: promptFillTimeout(task.prompt?.length) });
   const typed = await input.evaluate(el => el.value ?? el.innerText);
   if (normalizePromptText(typed) !== normalizePromptText(task.prompt)) throw Object.assign(new Error('composer_readback_failed'), { code: 'composer_readback_failed' });
   await installDomCore(page);

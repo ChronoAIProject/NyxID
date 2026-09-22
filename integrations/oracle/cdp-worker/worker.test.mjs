@@ -17,6 +17,9 @@ test("preferredModelPillIndex never selects an unlabelled control", () => {
 
 import {
   PRE_SEND_ACTION_MS,
+  promptFillTimeout,
+  PROMPT_FILL_CHARS_PER_MS,
+  PROMPT_FILL_MAX_MS,
   composerHasDraft,
   draftNeedsFastClear,
   COMPOSER_FAST_CLEAR_CHARS,
@@ -635,6 +638,30 @@ test("a menu without the split tier is not a missing level", () => {
   assert.equal(splitTierOffered([]), false);
   assert.equal(splitTierOffered(undefined), false);
   assert.equal(splitTierOffered([{}, { text: null }]), false);
+});
+
+test("the prompt fill allowance scales with the prompt", () => {
+  // fill() drives the prompt through the composer's React handlers. A flat
+  // PRE_SEND_ACTION_MS overruns on a long prompt; the error carries "timeout",
+  // stableErrorCode maps it to operation_timeout, and the last acked phase is
+  // still selecting_model - so a task that selected its model correctly is
+  // reported as operation_timeout@selecting_model and leaves its half-typed
+  // prompt in the composer, stranding the tab. Observed 2026-09-22 with a
+  // 50,432 character prompt that did this on four machines in turn.
+  assert.equal(promptFillTimeout(50432), 10087);
+  assert.equal(promptFillTimeout(129411), 25883);
+  // Short prompts keep the existing allowance exactly.
+  assert.equal(promptFillTimeout(0), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(5000), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(PRE_SEND_ACTION_MS * PROMPT_FILL_CHARS_PER_MS), PRE_SEND_ACTION_MS);
+  // A pathological prompt still fails promptly rather than hanging.
+  assert.equal(promptFillTimeout(400000), PROMPT_FILL_MAX_MS);
+  // An unreadable length keeps the default allowance rather than granting the
+  // maximum - Infinity is garbage, not a very long prompt.
+  assert.equal(promptFillTimeout(undefined), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(NaN), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(Infinity), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(-1), PRE_SEND_ACTION_MS);
 });
 
 test("pill level detection prefers the longest alias", () => {
