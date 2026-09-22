@@ -92,7 +92,7 @@ pub async fn asyncapi_json(
     get,
     path = "/api/v1/catalog-specs/{spec_key}/openapi.json",
     params(
-        ("spec_key" = String, Path, description = "Hosted catalog spec key, e.g. firecrawl or lark-bot")
+        ("spec_key" = String, Path, description = "Hosted catalog spec key or mapped service slug, e.g. firecrawl or api-firecrawl")
     ),
     responses(
         (status = 200, description = "NyxID-hosted OpenAPI overlay with Aevatar tool annotations", content_type = "application/json"),
@@ -101,7 +101,12 @@ pub async fn asyncapi_json(
     tag = "Catalog"
 )]
 pub async fn catalog_spec_json(Path(spec_key): Path<String>) -> AppResult<Json<serde_json::Value>> {
+    // Accept both the documented hosted overlay key (for example `firecrawl`)
+    // and the corresponding catalog service slug (for example
+    // `api-firecrawl`). The registry is static, so this compatibility alias
+    // cannot expose arbitrary service or user-service data.
     let spec = crate::services::catalog_spec_registry::spec_for_key(&spec_key)
+        .or_else(|| crate::services::catalog_spec_registry::spec_for_slug(&spec_key))
         .ok_or_else(|| AppError::NotFound("Catalog spec not found".to_string()))?;
     Ok(Json(spec.as_ref().clone()))
 }
@@ -420,6 +425,15 @@ mod tests {
             value["paths"]["/v2/search"]["post"]["x-aevatar-tool"]["name"],
             "search"
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_spec_json_accepts_catalog_slug_alias() {
+        let axum::Json(value) = catalog_spec_json(Path("api-firecrawl".to_string()))
+            .await
+            .expect("catalog slug maps to hosted overlay");
+
+        assert_eq!(value["info"]["title"], "Firecrawl API");
     }
 
     #[tokio::test]

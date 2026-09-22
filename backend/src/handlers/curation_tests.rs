@@ -169,6 +169,7 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
     assert_eq!(status, StatusCode::OK, "{listing}");
     assert_eq!(listing["services"].as_array().unwrap().len(), 1);
     assert_eq!(listing["services"][0]["id"], f.service.id);
+    assert_eq!(listing["services"][0]["slug"], f.service.slug);
     let write = json!({"base_revision": 0, "request_id": Uuid::new_v4().to_string(), "recommended_skills": ["other-publisher/manual"]});
     let (status, result) = request(&f.state, "PUT", &path, &bearer, Some(write.clone())).await;
     assert_eq!(status, StatusCode::OK, "{result}");
@@ -306,6 +307,116 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
         request(&f.state, "GET", &path, &bearer, None).await.0,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn curation_openapi_contract_is_grant_scoped_and_read_only() {
+    let f = fixture("curation_openapi_contract", true).await;
+    f.state
+        .db
+        .collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &f.service.id},
+            doc! {"$set": {"slug": "api-firecrawl", "openapi_spec_url": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+
+    let bearer = token(&f, None).await;
+    let path = format!(
+        "/api/v1/catalog-curation/services/{}/openapi.json",
+        f.service.id
+    );
+    let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["openapi"], "3.1.0");
+    assert!(
+        body["paths"]
+            .as_object()
+            .is_some_and(|paths| !paths.is_empty())
+    );
+    f.state
+        .db
+        .collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &f.service.id},
+            doc! {"$set": {"openapi_spec_url": ""}},
+        )
+        .await
+        .unwrap();
+    let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["openapi"], "3.1.0");
+
+    let other = Uuid::new_v4();
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            &format!("/api/v1/catalog-curation/services/{other}/openapi.json"),
+            &bearer,
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(&f.state, "GET", &path, &f.human_token, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn curation_actor_persists_and_reads_recommended_skill_refs() {
+    let f = fixture("curation_skill_refs", true).await;
+    let bearer = token(&f, None).await;
+    let path = format!("/api/v1/catalog-curation/services/{}/skills", f.service.id);
+    let reference = json!({
+        "source": "ornn",
+        "skill_id": "skill-123",
+        "name": "operations/manual",
+        "version": "1.5",
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "dependencies": []
+    });
+    let (status, body) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &bearer,
+        Some(json!({
+            "base_revision": 0,
+            "request_id": Uuid::new_v4().to_string(),
+            "recommended_skill_refs": [reference.clone()]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["skills_revision"], 1);
+    assert_eq!(body["recommended_skill_refs"][0], reference);
+
+    let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["recommended_skills"][0], "operations/manual");
+    assert_eq!(body["recommended_skill_refs"][0]["skill_id"], "skill-123");
+
+    let (status, body) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &bearer,
+        Some(json!({
+            "base_revision": 1,
+            "request_id": Uuid::new_v4().to_string(),
+            "clear_refs": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["recommended_skill_refs"].is_null());
 }
 
 #[tokio::test]
@@ -578,9 +689,12 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         matchers::{header, method, path},
     };
     let mut f = fixture("curation_proxy_binding", true).await;
+    // Verify NyxID propagates the SA identity and Ornn request permissions.
+    // Ornn enforces ownership and sharing against that identity downstream.
     let permission_names = vec![
         "ornn:skill:read".to_string(),
-        "ornn:skill:publish".to_string(),
+        "ornn:skill:create".to_string(),
+        "ornn:skill:update".to_string(),
     ];
     let role = crate::services::role_service::create_role(
         &f.state.db,
@@ -625,6 +739,7 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         serde_json::from_value(json!({"rules":[
             {"method":"GET","path_template":"/packages"},
             {"method":"POST","path_template":"/api/v1/skills"},
+            {"method":"POST","path_template":"/api/v1/skill-format/validate"},
             {"method":"PUT","path_template":"/api/v1/skills/{id}"}
         ]}))
         .unwrap(),
@@ -762,12 +877,23 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         .collect();
     header_permissions.sort();
     assert_eq!(header_permissions, expected_permissions);
-    for (method, path) in [
-        ("POST", "/api/v1/skills"),
-        ("PUT", "/api/v1/skills/owned-skill"),
+    for (method, path, payload) in [
+        ("POST", "/api/v1/skills", json!({})),
+        ("POST", "/api/v1/skill-format/validate", json!({})),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill",
+            json!({"isPrivate":false}),
+        ),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill",
+            json!({"isPrivate":true}),
+        ),
     ] {
         Mock::given(wiremock::matchers::method(method))
             .and(wiremock::matchers::path(path))
+            .and(wiremock::matchers::body_json(&payload))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
             .expect(1)
             .mount(&catalog)
@@ -778,7 +904,7 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
                 method,
                 &format!("/api/v1/proxy/{}{path}", f.service.id),
                 &bearer,
-                Some(json!({}))
+                Some(payload)
             )
             .await
             .0,
@@ -786,12 +912,13 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         );
     }
     let allowed_request_count = catalog.received_requests().await.unwrap().len();
-    assert_eq!(allowed_request_count, 3);
+    assert_eq!(allowed_request_count, 5);
     for (method, path) in [
         ("POST", "/api/v1/assistant/chat"),
         ("POST", "/api/v1/skills/owned-skill/audit"),
         ("DELETE", "/api/v1/skills/owned-skill/dist-tags/stable"),
         ("DELETE", "/api/v1/skills/owned-skill"),
+        ("DELETE", "/api/v1/skills/owned-skill/versions/1.0"),
         ("PATCH", "/api/v1/skills/owned-skill"),
     ] {
         let (status, body) = request(
@@ -980,7 +1107,10 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         request(&f.state, "GET", &route, &bearer, None).await.0,
         StatusCode::FORBIDDEN
     );
-    assert_eq!(catalog.received_requests().await.unwrap().len(), 4);
+    assert_eq!(
+        catalog.received_requests().await.unwrap().len(),
+        allowed_request_count + 1
+    );
     assert_eq!(owner_endpoint.received_requests().await.unwrap().len(), 0);
 }
 
