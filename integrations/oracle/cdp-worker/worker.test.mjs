@@ -18,6 +18,10 @@ test("preferredModelPillIndex never selects an unlabelled control", () => {
 import {
   PRE_SEND_ACTION_MS,
   promptFillTimeout,
+  PROMPT_MAX_CHARS,
+  promptExceedsLimit,
+  classifySubmissionResponse,
+  interactionBudget,
   PROMPT_FILL_CHARS_PER_MS,
   PROMPT_FILL_MAX_MS,
   composerHasDraft,
@@ -1235,4 +1239,51 @@ test("effort slider plans step counts from the minimum and reports a hidden Pro"
   assert.equal(effortSliderDetail({ min: 0, max: 4, before: 1, after: 4, confirmed: 4 }), "slider=1>4>4/0-4");
   assert.equal(effortSliderDetail({ min: 0, max: 3, before: 3, hint: "pro_hidden_usage_limit" }), "slider=3/0-3 hint=pro_hidden_usage_limit");
   assert.equal(effortSliderDetail(null), "slider=absent");
+});
+
+test("an undeliverable prompt is refused before the composer is touched", () => {
+  // The default ceiling is what the fill allowance can type at all.
+  assert.equal(PROMPT_MAX_CHARS, PROMPT_FILL_MAX_MS * PROMPT_FILL_CHARS_PER_MS);
+  assert.equal(promptExceedsLimit(PROMPT_MAX_CHARS), false);
+  assert.equal(promptExceedsLimit(PROMPT_MAX_CHARS + 1), true);
+  assert.equal(promptExceedsLimit(129411), false);
+  // Garbage lengths and a disabled ceiling never refuse a prompt.
+  assert.equal(promptExceedsLimit(undefined), false);
+  assert.equal(promptExceedsLimit(NaN), false);
+  assert.equal(promptExceedsLimit(10, 0), false);
+  assert.equal(promptExceedsLimit(10, 5), true);
+});
+
+test("only the page's own conversation POST returning 413 names a rejected message", () => {
+  const post = (url, status) => classifySubmissionResponse({ method: "POST", url, status });
+  assert.equal(post("https://chatgpt.com/backend-api/f/conversation", 413), "prompt_too_long");
+  assert.equal(post("https://chatgpt.com/backend-api/conversation", 413), "prompt_too_long");
+  assert.equal(post("https://chat.openai.com/backend-api/f/conversation?x=1", 413), "prompt_too_long");
+  assert.equal(post("https://chatgpt.com/backend-api/f/conversation", 200), null);
+  assert.equal(post("https://chatgpt.com/backend-api/f/conversation", 429), null);
+  assert.equal(post("https://chatgpt.com/backend-api/conversations", 413), null);
+  assert.equal(post("https://evil.example/backend-api/f/conversation", 413), null);
+  assert.equal(classifySubmissionResponse({ method: "GET", url: "https://chatgpt.com/backend-api/f/conversation", status: 413 }), null);
+  // The visible banner for the same rejection classifies identically.
+  assert.equal(classifyChatGptError("The message you submitted was too long, please reload the conversation and submit something shorter."), "prompt_too_long");
+  assert.equal(classifyChatGptError("消息过长，请缩短后重试"), "prompt_too_long");
+  assert.equal(classifyChatGptError("Something went wrong"), "chatgpt_error_response");
+  assert.equal(classifyChatGptError("You've reached the usage limit"), "usage_limit_reached");
+});
+
+test("selection budgets are bounded by silence up to a hard ceiling", () => {
+  const budget = interactionBudget(1000, null, { cap: 2500, now: 10_000 });
+  assert.equal(budget.deadline, 11_000);
+  assert.equal(budget.hardDeadline, 12_500);
+  // Progress restarts the window...
+  assert.equal(budget.progress(10_800), 11_800);
+  // ...but never past the hard deadline...
+  assert.equal(budget.progress(12_000), 12_500);
+  assert.equal(budget.progress(12_400), 12_500);
+  // ...and an aborted budget cannot be revived.
+  budget.controller.abort();
+  assert.equal(budget.progress(12_100), 12_500);
+  // Without a cap the window is also the ceiling.
+  const flat = interactionBudget(1000, null, { now: 0 });
+  assert.equal(flat.progress(900), 1000);
 });
