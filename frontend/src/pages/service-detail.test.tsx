@@ -55,6 +55,10 @@ vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ serviceId: "svc-1" }),
 }));
 
+vi.mock("@/hooks/use-ownership-transfers", () => ({
+  useOwnershipTransferAuthorization: () => ({ data: { can_transfer: false } }),
+}));
+
 vi.mock("@/hooks/use-services", () => ({
   useService: () => hooks.service,
   useDeleteService: () => ({ mutateAsync: vi.fn(), isPending: false }),

@@ -615,6 +615,26 @@ async fn insert_registered_bot_inner(
                 ).session(&mut *session).await?;
                 if gate.matched_count != 1 { return Err(AppError::Conflict("Telegram management changed after consent. Start a fresh connection request.".into())); }
             }
+            if bot.credential_source == "connection" {
+                let connection_id = bot.connection_id.as_deref().ok_or_else(|| {
+                    AppError::ValidationError(
+                        "Connection-backed bot is missing its OAuth credential".into(),
+                    )
+                })?;
+                let fenced = crate::services::service_history::mutation::fence_backing_reference(
+                    &db,
+                    crate::models::user_api_key::COLLECTION_NAME,
+                    connection_id,
+                    &bot.user_id,
+                    &mut *session,
+                )
+                .await?;
+                if !fenced {
+                    return Err(AppError::NotFound(
+                        "Connected OAuth credential not found".into(),
+                    ));
+                }
+            }
             bots.insert_one(&bot).session(&mut *session).await?;
             Ok(())
         }.await;
@@ -736,21 +756,45 @@ async fn reconnect_bot_inner(
         })?;
         (Some(cursor), outcome.backoff, Some(bson::DateTime::now()))
     };
-    let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
-        doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true, "connection_id": &bot.connection_id, "poll_cursor": &bot.poll_cursor, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
-        doc! { "$set": {
-            "connection_id": connection_id, "platform_bot_username": identity.platform_bot_username,
-            "poll_cursor": cursor, "poll_lease_until": null, "poll_error_count": 0,
-            "poll_backoff_until": backoff.map(|d| bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(d.as_secs().min(86400) as i64))),
-            "last_polled_at": last_polled_at, "status": "active", "error": null, "updated_at": bson::DateTime::now(),
-        } },
-    ).await?;
-    if result.matched_count == 0 {
-        return Err(AppError::Conflict(
-            "Channel bot changed during reconnect; retry".to_string(),
-        ));
-    }
-    Ok(())
+    let identity_username = identity.platform_bot_username;
+    let connection_id = connection_id.to_string();
+    let db = db.clone();
+    let bot = bot.clone();
+    let result = crate::services::service_history::transaction::run(&db.clone(), async move |transaction| {
+        let operation: AppResult<()> = async {
+            let session: &mut mongodb::ClientSession = transaction.into();
+            let fenced = crate::services::service_history::mutation::fence_backing_reference(
+                &db,
+                crate::models::user_api_key::COLLECTION_NAME,
+                &connection_id,
+                &bot.user_id,
+                session,
+            )
+            .await?;
+            if !fenced {
+                return Err(AppError::NotFound(
+                    "Connected OAuth credential not found".into(),
+                ));
+            }
+            let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+                doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true, "connection_id": &bot.connection_id, "poll_cursor": &bot.poll_cursor, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
+                doc! { "$set": {
+                    "connection_id": &connection_id, "platform_bot_username": &identity_username,
+                    "poll_cursor": &cursor, "poll_lease_until": null, "poll_error_count": 0,
+                    "poll_backoff_until": backoff.map(|d| bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(d.as_secs().min(86400) as i64))),
+                    "last_polled_at": last_polled_at, "status": "active", "error": null, "updated_at": bson::DateTime::now(),
+                } },
+            ).session(session).await?;
+            if result.matched_count == 0 {
+                return Err(AppError::Conflict(
+                    "Channel bot changed during reconnect; retry".to_string(),
+                ));
+            }
+            Ok(())
+        }.await;
+        super::api_key_mutation_service::transaction_result(operation)
+    }).await;
+    result.map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 pub async fn reregister_managed_bot(

@@ -35,6 +35,7 @@ import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
+import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -1276,6 +1277,17 @@ export function ChannelBotDetailPage() {
       {showEditNameDialog && (
         <EditBotNameDialog key={bot.id} bot={bot} onOpenChange={setShowEditNameDialog} />
       )}
+      <OwnershipTransferCard
+        kind="channel_bot"
+        resource={{
+          id: bot.id,
+          name: bot.label,
+          owner_user_id: bot.user_id,
+          platform: bot.platform,
+          slug: null,
+        }}
+        onTransferred={() => void navigate({ to: "/channel-bots" })}
+      />
       {/* Delete Confirmation */}
       <DeleteBotDialog
         deletionNote={bot.credential_source === "telegram_manager" ? TELEGRAM_MANAGER_DELETION_NOTE : bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined}

@@ -6,6 +6,10 @@ editor-operation follow-up in [PR #1633](https://github.com/ChronoAIProject/NyxI
 The earlier [PR #1572](https://github.com/ChronoAIProject/NyxID/pull/1572)
 is already part of that base.
 
+The rollup was subsequently updated to current `main` commit
+`6f633320c636963e7baa1aad7921814ca1d819cd` on 2026-09-22, preserving its
+existing constituent PRs and rebuilding the combined CLI wizard bundle.
+
 ## Problem and resulting behavior
 
 Google Drive exposed only nine file operations. Even a connection with full
@@ -56,6 +60,42 @@ containing the combined changes and its source PR reference. It does not rewrite
 the inherited `main` commits. The source PR retains its individual commits and
 review discussion. A later squash merge of this rollup into `main` likewise adds
 a new commit; its message and this document retain the constituent PR details.
+
+## Ownership transfer from asset settings
+
+[PR #1641](https://github.com/ChronoAIProject/NyxID/pull/1641), a follow-up to
+#1615 and #1616, makes transfers available in the asset's
+existing management flow. Channel bot detail pages contain an ownership card;
+connected-service detail pages show the catalog ownership card under
+**Advanced**. The cards and retained **Admin → Ownership transfers** inventory
+share one review dialog and searchable destination picker. No separate service
+settings page is introduced.
+
+Asset owners and active organization admins with unrestricted management can
+transfer their assets without mobile approval. General Agent Keys with live
+`write` or `admin` scope and `allow_all_services=true` act under the same owner
+authority; scoped execution keys do not gain asset management rights. Commit
+revalidates and fences the actor, key, and organization membership in its
+transaction. Platform admins retain the administrative inventory and override.
+
+A dedicated X channel-onboarding OAuth credential moves atomically with its
+bot when it belongs to the source owner and has no other consumers. Tokens stay
+on the same encrypted row; the callback handle rotates. Shared, pending,
+mismatched, and in-flight dependencies block transfer. Selected X DM, mention,
+and reply events are preserved, and required OAuth scopes follow those events.
+Old routes are retired, conversation history stays with the source owner, and
+audit records and idempotent receipts retain the actor and both owners.
+
+Service transfers apply to custom catalog definitions. Connected
+`UserService`/endpoint/credential bundles retain their owners. Aurinko, managed
+Telegram, and OIDC client handover remain unsupported. See
+[Ownership transfers](../ADMIN_OWNERSHIP_TRANSFERS.md) for supported adapters,
+authorization rules, effects, and blockers.
+
+Regression coverage includes owner and agent authorization, live revocation,
+destination search boundaries, transaction races, destination OAuth refresh,
+stale callback rejection, X public-event scopes, and desktop/mobile transfers
+from the existing asset pages.
 
 ## Standalone channel bot onboarding
 

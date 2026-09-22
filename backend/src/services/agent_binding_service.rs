@@ -206,6 +206,20 @@ async fn create_binding_with_scope_authorization_inner(
                     hook.after_reads().await;
                 }
 
+                let fenced = crate::services::service_history::mutation::fence_backing_reference(
+                    &db,
+                    USER_API_KEYS,
+                    &user_api_key_id,
+                    &user_id,
+                    &mut *session,
+                )
+                .await?;
+                if !fenced {
+                    return Err(AppError::NotFound(
+                        "External credential not found".to_string(),
+                    ));
+                }
+
                 db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
                     .insert_one(&binding_for_transaction)
                     .session(&mut *session)
