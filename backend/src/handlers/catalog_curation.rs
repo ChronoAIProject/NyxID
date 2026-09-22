@@ -150,8 +150,9 @@ async fn get_openapi(
     // Seeded catalog services may use an embedded overlay. Serving that value
     // directly avoids a loop back through this deployment when the stored URL
     // points at `/api/v1/catalog-specs/...` and keeps the contract available in
-    // test/air-gapped environments. An explicit downstream URL still wins
-    // over a slug mapping, as it does for the normal docs route.
+    // test/air-gapped environments. An explicit downstream URL wins over
+    // the Curation route's slug fallback. Return the source contract for
+    // authoring; this does not grant execution or rewrite proxy routing.
     let configured_url = service
         .openapi_spec_url
         .as_deref()

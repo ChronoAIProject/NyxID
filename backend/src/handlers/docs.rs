@@ -105,8 +105,7 @@ pub async fn catalog_spec_json(Path(spec_key): Path<String>) -> AppResult<Json<s
     // and the corresponding catalog service slug (for example
     // `api-firecrawl`). The registry is static, so this compatibility alias
     // cannot expose arbitrary service or user-service data.
-    let spec = crate::services::catalog_spec_registry::spec_for_key(&spec_key)
-        .or_else(|| crate::services::catalog_spec_registry::spec_for_slug(&spec_key))
+    let spec = crate::services::catalog_spec_registry::spec_for_key_or_slug(&spec_key)
         .ok_or_else(|| AppError::NotFound("Catalog spec not found".to_string()))?;
     Ok(Json(spec.as_ref().clone()))
 }

@@ -276,6 +276,11 @@ pub fn spec_for_slug(slug: &str) -> Option<Arc<serde_json::Value>> {
     spec_key_for_slug(slug).and_then(spec_for_key)
 }
 
+/// Resolve either supported identifier on the hosted spec route.
+pub fn spec_for_key_or_slug(key_or_slug: &str) -> Option<Arc<serde_json::Value>> {
+    spec_for_key(key_or_slug).or_else(|| spec_for_slug(key_or_slug))
+}
+
 /// Relative hosted path (`/api/v1/catalog-specs/{spec_key}/openapi.json`)
 /// for a catalog service slug.
 pub fn spec_path_for_slug(slug: &str) -> Option<String> {
@@ -291,7 +296,7 @@ pub fn spec_for_url_path(path: &str) -> Option<Arc<serde_json::Value>> {
     if spec_key.is_empty() || spec_key.contains('/') {
         return None;
     }
-    spec_for_key(spec_key)
+    spec_for_key_or_slug(spec_key)
 }
 
 /// Catalog service slugs that have a hosted overlay.
@@ -621,6 +626,10 @@ mod tests {
     #[test]
     fn spec_for_url_path_resolves_hosted_paths_only() {
         assert!(spec_for_url_path("/api/v1/catalog-specs/firecrawl/openapi.json").is_some());
+        assert_eq!(
+            spec_for_url_path("/api/v1/catalog-specs/api-firecrawl/openapi.json"),
+            spec_for_url_path("/api/v1/catalog-specs/firecrawl/openapi.json")
+        );
         assert!(spec_for_url_path("/api/v1/catalog-specs/elevenlabs/openapi.json").is_some());
         assert!(spec_for_url_path("/api/v1/catalog-specs/twilio/openapi.json").is_some());
         assert!(spec_for_url_path("/api/v1/catalog-specs/lark-bot/openapi.json").is_some());

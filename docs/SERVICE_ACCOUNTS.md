@@ -685,7 +685,7 @@ Grant and history responses contain no credentials or secret hashes. The origina
 
 ### Runtime confinement and token revocation
 
-A Curation bearer may use only `/api/v1/catalog-curation/...` and ordinary HTTP `/api/v1/proxy/{ornn_proxy_service_id}/...`. The grant and token/live scopes must authorize the request. The curation operation-contract route (`GET /api/v1/catalog-curation/services/{catalog_service_id}/openapi.json`) is the supported way to read a grant-listed admin service's OpenAPI document. It is read-only, bounded, and does not expose a user-managed `/keys` row. Generic catalog/services listing, other proxy IDs, slug routing, `_nyxid_via` instance selection, WebSocket upgrades, MCP, LLM/OpenAI routes, provider/connection self-management, nodes, oracle, and triggers are unavailable.
+A Curation bearer may use only `/api/v1/catalog-curation/...` and ordinary HTTP `/api/v1/proxy/{ornn_proxy_service_id}/...`. The grant and token/live scopes must authorize the request. The curation operation-contract route (`GET /api/v1/catalog-curation/services/{catalog_service_id}/openapi.json`) is the supported way to read a grant-listed admin service's OpenAPI document. It returns the source contract, preserving upstream server declarations for authoring; it does not rewrite them into executable proxy URLs or grant execution access. Authored skills must use the consumer's authorized NyxID service connection for execution. It is read-only, bounded, and does not expose a user-managed `/keys` row. Generic catalog/services listing, other proxy IDs, slug routing, `_nyxid_via` instance selection, WebSocket upgrades, MCP, LLM/OpenAI routes, provider/connection self-management, nodes, oracle, and triggers are unavailable.
 
 The Ornn proxy uses the granted catalog URL and the service account's own connection or delegated provider credential. It never inherits its creator's UserService, endpoint override, gateway URL, node, or broad credential, and does not fall back to a catalog master credential. Explicitly disconnecting the SA connection blocks execution. A platform admin attaches the separately scoped Ornn credential using the existing SA provider/connection management surface. General-purpose account routing keeps its existing behavior.
 
@@ -736,15 +736,24 @@ creating a new identity after deletion/recreation gets a new UUID and does not
 inherit the old identity's skills; rotating credentials on the existing SA
 preserves ownership.
 
-`ornn:skill:update` also authorizes other creator-managed settings in Ornn,
-including ACLs, ownership transfer, source configuration, deprecation, dist-tags,
-and service bindings. The minimal proxy policy below permits content and
-visibility through `PUT /skills/{id}` and leaves those other routes unavailable.
-If another setting is required, allowlist its exact method/path after checking
-its contract; no new Ornn role permission is needed for routes already checking
-`ornn:skill:update`. Removing a dist-tag uses that update permission despite
-being an HTTP DELETE, so omitting `ornn:skill:delete` alone does not prevent tag
-removal. The policy below blocks it as well as skill/version deletion.
+`ornn:skill:update` also authorizes creator-managed sharing permissions,
+source configuration and refresh, version deprecation, dist-tag assignment,
+ownership transfer, and service binding changes. The policy below includes
+those exact routes. Ornn still checks creator/manage authority and validates
+the target of each operation. Removing a dist-tag uses that update permission
+despite being an HTTP DELETE, so omitting `ornn:skill:delete` alone does not
+prevent tag removal. The policy deliberately excludes all DELETE routes,
+including skill, version, and tag deletion.
+
+Use direct user-type grants for an SA. Ornn's organization-grant resolution
+requires a NyxID organization lookup that Curation tokens cannot perform.
+Ownership transfer requires a known Ornn recipient and leaves the former owner
+with read access; transferring away a skill ends the SA's creator edit rights.
+The service-binding route allows an owner to untie a skill with
+`{"nyxidServiceId":null}`. Creating a new Ornn binding additionally requires a
+target resolvable by Ornn's caller-visible service lookup; Curation tokens do
+not gain general catalog access. Assign/remove admin catalog recommendations
+through the NyxID Curation API instead of relying on that separate binding.
 
 Before enabling the workload, verify this sequence with the intended SA:
 create private, read private, upload a newer version, set public, read publicly,
@@ -803,7 +812,16 @@ this existing `proxy_operation_policy` on that catalog row:
   {"method":"GET","path_template":"/api/v1/skills/{id}/versions/{version}/download"},
   {"method":"GET","path_template":"/api/v1/skills/{id}/closure"},
   {"method":"POST","path_template":"/api/v1/skills"},
-  {"method":"PUT","path_template":"/api/v1/skills/{id}"}
+  {"method":"POST","path_template":"/api/v1/skills/pull"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}/permissions"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}/source"},
+  {"method":"POST","path_template":"/api/v1/skills/{id}/refresh"},
+  {"method":"PATCH","path_template":"/api/v1/skills/{id}/versions/{version}"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/dist-tags"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}/dist-tags/{tag}"},
+  {"method":"POST","path_template":"/api/v1/skills/{id}/transfer-ownership"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}/nyxid-service"}
 ]}
 ```
 

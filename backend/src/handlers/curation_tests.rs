@@ -400,6 +400,10 @@ async fn curation_openapi_contract_honors_configuration_and_service_state() {
         (doc! {"is_active": false}, StatusCode::NOT_FOUND),
         (doc! {"service_type": "ssh"}, StatusCode::NOT_FOUND),
         (doc! {"openapi_spec_url": "  "}, StatusCode::OK),
+        (
+            doc! {"openapi_spec_url": "http://localhost:3001/api/v1/catalog-specs/api-firecrawl/openapi.json"},
+            StatusCode::OK,
+        ),
         (doc! {}, StatusCode::OK),
     ] {
         let mut fields = doc! {
@@ -427,6 +431,29 @@ async fn curation_openapi_contract_honors_configuration_and_service_state() {
             assert_eq!(&body, expected.as_ref());
         }
     }
+
+    let source_contract = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Custom operation contract", "version": "1.0"},
+        "servers": [{"url": "https://upstream.example"}],
+        "paths": {"/ping": {
+            "servers": [{"url": "https://regional.example"}],
+            "get": {"responses": {"200": {"description": "OK"}}}
+        }}
+    });
+    cache_test_spec(custom_url, None, source_contract.clone());
+    f.state
+        .db
+        .collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &f.service.id},
+            doc! {"$set": {"openapi_spec_url": custom_url}},
+        )
+        .await
+        .unwrap();
+    let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, source_contract);
 
     let write_only = token(&f, Some("catalog:skills:write")).await;
     assert_eq!(
@@ -805,8 +832,17 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         serde_json::from_value(json!({"rules":[
             {"method":"GET","path_template":"/packages"},
             {"method":"POST","path_template":"/api/v1/skills"},
+            {"method":"POST","path_template":"/api/v1/skills/pull"},
             {"method":"POST","path_template":"/api/v1/skill-format/validate"},
-            {"method":"PUT","path_template":"/api/v1/skills/{id}"}
+            {"method":"PUT","path_template":"/api/v1/skills/{id}"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}/permissions"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}/source"},
+            {"method":"POST","path_template":"/api/v1/skills/{id}/refresh"},
+            {"method":"PATCH","path_template":"/api/v1/skills/{id}/versions/{version}"},
+            {"method":"GET","path_template":"/api/v1/skills/{id}/dist-tags"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}/dist-tags/{tag}"},
+            {"method":"POST","path_template":"/api/v1/skills/{id}/transfer-ownership"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}/nyxid-service"}
         ]}))
         .unwrap(),
     );
@@ -943,7 +979,7 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         .collect();
     header_permissions.sort();
     assert_eq!(header_permissions, expected_permissions);
-    for (method, path, payload) in [
+    let allowed_operations = [
         ("POST", "/api/v1/skills", json!({})),
         ("POST", "/api/v1/skill-format/validate", json!({})),
         (
@@ -956,7 +992,50 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
             "/api/v1/skills/owned-skill",
             json!({"isPrivate":true}),
         ),
-    ] {
+        (
+            "POST",
+            "/api/v1/skills/pull",
+            json!({"repo":"example/skills"}),
+        ),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill/permissions",
+            json!({"isPrivate":true,"grants":[]}),
+        ),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill/source",
+            json!({"githubUrl":null}),
+        ),
+        (
+            "POST",
+            "/api/v1/skills/owned-skill/refresh",
+            json!({"dryRun":true}),
+        ),
+        (
+            "PATCH",
+            "/api/v1/skills/owned-skill/versions/1.0",
+            json!({"isDeprecated":true}),
+        ),
+        ("GET", "/api/v1/skills/owned-skill/dist-tags", json!({})),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill/dist-tags/stable",
+            json!({"version":"1.0"}),
+        ),
+        (
+            "POST",
+            "/api/v1/skills/owned-skill/transfer-ownership",
+            json!({"newOwnerUserId":"known-owner"}),
+        ),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill/nyxid-service",
+            json!({"nyxidServiceId":null}),
+        ),
+    ];
+    let expected_request_count = 1 + allowed_operations.len();
+    for (method, path, payload) in allowed_operations {
         Mock::given(wiremock::matchers::method(method))
             .and(wiremock::matchers::path(path))
             .and(wiremock::matchers::body_json(&payload))
@@ -978,7 +1057,7 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         );
     }
     let allowed_request_count = catalog.received_requests().await.unwrap().len();
-    assert_eq!(allowed_request_count, 5);
+    assert_eq!(allowed_request_count, expected_request_count);
     for (method, path) in [
         ("POST", "/api/v1/assistant/chat"),
         ("POST", "/api/v1/skills/owned-skill/audit"),
