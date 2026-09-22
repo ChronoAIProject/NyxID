@@ -3194,7 +3194,13 @@ List all user's keys (combined endpoint + key + service view).
 
 #### GET /api/v1/keys/{id}
 
-Get a single key's combined view.
+Get a single key's combined view for existing human/API-key/delegated callers. Service accounts receive a smaller nonsecret metadata response and must use an exact UserService UUID.
+
+**SA auth:** `user-services:read` in both the token and live account scopes, an unexpired exact key read grant, and current SA-owner access. Curation accounts also require their live Curation grant. Listing, slug access, HEAD, upgrades, and key writes are not included.
+
+The SA response includes identity/label, service type and active state, catalog association, effective `recommended_skills`/`recommended_skill_refs`, `skills_revision`, and `skills_manifest_digest`. It excludes credentials, raw URLs, headers, frame injections, and routing/authentication configuration. No credential resolution or OAuth reconciliation occurs.
+
+Platform admins manage exact grants with `PUT`/`DELETE /api/v1/admin/service-accounts/{sa_id}/key-read-grant`; admins/operators can inspect them with `GET`. PUT accepts `{"user_service_ids":["<uuid>"],"expires_at":"<optional future RFC3339>"}` and replaces all targets. See [Connection metadata reads](SERVICE_ACCOUNTS.md#connection-metadata-reads) for setup and lifecycle.
 
 **Auth:** Required
 
