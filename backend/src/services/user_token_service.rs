@@ -5152,6 +5152,9 @@ mod tests {
             "api-google-calendar",
             "api-google-drive",
             "api-google-gmail",
+            "api-google-docs",
+            "api-google-sheets",
+            "api-google-slides",
         ] {
             let product = GoogleProduct::from_slug(slug).unwrap();
             let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
@@ -5274,7 +5277,10 @@ mod tests {
             }
             let forbidden = match product {
                 GoogleProduct::Calendar => DRIVE,
-                GoogleProduct::Drive => CALENDAR,
+                GoogleProduct::Drive
+                | GoogleProduct::Docs
+                | GoogleProduct::Sheets
+                | GoogleProduct::Slides => CALENDAR,
                 GoogleProduct::Workspace | GoogleProduct::Gmail => {
                     "https://www.googleapis.com/auth/gmail.modify"
                 }

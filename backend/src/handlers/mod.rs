@@ -86,6 +86,9 @@ pub mod proxy;
 pub mod public_mcp;
 pub mod public_proxy;
 pub mod runtime_config;
+pub mod service_account_key_reads;
+#[cfg(test)]
+mod service_account_key_reads_tests;
 pub mod service_pools_handler;
 pub mod service_requirements;
 pub mod services;

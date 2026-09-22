@@ -1,0 +1,613 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Google Sheets",
+    "version": "v4-nyxid-overlay",
+    "description": "NyxID-hosted Google Sheets operations on their dedicated origin. Full Drive OAuth scope authorizes every published operation; connect this product separately from Drive or Workspace."
+  },
+  "servers": [
+    {
+      "url": "https://sheets.googleapis.com"
+    }
+  ],
+  "paths": {
+    "/v4/spreadsheets": {
+      "post": {
+        "operationId": "sheets_create_spreadsheet",
+        "summary": "Create a spreadsheet with a title and optional initial sheets.",
+        "x-aevatar-tool": {
+          "name": "sheets_create_spreadsheet",
+          "description": "Create a spreadsheet with a title and optional initial sheets.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "properties": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                      "title": {
+                        "type": "string"
+                      },
+                      "locale": {
+                        "type": "string"
+                      },
+                      "timeZone": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "title"
+                    ]
+                  },
+                  "sheets": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "description": "Initial sheets and their properties."
+                  }
+                },
+                "required": [
+                  "properties"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v4/spreadsheets/{spreadsheetId}": {
+      "get": {
+        "operationId": "sheets_get_spreadsheet",
+        "summary": "Read spreadsheet metadata and optionally grid data. Use sheets_get_values for cell values.",
+        "x-aevatar-tool": {
+          "name": "sheets_get_spreadsheet",
+          "description": "Read spreadsheet metadata and optionally grid data. Use sheets_get_values for cell values.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "spreadsheetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "includeGridData",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "ranges",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A1 range to include in grid data."
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional partial-response field mask."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v4/spreadsheets/{spreadsheetId}:batchUpdate": {
+      "post": {
+        "operationId": "sheets_batch_update_spreadsheet",
+        "summary": "Apply structural, formatting, and cell edits to a spreadsheet in one batch.",
+        "x-aevatar-tool": {
+          "name": "sheets_batch_update_spreadsheet",
+          "description": "Apply structural, formatting, and cell edits to a spreadsheet in one batch.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "spreadsheetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "requests": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "description": "Ordered API request objects, applied atomically. Each entry contains exactly one request, such as addSheet, updateCells, repeatCell, or updateSpreadsheetProperties."
+                  },
+                  "includeSpreadsheetInResponse": {
+                    "type": "boolean"
+                  },
+                  "responseIncludeGridData": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "requests"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v4/spreadsheets/{spreadsheetId}/values/{range}": {
+      "get": {
+        "operationId": "sheets_get_values",
+        "summary": "Read cell values in an A1 or named range.",
+        "x-aevatar-tool": {
+          "name": "sheets_get_values",
+          "description": "Read cell values in an A1 or named range.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "spreadsheetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A1 range or named range, such as Sheet1!A1:B2, 'Quarter 1'!A1:B2, A:A, or A1. Colons separate coordinates only; custom-method suffixes are not range values.",
+            "x-nyxid-path-constraint": "sheets_a1_range"
+          },
+          {
+            "name": "majorDimension",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ROWS",
+                "COLUMNS"
+              ]
+            }
+          },
+          {
+            "name": "valueRenderOption",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "FORMATTED_VALUE",
+                "UNFORMATTED_VALUE",
+                "FORMULA"
+              ]
+            }
+          },
+          {
+            "name": "dateTimeRenderOption",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "SERIAL_NUMBER",
+                "FORMATTED_STRING"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "sheets_update_values",
+        "summary": "Write values to an A1 or named range, replacing existing cells.",
+        "x-aevatar-tool": {
+          "name": "sheets_update_values",
+          "description": "Write values to an A1 or named range, replacing existing cells.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "spreadsheetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A1 range or named range, such as Sheet1!A1:B2, 'Quarter 1'!A1:B2, A:A, or A1. Colons separate coordinates only; custom-method suffixes are not range values.",
+            "x-nyxid-path-constraint": "sheets_a1_range"
+          },
+          {
+            "name": "valueInputOption",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "RAW",
+                "USER_ENTERED"
+              ]
+            }
+          },
+          {
+            "name": "includeValuesInResponse",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "responseValueRenderOption",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "FORMATTED_VALUE",
+                "UNFORMATTED_VALUE",
+                "FORMULA"
+              ]
+            }
+          },
+          {
+            "name": "responseDateTimeRenderOption",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "SERIAL_NUMBER",
+                "FORMATTED_STRING"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "range": {
+                    "type": "string",
+                    "description": "Optional range in A1 notation; the path range selects the target."
+                  },
+                  "majorDimension": {
+                    "type": "string",
+                    "enum": [
+                      "ROWS",
+                      "COLUMNS"
+                    ]
+                  },
+                  "values": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "items": {}
+                    },
+                    "description": "Rows or columns of scalar cell values (strings, numbers, booleans, or null to skip). Use an empty string to clear a cell."
+                  }
+                },
+                "required": [
+                  "values"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v4/spreadsheets/{spreadsheetId}/values/{range}:append": {
+      "post": {
+        "operationId": "sheets_append_values",
+        "summary": "Append values after the last row of the logical table found within the supplied range.",
+        "x-aevatar-tool": {
+          "name": "sheets_append_values",
+          "description": "Append values after the last row of the logical table found within the supplied range.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "spreadsheetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A1 range or named range, such as Sheet1!A1:B2, 'Quarter 1'!A1:B2, A:A, or A1. Colons separate coordinates only; custom-method suffixes are not range values.",
+            "x-nyxid-path-constraint": "sheets_a1_range"
+          },
+          {
+            "name": "valueInputOption",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "RAW",
+                "USER_ENTERED"
+              ]
+            }
+          },
+          {
+            "name": "includeValuesInResponse",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "responseValueRenderOption",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "FORMATTED_VALUE",
+                "UNFORMATTED_VALUE",
+                "FORMULA"
+              ]
+            }
+          },
+          {
+            "name": "responseDateTimeRenderOption",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "SERIAL_NUMBER",
+                "FORMATTED_STRING"
+              ]
+            }
+          },
+          {
+            "name": "insertDataOption",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "OVERWRITE",
+                "INSERT_ROWS"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "range": {
+                    "type": "string",
+                    "description": "Optional range in A1 notation; the path range selects the target."
+                  },
+                  "majorDimension": {
+                    "type": "string",
+                    "enum": [
+                      "ROWS",
+                      "COLUMNS"
+                    ]
+                  },
+                  "values": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "items": {}
+                    },
+                    "description": "Rows or columns of scalar cell values (strings, numbers, booleans, or null to skip). Use an empty string to clear a cell."
+                  }
+                },
+                "required": [
+                  "values"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear": {
+      "post": {
+        "operationId": "sheets_clear_values",
+        "summary": "Clear cell values in a range while retaining formatting and validation.",
+        "x-aevatar-tool": {
+          "name": "sheets_clear_values",
+          "description": "Clear cell values in a range while retaining formatting and validation.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "spreadsheetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A1 range or named range, such as Sheet1!A1:B2, 'Quarter 1'!A1:B2, A:A, or A1. Colons separate coordinates only; custom-method suffixes are not range values.",
+            "x-nyxid-path-constraint": "sheets_a1_range"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

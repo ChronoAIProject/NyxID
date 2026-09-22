@@ -497,15 +497,16 @@ class NyxIDClient:
 | `roles` | Includes assigned roles and permissions in OAuth userinfo |
 | `catalog:skills:read` | Granted Curation discovery, skills, and history |
 | `catalog:skills:write` | Granted Curation recommendation changes and restore |
+| `user-services:read` | Nonsecret `GET /keys/{uuid}` metadata for exact connections in a live key read grant |
 | `groups` | Includes groups in OAuth userinfo; service accounts have no group memberships, so the list is empty |
 
-The default suggestion menu includes all seven values in the table, even before an account exists. The `proxy:*` alias and empty `groups` behavior are labeled explicitly. New service-account scope checks must be added to the suggestions registry. The catalog skill scopes also require a platform-admin-issued curation grant for the selected catalog services. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
+The default suggestion menu includes all eight values in the table, even before an account exists. The `proxy:*` alias and empty `groups` behavior are labeled explicitly. New service-account scope checks must be added to the suggestions registry. The catalog skill scopes also require a platform-admin-issued curation grant for the selected catalog services. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
 
-General account create/update continue storing free-form scope strings. Curation accounts restrict scopes to the grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation.
+General account create/update continue storing free-form scope strings. Curation accounts restrict scopes to the grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation. Curation and key metadata reads additionally check the live configured scope on every request.
 
 ### Routes Accessible to Service Accounts
 
-The general route table below does not widen Curation access: that purpose permits only its catalog-curation routes and exact granted HTTP proxy target.
+The general route table below does not widen Curation access: that purpose permits its catalog-curation routes, exact granted HTTP proxy target, and exact connection metadata GETs with a separate key read grant.
 
 | Endpoint | Existing scope check |
 |----------|----------------------|
@@ -513,6 +514,8 @@ The general route table below does not widen Curation access: that purpose permi
 | `ANY /api/v1/llm/gateway/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
 | `GET /api/v1/llm/status` | `proxy`, `proxy:*`, or `llm:proxy` |
 | `ANY /api/v1/proxy/{service_id}/*` | `proxy` or `proxy:*`; Curation additionally requires the exact live Ornn target |
+| `GET /api/v1/keys/{uuid}` | `user-services:read` in token and live account, exact key read grant, and live owner access |
+| `GET /api/v1/mcp/config` | `proxy` or `proxy:*`; General SAs only, using their own discovery identity |
 | Connection/provider management | Existing route authentication and ownership checks; no separate connections/providers scope enforcement |
 
 ### Routes Blocked for Service Accounts
@@ -525,7 +528,7 @@ Service accounts cannot access human-only endpoints:
 - `/api/v1/api-keys/*` (API key management)
 - `/api/v1/admin/*` (admin panel)
 - `/api/v1/services/*` (service definition management)
-- `/api/v1/mcp/*` (MCP configuration)
+- `/api/v1/keys` listing, slug reads, writes, and `/keys/{id}/authorization`; exact metadata GETs use the separate grant below
 
 ---
 
@@ -650,7 +653,9 @@ All service account operations are logged:
 
 A dedicated service account can autonomously assign, replace, remove, clear, and restore recommended skills for exact permitted catalog services. The account has one embedded live grant and a persisted write budget shared by all backend replicas. There is no per-change approval or semantic review gate.
 
-NyxID stores recommendation names and optional immutable references. **Ornn owns package content create/read/update and its retained immutable versions.** NyxID does not store, fetch, validate, publish, or delete package bytes. The companion [Ornn change #1247](https://github.com/ChronoAIProject/Ornn/issues/1247) adds content-only `ornn:skill:publish` alongside existing exact object write grants. The combined contract below supports content CRU and recommendation management; source implementation and local/CI checks do not establish deployed Ornn/Aevatar verification. Package and version deletion remain outside this identity's authority.
+NyxID stores recommendation names and optional immutable references. **Ornn owns package content, visibility, ownership, and retained immutable versions.** Its existing `ornn:skill:read`, `ornn:skill:create`, and `ornn:skill:update` permissions support a service account reading public skills and creating, reading, updating, and changing visibility on its own skills. Creation records the authenticated SA UUID as `createdBy`; the author has implicit object read/write/manage authority even with an empty sharing ACL. Updating someone else's skill requires an explicit object `write` grant. Skill and version deletion require the separate `ornn:skill:delete` permission, which this role must omit. The NyxID operation policy below independently excludes deletion and unrelated management routes.
+
+This contract was checked against the connected Ornn API's OpenAPI 0.18.0 document and [Ornn source revision e7e21e9](https://github.com/ChronoAIProject/Ornn/tree/e7e21e9b7279ccc28ef7d4a40523da40b8cabc25). Source and local tests establish the authorization rules; deployment configuration still needs verification with the intended service-account identity. The proposed content-only permission in [Ornn #1247](https://github.com/ChronoAIProject/Ornn/issues/1247) addresses a different requirement: it would deliberately deny existing-skill visibility/settings changes. It is not required for this creator-managed workflow.
 
 ### Upgrade order and rollback
 
@@ -683,7 +688,7 @@ Grant and history responses contain no credentials or secret hashes. The origina
 
 ### Runtime confinement and token revocation
 
-A Curation bearer may use only `/api/v1/catalog-curation/...` and ordinary HTTP `/api/v1/proxy/{ornn_proxy_service_id}/...`. The grant and token/live scopes must authorize the request. Generic catalog/services listing, other proxy IDs, slug routing, `_nyxid_via` instance selection, WebSocket upgrades, MCP, LLM/OpenAI routes, provider/connection self-management, nodes, oracle, and triggers are unavailable.
+A Curation bearer may use `/api/v1/catalog-curation/...`, ordinary HTTP `/api/v1/proxy/{ornn_proxy_service_id}/...`, and exact `GET /api/v1/keys/{uuid}` with the separate key read scope and grant below. The grant and token/live scopes must authorize the request. The curation operation-contract route (`GET /api/v1/catalog-curation/services/{catalog_service_id}/openapi.json`) is the supported way to read a grant-listed admin service's OpenAPI document. It returns the source contract, preserving upstream server declarations for authoring; it does not rewrite them into executable proxy URLs or grant execution access. Authored skills must use the consumer's authorized NyxID service connection for execution. It is read-only, bounded, and does not expose a user-managed `/keys` row. Generic catalog/services listing, other proxy IDs, slug routing, `_nyxid_via` instance selection, WebSocket upgrades, MCP, LLM/OpenAI routes, provider/connection self-management, nodes, oracle, and triggers are unavailable.
 
 The Ornn proxy uses the granted catalog URL and the service account's own connection or delegated provider credential. It never inherits its creator's UserService, endpoint override, gateway URL, node, or broad credential, and does not fall back to a catalog master credential. Explicitly disconnecting the SA connection blocks execution. A platform admin attaches the separately scoped Ornn credential using the existing SA provider/connection management surface. General-purpose account routing keeps its existing behavior.
 
@@ -691,15 +696,109 @@ Every SA access token must have a live token row matching its account, JWT ID, e
 
 ### Separate Ornn identity and endpoint
 
-Before enabling content authoring, deploy the companion Ornn publish permission and
-complete the NyxID replica upgrade above. Assign the SA a downstream role containing
-only `ornn:skill:read` and `ornn:skill:publish`; use JWT or Both identity propagation.
-The assertion subject and permissions come from the SA, not its administrator.
-For existing skills an Ornn owner/admin grants the SA UUID exact write access once:
-`{"type":"user","id":"<SA UUID>","level":"write"}`. It can then upload new versions
-without further human review. For new readable skills, send a raw ZIP to
-`POST /api/v1/skills?public=true`; default creation remains private. Publish-only
-updates must omit `isPrivate`, including unchanged/null/multipart values.
+Assign the SA a NyxID role whose `permissions` contain exactly
+`ornn:skill:read`, `ornn:skill:create`, and `ornn:skill:update`. These are role
+permissions, separate from the SA OAuth scopes. Configure JWT or Both identity
+propagation on the dedicated Ornn catalog service. NyxID mints the downstream
+identity assertion with `sub` equal to the SA UUID and `permissions` resolved
+from that SA's roles. Ornn reads those claims as `auth.userId` and
+`auth.permissions`; it does not use the administrator who created the SA.
+
+Ornn applies two checks: the route checks the required permission in the minted
+identity, and the object check uses the stored creator or sharing grants:
+
+| Operation | Request permission | Object rule |
+|---|---|---|
+| Validate a package or read package JSON | `ornn:skill:read` | Package reads respect public visibility, creator ownership, or a read/write grant |
+| Create a skill | `ornn:skill:create` | Records the caller's UUID as `createdBy`; starts private |
+| Upload a new immutable version | `ornn:skill:update` | Creator or explicit `write` grantee |
+| Change private/public visibility | `ornn:skill:update` | Creator; a `write` grant alone is insufficient |
+| Delete a skill or version | `ornn:skill:delete` | Creator/object-manage authority is also required; denied because the role omits delete |
+
+Platform administrators also pass the object checks, but this SA must not hold
+`ornn:admin:skill`. Object-manage authority on a skill the SA created is an
+ownership rule, not a platform-admin role and not an ACL grant that needs to be
+assigned. The typed sharing ACL accepts `read` or `write`; an empty ACL means no
+collaborators, not an ownerless object. For a skill created by another principal,
+an owner/admin can grant the SA content write once with
+`{"type":"user","id":"<SA UUID>","level":"write"}`. Public visibility alone
+never grants content write access.
+
+The existing API supports the complete creator workflow without a new scope:
+
+1. Send a raw ZIP to `POST /api/v1/skills`. The result is private and owned by the SA.
+2. Read it through `GET /api/v1/skills/{id}` or `/json` as the same SA.
+3. Make it public with JSON `{"isPrivate":false}` to `PUT /api/v1/skills/{id}`.
+4. Upload a newer ZIP to the same PUT route. Existing versions remain immutable.
+5. Make it private again with JSON `{"isPrivate":true}` to the same PUT route.
+
+A skill tied through Ornn's own `nyxid-service` binding to an admin service is
+forced public and cannot become private until untied. That Ornn binding is
+separate from assigning recommendations through NyxID's Curation API. An SA
+creating a new identity after deletion/recreation gets a new UUID and does not
+inherit the old identity's skills; rotating credentials on the existing SA
+preserves ownership.
+
+`ornn:skill:update` also authorizes creator-managed sharing permissions,
+source configuration and refresh, version deprecation, dist-tag assignment,
+ownership transfer, and service binding changes. The policy below includes
+those exact routes. Ornn still checks creator/manage authority and validates
+the target of each operation. Removing a dist-tag uses that update permission
+despite being an HTTP DELETE, so omitting `ornn:skill:delete` alone does not
+prevent tag removal. The policy deliberately excludes all DELETE routes,
+including skill, version, and tag deletion.
+
+Use direct user-type grants for an SA. Ornn's organization-grant resolution
+requires a NyxID organization lookup that Curation tokens cannot perform.
+Ownership transfer requires a known Ornn recipient and leaves the former owner
+with read access; transferring away a skill ends the SA's creator edit rights.
+The service-binding route allows an owner to untie a skill with
+`{"nyxidServiceId":null}`. Creating a new Ornn binding additionally requires a
+target resolvable by Ornn's caller-visible service lookup; Curation tokens do
+not gain general catalog access. Assign/remove admin catalog recommendations
+through the NyxID Curation API instead of relying on that separate binding.
+
+Before enabling the workload, verify this sequence with the intended SA:
+create private, read private, upload a newer version, set public, read publicly,
+set private again, and confirm that another principal's private skills and
+ungranted updates are denied. Confirm skill/version deletion is denied even for
+the creator, and that unlisted management paths never reach Ornn. Use the
+Curation API separately to assign/remove recommendations on grant-listed admin
+catalog services. Private skill recommendations do not grant readers access to
+private content; shared recommendations need public content or suitable Ornn
+read grants.
+
+The relevant Ornn implementation is
+[`nyxidAuth.ts`](https://github.com/ChronoAIProject/Ornn/blob/e7e21e9b7279ccc28ef7d4a40523da40b8cabc25/ornn-api/src/middleware/nyxidAuth.ts),
+[`authorize.ts`](https://github.com/ChronoAIProject/Ornn/blob/e7e21e9b7279ccc28ef7d4a40523da40b8cabc25/ornn-api/src/domains/skills/crud/authorize.ts),
+and the CRUD
+[`routes.ts`](https://github.com/ChronoAIProject/Ornn/blob/e7e21e9b7279ccc28ef7d4a40523da40b8cabc25/ornn-api/src/domains/skills/crud/routes.ts)
+and
+[`service.ts`](https://github.com/ChronoAIProject/Ornn/blob/e7e21e9b7279ccc28ef7d4a40523da40b8cabc25/ornn-api/src/domains/skills/crud/service.ts).
+
+The Ornn role is only the downstream authorization. It does not grant the NyxID
+service-account token the `proxy` scope, create the Curation grant, attach the
+service-account's Ornn credential, or add paths to NyxID's operation policy. A
+working content-editing actor therefore needs all of these independent controls:
+
+1. The NyxID account must be Curation-protected with `catalog:skills:read`,
+   `catalog:skills:write`, and `proxy` in its configured scopes. The client-
+   credentials request must also include `proxy` when it will call Ornn.
+2. The live grant must list every catalog service whose recommendations may be
+   assigned and must name the one exact Ornn catalog service as
+   `ornn_proxy_service_id`.
+3. A platform admin must attach a dedicated Ornn connection to the service
+   account. Curation proxy resolution never falls back to the creator's
+   credential or a catalog master credential.
+4. The Ornn service row's `proxy_operation_policy` must explicitly allow every
+   required read/write operation, including `POST /api/v1/skill-format/validate`,
+   `POST /api/v1/skills`, and `PUT /api/v1/skills/{id}`. The policy is the NyxID
+   route allowlist; the Ornn role is not a substitute for it.
+5. Ornn must receive the SA UUID and the three role permissions in the NyxID
+   identity assertion. The stored `createdBy` must match that UUID for creator
+   access; only skills created by another identity need explicit write grants.
+   Omit `ornn:skill:delete` and `ornn:admin:skill` from every role assigned to the SA.
+   Role permissions are additive, so another assigned role must not reintroduce them.
 
 Use a **dedicated Ornn catalog service** so other clients retain their existing
 endpoint configuration. With `base_url=https://ornn.example` (origin only), configure
@@ -709,25 +808,36 @@ this existing `proxy_operation_policy` on that catalog row:
 {"rules":[
   {"method":"GET","path_template":"/api/v1/skill-search"},
   {"method":"GET","path_template":"/api/v1/skill-format/rules"},
+  {"method":"POST","path_template":"/api/v1/skill-format/validate"},
   {"method":"GET","path_template":"/api/v1/skills/{id}"},
   {"method":"GET","path_template":"/api/v1/skills/{id}/json"},
   {"method":"GET","path_template":"/api/v1/skills/{id}/versions"},
   {"method":"GET","path_template":"/api/v1/skills/{id}/versions/{version}/download"},
   {"method":"GET","path_template":"/api/v1/skills/{id}/closure"},
   {"method":"POST","path_template":"/api/v1/skills"},
-  {"method":"PUT","path_template":"/api/v1/skills/{id}"}
+  {"method":"POST","path_template":"/api/v1/skills/pull"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}/permissions"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}/source"},
+  {"method":"POST","path_template":"/api/v1/skills/{id}/refresh"},
+  {"method":"PATCH","path_template":"/api/v1/skills/{id}/versions/{version}"},
+  {"method":"GET","path_template":"/api/v1/skills/{id}/dist-tags"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}/dist-tags/{tag}"},
+  {"method":"POST","path_template":"/api/v1/skills/{id}/transfer-ownership"},
+  {"method":"PUT","path_template":"/api/v1/skills/{id}/nyxid-service"}
 ]}
 ```
 
-Paths are relative to the configured base URL. Queries such as `public=true` do not
-need another rule. This policy denies unlisted methods/paths with
+Paths are relative to the configured base URL. The existing POST creates privately;
+use the JSON visibility update on the allowlisted PUT route to make it public.
+Do not rely on an unimplemented `public=true` creation parameter. This policy denies unlisted methods/paths with
 `404 Service operation not found` before execution,
 including Ornn's auth-only assistant/audit/account routes. It is required both when
 a grant selects the target and on every Curation resolution; removing it fails
 closed. An explicit empty policy is valid and denies all operations. General
-accounts keep the existing optional-policy behavior. The read/publish role by
-itself is not an execution-route allowlist. Do not grant broad create/update/delete,
-admin, build or playground permissions, and do not configure wildcard route rules.
+accounts keep the existing optional-policy behavior. The Ornn request role by
+itself is not an execution-route allowlist. Do not grant `ornn:skill:delete`,
+`ornn:admin:skill`, build or playground permissions, and do not configure wildcard route rules.
 
 ### Machine recommendation API
 
@@ -738,19 +848,31 @@ curl --fail-with-body "$NYXID_URL/oauth/token" \
   --data-urlencode grant_type=client_credentials \
   --data-urlencode "client_id=$NYXID_CLIENT_ID" \
   --data-urlencode "client_secret=$NYXID_CLIENT_SECRET" \
-  --data-urlencode 'scope=catalog:skills:read catalog:skills:write'
+  --data-urlencode 'scope=catalog:skills:read catalog:skills:write proxy'
 ```
 
-Use the returned access token as `$CURATION_TOKEN`:
+Use the returned access token as `$CURATION_TOKEN`. The `proxy` scope is required for Ornn content operations; a token containing only the two `catalog:skills:*` scopes can read/assign recommendations but receives `403` from the Ornn proxy.
+After the scope and connection checks pass, a missing operation-policy rule fails
+closed as `404 Service operation not found`; that response means the exact method
+and path still need to be added to the Ornn catalog row's policy.
 
 ```sh
 curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
   "$NYXID_URL/api/v1/catalog-curation/services"
 curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
   "$NYXID_URL/api/v1/catalog-curation/services/$CATALOG_SERVICE_ID/skills"
+curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \
+  "$NYXID_URL/api/v1/catalog-curation/services/$CATALOG_SERVICE_ID/openapi.json"
 ```
 
-Only grant-listed catalog services appear. Each skill response contains `service_id`, `recommended_skills`, optional `recommended_skill_refs`, `skills_revision`, and the separately versioned `skills_manifest_digest`. Disallowed service IDs return 404 without disclosing their content or history. API keys, delegated/relay tokens, and human session/access tokens cannot use this router.
+Only grant-listed catalog services appear. The IDs in this API are catalog `DownstreamService` UUIDs; they are not `/keys` or `UserService` instance IDs. Use this route for catalog recommendations. Reading an individual connection through `GET /api/v1/keys/{user_service_id}` requires the separate key read grant; catalog IDs do not grant instance access. Each skill response contains `service_id`, `recommended_skills`, optional `recommended_skill_refs`, `skills_revision`, and the separately versioned `skills_manifest_digest`. Disallowed service IDs return 404 without disclosing their content or history. API keys, delegated/relay tokens, and human session/access tokens cannot use this router.
+
+The operation-contract route can read a hosted overlay or a custom `openapi_spec_url`
+only when NyxID can fetch that URL without downstream credentials. It uses the
+existing SSRF-checked, redirect-free, five-megabyte bounded fetch path and never
+injects a service-account or catalog credential. An authenticated custom spec is
+therefore an explicit unsupported case until a separate credentialed, read-only
+contract capability is designed and deployed; metadata access through `/keys/{uuid}` does not grant credentialed fetching, MCP discovery, or general proxy access.
 
 Replace the entire list with an observed revision and a fresh UUID `request_id`:
 
@@ -815,3 +937,33 @@ Revision zero restores the exact legacy baseline captured before the first edit,
 Catalog/MCP/key read surfaces expose optional refs and revision. An instance name override suppresses catalog refs, including when that override is an empty list. The existing name-based `catalog_digest` algorithm is unchanged; ref-only changes affect a separate `skills_manifest_digest` with a `v1:` prefix. Consumers see updates on their next fetch. Locally installed/copied skills do not update automatically.
 
 Human metadata side effects remain after commit. Idempotent retries complete OIDC redirect and billing work from the current committed desired state and re-dispatch eligible endpoint discovery, without reapplying older request values over later edits. Identity propagation uses its durable reconciliation marker; unresolved reconciliation returns a conflict directing a platform admin to identity resync.
+
+
+## Connection metadata reads
+
+General and Curation service accounts may read `GET /api/v1/keys/{uuid}` with `user-services:read` in both the issued token and the live SA scopes, plus a platform-admin-issued **key read grant** for that exact UserService UUID. Ornn role permissions, `proxy`, and catalog grants do not authorize this read. General accounts retain their purpose; they do not need a Curation grant. A Curation account still needs its live Curation grant in addition to the key read grant.
+
+In **Admin → Service Accounts**, add `user-services:read` to **Allowed Scopes**, then use **Connection metadata access → Grant read access** to enter the permitted connection UUIDs. Obtain a fresh client-credentials token including the new scope. No secret rotation is required.
+
+Grant administration uses:
+
+```http
+PUT /api/v1/admin/service-accounts/{sa_id}/key-read-grant
+Authorization: Bearer <platform-admin-token>
+Content-Type: application/json
+
+{
+  "user_service_ids": ["<UserService UUID>"],
+  "expires_at": "2026-12-31T23:59:59Z"
+}
+```
+
+`expires_at` is optional. Issuance/replacement accepts 1–100 distinct existing connection UUIDs, replaces the entire grant, and validates the SA owner's access to every target and its backing endpoint before saving. Invalid replacements leave the prior grant intact. The grant binds the effective SA owner and each target's owner. `GET` on this admin route returns the grant or `null`; platform admins and operators may inspect it. `PUT` and `DELETE` require platform admin. `DELETE` revokes the grant. Issuance and revocation produce SA grant audit events; a metadata read creates no service history mutation.
+
+The SA response contains only `id`, `slug`, `name`, `label`, `service_type`, `is_active`, catalog ID/slug/name, `recommended_skills`, `recommended_skill_refs`, `skills_revision`, and `skills_manifest_digest`. It omits credential material, headers, frame injections, raw endpoint/spec URLs, node configuration, OAuth configuration, and credential IDs. No credential decryption, provisioning, or OAuth reconciliation occurs. Responses use `Cache-Control: private, no-store`.
+
+Recommendation inheritance matches existing key reads: an endpoint name override (including an explicitly stored empty list) suppresses catalog refs and revision. Otherwise the catalog's names, refs and revision are returned. Custom connections without recommendations return null names/refs/revision and the digest of the empty state. This endpoint does not persist per-instance refs or permit any writes.
+
+Only exact UUID GETs are allowed for SAs. Listing, slugs, HEAD, upgrades, authorization evidence, history, and POST/PUT/DELETE remain unavailable. Disabled connections remain readable by UUID; deleted connections and missing/cross-owner backing endpoints return 404. Ungranted targets also return 404. Grant revocation/expiry, current scope removal, owner changes, inactive owners, and lost org membership/access deny new reads. Temporary scope removal, disablement, or membership loss suspends access; restoring prerequisites can restore access while the grant remains valid. Existing token revocation, expiry and credential-generation checks still apply. Existing human, API-key and delegated key reads retain their response and authorization behavior.
+
+Deploy all serving replicas before enabling clients; old replicas still reject this endpoint for SAs. Existing accounts gain no access until both the new scope and exact grant are configured.

@@ -87,6 +87,8 @@ mod optional_base64_bytes {
 /// Request sent to a node via WebSocket.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NodeProxyRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
     pub request_id: String,
     pub service_id: String,
     pub service_slug: String,
@@ -416,6 +418,7 @@ struct NodeConnection {
 /// haven't been upgraded yet.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct NodeCapabilitiesFlags {
+    pub http_signature_v2: bool,
     pub credential_ack_correlation: bool,
     pub remote_credential_crypto_v1: bool,
     pub proxy_max_body_size: Option<usize>,
@@ -479,6 +482,10 @@ impl Drop for NodeConnectionReservation {
 /// JSON message sent from NyxID to a node for a proxy request.
 #[derive(Debug, Serialize)]
 struct WsProxyRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature_version: Option<u8>,
     #[serde(rename = "type")]
     msg_type: &'static str,
     request_id: String,
@@ -1023,6 +1030,8 @@ pub enum CredentialAckOutcome {
 /// seventh-round Codex P2).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct NodeCapabilitiesMsg {
+    #[serde(default)]
+    pub http_signature_v2: bool,
     /// Node echoes the `request_id` from a `credential_update` /
     /// `credential_remove` frame back in the resulting
     /// `credential_update_ack`. Required for strict ack-wait on the
@@ -1144,18 +1153,55 @@ pub fn compute_hmac_signature(
     hex::encode(mac.finalize().into_bytes())
 }
 
+pub fn compute_http_v2_signature(
+    secret: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    request: &NodeProxyRequest,
+) -> String {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let body = request
+        .body
+        .as_ref()
+        .map(|body| base64::engine::general_purpose::STANDARD.encode(body))
+        .unwrap_or_default();
+    let message = serde_json::json!([
+        "nyxid-node-http.v2",
+        timestamp,
+        nonce,
+        request.service_id,
+        request.service_slug,
+        request.target_id.as_deref().unwrap_or(""),
+        request.base_url,
+        request.method,
+        request.path,
+        request.query.as_deref().unwrap_or(""),
+        body,
+    ])
+    .to_string();
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
 pub fn sign_proxy_request(secret: &[u8], request: &NodeProxyRequest) -> NodeRequestSignature {
     let timestamp = chrono::Utc::now().to_rfc3339();
     let nonce = uuid::Uuid::new_v4().to_string();
-    let signature = compute_hmac_signature(
-        secret,
-        &timestamp,
-        &nonce,
-        &request.method,
-        &request.path,
-        request.query.as_deref(),
-        request.body.as_deref(),
-    );
+    let signature = if request.target_id.is_some() {
+        compute_http_v2_signature(secret, &timestamp, &nonce, request)
+    } else {
+        compute_hmac_signature(
+            secret,
+            &timestamp,
+            &nonce,
+            &request.method,
+            &request.path,
+            request.query.as_deref(),
+            request.body.as_deref(),
+        )
+    };
     NodeRequestSignature {
         timestamp,
         nonce,
@@ -1734,6 +1780,27 @@ impl NodeWsManager {
         }
     }
 
+    /// Preflight before billing/durable dispatch markers. The owner checks the
+    /// live connection again when sending, so a reconnect cannot bypass the gate.
+    pub async fn require_http_signature_v2(
+        &self,
+        node_id: &str,
+        signing_enabled: bool,
+    ) -> AppResult<()> {
+        self.await_cluster_capability_resolution(node_id, std::time::Duration::from_millis(500))
+            .await;
+        if !signing_enabled
+            || !self
+                .cluster_session_info(node_id)
+                .await
+                .capabilities
+                .http_signature_v2
+        {
+            return Err(AppError::NodeHttpSignatureUnsupported);
+        }
+        Ok(())
+    }
+
     /// Send a proxy request to a node and wait for the response.
     /// If `signing_secret` is provided, the request is HMAC-signed.
     /// Returns either a complete response or a streaming channel.
@@ -1791,13 +1858,35 @@ impl NodeWsManager {
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
         let request_body_len = request.body.as_ref().map_or(0, Vec::len);
-        if request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
+        if request.target_id.is_some() || request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
             self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
                 .await;
         }
         let conn = self
             .connection_for(node_id, expected_connection_id)
             .map_err(NodeProxyFailure::before_dispatch)?;
+        if request.target_id.is_some() {
+            let capable = conn
+                .capabilities
+                .lock()
+                .is_ok_and(|caps| caps.http_signature_v2);
+            if !capable || prepared_signature.is_none() {
+                return Err(NodeProxyFailure::before_dispatch(
+                    AppError::NodeHttpSignatureUnsupported,
+                ));
+            }
+            if super::destination_routing::normalize_origin(&request.base_url)
+                .as_ref()
+                .ok()
+                != Some(&request.base_url)
+            {
+                return Err(NodeProxyFailure::before_dispatch(
+                    AppError::ValidationError(
+                        "Target-selected node request requires an exact normalized origin".into(),
+                    ),
+                ));
+            }
+        }
         let node_body_limit = conn
             .capabilities
             .lock()
@@ -1855,6 +1944,8 @@ impl NodeWsManager {
 
         // Build WS message
         let ws_msg = WsProxyRequest {
+            signature_version: request.target_id.as_ref().map(|_| 2),
+            target_id: request.target_id,
             msg_type: "proxy_request",
             request_id: request_id.clone(),
             service_id: request.service_id,
@@ -2603,6 +2694,7 @@ impl NodeWsManager {
         if let Some(conn) = self.connections.get(node_id)
             && let Ok(mut flags) = conn.capabilities.lock()
         {
+            flags.http_signature_v2 = caps.http_signature_v2;
             flags.credential_ack_correlation = caps.credential_ack_correlation;
             flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
             flags.proxy_max_body_size = caps.proxy_max_body_size;
@@ -4062,6 +4154,7 @@ mod tests {
             .send_proxy_request_classified_prepared(
                 "node-1",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "request-1".to_string(),
                     service_id: "service-1".to_string(),
                     service_slug: "service".to_string(),
@@ -4100,6 +4193,7 @@ mod tests {
             .send_proxy_request_classified_prepared(
                 "node-1",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "request-cancelled".to_string(),
                     service_id: "service-1".to_string(),
                     service_slug: "service".to_string(),
@@ -4133,6 +4227,7 @@ mod tests {
         mgr.record_capabilities(
             "node-small",
             &NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 proxy_max_body_size: Some(4),
                 ..NodeCapabilitiesMsg::default()
             },
@@ -4142,6 +4237,7 @@ mod tests {
             .send_proxy_request(
                 "node-small",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "request-1".to_string(),
                     service_id: "service-1".to_string(),
                     service_slug: "service".to_string(),
@@ -4179,6 +4275,7 @@ mod tests {
             .send_proxy_request(
                 "node-legacy",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "request-legacy".to_string(),
                     service_id: "service-1".to_string(),
                     service_slug: "service".to_string(),
@@ -4641,6 +4738,7 @@ mod tests {
             .send_proxy_request(
                 "node-1",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "req-1".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4685,6 +4783,7 @@ mod tests {
             .send_proxy_request_classified(
                 "node-timeout",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "req-timeout".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4715,6 +4814,7 @@ mod tests {
             .send_proxy_request_classified(
                 "node-missing",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "req-not-dispatched".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4769,6 +4869,7 @@ mod tests {
             .send_proxy_request(
                 "node-1",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "req-buffer".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4836,6 +4937,7 @@ mod tests {
             .send_proxy_request_classified(
                 "node-1",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "req-2".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4893,6 +4995,7 @@ mod tests {
             .send_proxy_request_classified(
                 "node-1",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "req-cred-missing".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -5283,6 +5386,7 @@ mod tests {
         mgr.record_capabilities(
             "node-cap",
             &NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
                 proxy_max_body_size: None,
@@ -5308,6 +5412,7 @@ mod tests {
         mgr.record_capabilities(
             "node-rci",
             &NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             },

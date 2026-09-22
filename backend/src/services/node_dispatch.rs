@@ -103,6 +103,7 @@ impl NodeDispatch {
             is_connected: true,
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
+                http_signature_v2: owner.http_signature_v2,
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
@@ -188,6 +189,21 @@ impl NodeDispatch {
         request: NodeProxyRequest,
         signature: Option<NodeRequestSignature>,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        if request.target_id.is_some() {
+            self.await_capability_resolution(&fence.node_id, Duration::from_millis(500))
+                .await;
+            if signature.is_none()
+                || !self
+                    .session_info(&fence.node_id)
+                    .await
+                    .capabilities
+                    .http_signature_v2
+            {
+                return Err(NodeProxyFailure::before_dispatch(
+                    AppError::NodeHttpSignatureUnsupported,
+                ));
+            }
+        }
         let node_id = fence.node_id.clone();
         let request_id = request.request_id.clone();
         let path = internal_path(&node_id, "proxy");
@@ -1185,6 +1201,7 @@ enum WireErrorCode {
     NodeOffline,
     NodeProxyTimeout,
     NodeCredentialMissing,
+    NodeHttpSignatureUnsupported,
     RequestBodyTooLarge,
     SshNodeKeyMissing,
     SshHostKeyMismatch,
@@ -1985,6 +2002,9 @@ fn encode_wire_failure(error: &AppError, dispatched: bool) -> WireFailure {
     let (code, max_bytes, error_code) = match error {
         AppError::NodeOffline(_) => (WireErrorCode::NodeOffline, None, None),
         AppError::NodeProxyTimeout => (WireErrorCode::NodeProxyTimeout, None, None),
+        AppError::NodeHttpSignatureUnsupported => {
+            (WireErrorCode::NodeHttpSignatureUnsupported, None, None)
+        }
         AppError::NodeCredentialMissing(_) => (WireErrorCode::NodeCredentialMissing, None, None),
         AppError::RequestBodyTooLarge { max_bytes, .. } => {
             (WireErrorCode::RequestBodyTooLarge, Some(*max_bytes), None)
@@ -2012,6 +2032,7 @@ fn decode_wire_failure(failure: WireFailure) -> AppError {
     match failure.code {
         WireErrorCode::NodeOffline => AppError::NodeOffline("Node is unavailable".to_string()),
         WireErrorCode::NodeProxyTimeout => AppError::NodeProxyTimeout,
+        WireErrorCode::NodeHttpSignatureUnsupported => AppError::NodeHttpSignatureUnsupported,
         WireErrorCode::NodeCredentialMissing => {
             AppError::NodeCredentialMissing("Node credential is unavailable".to_string())
         }
@@ -2134,6 +2155,7 @@ mod tests {
     fn owner(instance_name: &str, generation_id: &str) -> NodeConnectionOwner {
         let now = Utc::now();
         NodeConnectionOwner {
+            http_signature_v2: false,
             instance_name: instance_name.to_string(),
             generation_id: generation_id.to_string(),
             connection_id: "connection-a".to_string(),

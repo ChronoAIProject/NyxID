@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
+import { XEventsSettings } from "./x-events-settings";
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import {
   openOAuthPopup,
@@ -208,6 +209,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
       />
       </>}
       <div className="space-y-3 py-3">
+        {bot.platform === "x" && <XEventsSettings bot={bot} />}
         {!bot.webhook_registered && bot.last_poll_notice && (
           <p role="status" className="text-xs text-warning">{bot.last_poll_notice}</p>
         )}

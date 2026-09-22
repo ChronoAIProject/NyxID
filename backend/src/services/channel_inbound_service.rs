@@ -69,7 +69,12 @@ pub(crate) async fn process_inbound_messages(
             state.billing,
             bot,
             None,
-        ) && let Err(error) = billing.received(&inbound.platform_message_id).await
+        ) && let Err(error) =
+            if super::channel_adapters::x::is_public_conversation(&inbound.conversation_id) {
+                billing.received_post(&inbound.platform_message_id).await
+            } else {
+                billing.received(&inbound.platform_message_id).await
+            }
         {
             if super::channel_billing_service::blocks_channel(&error)
                 && super::channel_billing_service::suspend(&state, bot, adapter)
@@ -210,9 +215,12 @@ pub(crate) async fn process_inbound_messages(
             }
         };
 
-        // A manager is a public setup interface, not proof of the sender's
-        // NyxID identity. Its agent receives reply authority only.
-        let user_access_token = if bot.credential_source == "telegram_manager" {
+        // Public posts and manager setup messages do not prove the sender's
+        // NyxID identity. Their agents receive reply authority only.
+        let user_access_token = if bot.credential_source == "telegram_manager"
+            || (bot.platform == "x"
+                && super::channel_adapters::x::is_public_conversation(&inbound.conversation_id))
+        {
             None
         } else {
             let scope = crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES;

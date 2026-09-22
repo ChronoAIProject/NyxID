@@ -1,0 +1,167 @@
+{
+  "api-google-docs": {
+    "discovery_url": "https://docs.googleapis.com/$discovery/rest?version=v1",
+    "revision": "20260904",
+    "verified_on": "2026-09-14",
+    "origin": "https://docs.googleapis.com",
+    "operations": {
+      "docs_create_document": {
+        "discovery_id": "docs.documents.create",
+        "method": "POST",
+        "path": "/v1/documents",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/documents",
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file"
+        ]
+      },
+      "docs_get_document": {
+        "discovery_id": "docs.documents.get",
+        "method": "GET",
+        "path": "/v1/documents/{documentId}",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/documents",
+          "https://www.googleapis.com/auth/documents.readonly",
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/drive.readonly"
+        ]
+      },
+      "docs_batch_update_document": {
+        "discovery_id": "docs.documents.batchUpdate",
+        "method": "POST",
+        "path": "/v1/documents/{documentId}:batchUpdate",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/documents",
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file"
+        ]
+      }
+    }
+  },
+  "api-google-sheets": {
+    "discovery_url": "https://sheets.googleapis.com/$discovery/rest?version=v4",
+    "revision": "20260909",
+    "verified_on": "2026-09-14",
+    "origin": "https://sheets.googleapis.com",
+    "operations": {
+      "sheets_create_spreadsheet": {
+        "discovery_id": "sheets.spreadsheets.create",
+        "method": "POST",
+        "path": "/v4/spreadsheets",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/spreadsheets"
+        ]
+      },
+      "sheets_get_spreadsheet": {
+        "discovery_id": "sheets.spreadsheets.get",
+        "method": "GET",
+        "path": "/v4/spreadsheets/{spreadsheetId}",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/drive.readonly",
+          "https://www.googleapis.com/auth/spreadsheets",
+          "https://www.googleapis.com/auth/spreadsheets.readonly"
+        ]
+      },
+      "sheets_batch_update_spreadsheet": {
+        "discovery_id": "sheets.spreadsheets.batchUpdate",
+        "method": "POST",
+        "path": "/v4/spreadsheets/{spreadsheetId}:batchUpdate",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/spreadsheets"
+        ]
+      },
+      "sheets_get_values": {
+        "discovery_id": "sheets.spreadsheets.values.get",
+        "method": "GET",
+        "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/drive.readonly",
+          "https://www.googleapis.com/auth/spreadsheets",
+          "https://www.googleapis.com/auth/spreadsheets.readonly"
+        ]
+      },
+      "sheets_update_values": {
+        "discovery_id": "sheets.spreadsheets.values.update",
+        "method": "PUT",
+        "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/spreadsheets"
+        ]
+      },
+      "sheets_append_values": {
+        "discovery_id": "sheets.spreadsheets.values.append",
+        "method": "POST",
+        "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}:append",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/spreadsheets"
+        ]
+      },
+      "sheets_clear_values": {
+        "discovery_id": "sheets.spreadsheets.values.clear",
+        "method": "POST",
+        "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/spreadsheets"
+        ]
+      }
+    }
+  },
+  "api-google-slides": {
+    "discovery_url": "https://slides.googleapis.com/$discovery/rest?version=v1",
+    "revision": "20260904",
+    "verified_on": "2026-09-14",
+    "origin": "https://slides.googleapis.com",
+    "operations": {
+      "slides_create_presentation": {
+        "discovery_id": "slides.presentations.create",
+        "method": "POST",
+        "path": "/v1/presentations",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/presentations"
+        ]
+      },
+      "slides_get_presentation": {
+        "discovery_id": "slides.presentations.get",
+        "method": "GET",
+        "path": "/v1/presentations/{presentationId}",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/drive.readonly",
+          "https://www.googleapis.com/auth/presentations",
+          "https://www.googleapis.com/auth/presentations.readonly"
+        ]
+      },
+      "slides_batch_update_presentation": {
+        "discovery_id": "slides.presentations.batchUpdate",
+        "method": "POST",
+        "path": "/v1/presentations/{presentationId}:batchUpdate",
+        "accepted_scopes": [
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.file",
+          "https://www.googleapis.com/auth/drive.readonly",
+          "https://www.googleapis.com/auth/presentations",
+          "https://www.googleapis.com/auth/spreadsheets",
+          "https://www.googleapis.com/auth/spreadsheets.readonly"
+        ]
+      }
+    }
+  }
+}

@@ -532,6 +532,11 @@ See [ORACLE_RELAY.md](ORACLE_RELAY.md) for the full design.
 |----------|---------|-------------|
 | `RUST_LOG` | `nyxid=info,tower_http=info` | Tracing filter string |
 
+### Drive and Workspace multi-origin upgrade gate
+
+`GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED` defaults to `false`. This temporary gate orders upgraded readers before the catalog writer. Deploying with the default does not activate the 13 Docs, Sheets, and Slides operations on Drive or Workspace. The hosted specs always list 22 Drive operations and 38 Workspace operations; before activation, editor calls return HTTP 503, code 12300, `workspace_destinations_not_activated`, with operator instructions.
+
+On the first startup with `true`, NyxID compares and sets each known default Drive/Workspace policy and absent destination map, then additively synchronizes 13 editor endpoints per service. An environment with Workspace already activated gains Drive editor operations on the next enabled restart. Admin-edited policies/maps are preserved. The writes are idempotent, and leaving the gate enabled afterward is safe. Turning it off does not undo activation. The gate is scheduled for removal once every environment has activated. Upgrade all backend readers and the participating node agents before enabling it; see [Google Workspace OAuth](GOOGLE_WORKSPACE_OAUTH.md) for the rollout and approval window.
 
 ## Service-history database topology
 

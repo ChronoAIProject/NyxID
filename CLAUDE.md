@@ -37,6 +37,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 8000-8005 node/proxy: 8000 `NodeNotFound`, 8001 `NodeOffline`, 8002 `NodeProxyTimeout`, 8003 `NodeRegistrationFailed`, 8004 `NodeCredentialMissing`, 8005 `WsProxyDownstream`
 - 8006-8011 pending-credential protocol: 8006 `PendingCredentialDecryptFailed`, 8007 `PendingCredentialVersionUnsupported`, 8008 `PendingCredentialCiphertextTooLarge`, 8009 `PendingCredentialPubkeyAwaiting`, 8010 `PendingCredentialNodeOffline`, 8011 `PendingCredentialQueueFull`
 - 8012 `ClientDisconnected` (HTTP 499, nginx's "Client Closed Request"): the caller hung up before the response could be written and upstream work was cancelled. Never delivered to anyone — it exists so cancelled work is not counted as a server fault in telemetry and audit. Do not map it to 5xx.
+- 8013 `NodeHttpSignatureUnsupported` (HTTP 502): target-selected HTTP requests require a node advertising HTTP signature v2
 - 9500-9599 device-code binding: 9500 `DeviceCodeNotFound`, 9501 `DeviceCodeExpired`, 9502 `DevicePollSignatureInvalid`, 9503 `DeviceUserCodeInvalid`, 9504 `DeviceCodePending`, 9505 `DeviceCodeAlreadyDelivered`, 9506 `DeviceCodeRateLimited`, 9507 `DeviceCodeLocked`, 9508 `DeviceCodeSlowDown`
 - 10000-10015 channel relay: 10000 `ChannelBotNotFound`, 10001 `ChannelBotInactive`, 10002 `ChannelBotLimitReached`, 10003 `ChannelWebhookVerificationFailed`, 10004 `ChannelRelayFailed`, 10005 `ChannelPlatformError`, 10006 `DeviceChannelReplyNotAllowed`, 10007 `ChannelPlatformEditUnsupported`, 10008 `ChannelAgentInitiateNotAllowed`, 10009 `ChannelConversationNotAddressable`, 10010 `ChannelPlatformSendUnsupported`, 10011 `ChannelConversationNotReachable`, 10012 `ChannelMediaUnsupported` (415), 10013 `ChannelMediaTooLarge` (413), 10014 `ChannelMediaFetchFailed` (502), 10015 `ChannelAttachmentNotFound` (404)
 - 11000-11099 oracle relay: 11000 `OraclePoolNotFound`, 11001 `OraclePoolSlugTaken`, 11002 `OraclePoolInactive`, 11003 `OracleWorkerTokenInvalid`, 11004 `OracleQueueFull`, 11005 `OracleQuotaExceeded`, 11006 `OracleTaskNotFound`, 11007 `OracleSessionNotFound`, 11008 `OracleSessionClosed`, 11009 `OraclePayloadTooLarge`, 11010 `OracleExtractDisabled`, 11011 `OracleWorkerNotFound`, 11012 `OracleWorkerCapabilityUnsupported`, 11013 `OracleWorkerCommandNotFound`, 11014 `OracleWorkerLabelUnavailable`, 11015 `OracleLoginSnapshotNotFound`
@@ -50,6 +51,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12000-12004 one-time login codes: 12000 `LoginCodeInvalid`, 12001 `LoginCodeExpired`, 12002 `LoginCodeCancelled`, 12003 `LoginCodeRedeemed`, 12004 `LoginCodeRateLimited`
 - 12100 `AssistantTurnActive` (HTTP 409, `turn_active`): a persisted NyxAgent conversation already has an active turn.
 - 12200 `AdminUsageQueryTimeout` (HTTP 503): bounded admin usage aggregation timed out; retry with a narrower window or filters.
+- 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): temporary Drive/Workspace editor activation gate; expected rollout state, excluded from proxy-fault telemetry
 
 ### 4. Frontend Patterns
 
@@ -127,6 +129,8 @@ Services/connections/providers were unified into 3 user-managed collections plus
 - Legacy models kept for migration: DownstreamService (now the read-only catalog), UserServiceConnection, UserProviderToken, UserProviderCredentials, NodeServiceBinding (node routing absorbed into `UserService.node_id`)
 - Lifecycle is exactly two actions, named **Disable/Enable** (reversible, sets `UserService.is_active`) and **Delete** (hard-deletes credential + endpoint, leaves an `is_active: false` tombstone). Do not introduce further synonyms; `revoked` is a credential *status*, not a button verb. `GET /keys` is the one listing that returns disabled services — consumers MUST read `is_active` rather than assume every row is usable, and MUST NOT render `status` (the credential's) as the service's state. Every credential-resolving or catalog path keeps the active-only `list_user_services_with_sources`; only `list_keys` uses the `_including_disabled` variant, with effective service-allowlist filtering on top for restricted API keys. `/keys/{id_or_slug}` resolves a disabled row by UUID but deliberately not by slug — full rationale and the two known gaps in `docs/AI_SERVICES_ARCHITECTURE.md`.
 - AI-service inventory GETs under `/api/v1` (`/keys`, `/keys/{id_or_slug}`, `/keys/{id_or_slug}/authorization`, `/user-services`, `/endpoints`, `/endpoints/{id}/authorization`, `/endpoints/{id}/openapi-endpoints`, `/api-keys/external`, `/api-keys/external/{id}/authorization`, `/mcp/config`, `/catalog`, `/catalog/{slug}`, `/catalog/{slug}/endpoints`) accept general API keys without provisioning or lazy pending-OAuth reconciliation. `/mcp/config` requires `proxy` or `proxy:*` scope and matches stateless MCP discovery, including chat acknowledgement semantics. Restricted keys use their effective service allowlist and backing endpoint/credential references; org-owned keys act as the org (`credential_source.type: "personal"`), personal keys use active Member/Admin memberships and effective role scopes. Inventory writes and NyxID `/api-keys` management stay human-only for API keys; delegated `account:read` parity is unchanged.
+
+Service accounts can read a narrow metadata response from exact `GET /api/v1/keys/{uuid}` with `user-services:read` in both the token and live SA configuration, plus a platform-admin-issued key read grant for that connection. Every read rechecks the owner's ACL and resource ownership. This grants no inventory listing, credential access, or writes. See `docs/SERVICE_ACCOUNTS.md`.
 
 Key files: `services/unified_key_service.rs`, `services/catalog_service.rs` (`list_catalog_all`), `handlers/keys.rs`, `handlers/catalog.rs`, `models/user_{endpoint,api_key,service}.rs`.
 
@@ -487,6 +491,7 @@ INVITE_CODE_REQUIRED=true           # Gate registration behind invite codes (iss
 AUTO_VERIFY_EMAIL=false             # Dev only: skip email verification on registration
 
 # Optional
+GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=false # Temporary readers-before-writer upgrade gate. First true startup CAS-installs each known-default Drive/Workspace destination map/policy and additively syncs 13 editor endpoints per service. Idempotent; safe to leave true. Remove after every environment activates.
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET
 SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_ADDRESS

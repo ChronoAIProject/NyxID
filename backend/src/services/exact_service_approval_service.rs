@@ -271,13 +271,16 @@ pub async fn create_request(
         .first()
         .ok_or_else(|| AppError::Internal("approval recipient list is empty".to_string()))?;
     let channel = notification_service::get_or_create_channel(&state.db, timeout_recipient).await?;
-    let execution_authority = resolve_execution_authority(
+    // Keep operation-first resolution off nested approval handler stacks.
+    let execution_authority = Box::pin(resolve_execution_authority(
         state,
         caller,
         &input.user_service_id,
         &service.service_slug,
         ExecutionResolutionMode::ReadOnlySnapshot,
-    )
+        &resolution,
+        &input.arguments,
+    ))
     .await?;
     let binding = ExactServiceApprovalBinding {
         request_key,
@@ -443,6 +446,7 @@ pub async fn redeem_request(
             binding,
             &claimed.service_slug,
             ExecutionResolutionMode::MaterializeForExecution,
+            &resolution,
         )
         .await
         {
@@ -522,7 +526,7 @@ pub async fn redeem_request(
                 &caller.proxy_resolution_user_id,
                 &execution.resolution,
             );
-        let executed = mcp_service::execute_tool_resolved(
+        let executed = Box::pin(mcp_service::execute_tool_resolved(
             &state.http_client,
             &state.db,
             &state.encryption_keys,
@@ -544,7 +548,7 @@ pub async fn redeem_request(
             node_route,
             has_cred_for_fallback,
             billing_context_builder,
-        )
+        ))
         .await;
 
         let completed_at = Utc::now();
@@ -833,6 +837,8 @@ async fn resolve_execution_authority(
     user_service_id: &str,
     service_slug: &str,
     mode: ExecutionResolutionMode,
+    operation: &ExactCatalogResolution<'_>,
+    arguments: &serde_json::Value,
 ) -> AppResult<ResolvedExecution> {
     let mut resolution = match mode {
         ExecutionResolutionMode::ReadOnlySnapshot => {
@@ -863,8 +869,33 @@ async fn resolve_execution_authority(
     }
     .ok_or_else(|| AppError::NotFound(format!("User service '{service_slug}' not found")))?;
 
+    let prepared =
+        mcp_service::prepare_proxy_tool_call(operation.service(), operation.endpoint(), arguments)?;
+    prepared.resolve_destination(&mut resolution.target)?;
+    let mut authorization_audit = matches!(mode, ExecutionResolutionMode::MaterializeForExecution)
+        .then(|| {
+            super::destination_routing::DestinationAudit::new(
+                &state.db,
+                super::audit_service::AuditActor {
+                    user_id: caller.actor_user_id.clone(),
+                    api_key_id: caller.api_key_id.clone(),
+                    api_key_name: None,
+                    ip_address: None,
+                    user_agent: None,
+                },
+                &resolution.target,
+            )
+        });
     let mut override_identity = None;
     if let Some(api_key_id) = caller.api_key_id.as_deref() {
+        super::destination_routing::validate_selected_override(
+            &state.db,
+            &caller.proxy_resolution_user_id,
+            api_key_id,
+            user_service_id,
+            &resolution.target,
+        )
+        .await?;
         match mode {
             ExecutionResolutionMode::ReadOnlySnapshot => {
                 if let Some(identity) = proxy_service::read_agent_credential_override_identity(
@@ -923,6 +954,9 @@ async fn resolve_execution_authority(
     );
     let digest = execution_authority::digest(&projection);
     let legacy_digest = execution_authority::legacy_digest(&projection);
+    if let Some(audit) = authorization_audit.as_mut() {
+        audit.dismiss();
+    }
     Ok(ResolvedExecution {
         resolution,
         configured_fallback_node_ids,
@@ -1032,9 +1066,18 @@ async fn evaluate_execution_authority(
     binding: &ExactServiceApprovalBinding,
     service_slug: &str,
     mode: ExecutionResolutionMode,
+    operation: &ExactCatalogResolution<'_>,
 ) -> ExecutionAuthorityEvaluation {
-    match resolve_execution_authority(state, caller, &binding.user_service_id, service_slug, mode)
-        .await
+    match Box::pin(resolve_execution_authority(
+        state,
+        caller,
+        &binding.user_service_id,
+        service_slug,
+        mode,
+        operation,
+        &binding.arguments,
+    ))
+    .await
     {
         Ok(live) => evaluate_authority(binding, live),
         Err(error) if catalog_resolution_terminal_state(&error).is_some() => {
@@ -1445,6 +1488,7 @@ async fn evaluate_live_authority(
         binding,
         &request.service_slug,
         ExecutionResolutionMode::ReadOnlySnapshot,
+        &resolution,
     )
     .await
     {
@@ -1747,6 +1791,7 @@ mod tests {
         slug: &str,
     ) -> mcp_service::McpToolService {
         mcp_service::McpToolService {
+            workspace_destinations_pending: false,
             recommended_skill_refs: None,
             skills_revision: None,
             service_id: catalog_service_id.to_string(),
@@ -2373,6 +2418,7 @@ mod tests {
     #[test]
     fn exact_view_membership_rejects_only_delegated_generic_targets() {
         let generic_service = mcp_service::McpToolService {
+            workspace_destinations_pending: false,
             recommended_skill_refs: None,
             skills_revision: None,
             service_id: "generic-service".to_string(),
@@ -2529,6 +2575,7 @@ mod tests {
     fn delegated_out_of_view_error_precedence_preserved() {
         let delegated = caller();
         let generic_service = mcp_service::McpToolService {
+            workspace_destinations_pending: false,
             recommended_skill_refs: None,
             skills_revision: None,
             service_id: "generic-service".to_string(),
@@ -3261,3 +3308,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "destination_approval_tests.rs"]
+mod destination_approval_tests;

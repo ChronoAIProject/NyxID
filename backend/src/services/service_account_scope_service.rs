@@ -10,7 +10,7 @@ use crate::models::service_account::COLLECTION_NAME;
 use crate::mw::auth::{LLM_PROXY_SCOPE, PROXY_SCOPE, WIDE_PROXY_SCOPE};
 use crate::services::curation_grant_service::{READ_SCOPE, WRITE_SCOPE};
 
-pub const DEFINITION_VERSION: &str = "service-account-suggestions-v3";
+pub const DEFINITION_VERSION: &str = "service-account-suggestions-v4";
 pub const MAX_OWNER_ACCOUNTS: i64 = 1_000;
 pub const MAX_CONFIGURED_SCOPES: usize = 10_000;
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -41,6 +41,11 @@ pub const DEFINITIONS: &[ScopeDefinition] = &[
         value: READ_SCOPE,
         label: "Read catalog skills",
         description: "Read skill recommendations and history for services permitted by a platform-admin-issued curation grant. This scope alone grants no service access.",
+    },
+    ScopeDefinition {
+        value: super::service_account_key_read_service::READ_SCOPE,
+        label: "Read connection metadata",
+        description: "Read nonsecret metadata and effective skill recommendations for exact user-service IDs in a platform-admin-issued key read grant. Does not grant listing, credentials, writes, or execution.",
     },
     ScopeDefinition {
         value: WRITE_SCOPE,

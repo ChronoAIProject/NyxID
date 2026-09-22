@@ -96,6 +96,18 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/google-drive.openapi.json"),
     ),
     (
+        "google-docs",
+        include_str!("../../specs/catalog/google-docs.openapi.json"),
+    ),
+    (
+        "google-sheets",
+        include_str!("../../specs/catalog/google-sheets.openapi.json"),
+    ),
+    (
+        "google-slides",
+        include_str!("../../specs/catalog/google-slides.openapi.json"),
+    ),
+    (
         "lark",
         include_str!("../../specs/catalog/lark.openapi.json"),
     ),
@@ -173,6 +185,9 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-google-calendar", "google-calendar"),
     ("api-google-drive", "google-drive"),
     ("api-google-gmail", "google-gmail"),
+    ("api-google-docs", "google-docs"),
+    ("api-google-sheets", "google-sheets"),
+    ("api-google-slides", "google-slides"),
     ("api-lark", "lark"),
     ("api-lark-bot", "lark-bot"),
     ("api-microsoft", "microsoft-graph"),
@@ -194,8 +209,8 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("llm-openrouter", "openrouter"),
 ];
 
-static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
-    LazyLock::new(|| {
+static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = LazyLock::new(
+    || {
         let mut specs: HashMap<_, _> = HOSTED_SPEC_SOURCES
             .iter()
             .map(|(key, source)| {
@@ -206,26 +221,48 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
                 (*key, Arc::new(parsed))
             })
             .collect();
-        // Workspace publishes the same operations as its individual products.
-        let mut workspace = (*specs["google-drive"]).clone();
+        // Drive owns the editor bundle; Workspace adds Calendar and Gmail.
+        let mut drive = (*specs["google-drive"]).clone();
+        drive["info"]["description"] =
+            "Google Drive file operations and Docs, Sheets, and Slides editing through one Google OAuth connection. Editor paths declare their Google API servers and accept the full Drive scope, subject to file permissions. During the upgrade window, editor requests return workspace_destinations_not_activated (12300) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
+                .into();
+        for key in ["google-docs", "google-sheets", "google-slides"] {
+            let servers = specs[key]["servers"].clone();
+            for (path, item) in specs[key]["paths"].as_object().expect("Product paths") {
+                let mut item = item.clone();
+                item["servers"] = servers.clone();
+                assert!(
+                    drive["paths"]
+                        .as_object_mut()
+                        .expect("Drive paths")
+                        .insert(path.clone(), item)
+                        .is_none(),
+                    "Duplicate Drive path"
+                );
+            }
+        }
+        specs.insert("google-drive", Arc::new(drive.clone()));
+        let mut workspace = drive;
         workspace["info"]["title"] = "Google Workspace".into();
         workspace["info"]["description"] =
-            "Google Drive, Calendar, and Gmail read/send operations using one Google OAuth client."
+            "Google Workspace uses one Google OAuth connection for Drive, Calendar, Gmail, Docs, Sheets, and Slides. The root server https://www.googleapis.com serves Drive, Calendar, and Gmail; Docs, Sheets, and Slides paths declare their respective https://docs.googleapis.com, https://sheets.googleapis.com, and https://slides.googleapis.com servers. Standard OpenAPI server precedence applies: operation servers override path servers, which override the root server. During the operator-controlled upgrade window, editor requests return workspace_destinations_not_activated (12300) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
                 .into();
         for key in ["google-calendar", "google-gmail"] {
-            workspace["paths"]
-                .as_object_mut()
-                .expect("Drive paths")
-                .extend(
-                    specs[key]["paths"]
-                        .as_object()
-                        .expect("Product paths")
-                        .clone(),
+            for (path, item) in specs[key]["paths"].as_object().expect("Product paths") {
+                assert!(
+                    workspace["paths"]
+                        .as_object_mut()
+                        .expect("Workspace paths")
+                        .insert(path.clone(), item.clone())
+                        .is_none(),
+                    "Duplicate Workspace path"
                 );
+            }
         }
         specs.insert("google-workspace", Arc::new(workspace));
         specs
-    });
+    },
+);
 
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
 pub fn spec_for_key(spec_key: &str) -> Option<Arc<serde_json::Value>> {
@@ -245,6 +282,11 @@ pub fn spec_for_slug(slug: &str) -> Option<Arc<serde_json::Value>> {
     spec_key_for_slug(slug).and_then(spec_for_key)
 }
 
+/// Resolve either supported identifier on the hosted spec route.
+pub fn spec_for_key_or_slug(key_or_slug: &str) -> Option<Arc<serde_json::Value>> {
+    spec_for_key(key_or_slug).or_else(|| spec_for_slug(key_or_slug))
+}
+
 /// Relative hosted path (`/api/v1/catalog-specs/{spec_key}/openapi.json`)
 /// for a catalog service slug.
 pub fn spec_path_for_slug(slug: &str) -> Option<String> {
@@ -260,7 +302,7 @@ pub fn spec_for_url_path(path: &str) -> Option<Arc<serde_json::Value>> {
     if spec_key.is_empty() || spec_key.contains('/') {
         return None;
     }
-    spec_for_key(spec_key)
+    spec_for_key_or_slug(spec_key)
 }
 
 /// Catalog service slugs that have a hosted overlay.
@@ -270,9 +312,100 @@ pub fn hydrated_slugs() -> impl Iterator<Item = &'static str> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Frozen from 28fd2c44, including the original eight api-google operations.
+    /// Additions are allowed; moving or editing any existing operation is not.
+    #[test]
+    fn existing_google_operation_contracts_are_additive() {
+        use sha2::{Digest, Sha256};
+        let frozen: serde_json::Value = serde_json::from_str(include_str!(
+            "../../specs/fixtures/google-existing-operations.json"
+        ))
+        .unwrap();
+        for (slug, operations) in frozen.as_object().unwrap() {
+            let spec = spec_for_slug(slug).unwrap();
+            for pinned in operations.as_array().unwrap() {
+                let path = pinned["path"].as_str().unwrap();
+                let method = pinned["method"].as_str().unwrap().to_ascii_lowercase();
+                let operation = &spec["paths"][path][&method];
+                assert_eq!(
+                    operation["operationId"], pinned["operation_id"],
+                    "{slug} {method} {path}"
+                );
+                let mut canonical = operation.clone();
+                canonical.sort_all_objects();
+                let digest = hex::encode(Sha256::digest(serde_json::to_vec(&canonical).unwrap()));
+                assert_eq!(
+                    digest, pinned["operation_sha256"],
+                    "changed existing contract: {slug} {method} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn google_editor_operations_have_verified_origins_scopes_and_policies() {
+        use crate::services::google_workspace::{DRIVE, GoogleProduct};
+        let evidence: serde_json::Value = serde_json::from_str(include_str!(
+            "../../specs/fixtures/google-editor-scope-acceptance.json"
+        ))
+        .unwrap();
+        for (slug, proof) in evidence.as_object().unwrap() {
+            let product = GoogleProduct::from_slug(slug).unwrap();
+            let spec = spec_for_slug(slug).unwrap();
+            assert_eq!(
+                spec["servers"],
+                serde_json::json!([{ "url": proof["origin"] }])
+            );
+            let policy = product.operation_policy().unwrap();
+            let operations = proof["operations"].as_object().unwrap();
+            assert_eq!(policy.rules.len(), operations.len());
+            let defaults = product.default_scopes();
+            let allowed = product.allowed_scopes();
+            assert!(defaults.iter().any(|scope| scope == DRIVE));
+            for (id, operation) in operations {
+                let path = operation["path"].as_str().unwrap();
+                let method = operation["method"].as_str().unwrap();
+                assert_eq!(
+                    spec["paths"][path][method.to_ascii_lowercase()]["operationId"],
+                    *id
+                );
+                let scopes = operation["accepted_scopes"].as_array().unwrap();
+                assert!(
+                    scopes.iter().any(|scope| scope == DRIVE),
+                    "{id} does not accept Drive"
+                );
+                assert!(
+                    scopes
+                        .iter()
+                        .any(|scope| defaults.iter().any(|s| scope == s))
+                );
+                assert!(
+                    scopes
+                        .iter()
+                        .any(|scope| allowed.iter().any(|s| scope == s))
+                );
+                let rule = policy
+                    .rules
+                    .iter()
+                    .find(|rule| rule.method == method && rule.path_template == path)
+                    .unwrap();
+                if path.contains("{range}") {
+                    assert_eq!(
+                        rule.path_parameter_constraints.get("range"),
+                        Some(
+                            &crate::models::downstream_service::ProxyPathConstraint::SheetsA1Range
+                        )
+                    );
+                } else {
+                    assert!(rule.path_parameter_constraints.is_empty());
+                }
+            }
+        }
+    }
     use std::collections::HashSet;
 
-    use super::*;
     use crate::services::openapi_parser;
 
     #[test]
@@ -290,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn google_workspace_is_the_union_of_drive_calendar_and_gmail() {
+    fn google_workspace_is_the_union_of_all_six_products() {
         let workspace = spec_for_slug("api-google-workspace").unwrap();
         let drive = spec_for_slug("api-google-drive").unwrap();
         let calendar = spec_for_slug("api-google-calendar").unwrap();
@@ -302,6 +435,28 @@ mod tests {
                 + calendar["paths"].as_object().unwrap().len()
                 + gmail["paths"].as_object().unwrap().len()
         );
+        assert_eq!(workspace["servers"][0]["url"], "https://www.googleapis.com");
+        assert_eq!(
+            openapi_parser::parse_openapi_spec_value(&drive)
+                .unwrap()
+                .len(),
+            22
+        );
+        assert_eq!(
+            crate::services::openapi_parser::parse_openapi_spec_value(&workspace)
+                .unwrap()
+                .len(),
+            38
+        );
+        for key in ["google-docs", "google-sheets", "google-slides"] {
+            let product = spec_for_key(key).unwrap();
+            for (path, item) in product["paths"].as_object().unwrap() {
+                let mut expected = item.clone();
+                expected["servers"] = product["servers"].clone();
+                assert_eq!(paths[path], expected);
+                assert_eq!(drive["paths"][path], expected);
+            }
+        }
         for spec in [drive, calendar, gmail] {
             for (path, item) in spec["paths"].as_object().unwrap() {
                 assert_eq!(&paths[path], item);
@@ -477,6 +632,10 @@ mod tests {
     #[test]
     fn spec_for_url_path_resolves_hosted_paths_only() {
         assert!(spec_for_url_path("/api/v1/catalog-specs/firecrawl/openapi.json").is_some());
+        assert_eq!(
+            spec_for_url_path("/api/v1/catalog-specs/api-firecrawl/openapi.json"),
+            spec_for_url_path("/api/v1/catalog-specs/firecrawl/openapi.json")
+        );
         assert!(spec_for_url_path("/api/v1/catalog-specs/elevenlabs/openapi.json").is_some());
         assert!(spec_for_url_path("/api/v1/catalog-specs/twilio/openapi.json").is_some());
         assert!(spec_for_url_path("/api/v1/catalog-specs/lark-bot/openapi.json").is_some());

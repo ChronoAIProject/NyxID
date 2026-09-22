@@ -274,11 +274,23 @@ pub async fn update_endpoint(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path(endpoint_id): Path<String>,
-    Json(body): Json<UpdateEndpointRequest>,
+    Json(mut body): Json<UpdateEndpointRequest>,
 ) -> AppResult<Json<EndpointResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_endpoint_write_owner(&state, &actor, &endpoint_id).await?;
     user_service_service::ensure_user_managed_endpoint(&state.db, &owner_id, &endpoint_id).await?;
+
+    if let Some(raw_url) = body.url.take() {
+        body.url = Some(
+            user_endpoint_service::normalize_endpoint_url_for_update(
+                &state.db,
+                &owner_id,
+                &endpoint_id,
+                &raw_url,
+            )
+            .await?,
+        );
+    }
 
     if let Some(url) = body.url.as_deref()
         && !endpoint_is_only_node_routed(&state, &owner_id, &endpoint_id).await?
@@ -548,6 +560,9 @@ pub async fn list_openapi_endpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_endpoint::{COLLECTION_NAME as EP_COLLECTION, UserEndpoint};
     use crate::models::user_service::{
@@ -667,6 +682,60 @@ mod tests {
 
         assert_eq!(updated.id, ep_id);
         assert_eq!(updated.label, "New Label");
+    }
+
+    #[tokio::test]
+    async fn update_supabase_endpoint_normalizes_project_url() {
+        let Some(db) = connect_test_database("h_user_ep_update_supabase").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let ep_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "api-supabase".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(EP_COLLECTION)
+            .insert_one(test_user_endpoint(
+                &ep_id,
+                &user_id,
+                "Supabase",
+                "https://old.supabase.co/rest/v1",
+                None,
+                Some(&catalog_id),
+            ))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let Json(updated) = update_endpoint(
+            State(state),
+            test_auth_user(&user_id),
+            tele(),
+            Path(ep_id),
+            Json(UpdateEndpointRequest {
+                url: Some("https://new.supabase.co".to_string()),
+                label: None,
+                openapi_spec_url: None,
+                recommended_skills: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            updated.url.as_deref(),
+            Some("https://new.supabase.co/rest/v1")
+        );
     }
 
     #[tokio::test]
@@ -791,6 +860,7 @@ mod tests {
     #[test]
     fn parsed_endpoint_to_response_maps_all_fields() {
         let parsed = openapi_parser::ParsedEndpoint {
+            origin: None,
             source_operation_id: Some("list_users".into()),
             name: "list_users".into(),
             description: Some("List all users".into()),
@@ -816,6 +886,7 @@ mod tests {
     #[test]
     fn parsed_endpoint_to_response_with_body() {
         let parsed = openapi_parser::ParsedEndpoint {
+            origin: None,
             source_operation_id: Some("create_user".into()),
             name: "create_user".into(),
             description: None,

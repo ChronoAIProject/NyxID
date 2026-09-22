@@ -3893,17 +3893,35 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             continue;
         }
 
-        // Find the DownstreamService linked to this provider
-        let service = db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find_one(doc! { "provider_config_id": &token.provider_config_id, "is_active": true })
-            .await?;
-
         // Load ProviderConfig for name
         let provider = db
             .collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .find_one(doc! { "_id": &token.provider_config_id })
             .await?;
+
+        // Legacy Google tokens have no product identity. Only the original
+        // api-google service is a valid migration target, regardless of the
+        // insertion order of products sharing its provider. If it is absent,
+        // leave the token alone until that legacy target becomes available.
+        let mut service_filter = doc! {
+            "provider_config_id": &token.provider_config_id, "is_active": true,
+        };
+        let legacy_google = provider.as_ref().is_some_and(|p| p.slug == "google");
+        if legacy_google {
+            service_filter.insert("slug", "api-google");
+        }
+        let service = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(service_filter)
+            .await?;
+        if (legacy_google && service.is_none())
+            || service.as_ref().is_some_and(|service| {
+                crate::services::google_workspace::GoogleProduct::from_slug(&service.slug).is_some()
+            })
+        {
+            // Also reject product rows when the provider is missing or renamed.
+            continue;
+        }
 
         let provider_name = provider
             .as_ref()
@@ -4650,6 +4668,111 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn google_token_migration_never_infers_a_product_from_provider_id() {
+        let db = crate::test_utils::connect_test_database("google_token_product_migration")
+            .await
+            .expect("MongoDB required");
+        let enc = crate::test_utils::test_encryption_keys();
+        crate::services::provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        let provider = db
+            .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .find_one(doc! {"slug":"google"})
+            .await
+            .unwrap()
+            .unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        // Insert the new products first: the old find_one would migrate into Docs.
+        for product in ["docs", "sheets", "slides"] {
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = uuid::Uuid::new_v4().to_string();
+            service.slug = format!("api-google-{product}");
+            service.base_url = format!("https://{product}.googleapis.com");
+            service.provider_config_id = Some(provider.id.clone());
+            services.insert_one(service).await.unwrap();
+        }
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let now = bson::DateTime::now();
+        db.collection::<Document>(USER_PROVIDER_TOKENS)
+            .insert_one(doc! {
+                "_id": &token_id, "user_id": &owner_id, "provider_config_id": &provider.id,
+                "token_type": "oauth2", "status": "active", "created_at": now, "updated_at": now,
+            })
+            .await
+            .unwrap();
+        migrate_provider_tokens(&db).await.unwrap();
+        for collection in [USER_ENDPOINTS, USER_API_KEYS, USER_SERVICES] {
+            assert_eq!(
+                db.collection::<Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "no legacy target: {collection}"
+            );
+        }
+        let mut legacy = crate::models::downstream_service::test_helpers::dummy_service();
+        legacy.id = uuid::Uuid::new_v4().to_string();
+        legacy.slug = "api-google".into();
+        legacy.base_url = "https://www.googleapis.com".into();
+        legacy.provider_config_id = Some(provider.id.clone());
+        services.insert_one(&legacy).await.unwrap();
+        migrate_provider_tokens(&db).await.unwrap();
+        let migrated = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"source_id":&token_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated.slug, "api-google");
+        assert_eq!(
+            migrated.catalog_service_id.as_deref(),
+            Some(legacy.id.as_str())
+        );
+        let endpoint = db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .find_one(doc! {"_id":&migrated.endpoint_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(endpoint.url, "https://www.googleapis.com");
+        // Repeat migration must not rewrite, retarget or clone any existing row.
+        let mut snapshots = Vec::new();
+        for collection in [
+            DOWNSTREAM_SERVICES,
+            USER_ENDPOINTS,
+            USER_API_KEYS,
+            USER_SERVICES,
+        ] {
+            let rows: Vec<Document> = db
+                .collection::<Document>(collection)
+                .find(doc! {})
+                .sort(doc! {"_id":1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            snapshots.push((collection, rows));
+        }
+        migrate_provider_tokens(&db).await.unwrap();
+        for (collection, original) in snapshots {
+            let rows: Vec<Document> = db
+                .collection::<Document>(collection)
+                .find(doc! {})
+                .sort(doc! {"_id":1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(rows, original, "migration altered {collection}");
+        }
+    }
+
+    #[tokio::test]
     async fn channel_media_migration_preserves_provider_metadata_and_purges_legacy_content() {
         let Some(db) = crate::test_utils::connect_test_database("channel_media_migration").await
         else {
@@ -4724,6 +4847,7 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,

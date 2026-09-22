@@ -660,6 +660,63 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // Supabase Data API (per-project URL + API key)
+    if !slug_exists!("supabase") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "supabase".to_string(),
+            name: "Supabase".to_string(),
+            description: Some(
+                "Connect a Supabase project's PostgREST Data API as a personal database for AI agents."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Provide the project URL (`https://<project-ref>.supabase.co`) or full Data API \
+                 URL ending in `/rest/v1`, plus a Supabase API key. Prefer a new \
+                 `sb_secret_...` key for server-side \
+                 agent access, but note that secret keys use the `service_role` Postgres role \
+                 and bypass Row Level Security."
+                    .to_string(),
+            ),
+            api_key_url: Some(
+                "https://supabase.com/dashboard/project/_/settings/api-keys".to_string(),
+            ),
+            icon_url: None,
+            documentation_url: Some("https://supabase.com/docs/guides/api".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: true,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "supabase", "Seeded default provider: Supabase");
+        seeded_count += 1;
+    }
+
     // Telnyx (API Key)
     if !slug_exists!("telnyx") {
         let provider = ProviderConfig {
@@ -2929,7 +2986,9 @@ fn seed_required_permissions(slug: &str) -> Option<&'static [&'static str]> {
             super::google_workspace::GMAIL_SEND,
         ]),
         "api-google-calendar" => Some(&[super::google_workspace::CALENDAR]),
-        "api-google-drive" => Some(&[super::google_workspace::DRIVE]),
+        "api-google-drive" | "api-google-docs" | "api-google-sheets" | "api-google-slides" => {
+            Some(&[super::google_workspace::DRIVE])
+        }
         "api-google-gmail" => Some(&[
             super::google_workspace::GMAIL_READONLY,
             super::google_workspace::GMAIL_SEND,
@@ -3019,7 +3078,10 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
         "api-google-workspace"
         | "api-google-calendar"
         | "api-google-drive"
-        | "api-google-gmail" => Some((
+        | "api-google-gmail"
+        | "api-google-docs"
+        | "api-google-sheets"
+        | "api-google-slides" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
                 supports_proxy_write: true,
@@ -3087,7 +3149,7 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             true,
         )),
-        "api-twilio" | "api-aurinko" => Some((
+        "api-twilio" | "api-aurinko" | "api-supabase" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
                 supports_proxy_write: true,
@@ -3483,6 +3545,37 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
     },
     DefaultServiceSeed {
+        provider_slug: "supabase",
+        service_slug: "api-supabase",
+        service_name: "Supabase Data API",
+        // Placeholder: every connection must provide its own project URL.
+        base_url: "https://project-ref.supabase.co/rest/v1",
+        injection_method: "header",
+        injection_key: "apikey",
+        service_auth_method: Some("header"),
+        service_auth_key_name: Some("apikey"),
+        description: Some(
+            "Supabase PostgREST Data API connector for using a project database from AI agents. \
+             Supply the project URL (`https://<project-ref>.supabase.co`) or full `/rest/v1` \
+             Data API URL, and NyxID injects the encrypted Supabase key through the `apikey` header.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://supabase.com"),
+        auth_notes: Some(
+            "The credential is sent as the Supabase `apikey` header. Do not enter a \
+             `postgresql://` connection string. New `sb_secret_...` and `sb_publishable_...` \
+             keys are not bearer JWTs and must not be configured as Authorization Bearer tokens.",
+        ),
+        known_limitations: Some(
+            "This connector targets the PostgREST Data API only; it does not proxy PostgreSQL \
+             connection strings, Storage, Edge Functions, or Realtime. Secret keys and legacy \
+             `service_role` keys bypass Row Level Security. Supabase schemas are project-specific, \
+             so NyxID exposes the generic proxy tool unless the user supplies a separate OpenAPI spec.",
+        ),
+    },
+    DefaultServiceSeed {
         provider_slug: "twitter",
         service_slug: "api-twitter",
         service_name: "Twitter / X API",
@@ -3604,6 +3697,75 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "Only published message list, read, and send operations are available. No deletion, trash, mailbox changes, or draft management. Replies require threadId and matching Subject, In-Reply-To, and References MIME headers. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-docs",
+        service_name: "Google Docs",
+        base_url: "https://docs.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Create, read, and edit Google Docs, including text, formatting, tables, and lists.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://docs.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive scope, which authorizes every published operation. Enable the Google Docs API in the OAuth client's Cloud project.",
+        ),
+        known_limitations: Some(
+            "Only the published operations on docs.googleapis.com are available. Connect this product separately; existing Google, Drive, Calendar, Gmail, and Workspace connections are unchanged. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-sheets",
+        service_name: "Google Sheets",
+        base_url: "https://sheets.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Create and edit spreadsheets; read, write, append, and clear cell values using A1 ranges.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://sheets.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive scope, which authorizes every published operation. Enable the Google Sheets API in the OAuth client's Cloud project.",
+        ),
+        known_limitations: Some(
+            "Only the published operations on sheets.googleapis.com are available. Connect this product separately; existing Google, Drive, Calendar, Gmail, and Workspace connections are unchanged. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-slides",
+        service_name: "Google Slides",
+        base_url: "https://slides.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Create, read, and edit Google Slides presentations, pages, shapes, text, and formatting.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://slides.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive scope, which authorizes every published operation. Enable the Google Slides API in the OAuth client's Cloud project.",
+        ),
+        known_limitations: Some(
+            "Only the published operations on slides.googleapis.com are available. Connect this product separately; existing Google, Drive, Calendar, Gmail, and Workspace connections are unchanged. Google may revoke sibling connections using the same account and client together.",
         ),
     },
     DefaultServiceSeed {
@@ -4670,13 +4832,14 @@ async fn reconcile_google_workspace_seed(
             .await?;
     }
 
-    let mut old_rules = GoogleProduct::Drive.operation_policy()?.rules;
+    let mut old_rules = GoogleProduct::Drive.legacy_operation_policy()?.rules;
     old_rules.extend(GoogleProduct::Calendar.operation_policy()?.rules);
     let old_policy =
         super::proxy_authorization::normalize_policy(ProxyOperationPolicy { rules: old_rules })?;
     let old_policy = bson::to_bson(&old_policy)
         .map_err(|e| AppError::Internal(format!("Failed to serialize Workspace policy: {e}")))?;
-    let new_policy = bson::to_bson(&GoogleProduct::Workspace.operation_policy()?)
+    let legacy_workspace = GoogleProduct::Workspace.legacy_operation_policy()?;
+    let new_policy = bson::to_bson(&legacy_workspace)
         .map_err(|e| AppError::Internal(format!("Failed to serialize Workspace policy: {e}")))?;
     services.update_one(
         doc! { "_id": &service.id, "proxy_operation_policy": old_policy },
@@ -4736,13 +4899,137 @@ async fn reconcile_google_mail_send_seed(
     Ok(())
 }
 
+/// Compare-and-set only the exact known Workspace and Drive policies and absent maps.
+/// An operator's policy or destination map is never overwritten by startup.
+/// The temporary GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED gate orders upgraded
+/// readers before this writer. Activation installs map/policy here and adds the
+/// 13 endpoints during catalog sync. It is idempotent and safe to leave enabled;
+/// remove the gate after every environment has activated.
+async fn reconcile_workspace_destinations(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    use super::google_workspace::GoogleProduct;
+    let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    for (slug, product, description, limitations) in [
+        (
+            "api-google-workspace",
+            GoogleProduct::Workspace,
+            "Google Drive files and folders, calendars, events, availability, Gmail read/send access, and Docs, Sheets, and Slides editing.",
+            "Workspace bundles Drive, Calendar, Gmail read/send, Docs, Sheets, and Slides through the published HTTP operations. Gmail deletion, trash, mailbox changes, draft management, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
+        ),
+        (
+            "api-google-drive",
+            GoogleProduct::Drive,
+            "Read, upload, create, edit, export, and delete Google Drive files and folders; create, read, and edit Docs, Sheets, and Slides.",
+            "Drive includes Docs, Sheets, and Slides through the published HTTP operations. Full Drive scope covers existing files subject to file permissions; drive.file is limited to app-authorized files and drive.readonly does not grant write access. Calendar, Gmail, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
+        ),
+    ] {
+        let Some(service) = services
+            .find_one(doc! {"slug": slug, "created_by": "system"})
+            .await?
+        else {
+            continue;
+        };
+        if !super::destination_routing::effective_catalog_auth(db, &service)
+            .await
+            .is_ok_and(|auth| auth == "bearer")
+        {
+            tracing::warn!(slug, service_id = %service.id, "Google editor destinations were not activated: effective bearer provider requirement is unavailable");
+            continue;
+        }
+        let new_policy = product.operation_policy()?;
+        let old_policy = product.legacy_operation_policy()?;
+        let targets = super::destination_routing::normalize_targets(
+            slug,
+            "bearer",
+            "http",
+            super::destination_routing::workspace_targets(),
+            Some(&new_policy),
+        )?;
+        let activation = services.update_one(
+        doc! { "slug": slug, "created_by": "system", "auth_method": "none", "service_type": "http",
+            "proxy_operation_policy": bson::to_bson(&old_policy).map_err(|error| AppError::Internal(error.to_string()))?,
+            "$or": [{"destination_targets": {"$exists": false}}, {"destination_targets": {} }],
+        },
+        doc! { "$set": {
+            "destination_targets": bson::to_bson(&targets).map_err(|error| AppError::Internal(error.to_string()))?,
+            "proxy_operation_policy": bson::to_bson(&new_policy).map_err(|error| AppError::Internal(error.to_string()))?,
+            "updated_at": bson::DateTime::from_chrono(now),
+        } },
+    ).await?;
+        if activation.matched_count == 0 {
+            let live = services.find_one(doc! {"_id": &service.id}).await?;
+            if live
+                .as_ref()
+                .is_none_or(|row| row.destination_targets.is_empty())
+            {
+                let failed_precondition = match live.as_ref() {
+                    None => "service_exists",
+                    Some(row) if row.slug != slug => "slug",
+                    Some(row) if row.created_by != "system" => "created_by",
+                    Some(row) if row.auth_method != "none" => "auth_method",
+                    Some(row) if row.service_type != "http" => "service_type",
+                    Some(row) if row.proxy_operation_policy.as_ref() != Some(&old_policy) => {
+                        "proxy_operation_policy"
+                    }
+                    _ => "concurrent_update",
+                };
+                tracing::warn!(slug, service_id = %service.id, failed_precondition,
+                "Google editor destinations were not activated: compare-and-set precondition failed");
+            }
+        }
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == slug)
+            .expect("Google product seed");
+        // Metadata follows persisted activation and uses its own known-default CAS
+        // so an administrator's descriptions are preserved independently.
+        for (field, old, new) in [
+            ("description", seed.description, description),
+            ("known_limitations", seed.known_limitations, limitations),
+        ] {
+            let metadata = services.update_one(doc! {"_id": &service.id, "destination_targets": bson::to_bson(&targets).map_err(|error| AppError::Internal(error.to_string()))?, field: old},doc! {"$set":{field:new,"updated_at":bson::DateTime::from_chrono(now)}}).await?;
+            if metadata.matched_count == 0 {
+                let live = services.find_one(doc! {"_id": &service.id}).await?;
+                let failed_precondition = match live.as_ref() {
+                    None => "service_exists",
+                    Some(row) if row.destination_targets != targets => "destination_targets",
+                    Some(row) if field == "description" && row.description.as_deref() != old => {
+                        field
+                    }
+                    Some(row)
+                        if field == "known_limitations"
+                            && row.known_limitations.as_deref() != old =>
+                    {
+                        field
+                    }
+                    _ => "concurrent_update",
+                };
+                tracing::debug!(slug, service_id = %service.id, metadata_field = field, failed_precondition,
+                "Google editor metadata compare-and-set skipped");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Seed downstream services for each default provider (idempotent).
 ///
 /// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
 /// seeded provider that does not yet have a corresponding downstream service.
+#[cfg(test)]
 pub async fn seed_default_services(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
+) -> AppResult<()> {
+    seed_default_services_with_destinations(db, encryption_keys, true).await
+}
+
+pub async fn seed_default_services_with_destinations(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    enable_workspace_destinations: bool,
 ) -> AppResult<()> {
     let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
     let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
@@ -4923,6 +5210,14 @@ pub async fn seed_default_services(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
+            destination_targets: if enable_workspace_destinations
+                && super::google_workspace::GoogleProduct::from_slug(seed.service_slug)
+                    .is_some_and(|product| product.has_editor_destinations())
+            {
+                super::destination_routing::workspace_targets()
+            } else {
+                Default::default()
+            },
             owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
@@ -4982,7 +5277,13 @@ pub async fn seed_default_services(
             proxy_operation_policy: super::google_workspace::GoogleProduct::from_slug(
                 seed.service_slug,
             )
-            .map(|product| product.operation_policy())
+            .map(|product| {
+                let mut policy = product.operation_policy()?;
+                if !enable_workspace_destinations && product.has_editor_destinations() {
+                    policy.rules.retain(|rule| rule.target_id.is_none());
+                }
+                Ok::<_, AppError>(policy)
+            })
             .transpose()?,
             created_at: now,
             updated_at: now,
@@ -5035,6 +5336,9 @@ pub async fn seed_default_services(
 
     reconcile_firecrawl_seed_metadata(&service_col, now).await?;
     reconcile_google_workspace_seed(db, now).await?;
+    if enable_workspace_destinations {
+        reconcile_workspace_destinations(db, now).await?;
+    }
     reconcile_google_mail_send_seed(db, now).await?;
 
     // Replace only the incorrect metadata shipped by the initial Notion seed.
@@ -9329,6 +9633,7 @@ mod tests {
             "mistral",
             "cohere",
             "deepseek",
+            "supabase",
             "elevenlabs",
             "twilio",
             "twitter",
@@ -9947,6 +10252,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_destination_activation_logs_custom_policy_without_mutating_it() {
+        use tracing::instrument::WithSubscriber;
+
+        let db = crate::test_utils::connect_test_database("workspace_activation_warning")
+            .await
+            .unwrap();
+        let encryption = test_encryption_keys();
+        super::seed_default_providers(&db, &encryption)
+            .await
+            .unwrap();
+        super::seed_default_services_with_destinations(&db, &encryption, false)
+            .await
+            .unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        for slug in ["api-google-workspace", "api-google-drive"] {
+            let mut service = services
+                .find_one(doc! {"slug": slug})
+                .await
+                .unwrap()
+                .unwrap();
+            service.proxy_operation_policy = Some(
+                super::super::google_workspace::GoogleProduct::from_slug(slug)
+                    .unwrap()
+                    .legacy_operation_policy()
+                    .unwrap(),
+            );
+            service.proxy_operation_policy.as_mut().unwrap().rules.pop();
+            services.update_one(doc! {"_id": &service.id}, doc! {"$set": {
+            "proxy_operation_policy": bson::to_bson(&service.proxy_operation_policy).unwrap(),
+        }, "$unset": {"destination_targets": ""}}).await.unwrap();
+            let before = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id": &service.id})
+                .await
+                .unwrap()
+                .unwrap();
+
+            let capture = tempfile::NamedTempFile::new().unwrap();
+            let writer = capture.reopen().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish();
+            super::reconcile_workspace_destinations(&db, chrono::Utc::now())
+                .with_subscriber(subscriber)
+                .await
+                .unwrap();
+
+            let after = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id": &service.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after, before);
+            let logs = std::fs::read_to_string(capture.path()).unwrap();
+            let warnings: Vec<_> = logs
+                .lines()
+                .filter(|line| {
+                    line.contains("WARN")
+                        && line.contains("Google editor destinations were not activated")
+                        && line.contains(&service.id)
+                })
+                .collect();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("failed_precondition=\"proxy_operation_policy\""));
+            assert!(warnings[0].contains(&service.id));
+            assert!(!warnings[0].contains("path_template"));
+            for field in ["description", "known_limitations"] {
+                assert!(logs.lines().any(|line| {
+                    line.contains("DEBUG")
+                        && line.contains("Google editor metadata compare-and-set skipped")
+                        && line.contains(field)
+                        && line.contains("failed_precondition=\"destination_targets\"")
+                }));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn google_workspace_gmail_upgrade_preserves_customizations() {
         use crate::models::downstream_service::ProxyOperationPolicy;
         use crate::services::google_workspace::{CALENDAR, DRIVE, GoogleProduct};
@@ -9956,7 +10343,9 @@ mod tests {
             .expect("local MongoDB");
         let enc = test_encryption_keys();
         super::seed_default_providers(&db, &enc).await.unwrap();
-        super::seed_default_services(&db, &enc).await.unwrap();
+        super::seed_default_services_with_destinations(&db, &enc, false)
+            .await
+            .unwrap();
         let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
         let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
         let service = services
@@ -9964,10 +10353,24 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let mut old_policy = GoogleProduct::Workspace.operation_policy().unwrap();
-        old_policy
-            .rules
-            .retain(|rule| !rule.path_template.starts_with("/gmail/"));
+        // Pin this historical migration to Drive + Calendar -> + Gmail.
+        // Workspace's current union also contains the later editor operations.
+        let old_policy = ProxyOperationPolicy {
+            rules: [GoogleProduct::Drive, GoogleProduct::Calendar]
+                .into_iter()
+                .flat_map(|product| product.legacy_operation_policy().unwrap().rules)
+                .collect(),
+        };
+        let legacy_workspace_policy = ProxyOperationPolicy {
+            rules: [
+                GoogleProduct::Drive,
+                GoogleProduct::Calendar,
+                GoogleProduct::Gmail,
+            ]
+            .into_iter()
+            .flat_map(|product| product.legacy_operation_policy().unwrap().rules)
+            .collect(),
+        };
         let old_scopes = vec!["openid", "email", "profile", DRIVE, CALENDAR];
         for customized in [false, true] {
             let policy = if customized {
@@ -10007,7 +10410,9 @@ mod tests {
                 .await
                 .unwrap();
             for _ in 0..2 {
-                super::seed_default_services(&db, &enc).await.unwrap();
+                super::seed_default_services_with_destinations(&db, &enc, false)
+                    .await
+                    .unwrap();
                 let updated = services
                     .find_one(doc! { "_id": &service.id })
                     .await
@@ -10021,7 +10426,7 @@ mod tests {
                 let expected_policy = if customized {
                     policy.clone()
                 } else {
-                    GoogleProduct::Workspace.operation_policy().unwrap()
+                    legacy_workspace_policy.clone()
                 };
                 assert_eq!(updated.proxy_operation_policy, Some(expected_policy));
                 if customized {
@@ -10114,6 +10519,7 @@ mod tests {
     #[tokio::test]
     async fn google_products_share_existing_client_and_survive_reseeding() {
         use crate::services::google_workspace::GoogleProduct;
+        use futures::TryStreamExt;
         let db = connect_test_database("google_product_seed")
             .await
             .expect("local MongoDB");
@@ -10155,10 +10561,27 @@ mod tests {
             .await
             .unwrap();
 
+        let mut previous_rows: Option<Vec<bson::Document>> = None;
         for _ in 0..2 {
             crate::db::ensure_indexes(&db).await.unwrap();
             super::seed_default_providers(&db, &enc).await.unwrap();
             super::seed_default_services(&db, &enc).await.unwrap();
+            let rows: Vec<bson::Document> = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find(doc! { "provider_config_id": &provider.id })
+                .sort(doc! { "_id": 1 })
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            if let Some(previous) = &previous_rows {
+                assert_eq!(
+                    &rows, previous,
+                    "reseeding must preserve every Google row and UUID"
+                );
+            }
+            previous_rows = Some(rows);
             let entries = crate::services::catalog_service::list_catalog(&db, &enc, "reader")
                 .await
                 .unwrap();
@@ -10167,6 +10590,9 @@ mod tests {
                 "api-google-calendar",
                 "api-google-drive",
                 "api-google-gmail",
+                "api-google-docs",
+                "api-google-sheets",
+                "api-google-slides",
             ] {
                 let product = GoogleProduct::from_slug(slug).unwrap();
                 let entry = entries.iter().find(|entry| entry.slug == slug).unwrap();
@@ -10230,7 +10656,7 @@ mod tests {
                 .count_documents(doc! { "provider_config_id": &provider.id })
                 .await
                 .unwrap(),
-            5
+            8
         );
     }
 
@@ -10842,6 +11268,7 @@ mod tests {
     #[test]
     fn direct_auth_seeds_have_service_auth_method() {
         let direct_auth_slugs = [
+            "api-supabase",
             "api-elevenlabs",
             "api-twilio",
             "api-github-pat",
@@ -10935,5 +11362,32 @@ mod tests {
         for field in fields {
             assert!(!raw.contains_key(field), "{field} must be absent");
         }
+    }
+
+    #[test]
+    fn supabase_seed_uses_project_url_and_direct_apikey_header() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-supabase")
+            .expect("api-supabase seed should exist");
+
+        assert_eq!(seed.provider_slug, "supabase");
+        assert_eq!(seed.base_url, "https://project-ref.supabase.co/rest/v1");
+        assert_eq!(seed.service_auth_method, Some("header"));
+        assert_eq!(seed.service_auth_key_name, Some("apikey"));
+        assert_eq!(seed.service_category, "connection");
+        assert!(seed.requires_user_credential);
+        assert!(
+            crate::services::catalog_spec_registry::spec_path_for_slug(seed.service_slug).is_none()
+        );
+
+        let (caps, streaming) = seed_capability_override("api-supabase")
+            .expect("api-supabase should have a capability override");
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(caps.supports_direct_downstream_auth);
+        assert!(!caps.supports_websocket);
+        assert!(!caps.supports_streaming);
+        assert!(!streaming);
     }
 }

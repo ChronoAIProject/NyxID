@@ -623,6 +623,7 @@ async fn aurinko_reply_preflight_retry_and_uncertain_post_barrier() {
 async fn aurinko_registration_rotation_repair_delete_and_owner_fences() {
     let f = Fixture::new().await;
     let update = |token| bots::UpdateBotParams {
+        x_events: None,
         bot_token: Some(token),
         label: None,
         verification_token: None,
@@ -954,6 +955,7 @@ async fn aurinko_owner_deletion_removes_bot_secrets_and_cannot_recreate_ingress_
 async fn aurinko_rotated_signing_secret_requires_a_fresh_successful_challenge() {
     let f = Fixture::new().await;
     let patch = |secret| bots::UpdateBotParams {
+        x_events: None,
         bot_token: None,
         label: None,
         verification_token: None,

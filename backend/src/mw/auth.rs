@@ -308,6 +308,7 @@ pub fn scope_allows_llm_proxy(scopes: &str) -> bool {
 fn ensure_service_account_purpose_route(
     sa: &ServiceAccount,
     scope: &str,
+    method: &Method,
     path: &str,
     websocket: bool,
 ) -> Result<(), AppError> {
@@ -318,6 +319,16 @@ fn ensure_service_account_purpose_route(
     }
     let grant = live_grant(sa)?;
     if !websocket {
+        if *method == Method::GET
+            && crate::services::service_account_key_read_service::is_key_metadata_path(path)
+        {
+            require_scope(
+                sa,
+                scope,
+                crate::services::service_account_key_read_service::READ_SCOPE,
+            )?;
+            return Ok(());
+        }
         if path_matches_prefix(path, "/api/v1/catalog-curation") {
             return Ok(());
         }
@@ -770,6 +781,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         ensure_service_account_purpose_route(
                             &sa,
                             &claims.scope,
+                            &parts.method,
                             request_path,
                             is_websocket_upgrade(&parts.headers),
                         )?;
@@ -3716,11 +3728,13 @@ mod curation_purpose_regressions {
             "/api/v1/triggers",
         ] {
             assert!(
-                ensure_service_account_purpose_route(&sa, "proxy", path, false).is_ok(),
+                ensure_service_account_purpose_route(&sa, "proxy", &Method::GET, path, false)
+                    .is_ok(),
                 "{path}"
             );
             assert!(
-                ensure_service_account_purpose_route(&sa, "proxy", path, true).is_ok(),
+                ensure_service_account_purpose_route(&sa, "proxy", &Method::GET, path, true)
+                    .is_ok(),
                 "{path}"
             );
         }

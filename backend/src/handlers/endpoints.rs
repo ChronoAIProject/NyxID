@@ -19,6 +19,7 @@ use super::services_helpers::{fetch_service, require_admin_or_creator, require_h
 
 #[derive(Debug, Deserialize)]
 pub struct CreateEndpointRequest {
+    pub target_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub method: String,
@@ -35,6 +36,11 @@ pub struct CreateEndpointRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateEndpointRequest {
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub target_id: Option<Option<String>>,
     pub name: Option<String>,
     #[serde(
         default,
@@ -76,6 +82,8 @@ pub struct UpdateEndpointRequest {
 
 #[derive(Debug, Serialize)]
 pub struct EndpointResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
     pub id: String,
     pub service_id: String,
     pub name: String,
@@ -168,6 +176,7 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
     let request_body_required = e.effective_request_body_required();
 
     EndpointResponse {
+        target_id: e.target_id,
         id: e.id,
         service_id: e.service_id,
         name: e.name,
@@ -232,6 +241,7 @@ pub async fn create_endpoint(
     }
 
     let input = EndpointInput {
+        target_id: body.target_id,
         request_body_required: body
             .request_body_required
             .unwrap_or(body.request_body_schema.is_some() || body.request_content_type.is_some()),
@@ -290,6 +300,7 @@ pub async fn update_endpoint(
     }
 
     let updates = EndpointUpdate {
+        target_id: body.target_id,
         name: body.name,
         description: body.description,
         method: body.method,
@@ -373,6 +384,7 @@ pub async fn discover_endpoints(
     let inputs: Vec<EndpointInput> = parsed
         .into_iter()
         .map(|p| EndpointInput {
+            target_id: None,
             name: p.name,
             description: p.description,
             method: p.method,
@@ -473,6 +485,7 @@ mod tests {
     #[test]
     fn endpoint_to_response_uses_effective_request_body_required() {
         let endpoint = ServiceEndpoint {
+            target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
             name: "list_users".to_string(),
@@ -516,6 +529,7 @@ mod tests {
             &db,
             &other_service_id,
             EndpointInput {
+                target_id: None,
                 name: "other_endpoint".to_string(),
                 description: None,
                 method: "GET".to_string(),
@@ -539,6 +553,7 @@ mod tests {
             test_auth_user(&owner_id),
             Path((route_service.id.clone(), endpoint.id.clone())),
             Json(UpdateEndpointRequest {
+                target_id: None,
                 name: None,
                 description: None,
                 method: None,

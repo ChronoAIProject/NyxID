@@ -15,16 +15,18 @@ use crate::{
         catalog_skill_revision::{
             COLLECTION_NAME as HISTORY, CatalogSkillRevision, SkillReference, SkillState,
         },
-        downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
+        downstream_service::{
+            COLLECTION_NAME as SERVICES, DownstreamService, legacy_http_service_type_filter,
+        },
         service_account::ServiceAccount,
     },
     mw::auth::{
         AuthMethod, AuthUser, reject_api_key_tokens, reject_delegated_tokens, reject_relay_tokens,
     },
     services::{
-        audit_service,
+        api_docs_service, audit_service,
         catalog_skill_service::{self as skills, SkillActor, SkillUpdate},
-        curation_grant_service as grants, service_account_service,
+        catalog_spec_registry, curation_grant_service as grants, service_account_service,
     },
 };
 
@@ -32,6 +34,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/services", get(list_services))
         .route("/services/{id}/skills", get(get_skills).put(update_skills))
+        .route("/services/{id}/openapi.json", get(get_openapi))
         .route("/services/{id}/skills/history", get(history))
         .route("/services/{id}/skills/restore", post(restore))
         .layer(DefaultBodyLimit::max(70_000))
@@ -85,6 +88,7 @@ impl SkillsResponse {
 #[derive(Serialize)]
 struct ServiceSummary {
     id: String,
+    slug: String,
     name: String,
     skills_revision: i64,
 }
@@ -112,11 +116,63 @@ async fn list_services(
             .into_iter()
             .map(|s| ServiceSummary {
                 id: s.id,
+                slug: s.slug,
                 name: s.name,
                 skills_revision: s.skills_revision,
             })
             .collect(),
     }))
+}
+
+/// Return the operation contract for one grant-listed catalog service.
+///
+/// This is deliberately a Curation route rather than a general proxy/docs
+/// route. It accepts only a catalog service ID present in the live grant and
+/// performs a bounded, read-only OpenAPI fetch. It never resolves a
+/// user-managed service, injects a credential, or exposes `/mcp/config`'s
+/// caller-wide operation catalog.
+async fn get_openapi(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    authorize(&state, &auth, grants::READ_SCOPE, Some(&id)).await?;
+
+    let mut service_filter = doc! {"_id": &id, "is_active": true};
+    service_filter.extend(legacy_http_service_type_filter());
+    let service = state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .find_one(service_filter)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".into()))?;
+
+    // Seeded catalog services may use an embedded overlay. Serving that value
+    // directly avoids a loop back through this deployment when the stored URL
+    // points at `/api/v1/catalog-specs/...` and keeps the contract available in
+    // test/air-gapped environments. An explicit downstream URL wins over
+    // the Curation route's slug fallback. Return the source contract for
+    // authoring; this does not grant execution or rewrite proxy routing.
+    let configured_url = service
+        .openapi_spec_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty());
+    let spec = if let Some(url) = configured_url {
+        let spec = api_docs_service::fetch_spec_json(url).await?;
+        if spec.get("openapi").is_none() && spec.get("swagger").is_none() {
+            return Err(AppError::BadRequest(
+                "Downstream spec is not an OpenAPI or Swagger document".into(),
+            ));
+        }
+        spec.as_ref().clone()
+    } else {
+        catalog_spec_registry::spec_for_slug(&service.slug)
+            .ok_or_else(|| AppError::NotFound("Service has no OpenAPI spec configured".into()))?
+            .as_ref()
+            .clone()
+    };
+
+    Ok(Json(spec))
 }
 
 async fn get_skills(

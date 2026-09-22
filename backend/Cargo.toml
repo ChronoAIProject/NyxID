@@ -95,6 +95,9 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+# TLS echo proxy for multi-origin routing and redirect acceptance tests.
+rcgen = "0.14"
+tokio-rustls = "0.26"
 # Virtual time for WebSocket lifecycle deadline regressions.
 tokio = { workspace = true, features = ["test-util"] }
 nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }

@@ -331,6 +331,7 @@ pub async fn service_to_response_with_viewer(
         ws_frame_injections: s.ws_frame_injections,
         anonymous_endpoints: s.anonymous_endpoints,
         proxy_operation_policy: s.proxy_operation_policy,
+        destination_targets: s.destination_targets,
         developer_app_ids: s.developer_app_ids,
         owner_user_id: s
             .owner_user_id
