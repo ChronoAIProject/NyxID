@@ -168,7 +168,7 @@
       "operation_id": "drive_create_file",
       "method": "POST",
       "path": "/drive/v3/files",
-      "operation_sha256": "9ac6dc85030521a4f117134aea8f52235e4070daea0bd5a525b248af559e6bf1"
+      "operation_sha256": "37595d000f31d5f12fe55ba737baebef60498ca829c9feab4c41405feb3e28c3"
     },
     {
       "operation_id": "drive_delete_file",
@@ -180,19 +180,19 @@
       "operation_id": "drive_get_file",
       "method": "GET",
       "path": "/drive/v3/files/{fileId}",
-      "operation_sha256": "844bb478f20c997f3b0dcf5adaf99dad3b1606d65fa5a300d72354c60f56f25c"
+      "operation_sha256": "9f1215e5ea80041b6496873fe7a337d501f286643b855b680e1c65a5d8ad142e"
     },
     {
       "operation_id": "drive_update_file",
       "method": "PATCH",
       "path": "/drive/v3/files/{fileId}",
-      "operation_sha256": "9818be2641f9dc910c0fd3c7a847fecc9ac2600571e115b1241fe11d16457694"
+      "operation_sha256": "ac616a5a21b32f52cb8ba3342f29832384e61947ab74a2a960cd1399979725b9"
     },
     {
       "operation_id": "drive_copy_file",
       "method": "POST",
       "path": "/drive/v3/files/{fileId}/copy",
-      "operation_sha256": "ff3373d6b5186b0d5e501f67a668330d9f9418a48a0b2387b3b474fab909f095"
+      "operation_sha256": "06369386b56c27b8ca9a04c19cfd3b3e2a7e76253ffe3a26bcfff4facce93d22"
     },
     {
       "operation_id": "drive_export_file",
@@ -204,13 +204,13 @@
       "operation_id": "drive_upload_file",
       "method": "POST",
       "path": "/upload/drive/v3/files",
-      "operation_sha256": "179c0569ea1b0e55c67c58a7bc613755d678db878d5f8fc2dace731c028628a9"
+      "operation_sha256": "a377132a63d69878c726e819b432c54dcdc3df319926d8537cc1d7b41b46041a"
     },
     {
       "operation_id": "drive_upload_file_content",
       "method": "PATCH",
       "path": "/upload/drive/v3/files/{fileId}",
-      "operation_sha256": "79605e23d48148aa44448ccf5d1fbcb5e86607222d1c7110cc5d76f929f16544"
+      "operation_sha256": "180c2e6308458995ed8df7f6879625603de1f69bc1dfa70db61c15b60ef8d9a7"
     }
   ],
   "api-google-calendar": [
@@ -402,7 +402,7 @@
       "operation_id": "drive_create_file",
       "method": "POST",
       "path": "/drive/v3/files",
-      "operation_sha256": "9ac6dc85030521a4f117134aea8f52235e4070daea0bd5a525b248af559e6bf1"
+      "operation_sha256": "37595d000f31d5f12fe55ba737baebef60498ca829c9feab4c41405feb3e28c3"
     },
     {
       "operation_id": "drive_delete_file",
@@ -414,19 +414,19 @@
       "operation_id": "drive_get_file",
       "method": "GET",
       "path": "/drive/v3/files/{fileId}",
-      "operation_sha256": "844bb478f20c997f3b0dcf5adaf99dad3b1606d65fa5a300d72354c60f56f25c"
+      "operation_sha256": "9f1215e5ea80041b6496873fe7a337d501f286643b855b680e1c65a5d8ad142e"
     },
     {
       "operation_id": "drive_update_file",
       "method": "PATCH",
       "path": "/drive/v3/files/{fileId}",
-      "operation_sha256": "9818be2641f9dc910c0fd3c7a847fecc9ac2600571e115b1241fe11d16457694"
+      "operation_sha256": "ac616a5a21b32f52cb8ba3342f29832384e61947ab74a2a960cd1399979725b9"
     },
     {
       "operation_id": "drive_copy_file",
       "method": "POST",
       "path": "/drive/v3/files/{fileId}/copy",
-      "operation_sha256": "ff3373d6b5186b0d5e501f67a668330d9f9418a48a0b2387b3b474fab909f095"
+      "operation_sha256": "06369386b56c27b8ca9a04c19cfd3b3e2a7e76253ffe3a26bcfff4facce93d22"
     },
     {
       "operation_id": "drive_export_file",
@@ -456,13 +456,13 @@
       "operation_id": "drive_upload_file",
       "method": "POST",
       "path": "/upload/drive/v3/files",
-      "operation_sha256": "179c0569ea1b0e55c67c58a7bc613755d678db878d5f8fc2dace731c028628a9"
+      "operation_sha256": "a377132a63d69878c726e819b432c54dcdc3df319926d8537cc1d7b41b46041a"
     },
     {
       "operation_id": "drive_upload_file_content",
       "method": "PATCH",
       "path": "/upload/drive/v3/files/{fileId}",
-      "operation_sha256": "79605e23d48148aa44448ccf5d1fbcb5e86607222d1c7110cc5d76f929f16544"
+      "operation_sha256": "180c2e6308458995ed8df7f6879625603de1f69bc1dfa70db61c15b60ef8d9a7"
     }
   ]
 }

@@ -3090,6 +3090,22 @@ pub fn build_proxy_args(
         && let Some(params) = params_value.as_array()
     {
         for param in params {
+            if let Some(projected) = openapi_parser::mcp_enum_projection(param)? {
+                if param["schema"]["enum"].as_array() != Some(projected) {
+                    return Err(AppError::BadRequest(
+                        "Malformed persisted x-nyxid-mcp-enum projection".into(),
+                    ));
+                }
+                let name = param["name"].as_str().expect("validated projection name");
+                if let Some(value) = args.get(name)
+                    && !projected.contains(value)
+                {
+                    return Err(AppError::BadRequest(format!(
+                        "Argument `{name}` is not supported by this MCP tool. Use a value from this tool's declared enum; use the REST/CLI proxy for other HTTP variants."
+                    )));
+                }
+            }
+
             let name = param.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let is_required = param
                 .get("required")
@@ -9158,6 +9174,52 @@ mod tests {
             schema["required"],
             serde_json::json!(["Body", "request_body"])
         );
+    }
+
+    #[test]
+    fn build_proxy_args_preserves_parameter_schema_opaque_metadata_in_parsed_and_persisted_rows() {
+        let parameter = serde_json::json!({
+            "name": "q", "in": "query", "schema": {
+                "type": "string",
+                "x-vendor-data": {"x-nyxid-mcp-enum": ["opaque"], "x-nyxid-mcp-media": null}
+            }
+        });
+        let spec = serde_json::json!({
+            "openapi": "3.1.0", "paths": {"/search": {"get": {
+                "operationId": "search", "parameters": [parameter.clone()]
+            }}}
+        });
+        let parsed = openapi_parser::parse_openapi_spec_value(&spec)
+            .unwrap()
+            .remove(0);
+        assert_eq!(parsed.parameters.as_ref().unwrap()[0], parameter);
+        for parameters in [
+            parsed.parameters,
+            Some(serde_json::json!([parameter.clone()])),
+        ] {
+            let mut endpoint = McpToolEndpoint {
+                method: "GET".into(),
+                path: "/search".into(),
+                parameters,
+                ..Default::default()
+            };
+            let (_, path, query, _, body) =
+                build_proxy_args(&endpoint, &serde_json::json!({"q": "term"})).unwrap();
+            assert_eq!(path, "search");
+            assert_eq!(query.as_deref(), Some("q=term"));
+            assert!(body.is_none());
+            assert!(build_proxy_args(&endpoint, &serde_json::json!({})).is_ok());
+            endpoint.parameters.as_mut().unwrap()[0]["schema"]["x-nyxid-mcp-enum"] =
+                serde_json::json!(["misplaced"]);
+            assert!(matches!(
+                build_proxy_args(&endpoint, &serde_json::json!({})),
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        let mut invalid = spec;
+        invalid["paths"]["/search"]["get"]["parameters"][0]["schema"]["x-nyxid-mcp-enum"] =
+            serde_json::json!(["misplaced"]);
+        assert!(openapi_parser::parse_openapi_spec_value(&invalid).is_err());
     }
 
     #[test]

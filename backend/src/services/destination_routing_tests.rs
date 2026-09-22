@@ -95,11 +95,21 @@ impl Echo {
                                 .map(|value| value.trim().to_string())
                         })
                         .unwrap();
-                    let value = json!({"host": host, "request": headers.lines().next().unwrap(), "headers": headers, "body": String::from_utf8(body).unwrap()});
+                    let value = json!({"host": host, "request": headers.lines().next().unwrap(), "headers": headers, "body": String::from_utf8_lossy(&body), "body_base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &body)});
                     let redirect = value["request"].as_str().unwrap().contains("/redirect:");
                     calls.lock().unwrap().push(value.clone());
-                    let body = value.to_string();
-                    let status = if redirect {
+                    let disabled = value["request"]
+                        .as_str()
+                        .unwrap()
+                        .contains("service-disabled");
+                    let body = if disabled {
+                        json!({"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"reason":"SERVICE_DISABLED","metadata":{"service":"docs.googleapis.com","consumer":"projects/test-project"}}]}}).to_string()
+                    } else {
+                        value.to_string()
+                    };
+                    let status = if disabled {
+                        "403 Forbidden"
+                    } else if redirect {
                         "302 Found\r\nLocation: https://sheets.googleapis.com/redirected"
                     } else {
                         "200 OK"
@@ -118,15 +128,101 @@ impl Echo {
     }
 }
 
-pub(crate) async fn seed(db: &mongodb::Database, enabled: bool) {
+pub(crate) const GOOGLE_CHANGED_OPERATIONS: &[&str] = &[
+    "drive_get_file",
+    "drive_create_file",
+    "drive_update_file",
+    "drive_copy_file",
+    "drive_upload_file",
+    "drive_upload_file_content",
+];
+
+pub(crate) async fn seed(db: &mongodb::Database) {
     let keys = test_encryption_keys();
     provider_service::seed_default_providers(db, &keys)
         .await
         .unwrap();
-    provider_service::seed_default_services_with_destinations(db, &keys, enabled)
+    provider_service::seed_default_services(db, &keys)
         .await
         .unwrap();
-    catalog_spec_sync::sync_seeded_service_endpoints_with_destinations(db, enabled)
+    catalog_spec_sync::sync_seeded_service_endpoints(db)
+        .await
+        .unwrap();
+}
+
+pub(crate) async fn seed_legacy(db: &mongodb::Database) {
+    let keys = test_encryption_keys();
+    provider_service::seed_default_providers(db, &keys)
+        .await
+        .unwrap();
+    provider_service::seed_default_services(db, &keys)
+        .await
+        .unwrap();
+    for slug in ["api-google-drive", "api-google-workspace"] {
+        let product = super::super::google_workspace::GoogleProduct::from_slug(slug).unwrap();
+        let (description, limitations) = if slug == "api-google-drive" {
+            (
+                "Read, upload, create, edit, export, and delete Google Drive files and folders.",
+                "API access is limited to the published Drive operations. Native Docs/Sheets document editing requires their separate APIs. Google may revoke sibling connections using the same account and client together.",
+            )
+        } else {
+            (
+                "Google Drive files and folders, calendars, events, availability, and Gmail read/send access.",
+                "Workspace bundles Drive, Calendar, and Gmail read/send access. Gmail deletion, trash, mailbox changes, and draft management are not supported. Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
+            )
+        };
+
+        db.collection::<bson::Document>(downstream_service::COLLECTION_NAME)
+            .update_one(doc! {"slug": slug}, doc! {"$set": {
+                "proxy_operation_policy": bson::to_bson(&product.legacy_operation_policy().unwrap()).unwrap(),
+                "destination_targets": {}, "description":description, "known_limitations":limitations,
+            }}).await.unwrap();
+    }
+    catalog_spec_sync::sync_seeded_service_endpoints(db)
+        .await
+        .unwrap();
+    let old: Value = serde_json::from_str(include_str!(
+        "../../specs/fixtures/google-drive-before-auto-activation.json"
+    ))
+    .unwrap();
+    for slug in ["api-google-drive", "api-google-workspace"] {
+        let service = db
+            .collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
+            .find_one(doc! {"slug": slug})
+            .await
+            .unwrap()
+            .unwrap();
+        restore_historical_drive_endpoints(db, &service.id, &old).await;
+    }
+}
+
+pub(crate) async fn restore_historical_drive_endpoints(
+    db: &mongodb::Database,
+    service_id: &str,
+    old: &Value,
+) {
+    let inputs = crate::services::openapi_parser::parse_openapi_spec_value(old)
+        .unwrap()
+        .into_iter()
+        .map(
+            |endpoint| crate::services::service_endpoint_service::EndpointInput {
+                name: endpoint.name,
+                description: endpoint.description,
+                method: endpoint.method,
+                path: endpoint.path,
+                target_id: None,
+                parameters: endpoint.parameters,
+                request_body_schema: endpoint.request_body_schema,
+                request_content_type: endpoint.request_content_type,
+                request_body_required: endpoint.request_body_required,
+                response_description: None,
+                response: endpoint.response,
+                risk: endpoint.risk,
+                supports_idempotency_key: endpoint.supports_idempotency_key,
+            },
+        )
+        .collect();
+    crate::services::service_endpoint_service::upsert_endpoints_additive(db, service_id, inputs)
         .await
         .unwrap();
 }
@@ -185,9 +281,9 @@ pub(crate) async fn connect(
 }
 
 #[tokio::test]
-async fn drive_and_workspace_activation_preserves_every_existing_row_contract_and_generation() {
+async fn drive_and_workspace_activation_changes_only_six_contracts_and_preserves_other_rows() {
     let db = connect_test_database("workspace_activation").await.unwrap();
-    seed(&db, false).await;
+    seed_legacy(&db).await;
     let services = db.collection::<DownstreamService>(downstream_service::COLLECTION_NAME);
     let legacy_drive = services
         .find_one(doc! {"slug": "api-google-drive"})
@@ -205,9 +301,16 @@ async fn drive_and_workspace_activation_preserves_every_existing_row_contract_an
                 .await
                 .unwrap();
             db.collection::<service_endpoint::ServiceEndpoint>(service_endpoint::COLLECTION_NAME)
-                .delete_many(doc! {"service_id": &legacy_drive.id, "target_id": {"$exists": true}})
+                .delete_many(
+                    doc! {"service_id": &legacy_drive.id, "target_id": {"$type": "string"}},
+                )
                 .await
                 .unwrap();
+            let historical: Value = serde_json::from_str(include_str!(
+                "../../specs/fixtures/google-drive-before-auto-activation.json"
+            ))
+            .unwrap();
+            restore_historical_drive_endpoints(&db, &legacy_drive.id, &historical).await;
             let workspace = services
                 .find_one(doc! {"slug": "api-google-workspace"})
                 .await
@@ -226,7 +329,7 @@ async fn drive_and_workspace_activation_preserves_every_existing_row_contract_an
             .await
             .unwrap();
         assert_eq!(before.len(), old_count);
-        seed(&db, true).await;
+        seed(&db).await;
         let after = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
             .await
             .unwrap();
@@ -251,6 +354,21 @@ async fn drive_and_workspace_activation_preserves_every_existing_row_contract_an
         assert!(!workspace_destinations_pending(&active));
         for old in before {
             let new = after.iter().find(|row| row.id == old.id).unwrap();
+            if GOOGLE_CHANGED_OPERATIONS.contains(&old.name.as_str()) {
+                assert_eq!(
+                    new.operation_generation,
+                    old.operation_generation + 1,
+                    "{}",
+                    old.name
+                );
+                assert_ne!(
+                    durable_operation_grant_service::endpoint_contract_digest(new).unwrap(),
+                    durable_operation_grant_service::endpoint_contract_digest(&old).unwrap(),
+                    "{}",
+                    old.name
+                );
+                continue;
+            }
             assert_eq!(
                 new.operation_generation, old.operation_generation,
                 "{}",
@@ -269,7 +387,7 @@ async fn drive_and_workspace_activation_preserves_every_existing_row_contract_an
                 old.name
             );
         }
-        seed(&db, false).await;
+        seed(&db).await;
         assert_eq!(
             crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
                 .await
@@ -286,7 +404,7 @@ mod old_writer;
 #[tokio::test]
 async fn workspace_old_binary_upsert_preserves_top_level_target_while_replacing_parameters() {
     let db = connect_test_database("workspace_old_writer").await.unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     let row = db
         .collection::<service_endpoint::ServiceEndpoint>(service_endpoint::COLLECTION_NAME)
         .find_one(doc! {"name": "docs_batch_update_document", "target_id": "docs"})
@@ -449,7 +567,7 @@ async fn drive_and_workspace_route_all_editors_over_rest_typed_and_generic_mcp()
     let db = connect_test_database("drive_workspace_editors")
         .await
         .unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
     for slug in ["api-google-drive", "api-google-workspace"] {
         connect(&db, &owner, slug).await;
@@ -560,7 +678,7 @@ async fn drive_and_workspace_route_all_editors_over_rest_typed_and_generic_mcp()
 #[tokio::test]
 async fn workspace_rest_typed_generic_mcp_and_product_service_reach_real_host_without_redirects() {
     let db = connect_test_database("workspace_echo").await.unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
     connect(&db, &owner, "api-google-workspace").await;
     connect(&db, &owner, "api-google-docs").await;
@@ -625,7 +743,7 @@ async fn workspace_rest_typed_generic_mcp_and_product_service_reach_real_host_wi
 #[tokio::test]
 async fn drive_and_workspace_inactive_errors_are_actionable_on_rest_and_mcp() {
     let db = connect_test_database("workspace_inactive").await.unwrap();
-    seed(&db, false).await;
+    seed_legacy(&db).await;
     for slug in ["api-google-drive", "api-google-workspace"] {
         let owner = uuid::Uuid::new_v4().to_string();
         connect(&db, &owner, slug).await;
@@ -642,6 +760,16 @@ async fn drive_and_workspace_inactive_errors_are_actionable_on_rest_and_mcp() {
         assert!(matches!(error, AppError::WorkspaceDestinationsNotActivated));
 
         assert_eq!(error.error_code(), 12300);
+        assert!(
+            error
+                .to_string()
+                .contains("Startup reconciliation did not complete")
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains("GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED")
+        );
         assert_eq!(
             axum::response::IntoResponse::into_response(error).status(),
             503
@@ -953,7 +1081,7 @@ async fn workspace_admin_policy_is_not_overwritten_and_override_recipient_is_che
     let db = connect_test_database("workspace_policy_override")
         .await
         .unwrap();
-    seed(&db, false).await;
+    seed_legacy(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
     let service = connect(&db, &owner, "api-google-workspace").await;
     let catalog_id = service.catalog_service_id.as_ref().unwrap();
@@ -972,7 +1100,7 @@ async fn workspace_admin_policy_is_not_overwritten_and_override_recipient_is_che
         )
         .await
         .unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     let preserved = db
         .collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
         .find_one(doc! {"_id":catalog_id})
@@ -982,7 +1110,7 @@ async fn workspace_admin_policy_is_not_overwritten_and_override_recipient_is_che
     assert!(preserved.destination_targets.is_empty());
     assert_eq!(preserved.proxy_operation_policy, Some(edited));
     db.collection::<DownstreamService>(downstream_service::COLLECTION_NAME).update_one(doc! {"_id":catalog_id},doc! {"$set":{"proxy_operation_policy":bson::to_bson(&catalog.proxy_operation_policy).unwrap()}}).await.unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     let mut key = db
         .collection::<user_api_key::UserApiKey>(user_api_key::COLLECTION_NAME)
         .find_one(doc! {"_id":service.api_key_id.as_ref().unwrap()})
@@ -1099,7 +1227,7 @@ async fn workspace_resolved_target_cannot_enter_a_specialized_transport_after_se
     let db = connect_test_database("workspace_specialized_transport")
         .await
         .unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
     let service = connect(&db, &owner, "api-google-workspace").await;
     // An admin-selected generic HTTP operation must retain its recipient even
@@ -1204,7 +1332,7 @@ async fn workspace_served_external_routing_omission_preserves_instance_catalog_p
     let db = connect_test_database("workspace_instance_ref_precedence")
         .await
         .unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
     let service = connect(&db, &owner, "api-google-workspace").await;
     let spec_url = "https://nyxid.test/api/v1/catalog-specs/google-workspace/openapi.json";
@@ -1343,7 +1471,7 @@ async fn workspace_external_response_omission_preserves_template_tools_and_cache
     let db = connect_test_database("workspace_external_response")
         .await
         .unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
     let connection = connect(&db, &owner, "api-google-workspace").await;
     let catalog_id = connection.catalog_service_id.as_deref().unwrap();
@@ -1440,7 +1568,7 @@ async fn workspace_platform_keys_are_rejected_before_target_selection_and_catalo
     let db = connect_test_database("workspace_platform_recipient")
         .await
         .unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
     let connection = connect(&db, &owner, "api-google-workspace").await;
     let state = test_app_state(db.clone());
@@ -1554,3 +1682,6 @@ fn user_owned_bearer_target_does_not_become_platform_by_catalog_category() {
     assert_eq!(target.base_url, "https://docs.googleapis.com");
     validate_outbound_destination(&target, "POST", "/v1/documents/doc:batchUpdate", &[]).unwrap();
 }
+
+#[path = "google_auto_activation_tests.rs"]
+mod auto_activation;

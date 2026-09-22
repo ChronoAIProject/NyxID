@@ -139,9 +139,16 @@ impl GoogleProduct {
 
     /// The original single-origin policy is the activation migration's CAS pin.
     pub fn legacy_operation_policy(self) -> AppResult<ProxyOperationPolicy> {
-        let mut policy = self.operation_policy()?;
-        policy.rules.retain(|rule| rule.target_id.is_none());
-        Ok(policy)
+        let source = match self {
+            Self::Drive => include_str!("../../specs/fixtures/google-drive-legacy-policy.json"),
+            Self::Workspace => {
+                include_str!("../../specs/fixtures/google-workspace-legacy-policy.json")
+            }
+            _ => return self.operation_policy(),
+        };
+        serde_json::from_str(source).map_err(|error| {
+            AppError::Internal(format!("Invalid historical Google policy: {error}"))
+        })
     }
 
     /// The operation catalog also defines the proxy boundary, including for
@@ -194,6 +201,15 @@ impl GoogleProduct {
 mod tests {
     use super::*;
     use crate::services::proxy_authorization::{CanonicalPath, authorize_proxy_operation_fields};
+
+    #[test]
+    fn legacy_google_policy_pins_preserve_production_source_order() {
+        for product in [GoogleProduct::Drive, GoogleProduct::Workspace] {
+            let mut main_policy = product.operation_policy().unwrap();
+            main_policy.rules.retain(|rule| rule.target_id.is_none());
+            assert_eq!(product.legacy_operation_policy().unwrap(), main_policy);
+        }
+    }
 
     #[test]
     fn google_product_scopes_exclude_other_apis() {

@@ -3267,7 +3267,7 @@ mod tests {
         let db = connect_test_database("workspace_admin_targets")
             .await
             .unwrap();
-        crate::services::destination_routing::tests::seed(&db, false).await;
+        crate::services::destination_routing::tests::seed_legacy(&db).await;
         let owner = seed_user(&db, true).await;
         let state = test_app_state(db.clone());
         let service = db

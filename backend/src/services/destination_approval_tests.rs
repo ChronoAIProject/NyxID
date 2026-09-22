@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::destination_routing::tests::{Echo, connect, seed};
+use crate::services::destination_routing::tests::{Echo, connect, seed, seed_legacy};
 use crate::test_utils::*;
 
 async fn setup_approval(
@@ -23,10 +23,20 @@ async fn setup_approval(
         allowed_node_ids: vec![],
     };
     let endpoint = state.db.collection::<crate::models::service_endpoint::ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME).find_one(doc! {"service_id":user_service.catalog_service_id.as_ref().unwrap(),"name":operation_name}).await.unwrap().unwrap();
-    let args = if operation_name == "docs_batch_update_document" {
-        serde_json::json!({"documentId":"approval-doc","requests":[]})
-    } else {
-        serde_json::json!({})
+    let args = match operation_name {
+        "docs_batch_update_document" => {
+            serde_json::json!({"documentId":"approval-doc","requests":[]})
+        }
+        "drive_get_file" => serde_json::json!({"fileId":"approval-file"}),
+        "drive_create_file" => serde_json::json!({"name":"approval-file"}),
+        "drive_copy_file" | "drive_update_file" => {
+            serde_json::json!({"fileId":"approval-file","name":"approved"})
+        }
+        "drive_upload_file" => serde_json::json!({"uploadType":"media","body":"AP+A"}),
+        "drive_upload_file_content" => {
+            serde_json::json!({"fileId":"approval-file","uploadType":"media","body":"AP+A"})
+        }
+        _ => serde_json::json!({}),
     };
     let resolution = resolve_exact_catalog(state, &caller, &user_service.id, &endpoint.id, &args)
         .await
@@ -137,7 +147,7 @@ async fn workspace_pending_approval_preserves_catalog_and_execution_drift_fences
     let db = connect_test_database("workspace_pending_approval")
         .await
         .unwrap();
-    seed(&db, false).await;
+    seed_legacy(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
     let service = connect(&db, &owner, "api-google-workspace").await;
     let state = test_app_state(db.clone());
@@ -155,13 +165,9 @@ async fn workspace_pending_approval_preserves_catalog_and_execution_drift_fences
     );
     approve(&state, &pending).await;
     // The policy writer can run before the additive endpoint sync finishes.
-    crate::services::provider_service::seed_default_services_with_destinations(
-        &db,
-        &state.encryption_keys,
-        true,
-    )
-    .await
-    .unwrap();
+    crate::services::provider_service::seed_default_services(&db, &state.encryption_keys)
+        .await
+        .unwrap();
     let observed = observe_request(&state, &caller, &pending.request_id)
         .await
         .unwrap();
@@ -169,7 +175,7 @@ async fn workspace_pending_approval_preserves_catalog_and_execution_drift_fences
         observed.failure_code.as_deref(),
         Some("execution_authority_drift")
     );
-    crate::services::catalog_spec_sync::sync_seeded_service_endpoints_with_destinations(&db, true)
+    crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
         .await
         .unwrap();
     let observed = observe_request(&state, &caller, &pending.request_id)
@@ -205,7 +211,7 @@ async fn workspace_old_shape_drive_approval_and_new_docs_approval_redeem() {
     let db = connect_test_database("workspace_approval_echo")
         .await
         .unwrap();
-    seed(&db, true).await;
+    seed(&db).await;
     for slug in ["api-google-workspace", "api-google-drive"] {
         let owner = uuid::Uuid::new_v4().to_string();
         let service = connect(&db, &owner, slug).await;
@@ -237,5 +243,108 @@ async fn workspace_old_shape_drive_approval_and_new_docs_approval_redeem() {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0]["host"], "www.googleapis.com");
         assert_eq!(calls[1]["host"], "docs.googleapis.com");
+    }
+}
+
+#[tokio::test]
+async fn google_corrected_contracts_drift_pending_exact_approvals_then_reapprove_normally() {
+    use crate::services::destination_routing::tests::{
+        GOOGLE_CHANGED_OPERATIONS, restore_historical_drive_endpoints,
+    };
+    let db = connect_test_database("google_corrected_approvals")
+        .await
+        .unwrap();
+    seed(&db).await;
+    let echo = Echo::start().await;
+    let mut state = test_app_state(db.clone());
+    state.http_client = echo.client.clone();
+    let old: serde_json::Value = serde_json::from_str(include_str!(
+        "../../specs/fixtures/google-drive-before-auto-activation.json"
+    ))
+    .unwrap();
+    for slug in ["api-google-drive", "api-google-workspace"] {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let service = connect(&db, &owner, slug).await;
+        restore_historical_drive_endpoints(
+            &db,
+            service.catalog_service_id.as_deref().unwrap(),
+            &old,
+        )
+        .await;
+        let mut pending = Vec::new();
+        for operation in GOOGLE_CHANGED_OPERATIONS {
+            let (caller, request) = setup_approval(&state, &owner, &service, operation).await;
+            approve(&state, &request).await;
+            pending.push((caller, request));
+        }
+        crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
+            .await
+            .unwrap();
+        for (caller, request) in pending {
+            let observed = observe_request(&state, &caller, &request.request_id)
+                .await
+                .unwrap();
+            assert_eq!(observed.failure_code.as_deref(), Some("catalog_drift"));
+            let result = redeem(&state, &caller, &request).await;
+            assert_eq!(result.state, ExactServiceApprovalState::Drifted);
+        }
+        let before = echo.calls.lock().unwrap().len();
+        for operation in GOOGLE_CHANGED_OPERATIONS {
+            let (caller, request) = setup_approval(&state, &owner, &service, operation).await;
+            if operation.starts_with("drive_upload_file") {
+                let args = if *operation == "drive_upload_file" {
+                    serde_json::json!({"uploadType":"multipart","body":"AP+A"})
+                } else {
+                    serde_json::json!({"fileId":"approval-file","uploadType":"multipart","body":"AP+A"})
+                };
+                let resolution = resolve_exact_catalog(
+                    &state,
+                    &caller,
+                    &service.id,
+                    &request.endpoint_id,
+                    &args,
+                )
+                .await
+                .unwrap();
+                let count = db
+                    .collection::<ApprovalRequest>(REQUESTS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap();
+                let calls = echo.calls.lock().unwrap().len();
+                let invalid = ExactServiceApprovalCreate {
+                    user_service_id: service.id.clone(),
+                    endpoint_id: request.endpoint_id.clone(),
+                    catalog_digest: resolution.catalog_digest,
+                    exact_view_digest: Some(resolution.exact_view_digest),
+                    endpoint_contract_digest: resolution.endpoint_contract_digest,
+                    operation_digest: resolution.operation_digest,
+                    operation_id: request.endpoint_id.clone(),
+                    operation_generation: Some(resolution.operation_generation),
+                    idempotency_key: uuid::Uuid::new_v4().to_string(),
+                    arguments: args,
+                };
+                assert!(matches!(
+                    create_request(&state, &caller, invalid).await,
+                    Err(AppError::BadRequest(_))
+                ));
+                assert_eq!(
+                    db.collection::<ApprovalRequest>(REQUESTS)
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    count
+                );
+                assert_eq!(echo.calls.lock().unwrap().len(), calls);
+            }
+            approve(&state, &request).await;
+            let result = redeem(&state, &caller, &request).await;
+            assert_eq!(
+                result.state,
+                ExactServiceApprovalState::Redeemed,
+                "{operation}: {result:?}"
+            );
+        }
+        assert_eq!(echo.calls.lock().unwrap().len(), before + 6);
     }
 }

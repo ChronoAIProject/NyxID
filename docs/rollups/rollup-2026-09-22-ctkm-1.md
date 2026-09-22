@@ -28,7 +28,7 @@ remain available.
 
 ## Migration and deployment
 
-The existing `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED` flag activates both Drive
+Historical rollout note (the flag was subsequently retired): `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED` activated both Drive
 and Workspace. Startup updates only the known seeded policy with an absent or
 empty destination map, preserves administrator changes, and adds 13 endpoints
 per service. Existing endpoint IDs, contracts, and generations are preserved.

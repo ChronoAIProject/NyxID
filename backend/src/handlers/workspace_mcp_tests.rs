@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::destination_routing::tests::{Echo, connect, seed};
+use crate::services::destination_routing::tests::{Echo, connect, seed, seed_legacy};
 use crate::test_utils::*;
 
 #[tokio::test]
@@ -8,7 +8,7 @@ async fn workspace_mcp_protocol_typed_and_universal_calls_resolve_the_same_googl
     let db = connect_test_database("workspace_mcp_protocol")
         .await
         .unwrap();
-    seed(&db, false).await;
+    seed_legacy(&db).await;
     let owner = uuid::Uuid::new_v4().to_string();
     connect(&db, &owner, "api-google-workspace").await;
     connect(&db, &owner, "api-google-docs").await;
@@ -19,7 +19,7 @@ async fn workspace_mcp_protocol_typed_and_universal_calls_resolve_the_same_googl
     let auth = McpAuthContext::user(owner, AuthMethod::AccessToken);
     crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(),async {
         for active in [false,true] {
-            if active { seed(&db,true).await; }
+            if active { seed(&db).await; }
             for slug in ["api-google-workspace","api-google-drive","api-google-docs"] {
                 for universal in [false,true] {
                     let tool = format!("{slug}__docs_batch_update_document");
