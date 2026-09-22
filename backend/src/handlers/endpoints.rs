@@ -102,13 +102,13 @@ fn validate_endpoint_name(name: &str) -> AppResult<()> {
         if i == 0 {
             c.is_ascii_lowercase()
         } else {
-            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
+            c.is_ascii_alphanumeric() || c == '_'
         }
     });
 
     if !valid {
         return Err(AppError::ValidationError(
-            "name must match ^[a-z][a-z0-9_]*$ (valid MCP tool name)".to_string(),
+            "name must match ^[a-z][a-zA-Z0-9_]*$ (case-sensitive MCP tool name)".to_string(),
         ));
     }
 
@@ -389,6 +389,32 @@ mod tests {
     use super::{endpoint_to_response, validate_request_content_type, validate_response_contract};
     use crate::errors::AppError;
     use crate::models::service_endpoint::ServiceEndpoint;
+
+    #[test]
+    fn manual_endpoint_names_preserve_protocol_case() {
+        for name in [
+            "replyToEvent",
+            "updateMessage",
+            "sendTyping",
+            "readEventContext",
+            "legacy_name_1",
+        ] {
+            super::validate_endpoint_name(name).expect("valid case-sensitive protocol name");
+        }
+        for name in [
+            "",
+            "1tool",
+            "Tool",
+            "tool/name",
+            "tool name",
+            "tool\nname",
+            "töol",
+        ] {
+            assert!(super::validate_endpoint_name(name).is_err());
+        }
+        assert!(super::validate_endpoint_name(&"a".repeat(100)).is_ok());
+        assert!(super::validate_endpoint_name(&"a".repeat(101)).is_err());
+    }
 
     #[test]
     fn validate_request_content_type_accepts_valid_values() {

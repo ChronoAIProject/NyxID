@@ -6653,6 +6653,33 @@ mod tests {
     // ---- pure function coverage: tool resolution, body mode, helpers ----
 
     #[test]
+    fn manually_registered_protocol_tool_names_remain_case_sensitive() {
+        let names = [
+            "replyToEvent",
+            "updateMessage",
+            "sendTyping",
+            "readEventContext",
+        ];
+        let services = vec![make_service(
+            "gateway",
+            "Event Gateway",
+            "cmaeg",
+            names
+                .iter()
+                .map(|name| make_endpoint(name, "Protocol tool"))
+                .collect(),
+        )];
+        let tools = generate_tool_definitions(&services, None);
+        for name in names {
+            let wire_name = format!("cmaeg__{name}");
+            assert!(tools.iter().any(|tool| tool.name == wire_name));
+            let (_, endpoint) = resolve_tool_call(&wire_name, &services).unwrap();
+            assert_eq!(endpoint.name, name);
+            assert!(resolve_tool_call(&wire_name.to_ascii_lowercase(), &services).is_none());
+        }
+    }
+
+    #[test]
     fn resolve_tool_call_finds_match() {
         let services = vec![make_service(
             "s1",

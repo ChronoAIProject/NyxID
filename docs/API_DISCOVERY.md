@@ -152,6 +152,14 @@ The `/endpoints` response includes structured endpoint data:
 
 The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching.
 
+Manually registered endpoint names are case-sensitive and accept
+`^[a-z][a-zA-Z0-9_]*$`, with a maximum of 100 ASCII characters. NyxID preserves
+the supplied name when listing and resolving MCP tools. For example, a manual
+`readEventContext` endpoint under service slug `cmaeg` is exposed as
+`cmaeg__readEventContext`; its lowercase spelling is a different tool name.
+OpenAPI endpoint discovery keeps its existing name normalization. Services with
+protocol-defined mixed-case tool names should register those endpoints manually.
+
 ### Rich catalog metadata
 
 Catalog entries can include metadata to help AI agents understand what a service is and how it works:
