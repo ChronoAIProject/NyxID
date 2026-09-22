@@ -33,8 +33,11 @@ frontend/src/components/service-icons/api-github-pat.tsx
 frontend/src/components/service-icons/api-github.tsx
 frontend/src/components/service-icons/api-google-calendar.tsx
 frontend/src/components/service-icons/api-google-cloud.tsx
+frontend/src/components/service-icons/api-google-docs.tsx
 frontend/src/components/service-icons/api-google-drive.tsx
 frontend/src/components/service-icons/api-google-gmail.tsx
+frontend/src/components/service-icons/api-google-sheets.tsx
+frontend/src/components/service-icons/api-google-slides.tsx
 frontend/src/components/service-icons/api-google-workspace.tsx
 frontend/src/components/service-icons/api-google.tsx
 frontend/src/components/service-icons/api-ifttt-mcp.tsx

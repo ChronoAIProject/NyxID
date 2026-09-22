@@ -1198,6 +1198,7 @@ mod tests {
     ) -> ServiceEndpoint {
         let now = Utc::now();
         ServiceEndpoint {
+            target_id: None,
             id: id.to_string(),
             service_id: service_id.to_string(),
             name: name.to_string(),
@@ -3911,6 +3912,7 @@ mod tests {
             rules: vec![ProxyOperationRule {
                 method: "GET".to_string(),
                 path_template: "/items".to_string(),
+                ..Default::default()
             }],
         };
         fixture

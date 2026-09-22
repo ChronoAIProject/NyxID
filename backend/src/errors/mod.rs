@@ -232,6 +232,14 @@ pub enum AppError {
     #[error("Node credential missing: {0}")]
     NodeCredentialMissing(String),
 
+    #[error("Target-selected HTTP requests require a node advertising HTTP signature v2")]
+    NodeHttpSignatureUnsupported,
+
+    #[error(
+        "workspace_destinations_not_activated (12300): Workspace editor destinations are not activated. Ask the NyxID operator to enable GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading backend readers and node agents, then retry."
+    )]
+    WorkspaceDestinationsNotActivated,
+
     #[error("WebSocket proxy downstream error: {0}")]
     WsProxyDownstream(String),
 
@@ -652,6 +660,8 @@ impl AppError {
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
             Self::NodeCredentialMissing(_) => StatusCode::BAD_GATEWAY,
+            Self::NodeHttpSignatureUnsupported => StatusCode::BAD_GATEWAY,
+            Self::WorkspaceDestinationsNotActivated => StatusCode::SERVICE_UNAVAILABLE,
             Self::WsProxyDownstream(_) => StatusCode::BAD_GATEWAY,
             Self::ClientDisconnected => client_closed_request(),
             Self::PendingCredentialDecryptFailed(_) => StatusCode::BAD_REQUEST,
@@ -837,6 +847,8 @@ impl AppError {
             Self::NodeCredentialMissing(_) => 8004,
             Self::WsProxyDownstream(_) => 8005,
             Self::ClientDisconnected => 8012,
+            Self::NodeHttpSignatureUnsupported => 8013,
+            Self::WorkspaceDestinationsNotActivated => 12300,
             Self::PendingCredentialDecryptFailed(_) => PENDING_CREDENTIAL_DECRYPT_FAILED_CODE,
             Self::PendingCredentialVersionUnsupported(_) => {
                 PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE
@@ -1060,6 +1072,8 @@ impl AppError {
             Self::NodeProxyTimeout => "node_proxy_timeout",
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
             Self::NodeCredentialMissing(_) => "node_credential_missing",
+            Self::NodeHttpSignatureUnsupported => "node_http_signature_unsupported",
+            Self::WorkspaceDestinationsNotActivated => "workspace_destinations_not_activated",
             Self::WsProxyDownstream(_) => "ws_proxy_downstream",
             Self::ClientDisconnected => "client_disconnected",
             Self::PendingCredentialDecryptFailed(_) => "pending_credential_decrypt_failed",
@@ -1577,6 +1591,10 @@ mod tests {
     #[test]
     fn error_codes_unique() {
         let codes = vec![
+            AppError::AssistantTurnActive.error_code(),
+            AppError::AdminUsageQueryTimeout.error_code(),
+            AppError::WorkspaceDestinationsNotActivated.error_code(),
+            AppError::NodeHttpSignatureUnsupported.error_code(),
             AppError::BadRequest("".into()).error_code(),
             AppError::RequestBodyTooLarge {
                 max_bytes: 0,

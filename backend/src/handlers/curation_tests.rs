@@ -1061,6 +1061,37 @@ async fn curation_human_mixed_retry_nullable_noop_and_postcommit_oidc_repair() {
         request(&f.state, "PUT", &route, &f.human_token, Some(body.clone())).await;
     assert_eq!(status, StatusCode::OK, "{response}");
     assert_eq!(response["skills_revision"], 1);
+    // A receipt written before destination fields existed must replay after upgrade.
+    let parsed: super::services::UpdateServiceRequest =
+        serde_json::from_value(body.clone()).unwrap();
+    let skill_update = catalog_skill_service::SkillUpdate {
+        recommended_skills: parsed.recommended_skills.clone(),
+        recommended_skill_refs: parsed.recommended_skill_refs.clone(),
+        clear_refs: parsed.clear_skill_refs,
+    };
+    let mut legacy_body = serde_json::to_value(&parsed).unwrap();
+    legacy_body
+        .as_object_mut()
+        .unwrap()
+        .remove("destination_targets");
+    use sha2::Digest;
+    let legacy_fingerprint = hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(&(&f.service.id, 0_i64, skill_update, legacy_body, None::<i64>))
+            .unwrap(),
+    ));
+    f.state
+        .db
+        .collection::<Document>(OPERATIONS)
+        .update_one(
+            doc! { "request_id": &request_id },
+            doc! { "$set": { "fingerprint": legacy_fingerprint } },
+        )
+        .await
+        .unwrap();
+    let (status, replay) =
+        request(&f.state, "PUT", &route, &f.human_token, Some(body.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["skills_revision"], 1);
     let mut different = body.clone();
     different["default_request_headers"] = Value::Null;
     assert_eq!(
@@ -1073,12 +1104,15 @@ async fn curation_human_mixed_retry_nullable_noop_and_postcommit_oidc_repair() {
     for field in [
         "inference",
         "proxy_operation_policy",
+        "destination_targets",
         "byok_pricing",
         "platform_key_pricing",
         "platform_charge_nyxid_credentials_only",
     ] {
         let mut different = body.clone();
-        if matches!(field, "inference" | "proxy_operation_policy") {
+        if field == "destination_targets" {
+            different[field] = json!({});
+        } else if matches!(field, "inference" | "proxy_operation_policy") {
             different[field] = Value::Null;
         } else {
             different["billing"][field] = if field == "platform_charge_nyxid_credentials_only" {
@@ -1418,6 +1452,34 @@ async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt
     assert_eq!(a.1["recommended_skills"], json!(["one"]));
     assert_eq!(a.1["skills_revision"], 1);
     assert_eq!(a.1["credential_configured"], false);
+    // Recreate the pre-destination create receipt and retry through the HTTP handler.
+    let parsed: super::services::CreateServiceRequest =
+        serde_json::from_value(input.clone()).unwrap();
+    let mut legacy_body = serde_json::to_value(&parsed).unwrap();
+    legacy_body
+        .as_object_mut()
+        .unwrap()
+        .remove("destination_targets");
+    let legacy_fingerprint = catalog_skill_service::create_fingerprint(&legacy_body).unwrap();
+    f.state
+        .db
+        .collection::<Document>(OPERATIONS)
+        .update_one(
+            doc! { "request_id": input["skills_request_id"].as_str().unwrap() },
+            doc! { "$set": { "fingerprint": legacy_fingerprint } },
+        )
+        .await
+        .unwrap();
+    let (status, replay) = request(
+        &f.state,
+        "POST",
+        "/api/v1/services",
+        &f.human_token,
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["id"], a.1["id"]);
     for collection in [HISTORY, OPERATIONS] {
         assert_eq!(
             f.state

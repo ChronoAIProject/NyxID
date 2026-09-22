@@ -1416,6 +1416,7 @@ mod tests {
 
     fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,

@@ -68,6 +68,8 @@ After a possible dispatch, transport failure is recorded as
 node. Do not retry a non-replayable write with a new operation ID. Reusing the
 same ID returns the stored uncertain classification rather than dispatching.
 
+Custom-method (`:verb`) operations cannot yet receive durable grants; creation is rejected up front.
+
 ## Manage and renew
 
 ```bash

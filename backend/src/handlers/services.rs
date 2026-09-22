@@ -37,6 +37,8 @@ use super::services_helpers::{
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreateServiceRequest {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub destination_targets: std::collections::BTreeMap<String, String>,
     pub provider_config_id: Option<String>,
     pub name: String,
     pub slug: Option<String>,
@@ -143,6 +145,8 @@ pub struct SshServiceConfigResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub destination_targets: std::collections::BTreeMap<String, String>,
     pub provider_config_id: Option<String>,
     /// Admin-only inspection: false for absent/encrypted-empty material, null for
     /// unreadable material or a caller without inspection permission.
@@ -397,6 +401,8 @@ impl std::ops::DerefMut for BillingUpdate {
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct UpdateServiceRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_targets: Option<std::collections::BTreeMap<String, String>>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub base_url: Option<String>,
@@ -937,7 +943,16 @@ pub async fn create_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    Json(mut body): Json<CreateServiceRequest>,
+    Json(body): Json<CreateServiceRequest>,
+) -> AppResult<Json<ServiceResponse>> {
+    Box::pin(create_service_inner(state, auth_user, tele, body)).await
+}
+
+async fn create_service_inner(
+    state: AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    mut body: CreateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
     require_admin(&state, &auth_user).await?;
 
@@ -1423,7 +1438,15 @@ pub async fn create_service(
     }
     validate_service_billing(body.billing.as_ref())?;
 
+    let destination_targets = crate::services::destination_routing::normalize_targets(
+        &slug,
+        &auth_method,
+        &service_type,
+        body.destination_targets.clone(),
+        proxy_operation_policy.as_ref(),
+    )?;
     let new_service = DownstreamService {
+        destination_targets,
         owner_user_id: None,
         recommended_skill_refs: None,
         skills_revision: 0,
@@ -1488,6 +1511,8 @@ pub async fn create_service(
     };
     crate::services::retired_service_service::require_available(&new_service)?;
     anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&new_service)?;
+
+    crate::services::destination_routing::validate_credential_source(&new_service)?;
 
     let new_service = crate::services::catalog_skill_service::create(
         &state.db,
@@ -1735,12 +1760,28 @@ pub async fn update_service(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path(service_id): Path<String>,
-    Json(mut body): Json<UpdateServiceRequest>,
+    Json(body): Json<UpdateServiceRequest>,
+) -> AppResult<Json<ServiceResponse>> {
+    Box::pin(update_service_inner(
+        state, auth_user, tele, service_id, body,
+    ))
+    .await
+}
+
+async fn update_service_inner(
+    state: AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    service_id: String,
+    mut body: UpdateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
     let skill_fingerprint_input = serde_json::to_value(&body)
         .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service).await?;
+    if body.destination_targets.is_some() {
+        require_admin(&state, &auth_user).await?;
+    }
     let skill_update = crate::services::catalog_skill_service::SkillUpdate {
         recommended_skills: body.recommended_skills.clone(),
         recommended_skill_refs: body.recommended_skill_refs.clone(),
@@ -2443,6 +2484,39 @@ pub async fn update_service(
         );
     }
 
+    let mut destination_service = service.clone();
+    destination_service.destination_targets = body
+        .destination_targets
+        .clone()
+        .unwrap_or_else(|| service.destination_targets.clone());
+    if let Some(config) = &body.platform_key {
+        destination_service.platform_key = Some(config.clone());
+    }
+    let destination_auth = if !destination_service.destination_targets.is_empty() {
+        crate::services::destination_routing::effective_catalog_auth(
+            &state.db,
+            &destination_service,
+        )
+        .await?
+    } else {
+        service.auth_method.clone()
+    };
+    let next_targets = crate::services::destination_routing::normalize_targets(
+        &service.slug,
+        &destination_auth,
+        &service.service_type,
+        destination_service.destination_targets,
+        body.proxy_operation_policy
+            .as_ref()
+            .map(Option::as_ref)
+            .unwrap_or(service.proxy_operation_policy.as_ref()),
+    )?;
+    if body.destination_targets.is_some() {
+        set_doc.insert(
+            "destination_targets",
+            bson::to_bson(&next_targets).map_err(|error| AppError::Internal(error.to_string()))?,
+        );
+    }
     if let Some(policy) = body.proxy_operation_policy.clone() {
         let normalized = policy
             .map(crate::services::proxy_authorization::normalize_policy)
@@ -3188,6 +3262,50 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
+    #[tokio::test]
+    async fn workspace_admin_writes_reject_unsafe_destination_recipients() {
+        let db = connect_test_database("workspace_admin_targets")
+            .await
+            .unwrap();
+        crate::services::destination_routing::tests::seed(&db, false).await;
+        let owner = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let service = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"slug":"api-google-workspace"})
+            .await
+            .unwrap()
+            .unwrap();
+        for origin in [
+            "http://docs.googleapis.com",
+            "https://outside.test",
+            "https://evil.googleapis.com",
+        ] {
+            let body: super::UpdateServiceRequest =
+                serde_json::from_value(serde_json::json!({"destination_targets":{"docs":origin}}))
+                    .unwrap();
+            let error = super::update_service(
+                State(state.clone()),
+                test_auth_user(&owner),
+                Default::default(),
+                Path(service.id.clone()),
+                Json(body),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, AppError::ValidationError(_)), "{error:?}");
+        }
+        assert!(
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id":service.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .destination_targets
+                .is_empty()
+        );
+    }
+
     #[derive(Default)]
     struct PriceRemovalLago {
         removals: AtomicUsize,
@@ -3298,6 +3416,7 @@ mod tests {
         base_url: String,
     ) -> CreateServiceRequest {
         CreateServiceRequest {
+            destination_targets: Default::default(),
             recommended_skill_refs: None,
             skills_request_id: None,
             provider_config_id: None,
@@ -4636,6 +4755,144 @@ mod tests {
         let err = validate_token_exchange_config(&config).unwrap_err();
         assert!(err.to_string().contains("missing"));
     }
+    #[tokio::test]
+    async fn platform_keys_and_destination_maps_are_rejected_on_admin_create_and_update() {
+        use crate::services::{destination_routing, google_workspace::GoogleProduct};
+        let db = crate::test_utils::connect_transaction_test_database("platform_destination_admin")
+            .await;
+        let admin = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let mut body = create_http_service_request(
+            "Multi-origin",
+            "multi-origin",
+            "https://www.googleapis.com".into(),
+        );
+        body.auth_method = Some("bearer".into());
+        body.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        body.destination_targets = destination_routing::workspace_targets();
+        body.proxy_operation_policy = Some(GoogleProduct::Workspace.operation_policy().unwrap());
+        let result = create_service(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Default::default(),
+            Json(body),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::ValidationError(message)) if message == "Destination targets do not support platform keys")
+        );
+        assert_eq!(
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .count_documents(doc! {"slug": "multi-origin"})
+                .await
+                .unwrap(),
+            0
+        );
+        let mut service = dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.created_by = admin.clone();
+        service.auth_method = "bearer".into();
+        service.requires_user_credential = true;
+        service.destination_targets = destination_routing::workspace_targets();
+        service.proxy_operation_policy = Some(GoogleProduct::Workspace.operation_policy().unwrap());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let result = update_service(State(state), test_auth_user(&admin), Default::default(), Path(service.id.clone()),
+            Json(serde_json::from_value(serde_json::json!({"platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]}})).unwrap())).await;
+        assert!(
+            matches!(result, Err(AppError::ValidationError(message)) if message == "Destination targets do not support platform keys")
+        );
+        let stored = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"_id": &service.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.platform_key.is_none());
+        assert_eq!(stored.destination_targets, service.destination_targets);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn destination_policy_clear_requires_clearing_targets_in_the_same_update() {
+        use crate::services::{destination_routing, google_workspace::GoogleProduct};
+
+        let db =
+            crate::test_utils::connect_transaction_test_database("destination_policy_clear").await;
+        let admin = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let mut service = dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.created_by = admin.clone();
+        service.auth_method = "bearer".into();
+        service.requires_user_credential = true;
+        service.destination_targets = destination_routing::workspace_targets();
+        service.proxy_operation_policy = Some(GoogleProduct::Workspace.operation_policy().unwrap());
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        services.insert_one(&service).await.unwrap();
+
+        let update = |body| {
+            update_service(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Default::default(),
+                Path(service.id.clone()),
+                Json(serde_json::from_value(body).unwrap()),
+            )
+        };
+        let result = update(serde_json::json!({ "proxy_operation_policy": null })).await;
+        assert!(matches!(result, Err(AppError::ValidationError(message))
+            if message == "Destination targets require an operation policy"));
+        let unchanged = services
+            .find_one(doc! { "_id": &service.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.destination_targets, service.destination_targets);
+        assert_eq!(
+            unchanged.proxy_operation_policy,
+            service.proxy_operation_policy
+        );
+
+        let Json(renamed_response) = update(serde_json::json!({ "name": "Renamed workspace" }))
+            .await
+            .unwrap();
+        assert_eq!(renamed_response.name, "Renamed workspace");
+        let renamed = services
+            .find_one(doc! { "_id": &service.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.name, "Renamed workspace");
+        assert_eq!(renamed.destination_targets, service.destination_targets);
+        assert_eq!(
+            renamed.proxy_operation_policy,
+            service.proxy_operation_policy
+        );
+
+        let Json(cleared_response) = update(serde_json::json!({
+            "proxy_operation_policy": null,
+            "destination_targets": {}
+        }))
+        .await
+        .unwrap();
+        assert!(cleared_response.destination_targets.is_empty());
+        assert!(cleared_response.proxy_operation_policy.is_none());
+        let cleared = services
+            .find_one(doc! { "_id": &service.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(cleared.destination_targets.is_empty());
+        assert!(cleared.proxy_operation_policy.is_none());
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn ifttt_catalog_update_preserves_blank_credentials_and_validates_replacements() {
         let db =

@@ -44,6 +44,8 @@ pub struct ServiceEndpoint {
     pub method: String,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_schema: Option<serde_json::Value>,
@@ -91,6 +93,7 @@ mod tests {
 
     fn make_endpoint() -> ServiceEndpoint {
         ServiceEndpoint {
+            target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
             name: "get_users".to_string(),

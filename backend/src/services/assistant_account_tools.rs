@@ -222,6 +222,7 @@ fn description(name: &str) -> String {
 
 pub fn virtual_service() -> McpToolService {
     McpToolService {
+        workspace_destinations_pending: false,
         service_id: "nyxid".into(),
         service_name: "NyxID account".into(),
         service_slug: "nyxid".into(),

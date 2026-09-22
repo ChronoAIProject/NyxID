@@ -66,6 +66,7 @@ pub mod content_type;
 pub mod coordination_service;
 pub mod credential_push_service;
 pub mod delegation_service;
+pub mod destination_routing;
 pub mod developer_webhook_service;
 pub mod device_code_service;
 pub mod dpop_jti_cache;

@@ -478,6 +478,10 @@ pub struct AppConfig {
     pub node_max_stream_duration_secs: u64,
     /// Enable HMAC request signing for node proxy requests (default: true)
     pub node_hmac_signing_enabled: bool,
+    /// Temporary reader-before-writer rollout gate; remove after all environments activate.
+    /// First true startup installs the known-default Workspace map/policy and adds 13 endpoints.
+    /// Idempotent, safe to leave enabled; false never reverses persisted activation.
+    pub google_workspace_multi_origin_enabled: bool,
 
     // Proxy streaming
     /// Maximum request body size for proxy routes in bytes (default: 100 MB)
@@ -1356,6 +1360,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
+            google_workspace_multi_origin_enabled: env::var("GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED").is_ok_and(|value| value == "true"),
             node_hmac_signing_enabled: env::var("NODE_HMAC_SIGNING_ENABLED")
                 .ok()
                 .map(|v| v != "false" && v != "0")
@@ -2000,6 +2005,7 @@ mod tests {
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
+            google_workspace_multi_origin_enabled: true,
             proxy_max_body_size: 100 * 1024 * 1024,
             llm_max_body_size: 10 * 1024 * 1024,
             proxy_stream_idle_timeout_secs: 60,

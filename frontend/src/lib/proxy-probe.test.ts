@@ -96,6 +96,18 @@ describe("probePathForSlug — registry uses seeded service_slug forms", () => {
     expect(probePathForSlug("api-feishu")).toBe("authen/v1/user_info");
   });
 
+  it.each(["api-google-docs", "api-google-sheets", "api-google-slides"])(
+    "%s requires a document ID and never offers an automatic probe",
+    (slug) => {
+      for (const connectionSlug of [slug, `${slug}-2`]) {
+        expect(recipeForSlug(connectionSlug)).toBeNull();
+        expect(isKnownUntestable(connectionSlug)).toBe(true);
+        expect(isTestable(connectionSlug)).toBe(false);
+        expect(probePathForSlug(connectionSlug)).toBe("");
+      }
+    },
+  );
+
   it("returns '' for explicitly untestable seeded slugs", () => {
     // Registered as `null` — no probe endpoint we can rely on.
     expect(probePathForSlug("llm-openai-codex")).toBe("");
