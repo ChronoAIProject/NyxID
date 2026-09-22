@@ -30,21 +30,58 @@ authorizes the 13 editor operations, subject to file permissions. Narrower
 `drive.file` and read-only grants retain their limits. Separate editor services
 remain available.
 
+## Automatic Google activation and corrected contracts
+
+[PR #1643](https://github.com/ChronoAIProject/NyxID/pull/1643) builds on #1633.
+The temporary `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED` flag previously left
+editor routing inactive while the hosted specs advertised those operations.
+This follow-up removes the flag and runs recognized-default migration and
+endpoint synchronization automatically during normal startup. Fresh and legacy
+catalogs receive Drive22/Workspace38 without a separate environment setting.
+
+Workspace is composed from the same Drive spec, then adds Calendar and Gmail.
+All 22 shared operations have identical definitions, including native editor
+origins and the corrected upload contracts. The existing upload POST/PATCH
+routes now document raw media and `multipart/related`, with complete HTML import
+and replacement examples for Google Docs. Generated MCP uploads preserve their
+media/base64 contract; unsupported multipart MCP requests fail before approval
+or execution. Single-file field selectors and PATCH parent-move guidance are
+also corrected.
+
+The six corrected operations in each catalog retain their IDs and advance their
+generations once. Approvals and durable grants bound to those changed contracts
+require normal re-approval. Unchanged contracts retain their generations and
+grants. Startup preserves administrator-customized policies and destination
+maps, disabled endpoints, existing connections and credentials. Concurrent
+startup reconciles the same definition without repeated generation changes.
+No OAuth scopes, Google routes, billing, or pricing changes are added.
+
 ## Migration and deployment
 
-Historical rollout note (the flag was subsequently retired): `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED` activated both Drive
-and Workspace. Startup updates only the known seeded policy with an absent or
-empty destination map, preserves administrator changes, and adds 13 endpoints
-per service. Existing endpoint IDs, contracts, and generations are preserved.
-The older Workspace migration that added Gmail retains its original policy
-precondition.
+Historical #1633 deployments used the flag to order compatible backend readers
+and nodes before activation. With #1643, activation is automatic. Before rollout,
+verify every serving backend and participating/failover node supports destination
+routing and the required HTTP signature version. Inspect persisted policies,
+destination maps and endpoint rows after startup. Customized configurations are
+retained and diagnostic logs identify blocked migrations. See
+[Google Workspace OAuth](../GOOGLE_WORKSPACE_OAUTH.md) for rollout, rollback,
+and approval details.
 
-Before activation, editor calls return HTTP 503/code 12300. Deploy updated
-backend readers and upgrade participating nodes before enabling the flag;
-the corresponding Google APIs must also be enabled in the OAuth client's Cloud
-project. Merging this rollup does not itself activate production. See
-[Google Workspace OAuth](../GOOGLE_WORKSPACE_OAUTH.md) for the activation order
-and pending-approval behavior.
+Google API enablement is a separate prerequisite. A Google 403 with
+`SERVICE_DISABLED` requires enabling the named API in the consumer Cloud project;
+it is distinct from NyxID's 503/code12300 activation error. Recreating services
+or OAuth connections does not resolve API enablement. Production acceptance must
+verify Docs create/edit/read-back, Sheets formulas and calculated results, and
+Drive multipart import/update through the exact existing connections. Merging
+this rollup does not establish deployment or live execution success.
+
+The automatic-activation implementation passed 260 selected backend tests and
+23 CLI security tests before rollup integration, plus format, all-target Clippy,
+an optimized gcp-kms backend build, and build-input guards. All 38 unique Google
+operations passed the independent structural Discovery audit. The shared-spec
+regression compares every Drive path definition with Workspace. PR #1643 records
+final integration CI and its squash provenance; the rollup PR records the
+combined branch's checks.
 
 ## Verification and history
 
