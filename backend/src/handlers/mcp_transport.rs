@@ -1,31 +1,23 @@
 use std::convert::Infallible;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use base64::Engine as _;
-use chrono::Utc;
 use mongodb::bson::doc;
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::crypto::jwt;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
-use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
-use crate::services::platform_operation_service::{
-    CallAndSayRequest, SpeakRequest, XSearchRequest,
-};
 use crate::services::{
-    approval_service, audit_service, connect_link_service, feature_flag_service, mcp_service,
-    notification_service, operation_descriptor, oracle_pool_service, oracle_session_service,
-    oracle_task_service, platform_operation_service, proxy_service, ssh_service,
-    user_service_service,
+    approval_service, audit_service, connect_link_service, mcp_service, notification_service,
+    operation_descriptor, oracle_pool_service, oracle_session_service, oracle_task_service,
+    proxy_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -101,20 +93,6 @@ fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Res
         serde_json::json!({
             "content": [{ "type": "text", "text": text }],
             "isError": is_error,
-        }),
-    )
-}
-
-fn audio_tool_result(id: Option<serde_json::Value>, audio: &[u8]) -> Response {
-    rpc_success(
-        id,
-        serde_json::json!({
-            "content": [{
-                "type": "audio",
-                "data": base64::engine::general_purpose::STANDARD.encode(audio),
-                "mimeType": "audio/mpeg",
-            }],
-            "isError": false,
         }),
     )
 }
@@ -267,6 +245,8 @@ fn rpc_scope_forbidden(id: Option<serde_json::Value>, message: &str) -> Response
 /// limits, and audit attribution.
 #[derive(Debug, Clone)]
 struct McpAuthContext {
+    chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
+    account_acknowledged: bool,
     user_id: String,
     auth_method: AuthMethod,
     acting_client_id: Option<String>,
@@ -275,7 +255,6 @@ struct McpAuthContext {
     /// request authenticates independently, no MCP session is created or required.
     is_api_key: bool,
     /// True only for the scoped `nyxid_ag_` API-key class.
-    is_agent_api_key: bool,
     api_key_id: Option<String>,
     api_key_name: Option<String>,
     /// If false, `allowed_service_ids` constrains which UserServices this request may call.
@@ -283,6 +262,9 @@ struct McpAuthContext {
     /// If false, `allowed_node_ids` constrains which nodes this request may route through.
     allow_all_nodes: bool,
     allowed_service_ids: Vec<String>,
+    /// Platform-provided catalog services an assistant chat key was allowed
+    /// to use from a chat card. Empty for every other caller.
+    allowed_platform_service_ids: Vec<String>,
     allowed_node_ids: Vec<String>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -293,17 +275,19 @@ struct McpAuthContext {
 impl McpAuthContext {
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
         Self {
+            chat: None,
+            account_acknowledged: false,
             user_id,
             auth_method,
             acting_client_id: None,
             approval_owner_user_id: None,
             is_api_key: false,
-            is_agent_api_key: false,
             api_key_id: None,
             api_key_name: None,
             allow_all_services: true,
             allow_all_nodes: true,
             allowed_service_ids: Vec::new(),
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -429,13 +413,30 @@ async fn authenticate_mcp(
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
                 let user_id = verify_user_active(state, user_id).await?;
+                let chat = crate::services::assistant_acknowledgement_service::for_key(
+                    &state.db,
+                    &user_id,
+                    Some(&api_key.id),
+                )
+                .await
+                .map_err(|_| mcp_401(&state.config.base_url))?;
+                // Platform grants are meaningful only for assistant chat keys.
+                let platform_grants = if chat.is_some() {
+                    api_key.allowed_platform_service_ids.clone()
+                } else {
+                    Vec::new()
+                };
                 return Ok(McpAuthContext {
+                    chat,
+                    account_acknowledged: api_key
+                        .scopes
+                        .split_whitespace()
+                        .any(|scope| scope == auth::ASSISTANT_ACCOUNT_SCOPE),
                     user_id,
                     auth_method: AuthMethod::ApiKey,
                     acting_client_id: None,
                     approval_owner_user_id: None,
                     is_api_key: true,
-                    is_agent_api_key: api_key.key_prefix.starts_with("nyxid_ag_"),
                     api_key_id: Some(api_key.id.clone()),
                     api_key_name: Some(api_key.name.clone()),
                     allow_all_services: api_key.allow_all_services,
@@ -446,6 +447,7 @@ async fn authenticate_mcp(
                         )
                         .await
                         .map_err(axum::response::IntoResponse::into_response)?,
+                    allowed_platform_service_ids: platform_grants,
                     allowed_node_ids: api_key.allowed_node_ids.clone(),
                     rate_limit_per_second: api_key.rate_limit_per_second,
                     rate_limit_burst: api_key.rate_limit_burst,
@@ -507,8 +509,7 @@ async fn authenticate_mcp(
                 // Service account tokens have sa=true; verify against
                 // the service_accounts collection instead of users.
                 let (user_id, approval_owner_user_id) = if claims.sa == Some(true) {
-                    let (sa_id, owner_id) =
-                        verify_service_account_active(state, claims.sub).await?;
+                    let (sa_id, owner_id) = verify_service_account_active(state, &claims).await?;
                     (sa_id, Some(owner_id))
                 } else {
                     (verify_user_active(state, claims.sub).await?, None)
@@ -616,19 +617,15 @@ async fn verify_user_active(state: &AppState, user_id: String) -> Result<String,
 #[allow(clippy::result_large_err)]
 async fn verify_service_account_active(
     state: &AppState,
-    sa_id: String,
+    claims: &jwt::Claims,
 ) -> Result<(String, String), Response> {
-    let sa = state
-        .db
-        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
-        .find_one(doc! { "_id": &sa_id, "is_active": true })
+    let sa = crate::services::service_account_service::validate_access_token(&state.db, claims)
         .await
-        .map_err(|_| rpc_error(None, -32603, "Internal error"))?;
-
-    match sa {
-        Some(sa) => Ok((sa_id, sa.effective_owner_user_id().to_string())),
-        None => Err(mcp_401(&state.config.base_url)),
+        .map_err(|_| mcp_401(&state.config.base_url))?;
+    if sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation {
+        return Err(mcp_403_insufficient_scope());
     }
+    Ok((sa.id.clone(), sa.effective_owner_user_id().to_string()))
 }
 
 /// Extract the `Mcp-Session-Id` header value.
@@ -685,34 +682,8 @@ fn is_scoped_api_key(auth: &McpAuthContext) -> bool {
     auth.is_api_key && (!auth.allow_all_services || !auth.allow_all_nodes)
 }
 
-fn platform_operations_allowed(auth: &McpAuthContext) -> bool {
-    matches!(
-        auth.auth_method,
-        AuthMethod::Session | AuthMethod::AccessToken
-    ) || (auth.auth_method == AuthMethod::ApiKey && auth.is_agent_api_key)
-}
-
-/// Resolve the caller-facing feature gate for platform operations. Resolution
-/// failures fail closed so a rollout cannot accidentally publish or execute a
-/// surface while its flag state is unavailable.
-async fn platform_services_flag_enabled(state: &AppState, auth: &McpAuthContext) -> bool {
-    match feature_flag_service::resolve_personal_features(&state.db, &auth.user_id).await {
-        Ok(features) => features
-            .iter()
-            .any(|key| key == feature_flag_service::PLATFORM_SERVICES_FLAG_KEY),
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                user_id = %auth.user_id,
-                "Failed to resolve platform-services feature flag for MCP"
-            );
-            false
-        }
-    }
-}
-
 fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
-    if auth.allow_all_services {
+    if auth.chat.is_some() || auth.allow_all_services {
         mcp_service::ServiceScope::Unrestricted
     } else {
         mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
@@ -739,7 +710,9 @@ fn filter_services_by_scope(
             mcp_service::McpToolSource::UserManaged { .. } => {
                 auth.allowed_service_ids.contains(&svc.service_id)
             }
-            mcp_service::McpToolSource::Platform { .. } => false,
+            mcp_service::McpToolSource::Platform { .. } | mcp_service::McpToolSource::Internal => {
+                false
+            }
         })
         .collect()
 }
@@ -761,16 +734,28 @@ fn ensure_service_in_scope(
         {
             Ok(())
         }
+        // An assistant chat key may hold platform grants the owner allowed
+        // from a chat card; visibility was checked when the service resolved.
+        mcp_service::McpToolSource::Platform { .. }
+            if auth.chat.is_some()
+                && auth
+                    .allowed_platform_service_ids
+                    .contains(&service.service_id) =>
+        {
+            Ok(())
+        }
         mcp_service::McpToolSource::UserManaged { .. } => Err(tool_result(
             request_id,
             "API key does not have access to this service",
             true,
         )),
-        mcp_service::McpToolSource::Platform { .. } => Err(tool_result(
-            request_id,
-            "Scoped API keys cannot call platform services through MCP",
-            true,
-        )),
+        mcp_service::McpToolSource::Internal | mcp_service::McpToolSource::Platform { .. } => {
+            Err(tool_result(
+                request_id,
+                "Scoped API keys cannot call platform services through MCP",
+                true,
+            ))
+        }
     }
 }
 
@@ -1275,23 +1260,10 @@ async fn handle_tools_list(
         }
     };
 
-    let services = catalog.services;
-    let platform_operations =
-        if platform_operations_allowed(auth) && platform_services_flag_enabled(state, auth).await {
-            match platform_operation_service::list_enabled_operations(&state.db).await {
-                Ok(operations) => operations,
-                Err(error) => {
-                    tracing::error!(
-                        error = %error,
-                        "Failed to load enabled platform operations for MCP discovery"
-                    );
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
+    let mut services = catalog.services;
+    if auth.chat.is_some() {
+        services.push(crate::services::assistant_account_tools::virtual_service());
+    }
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
     let mut tool_defs = match session_id {
@@ -1303,13 +1275,9 @@ async fn handle_tools_list(
                     return rpc_error(request.id.clone(), -32603, "Internal error");
                 }
             };
-            mcp_service::generate_tool_definitions(
-                &services,
-                Some(&activated),
-                &platform_operations,
-            )
+            mcp_service::generate_tool_definitions(&services, Some(&activated))
         }
-        None => mcp_service::generate_tool_definitions(&services, None, &platform_operations),
+        None => mcp_service::generate_tool_definitions(&services, None),
     };
 
     // Scoped API keys do not get SSH meta-tools. SSH invocations would
@@ -1335,7 +1303,78 @@ async fn handle_tools_list(
     )
 }
 
+fn audit_chat_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "nyx__call_tool" | "nyx__connect_service" | "nyx__wait_for_connection" | "nyx__ssh_exec"
+    ) || name.starts_with("nyx__oracle_")
+        || name.starts_with("nyxid__")
+}
+
+/// The identifier shown to the chat owner for a tool call. Never arguments.
+fn chat_activity_label(params: &serde_json::Value) -> String {
+    let name = params
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("tool");
+    if name == "nyx__call_tool"
+        && let Some(inner) = params
+            .get("arguments")
+            .and_then(|a| a.get("tool_name"))
+            .and_then(|t| t.as_str())
+            .filter(|t| !t.is_empty())
+    {
+        return inner.to_owned();
+    }
+    name.to_owned()
+}
+
+/// Chat-key tool calls are recorded on the live turn as metadata-only activity
+/// so the browser can show what the assistant is doing before its reply streams.
 async fn handle_tools_call(
+    state: &AppState,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
+    request: &JsonRpcRequest,
+    client_accepts_sse: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> Response {
+    let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
+        (Some(chat), Some(params)) => crate::services::assistant_nyxagent::activity_started(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+            &chat_activity_label(params),
+        )
+        .await
+        .ok()
+        .flatten()
+        .map(|id| (chat, id)),
+        _ => None,
+    };
+    let response = dispatch_tools_call(
+        state,
+        auth,
+        session_id,
+        request,
+        client_accepts_sse,
+        billing_egress_permit,
+    )
+    .await;
+    if let Some((chat, id)) = activity {
+        let _ = crate::services::assistant_nyxagent::activity_finished(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+            &id,
+            response.status().is_success(),
+        )
+        .await;
+    }
+    response
+}
+
+async fn dispatch_tools_call(
     state: &AppState,
     auth: &McpAuthContext,
     session_id: Option<&str>,
@@ -1358,6 +1397,56 @@ async fn handle_tools_call(
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
+    if let Some(chat) = auth.chat.as_ref().filter(|_| audit_chat_tool(tool_name)) {
+        // Record execution requests and refusals. Never copy arbitrary tool names or
+        // arguments into the audit chain; execution events identify resolved tools.
+        let known_meta_tool = matches!(
+            tool_name,
+            "nyx__search_tools"
+                | "nyx__discover_services"
+                | "nyx__list_connected_services"
+                | "nyx__connect_service"
+                | "nyx__wait_for_connection"
+                | "nyx__call_tool"
+                | "nyx__ssh_exec"
+                | "nyx__ssh_list_services"
+                | "nyx__oracle_pools"
+                | "nyx__oracle_ask"
+                | "nyx__oracle_result"
+                | "nyx__oracle_attach"
+                | "nyx__oracle_extract"
+                | "nyx__oracle_session"
+        );
+        let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
+            crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
+        });
+        let _ = audit_service::log_actor_event(
+            state.db.clone(),
+            &audit_service::AuditActor {
+                user_id: auth.user_id.clone(),
+                ip_address: auth.ip_address.clone(),
+                user_agent: auth.user_agent.clone(),
+                api_key_id: auth.api_key_id.clone(),
+                api_key_name: auth.api_key_name.clone(),
+            },
+            "assistant_mcp_tool_call",
+            Some(serde_json::json!({
+                "conversation_id": chat.conversation_id,
+                "access_mode": chat.access_mode,
+                "tool_name": if known_meta_tool || known_account_tool {
+                    tool_name
+                } else {
+                    "service_tool"
+                },
+                "outcome": "requested",
+            })),
+        )
+        .await;
+    }
+
+    if tool_name.starts_with("nyxid__") {
+        return handle_account_tool(state, auth, tool_name, &arguments, request.id.clone()).await;
+    }
     // -- Meta-tools --
     match tool_name {
         "nyx__search_tools" => {
@@ -1372,8 +1461,7 @@ async fn handle_tools_call(
             .await;
         }
         "nyx__discover_services" => {
-            return handle_meta_discover(state, &auth.user_id, &arguments, request.id.clone())
-                .await;
+            return handle_meta_discover(state, auth, &arguments, request.id.clone()).await;
         }
         "nyx__list_connected_services" => {
             return handle_meta_list_connected(state, auth, &arguments, request.id.clone()).await;
@@ -1411,15 +1499,6 @@ async fn handle_tools_call(
                 billing_egress_permit,
             )
             .await;
-        }
-        "nyx__x_search" => {
-            return handle_platform_x_search(state, auth, &arguments, request.id.clone()).await;
-        }
-        "nyx__speak" => {
-            return handle_platform_speak(state, auth, &arguments, request.id.clone()).await;
-        }
-        "nyx__call_and_say" => {
-            return handle_platform_call_and_say(state, auth, &arguments, request.id.clone()).await;
         }
         "nyx__ssh_exec" | "nyx__ssh_list_services" => {
             if is_scoped_api_key(auth) {
@@ -1515,6 +1594,9 @@ async fn handle_tools_call(
         }
     };
 
+    if let Some(response) = chat_service_gate(state, auth, service, request.id.clone()).await {
+        return response;
+    }
     // Enforce API-key service scope before activation/execute -- scoped keys
     // must not reach execute_tool for services outside their allow-list.
     if let Err(resp) = ensure_service_in_scope(auth, service, request.id.clone()) {
@@ -1602,6 +1684,7 @@ async fn handle_tools_call(
             "tool": tool_name,
             "service_id": service.service_id,
             "response_status": status,
+            "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
         })),
         auth.ip_address.clone(),
         auth.user_agent.clone(),
@@ -1785,218 +1868,110 @@ async fn authorize_mcp_operation(
 }
 
 // ---------------------------------------------------------------------------
-// Platform-operation tool dispatch
-// ---------------------------------------------------------------------------
-
-fn parse_platform_operation_arguments<T: DeserializeOwned>(
-    arguments: &serde_json::Value,
-) -> Result<T, String> {
-    serde_json::from_value(arguments.clone())
-        .map_err(|error| format!("Invalid platform operation arguments: {error}"))
-}
-
-fn platform_operation_error_result(
-    request_id: Option<serde_json::Value>,
-    error: &crate::errors::AppError,
-) -> Response {
-    use crate::errors::AppError;
-
-    let message = match error {
-        AppError::BadRequest(message) | AppError::ValidationError(message) => message.clone(),
-        AppError::RateLimited => "Daily platform operation limit reached".to_string(),
-        AppError::NotFound(_) => "Platform operation is not available".to_string(),
-        AppError::PlatformOperationUnavailable => {
-            "Platform operation vendor is unavailable".to_string()
-        }
-        _ => {
-            tracing::error!(error = %error, "MCP platform operation failed");
-            "Platform operation failed".to_string()
-        }
-    };
-    tool_result(request_id, &message, true)
-}
-
-fn audit_mcp_platform_operation<T>(
-    state: &AppState,
-    auth: &McpAuthContext,
-    op: &'static str,
-    result: &crate::errors::AppResult<T>,
-    started: Instant,
-    metadata: serde_json::Value,
-) {
-    let mut data = metadata.as_object().cloned().unwrap_or_default();
-    data.insert("op".to_string(), serde_json::Value::String(op.to_string()));
-    data.insert(
-        "outcome".to_string(),
-        serde_json::Value::String(platform_operation_audit_outcome(result).to_string()),
-    );
-    data.insert(
-        "duration_ms".to_string(),
-        serde_json::Value::from(started.elapsed().as_millis() as u64),
-    );
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth.user_id.clone()),
-        "platform_operation".to_string(),
-        Some(serde_json::Value::Object(data)),
-        auth.ip_address.clone(),
-        auth.user_agent.clone(),
-        auth.api_key_id.clone(),
-        auth.api_key_name.clone(),
-    );
-}
-
-fn platform_operation_audit_outcome<T>(result: &crate::errors::AppResult<T>) -> &'static str {
-    use crate::errors::AppError;
-
-    match result {
-        Ok(_) => "succeeded",
-        Err(AppError::NotFound(_)) => "not_found",
-        Err(AppError::RateLimited) => "rate_limited",
-        Err(AppError::BadRequest(_) | AppError::ValidationError(_)) => "rejected",
-        Err(AppError::PlatformOperationUnavailable) => "vendor_unavailable",
-        Err(_) => "failed",
-    }
-}
-
-async fn handle_platform_x_search(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
-        return tool_result(request_id, "Platform operation is not available", true);
-    }
-    let request = match parse_platform_operation_arguments::<XSearchRequest>(arguments) {
-        Ok(request) => request,
-        Err(error) => return tool_result(request_id, &error, true),
-    };
-    let started = Instant::now();
-    let query_chars = request.query.chars().count();
-    let requested_max_results = request.max_results;
-    let result = platform_operation_service::execute_x_search(
-        &state.db,
-        &state.encryption_keys,
-        &state.http_client,
-        request,
-    )
-    .await;
-    audit_mcp_platform_operation(
-        state,
-        auth,
-        "x_search",
-        &result,
-        started,
-        serde_json::json!({
-            "query_chars": query_chars,
-            "requested_max_results": requested_max_results,
-        }),
-    );
-
-    match result {
-        Ok(response) => tool_result(request_id, &response.to_string(), false),
-        Err(error) => platform_operation_error_result(request_id, &error),
-    }
-}
-
-async fn handle_platform_speak(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
-        return tool_result(request_id, "Platform operation is not available", true);
-    }
-    let request = match parse_platform_operation_arguments::<SpeakRequest>(arguments) {
-        Ok(request) => request,
-        Err(error) => return tool_result(request_id, &error, true),
-    };
-    let started = Instant::now();
-    let text_chars = request.text.chars().count();
-    let voice_id = request.voice_id.clone();
-    let result = async {
-        let vendor = platform_operation_service::execute_speak(
-            &state.db,
-            &state.encryption_keys,
-            &state.http_client,
-            request,
-        )
-        .await?;
-        platform_operation_service::collect_speak_audio(vendor).await
-    }
-    .await;
-    audit_mcp_platform_operation(
-        state,
-        auth,
-        "speak",
-        &result,
-        started,
-        serde_json::json!({
-            "text_chars": text_chars,
-            "voice_id": voice_id,
-        }),
-    );
-
-    match result {
-        Ok(audio) => audio_tool_result(request_id, &audio),
-        Err(error) => platform_operation_error_result(request_id, &error),
-    }
-}
-
-async fn handle_platform_call_and_say(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-) -> Response {
-    if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
-        return tool_result(request_id, "Platform operation is not available", true);
-    }
-    let request = match parse_platform_operation_arguments::<CallAndSayRequest>(arguments) {
-        Ok(request) => request,
-        Err(error) => return tool_result(request_id, &error, true),
-    };
-    let started = Instant::now();
-    let message_chars = request.message.chars().count();
-    let destination_suffix = if platform_operation_service::is_e164_number(&request.to) {
-        platform_operation_service::redacted_destination_suffix(&request.to)
-    } else {
-        "invalid".to_string()
-    };
-    // The transport edge owns the UTC date; quota logic receives it explicitly.
-    let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
-    let result = platform_operation_service::execute_call_and_say(
-        &state.db,
-        &state.encryption_keys,
-        &state.http_client,
-        &auth.user_id,
-        &yyyymmdd,
-        request,
-    )
-    .await;
-    audit_mcp_platform_operation(
-        state,
-        auth,
-        "call_and_say",
-        &result,
-        started,
-        serde_json::json!({
-            "message_chars": message_chars,
-            "destination_suffix": destination_suffix,
-        }),
-    );
-
-    match result {
-        Ok(response) => tool_result(request_id, &response.to_string(), false),
-        Err(error) => platform_operation_error_result(request_id, &error),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Meta-tool dispatch helpers
 // ---------------------------------------------------------------------------
+
+/// Tells the assistant what each `chat_access` value means so it calls gated
+/// tools instead of telling the user it lacks permission.
+const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = call freely. \
+    acknowledgement_required = call the tool now; NyxID shows the user an Allow card \
+    in the chat and returns instructions to retry after approval. Never say you lack \
+    permission or send the user to settings, and never ask for Full access. \
+    source meanings: user_service = the user's own connection; platform = NyxID's \
+    shared platform credential, not the user's account. To connect the user's own \
+    account, use nyx__discover_services then nyx__connect_service and give the user \
+    the link; that works in Ask mode.";
+
+fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> &'static str {
+    let granted = if auth.chat.as_ref().is_some_and(|chat| {
+        chat.access_mode == crate::models::assistant_conversation::AccessMode::Full
+    }) {
+        true
+    } else if matches!(service.source, mcp_service::McpToolSource::Platform { .. }) {
+        auth.allowed_platform_service_ids
+            .contains(&service.service_id)
+    } else if matches!(service.source, mcp_service::McpToolSource::Internal) {
+        auth.account_acknowledged
+    } else {
+        auth.allowed_service_ids.contains(&service.service_id)
+    };
+    if granted {
+        "granted"
+    } else {
+        "acknowledgement_required"
+    }
+}
+
+async fn chat_service_gate(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    let chat = auth.chat.as_ref()?;
+    let result = crate::services::assistant_acknowledgement_service::service_gate(
+        &state.db,
+        chat,
+        &service.service_id,
+        &service.service_slug,
+        &service.service_name,
+        matches!(service.source, mcp_service::McpToolSource::Platform { .. }),
+    )
+    .await;
+    match result {
+        Ok(None) => None,
+        Ok(Some(value)) => Some(tool_result(request_id, &value.to_string(), true)),
+        Err(error) => {
+            let result = crate::services::assistant_account_tools::error_result(error);
+            Some(tool_result(request_id, &result.value.to_string(), true))
+        }
+    }
+}
+
+async fn handle_account_tool(
+    state: &AppState,
+    auth: &McpAuthContext,
+    name: &str,
+    args: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let Ok(user_id) = uuid::Uuid::parse_str(&auth.user_id) else {
+        return tool_result(request_id, "{\"error\":\"unauthorized\"}", true);
+    };
+    let user = auth::AuthUser {
+        user_id,
+        session_id: None,
+        scope: String::new(),
+        acting_client_id: auth.acting_client_id.clone(),
+        oauth_client_id: None,
+        token_jti: None,
+        approval_owner_user_id: auth.approval_owner_user_id.clone(),
+        auth_method: auth.auth_method.clone(),
+        allow_all_services: auth.allow_all_services,
+        allow_all_nodes: auth.allow_all_nodes,
+        allowed_service_ids: auth.allowed_service_ids.clone(),
+        resource_uris: None,
+        allowed_node_ids: auth.allowed_node_ids.clone(),
+        api_key_id: auth.api_key_id.clone(),
+        api_key_name: auth.api_key_name.clone(),
+        api_key_credential_id: None,
+        api_key_purpose: Default::default(),
+        rate_limit_per_second: auth.rate_limit_per_second,
+        rate_limit_burst: auth.rate_limit_burst,
+        ip_address: auth.ip_address.clone(),
+        user_agent: auth.user_agent.clone(),
+    };
+    let tools = crate::services::assistant_account_tools::AccountTools {
+        db: &state.db,
+        keys: &state.encryption_keys,
+        http: &state.http_client,
+        config: &state.config,
+        token_exchange_cache: &state.token_exchange_cache,
+        node_manager: &state.node_ws_manager,
+    };
+    let result = tools.execute(&user, name, args).await;
+    tool_result(request_id, &result.value.to_string(), result.is_error)
+}
 
 /// `nyx__call_tool` -- universal proxy that lets clients invoke any connected
 /// tool by name, bypassing the need for a `tools/list` refresh.  The AI
@@ -2030,7 +2005,7 @@ async fn handle_meta_call_tool(
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(parsed) => parsed,
                 Err(e) => {
-                    tracing::warn!("Failed to parse arguments_json as JSON: {e}, raw: {json_str}");
+                    tracing::warn!("Invalid MCP tool arguments JSON");
                     return tool_result(
                         request_id,
                         &format!("arguments_json must be a valid JSON string. Parse error: {e}"),
@@ -2053,6 +2028,10 @@ async fn handle_meta_call_tool(
             }
             serde_json::Value::Object(flat)
         };
+
+    if tool_name.starts_with("nyxid__") {
+        return handle_account_tool(state, auth, tool_name, &inner_args, request_id).await;
+    }
 
     // Load user tools with API-key node scope applied so
     // `nyx__call_tool` can't auto-invoke a tool whose only dispatchable
@@ -2095,6 +2074,10 @@ async fn handle_meta_call_tool(
             );
         }
     };
+
+    if let Some(response) = chat_service_gate(state, auth, service, request_id.clone()).await {
+        return response;
+    }
 
     let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &inner_args) {
         Ok(prepared) => prepared,
@@ -2176,6 +2159,7 @@ async fn handle_meta_call_tool(
             "tool": tool_name,
             "service_id": service.service_id,
             "response_status": status,
+            "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
             "via": "nyx__call_tool",
         })),
         auth.ip_address.clone(),
@@ -2244,20 +2228,29 @@ async fn handle_meta_search(
         .matches
         .iter()
         .map(|t| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
                 "inputSchema": t.input_schema,
-            })
+            });
+            if auth.chat.is_some()
+                && let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services)
+            {
+                value["chat_access"] = serde_json::json!(chat_access(auth, service));
+            }
+            value
         })
         .collect();
 
-    let response_json = serde_json::json!({
+    let mut response_json = serde_json::json!({
         "matches": results,
         "count": results.len(),
         "hint": "Use nyx__call_tool to invoke any of these tools by name. \
             Pass the tool name and arguments as shown in the match results.",
     });
+    if auth.chat.is_some() {
+        response_json["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
+    }
 
     let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
     tool_result(request_id, &text, false)
@@ -2273,10 +2266,22 @@ async fn load_all_services_for_meta_tools(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
-        mcp_node_scope(auth),
+        if auth.chat.is_some() {
+            mcp_service::NodeScope::Unrestricted
+        } else {
+            mcp_node_scope(auth)
+        },
     )
     .await?;
-    Ok(filter_services_by_scope(services, auth))
+    if auth.chat.is_some() {
+        let mut services = services;
+        // Reserve the native namespace against a connected service shadowing it.
+        services.retain(|service| service.service_slug != "nyxid");
+        services.push(crate::services::assistant_account_tools::virtual_service());
+        Ok(services)
+    } else {
+        Ok(filter_services_by_scope(services, auth))
+    }
 }
 
 async fn handle_meta_list_connected(
@@ -2298,21 +2303,46 @@ async fn handle_meta_list_connected(
         }
     };
 
-    let result = mcp_service::list_connected_services(&services, query);
+    let mut result = mcp_service::list_connected_services(&services, query);
+    if auth.chat.is_some()
+        && let Some(rows) = result["services"].as_array_mut()
+    {
+        for row in rows {
+            if let Some(service) = services
+                .iter()
+                .find(|service| row["service_id"] == service.service_id)
+            {
+                row["chat_access"] = serde_json::json!(chat_access(auth, service));
+            }
+        }
+        result["chat_access_hint"] = serde_json::json!(CHAT_ACCESS_HINT);
+    }
     let text = serde_json::to_string_pretty(&result).unwrap_or_default();
     tool_result(request_id, &text, false)
 }
 
 async fn handle_meta_discover(
     state: &AppState,
-    user_id: &str,
+    auth: &McpAuthContext,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
     let query = arguments.get("query").and_then(|q| q.as_str());
     let category = arguments.get("category").and_then(|c| c.as_str());
 
-    match mcp_service::discover_services(&state.db, user_id, query, category).await {
+    let result = if auth.is_api_key && !auth.allow_all_services {
+        mcp_service::discover_services_with_scope(
+            &state.db,
+            &auth.user_id,
+            query,
+            category,
+            Some(&auth.allowed_service_ids),
+        )
+        .await
+    } else {
+        mcp_service::discover_services(&state.db, &auth.user_id, query, category).await
+    };
+    match result {
         Ok(result) => {
             let text = serde_json::to_string_pretty(&result).unwrap_or_default();
             tool_result(request_id, &text, false)
@@ -2332,6 +2362,17 @@ async fn handle_meta_connect(
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
 ) -> Response {
+    if auth.chat.is_some() && arguments.get("credential").is_some() {
+        return tool_result(
+            request_id,
+            &serde_json::json!({
+                "error": "credential_entry_excluded",
+                "instructions": "Enter credentials in the NyxID UI, never in chat.",
+            })
+            .to_string(),
+            true,
+        );
+    }
     let service_id = match arguments.get("service_id").and_then(|s| s.as_str()) {
         Some(id) if uuid::Uuid::try_parse(id).is_ok() => id,
         Some(_) => return tool_result(request_id, "Invalid service_id format", true),
@@ -2339,7 +2380,13 @@ async fn handle_meta_connect(
     };
 
     // Scoped API keys can only connect services already in their allow-list.
-    if !auth.allow_all_services && !auth.allowed_service_ids.contains(&service_id.to_string()) {
+    // An assistant chat key acts for its owner and only mints a hosted link the
+    // owner completes in the UI, so it may connect any catalog service; the new
+    // connection still needs its own card before the chat can use it.
+    if auth.chat.is_none()
+        && !auth.allow_all_services
+        && !auth.allowed_service_ids.contains(&service_id.to_string())
+    {
         return tool_result(
             request_id,
             "API key does not have access to this service",
@@ -3349,10 +3396,15 @@ async fn execute_ssh_command_internal(
         user_service_service::find_by_catalog_service_id(&state.db, user_id, service_id)
             .await?
             .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
+    let credential_class = CredentialClass::NodeManaged;
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(auth.billing_principal_user_id(), &user_service.user_id)
+        .resolve_for_execution(
+            auth.billing_principal_user_id(),
+            &user_service.user_id,
+            credential_class,
+        )
         .await?;
     let node_intent = if node_route.fallback_node_ids.is_empty() {
         crate::services::billing::NodeIntent::Node
@@ -3370,7 +3422,7 @@ async fn execute_ssh_command_internal(
         Some(user_service.slug),
         node_intent,
         "ssh".to_string(),
-        CredentialClass::NodeManaged,
+        credential_class,
         BillingMetric::Requests,
         None,
         false,
@@ -3519,10 +3571,6 @@ mod tests {
     use crate::models::org_membership::{
         COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
     };
-    use crate::models::platform_operation::{
-        COLLECTION_NAME as PLATFORM_OPERATIONS, PlatformOperation, PlatformOperationConfig,
-        PlatformOperationName, XSearchConfig,
-    };
     use crate::models::service_approval_config::{
         ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
     };
@@ -3589,17 +3637,19 @@ mod tests {
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
+            chat: None,
+            account_acknowledged: false,
             user_id: "user-1".into(),
             auth_method: AuthMethod::ApiKey,
             acting_client_id: None,
             approval_owner_user_id: None,
             is_api_key: true,
-            is_agent_api_key: true,
             api_key_id: Some("key-1".into()),
             api_key_name: Some("agent".into()),
             allow_all_services: false,
             allow_all_nodes: false,
             allowed_service_ids,
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -3608,220 +3658,77 @@ mod tests {
         }
     }
 
-    #[test]
-    fn platform_operations_accept_only_user_sessions_and_agent_keys() {
-        assert!(platform_operations_allowed(&McpAuthContext::user(
-            "user-1".to_string(),
-            AuthMethod::Session,
-        )));
-        assert!(platform_operations_allowed(&McpAuthContext::user(
-            "user-1".to_string(),
-            AuthMethod::AccessToken,
-        )));
-
-        let agent_key = api_key_auth(Vec::new());
-        assert!(platform_operations_allowed(&agent_key));
-
-        let mut ordinary_key = agent_key;
-        ordinary_key.is_agent_api_key = false;
-        assert!(!platform_operations_allowed(&ordinary_key));
-        for method in [
-            AuthMethod::Delegated,
-            AuthMethod::Relay,
-            AuthMethod::ServiceAccount,
+    #[tokio::test]
+    async fn removed_operation_names_are_unknown_even_with_legacy_database_rows() {
+        let Some(db) = connect_test_database("mcp_retired_operations").await else {
+            return;
+        };
+        db.collection::<mongodb::bson::Document>("platform_operations")
+            .insert_one(doc! { "op": "x_search", "enabled": true })
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for auth in [
+            McpAuthContext::user("user-1".into(), AuthMethod::Session),
+            api_key_auth(vec![]),
         ] {
-            assert!(!platform_operations_allowed(&McpAuthContext::user(
-                "user-1".to_string(),
-                method,
-            )));
+            for name in ["nyx__x_search", "nyx__speak", "nyx__call_and_say"] {
+                for params in [
+                    serde_json::json!({ "name": name, "arguments": {} }),
+                    serde_json::json!({ "name": "nyx__call_tool", "arguments": { "tool_name": name, "arguments_json": "{}" } }),
+                ] {
+                    let request = JsonRpcRequest {
+                        jsonrpc: JSONRPC_VERSION.into(),
+                        id: Some(serde_json::json!(1)),
+                        method: "tools/call".into(),
+                        params: Some(params),
+                    };
+                    let permit = crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                    Some(crate::services::billing::route_inventory::BillingRoutePolicy::Metered(crate::services::billing::BillingIngress::Mcp)), crate::services::billing::BillingIngress::Mcp).unwrap();
+                    let response =
+                        handle_tools_call(&state, &auth, None, &request, false, permit).await;
+                    let body = axum::body::to_bytes(response.into_body(), 65536)
+                        .await
+                        .unwrap();
+                    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(value["result"]["isError"], true);
+                    assert!(
+                        value["result"]["content"][0]["text"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with(&format!("Unknown tool: {name}."))
+                    );
+                }
+            }
+            let response = handle_tools_list(&state, &auth, None, &tools_list_request()).await;
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            for tool in value["result"]["tools"].as_array().unwrap() {
+                assert!(
+                    !["nyx__x_search", "nyx__speak", "nyx__call_and_say"]
+                        .contains(&tool["name"].as_str().unwrap())
+                );
+            }
         }
-    }
-
-    async fn enable_platform_services_for_mcp_tests(db: &mongodb::Database) {
-        crate::services::feature_flag_service::set_platform_override(
-            db,
-            crate::services::feature_flag_service::PLATFORM_SERVICES_FLAG_KEY,
-            &crate::services::feature_flag_service::FlagTarget::Global,
-            true,
-            "mcp-test-actor",
-        )
-        .await
-        .expect("enable platform-services flag for MCP test");
-    }
-
-    fn enabled_x_search_operation() -> PlatformOperation {
-        PlatformOperation {
-            id: uuid::Uuid::new_v4().to_string(),
-            op: PlatformOperationName::XSearch,
-            enabled: true,
-            vendor_service_slug: "platform-x".to_string(),
-            config: PlatformOperationConfig::XSearch(XSearchConfig {
-                max_results_cap: 10,
-            }),
-            updated_at: chrono::Utc::now(),
-            updated_by: "mcp-test-actor".to_string(),
-        }
+        db.drop().await.unwrap();
     }
 
     fn tools_list_request() -> JsonRpcRequest {
         JsonRpcRequest {
-            jsonrpc: JSONRPC_VERSION.to_string(),
+            jsonrpc: JSONRPC_VERSION.into(),
             id: Some(serde_json::json!(1)),
-            method: "tools/list".to_string(),
+            method: "tools/list".into(),
             params: None,
         }
-    }
-
-    #[tokio::test]
-    async fn mcp_tools_list_hides_platform_operations_when_flag_is_off() {
-        let Some(db) = connect_test_database("mcp_platform_ops_flag_off").await else {
-            eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
-            return;
-        };
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-            .insert_one(enabled_x_search_operation())
-            .await
-            .expect("insert enabled platform operation");
-        let state = test_app_state(db);
-        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
-        let response = handle_tools_list(&state, &auth, None, &tools_list_request()).await;
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("read MCP tools/list response");
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("decode MCP tools/list response");
-        let tools = payload["result"]["tools"]
-            .as_array()
-            .expect("tools/list result contains tools");
-        assert!(!tools.iter().any(|tool| tool["name"] == "nyx__x_search"));
-        assert!(!tools.iter().any(|tool| tool["name"] == "nyx__speak"));
-        assert!(!tools.iter().any(|tool| tool["name"] == "nyx__call_and_say"));
-    }
-
-    #[tokio::test]
-    async fn mcp_tools_list_publishes_platform_operations_when_flag_is_on() {
-        let Some(db) = connect_test_database("mcp_platform_ops_flag_on").await else {
-            eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
-            return;
-        };
-        enable_platform_services_for_mcp_tests(&db).await;
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-            .insert_one(enabled_x_search_operation())
-            .await
-            .expect("insert enabled platform operation");
-        let state = test_app_state(db);
-        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
-        let response = handle_tools_list(&state, &auth, None, &tools_list_request()).await;
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("read MCP tools/list response");
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("decode MCP tools/list response");
-        let tools = payload["result"]["tools"]
-            .as_array()
-            .expect("tools/list result contains tools");
-        assert!(tools.iter().any(|tool| tool["name"] == "nyx__x_search"));
-    }
-
-    #[tokio::test]
-    async fn mcp_platform_operations_reject_guessed_names_when_flag_is_off() {
-        let Some(db) = connect_test_database("mcp_platform_ops_dispatch_off").await else {
-            eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
-            return;
-        };
-        let state = test_app_state(db);
-        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
-
-        let responses = [
-            handle_platform_x_search(
-                &state,
-                &auth,
-                &serde_json::json!({}),
-                Some(serde_json::json!(1)),
-            )
-            .await,
-            handle_platform_speak(
-                &state,
-                &auth,
-                &serde_json::json!({}),
-                Some(serde_json::json!(2)),
-            )
-            .await,
-            handle_platform_call_and_say(
-                &state,
-                &auth,
-                &serde_json::json!({}),
-                Some(serde_json::json!(3)),
-            )
-            .await,
-        ];
-        for response in responses {
-            let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
-                .await
-                .expect("read MCP tool response");
-            let payload: serde_json::Value =
-                serde_json::from_slice(&body).expect("decode MCP tool response");
-            assert_eq!(payload["result"]["isError"], true);
-            assert_eq!(
-                payload["result"]["content"][0]["text"],
-                "Platform operation is not available"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn mcp_platform_dispatch_preserves_argument_validation_when_flag_is_on() {
-        let Some(db) = connect_test_database("mcp_platform_ops_dispatch_on").await else {
-            eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
-            return;
-        };
-        enable_platform_services_for_mcp_tests(&db).await;
-        let state = test_app_state(db);
-        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
-        let response = handle_platform_x_search(
-            &state,
-            &auth,
-            &serde_json::json!({}),
-            Some(serde_json::json!(1)),
-        )
-        .await;
-        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
-            .await
-            .expect("read MCP tool response");
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("decode MCP tool response");
-        assert_eq!(payload["result"]["isError"], true);
-        assert!(
-            payload["result"]["content"][0]["text"]
-                .as_str()
-                .is_some_and(|text| text.starts_with("Invalid platform operation arguments:"))
-        );
-    }
-
-    #[tokio::test]
-    async fn speech_tool_result_uses_mcp_audio_content() {
-        let response = audio_tool_result(Some(serde_json::json!(17)), b"mp3-bytes");
-        let body = axum::body::to_bytes(response.into_body(), 4096)
-            .await
-            .expect("read MCP audio response");
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("decode MCP audio response");
-        let content = &payload["result"]["content"][0];
-
-        assert_eq!(payload["id"], 17);
-        assert_eq!(payload["result"]["isError"], false);
-        assert_eq!(content["type"], "audio");
-        assert_eq!(content["mimeType"], "audio/mpeg");
-        assert_eq!(
-            content["data"],
-            base64::engine::general_purpose::STANDARD.encode(b"mp3-bytes")
-        );
-        assert!(content.get("text").is_none());
     }
 
     fn user_managed(id: &str) -> McpToolService {
         McpToolService {
             workspace_destinations_pending: false,
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: id.into(),
             service_name: id.into(),
             service_slug: id.into(),
@@ -3847,6 +3754,8 @@ mod tests {
     fn platform(id: &str) -> McpToolService {
         McpToolService {
             workspace_destinations_pending: false,
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: id.into(),
             service_name: id.into(),
             service_slug: id.into(),
@@ -5219,3 +5128,69 @@ mod tests {
 #[cfg(test)]
 #[path = "workspace_mcp_tests.rs"]
 mod workspace_mcp_tests;
+
+#[cfg(test)]
+mod curation_auth_regressions {
+    use super::*;
+    use crate::handlers::curation_tests::{fixture, grant_input, token};
+    use crate::services::{curation_grant_service, service_account_service};
+
+    #[tokio::test]
+    async fn curation_conversion_denies_mcp_bearer_and_preexisting_session() {
+        let f = fixture("curation_mcp_conversion", false).await;
+        let bearer = token(&f, None).await;
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_ok());
+        let sid = f
+            .state
+            .mcp_sessions
+            .create_with_proxy_access(&f.sa.id, true)
+            .await
+            .unwrap()
+            .unwrap();
+        curation_grant_service::issue(&f.state.db, &f.sa.id, &f.owner, grant_input(&f.service.id))
+            .await
+            .unwrap();
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
+        let fresh = token(&f, None).await;
+        headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
+        headers.remove("authorization");
+        headers.insert("mcp-session-id", sid.parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn general_sa_mcp_checks_missing_token_and_generation() {
+        let f = fixture("curation_mcp_generation", false).await;
+        let bearer = token(&f, None).await;
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_ok());
+        let claims = jwt::verify_token(&f.state.jwt_keys, &f.state.config, &bearer).unwrap();
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::service_account_token::COLLECTION_NAME,
+            )
+            .delete_one(doc! {"jti":claims.jti})
+            .await
+            .unwrap();
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
+        let fresh = token(&f, None).await;
+        headers.insert("authorization", format!("Bearer {fresh}").parse().unwrap());
+        service_account_service::rotate_secret(&f.state.db, &f.sa.id, true)
+            .await
+            .unwrap();
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
+    }
+}
+
+#[cfg(test)]
+#[path = "mcp_chat_authority_tests.rs"]
+mod chat_authority_tests;
+
+#[cfg(test)]
+#[path = "mcp_config_routes_tests.rs"]
+mod config_routes_tests;

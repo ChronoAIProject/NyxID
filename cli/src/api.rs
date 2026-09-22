@@ -555,6 +555,33 @@ impl ApiClient {
         Self::handle_response(resp, path).await
     }
 
+    /// Delete an item whose API returns either legacy 204 or a JSON result.
+    pub async fn delete_optional<T: DeserializeOwned>(&mut self, path: &str) -> Result<Option<T>> {
+        let url = format!("{}{path}", self.base_url);
+        let mut resp = self
+            .client
+            .delete(&url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .with_context(|| format!("DELETE {path} failed"))?;
+
+        self.reject_agent_key_unauthorized(&resp)?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
+            resp = self
+                .client
+                .delete(&url)
+                .bearer_auth(&self.access_token)
+                .send()
+                .await
+                .with_context(|| format!("DELETE {path} failed (retry)"))?;
+        }
+        if resp.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        Self::handle_response(resp, path).await.map(Some)
+    }
+
     #[allow(dead_code)]
     pub async fn post_empty<B: Serialize>(&mut self, path: &str, body: &B) -> Result<()> {
         let url = format!("{}{path}", self.base_url);

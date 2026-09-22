@@ -71,10 +71,7 @@ pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;
 pub mod platform_credential;
-pub mod platform_op_usage;
-pub mod platform_operation;
 pub mod platform_settings;
-pub mod platform_vendor_template;
 pub mod provider_config;
 pub mod pushed_authorization_request;
 pub mod refresh_token;
@@ -106,3 +103,16 @@ pub mod user_provider_token;
 pub mod user_service;
 pub mod user_service_connection;
 pub mod ws_frame_injection;
+
+pub mod assistant_acknowledgement;
+pub mod assistant_agent_credential;
+pub mod assistant_conversation;
+pub mod assistant_message;
+pub mod catalog_skill_revision;
+pub mod channel_email;
+
+pub mod channel_delivery;
+
+pub mod usage_rollup_daily;
+pub mod usage_rollup_hourly;
+pub mod usage_rollup_state;

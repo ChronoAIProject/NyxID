@@ -31,6 +31,7 @@ async fn load_readable_endpoint(
     state: &AppState,
     actor: &str,
     endpoint_id: &str,
+    api_key_scope: Option<&[String]>,
 ) -> AppResult<UserEndpoint> {
     let endpoint = state
         .db
@@ -43,7 +44,7 @@ async fn load_readable_endpoint(
     if !access.can_read() {
         return Err(AppError::NotFound("Endpoint not found".to_string()));
     }
-    let backing_service_ids = user_service_service::user_service_ids_for_endpoint(
+    let mut backing_service_ids = user_service_service::user_service_ids_for_endpoint(
         &state.db,
         &endpoint.user_id,
         &endpoint.id,
@@ -52,6 +53,15 @@ async fn load_readable_endpoint(
     if !access.allows_any_resource(&backing_service_ids) {
         return Err(AppError::NotFound("Endpoint not found".to_string()));
     }
+    // Both authorities must cover the same backing service; separate matches
+    // on a shared endpoint/credential must not combine disjoint scopes.
+    if api_key_scope.is_some() {
+        backing_service_ids.retain(|id| access.allows_resource(id));
+    }
+    crate::services::key_service::ensure_api_key_service_scope(
+        api_key_scope,
+        &backing_service_ids,
+    )?;
     Ok(endpoint)
 }
 
@@ -63,7 +73,7 @@ async fn resolve_endpoint_write_owner(
     actor: &str,
     endpoint_id: &str,
 ) -> AppResult<String> {
-    let endpoint = load_readable_endpoint(state, actor, endpoint_id).await?;
+    let endpoint = load_readable_endpoint(state, actor, endpoint_id, None).await?;
     let access = org_service::resolve_owner_access(&state.db, actor, &endpoint.user_id).await?;
     if !access.can_write() {
         return Err(AppError::OrgRoleInsufficient(
@@ -194,7 +204,8 @@ pub struct EndpointListQuery {
 )]
 /// GET /api/v1/endpoints
 ///
-/// Defaults to listing the caller's personal endpoints. Pass
+/// API-key readable, filtered to allowed backing services for restricted keys.
+/// Org-owned keys act as the org. Defaults to the actor's own endpoints. Pass
 /// `?org_id=<id>` to list endpoints owned by an org (the caller must be
 /// an admin of that org). This is how admins discover orphan endpoints
 /// that block org deletion (issue #365).
@@ -204,18 +215,32 @@ pub async fn list_endpoints(
     Query(query): Query<EndpointListQuery>,
 ) -> AppResult<Json<EndpointListResponse>> {
     let actor = auth_user.user_id.to_string();
-    let user_id_str = if let Some(target_org_id) = query.org_id.as_deref() {
+    let (user_id_str, access) = if let Some(target_org_id) = query.org_id.as_deref() {
         let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
         if !access.can_write() {
             return Err(AppError::OrgRoleInsufficient(
                 "admin access to the target org is required to list its endpoints".to_string(),
             ));
         }
-        target_org_id.to_string()
+        (target_org_id.to_string(), access)
     } else {
-        actor
+        (actor, org_service::OwnerAccess::Direct)
     };
-    let endpoints = user_endpoint_service::list_endpoints(&state.db, &user_id_str).await?;
+    let mut endpoints = user_endpoint_service::list_endpoints(&state.db, &user_id_str).await?;
+    if let Some(scope) = auth_user.api_key_service_scope() {
+        let scope: Vec<String> = scope
+            .iter()
+            .filter(|id| access.allows_resource(id))
+            .cloned()
+            .collect();
+        let references = user_service_service::inventory_references_for_services(
+            &state.db,
+            &user_id_str,
+            &scope,
+        )
+        .await?;
+        endpoints.retain(|endpoint| references.endpoint_ids.contains(&endpoint.id));
+    }
     let auto_connected_ids =
         user_service_service::auto_connected_endpoint_ids(&state.db, &user_id_str).await?;
     let items = endpoints
@@ -382,6 +407,8 @@ pub async fn delete_endpoint(
     tag = "Endpoints"
 )]
 /// GET /api/v1/endpoints/{endpoint_id}/authorization
+/// API-key readable under owner/membership ACLs and backing-service scope;
+/// org-owned keys read their own endpoints directly. No provisioning.
 ///
 /// Same ACL as the endpoint detail sibling, projected to the properties an
 /// assistant-action postcondition reader consumes. Delete-shaped verbs prove
@@ -392,7 +419,13 @@ pub async fn get_endpoint_authorization(
     Path(endpoint_id): Path<String>,
 ) -> AppResult<Json<EndpointAuthorizationEvidenceResponse>> {
     let actor = auth_user.user_id.to_string();
-    let endpoint = load_readable_endpoint(&state, &actor, &endpoint_id).await?;
+    let endpoint = load_readable_endpoint(
+        &state,
+        &actor,
+        &endpoint_id,
+        auth_user.api_key_service_scope(),
+    )
+    .await?;
     let auto_connected =
         user_service_service::auto_connected_endpoint_ids(&state.db, &endpoint.user_id)
             .await?
@@ -471,13 +504,21 @@ fn parsed_endpoint_to_response(p: openapi_parser::ParsedEndpoint) -> UserEndpoin
     tag = "Endpoints"
 )]
 /// GET /api/v1/endpoints/{endpoint_id}/openapi-endpoints
+/// API-key readable under owner/membership ACLs and backing-service scope;
+/// org-owned keys read their own endpoints directly. No provisioning.
 pub async fn list_openapi_endpoints(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(endpoint_id): Path<String>,
 ) -> AppResult<Json<UserEndpointOperationsResponse>> {
     let actor = auth_user.user_id.to_string();
-    let endpoint = load_readable_endpoint(&state, &actor, &endpoint_id).await?;
+    let endpoint = load_readable_endpoint(
+        &state,
+        &actor,
+        &endpoint_id,
+        auth_user.api_key_service_scope(),
+    )
+    .await?;
 
     let Some(ref spec_url) = endpoint.openapi_spec_url else {
         return Ok(Json(UserEndpointOperationsResponse {

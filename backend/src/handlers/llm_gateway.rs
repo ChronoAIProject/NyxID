@@ -62,6 +62,7 @@ fn resale_usage_from_optional_reported(
             metric,
             quantity: fallback_bytes.max(0),
         }),
+        _ => None,
     }
 }
 
@@ -69,11 +70,7 @@ pub(crate) fn llm_platform_usage(
     usage: Option<&llm_usage_service::ReportedLlmUsage>,
     fallback_bytes: i64,
 ) -> PlatformUsage {
-    PlatformUsage::llm_completion(
-        fallback_bytes,
-        llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
-    )
-    .with_token_breakdown(usage.map(llm_usage_service::ReportedLlmUsage::token_breakdown))
+    llm_usage_service::platform_usage(usage, fallback_bytes, true)
 }
 
 pub(crate) fn enforce_llm_billing_classification(
@@ -369,10 +366,20 @@ pub async fn llm_proxy_request(
     let billing_resource_owner_id = owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmProvider,
@@ -385,16 +392,12 @@ pub async fn llm_proxy_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(
-            resolved_via_user_service,
-            master_credential,
-            credential_source.as_deref(),
-            &target,
-        ),
+        credential_class,
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
+    let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
     let metered = state.billing.open(&billing_ctx).await?;
 
     // Resolve credentials for injection. The new UserService path bakes the
@@ -800,10 +803,20 @@ pub async fn gateway_request(
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmGateway,
@@ -816,16 +829,12 @@ pub async fn gateway_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(
-            resolved_via_user_service,
-            master_credential,
-            credential_source.as_deref(),
-            &target,
-        ),
+        credential_class,
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
+    let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
     let metered = state.billing.open(&billing_ctx).await?;
 
     // Resolve delegated credentials. When the target came from the new
@@ -1266,12 +1275,15 @@ async fn build_filtered_response(
                             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                             while let Some(event) = parse_next_sse_event(&mut buffer) {
-                                if let Some((usage, mode)) =
+                                if let Some((mut usage, mode)) =
                                     llm_usage_service::extract_reported_usage_from_sse_event(
                                         event.event_type.as_deref(),
                                         &event.data,
                                     )
                                 {
+                                    if !status.is_success() {
+                                        usage.images = 0;
+                                    }
                                     accumulator.observe(usage, mode);
                                 }
                             }
@@ -1361,7 +1373,11 @@ async fn build_filtered_response(
         let mut model = None;
         if let Some(context) = usage_context
             && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
-            && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+            && let Some(usage) = llm_usage_service::extract_reported_usage_for_path(
+                &json,
+                &context.path,
+                status.is_success(),
+            )
         {
             model = context.model.clone();
             llm_usage_service::log_reported_usage_async(context, usage.clone());
@@ -2006,6 +2022,7 @@ mod tests {
             cached_tokens: 3,
             cache_creation_tokens: 0,
             reported_cost: None,
+            ..Default::default()
         };
 
         let platform = llm_platform_usage(Some(&usage), 10_000);

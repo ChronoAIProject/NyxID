@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.21.1"
+version = "0.29.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -46,10 +46,10 @@ p256 = "0.13"
 totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 validator = { version = "0.20", features = ["derive"] }
 governor = "0.10"
-reqwest = { version = "0.12.28", features = ["json", "stream", "rustls-tls", "http2"], default-features = false }
+reqwest = { version = "0.12.28", features = ["json", "stream", "rustls-tls", "http2", "multipart"], default-features = false }
 utoipa = { version = "5.4", features = ["axum_extras", "uuid", "chrono"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
-bytes = "1.11"
+bytes = { version = "1.11", features = ["serde"] }
 anyhow = "1.0.101"
 thiserror = "2.0.18"
 dotenvy = "0.15.7"
@@ -75,6 +75,7 @@ ssh-key = { version = "0.6.7", features = ["ed25519", "getrandom"] }
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
 deunicode = "1.6"
 nyxid-cloud-auth = { path = "../cloud-auth" }
+nyxid-service-adapters = { path = "../service-adapters" }
 http = "1.4"
 http-body-util = "0.1"
 # Direct rustls dep so we can install a default CryptoProvider at startup.
@@ -97,6 +98,9 @@ axum-extra = { version = "0.12.6", features = ["form", "query"] }
 # TLS echo proxy for multi-origin routing and redirect acceptance tests.
 rcgen = "0.14"
 tokio-rustls = "0.26"
+# Virtual time for WebSocket lifecycle deadline regressions.
+tokio = { workspace = true, features = ["test-util"] }
+nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }
 wiremock = "0.6"
 # Used only by `test_utils` (compiled under `#[cfg(test)]`) to register an
 # `atexit` hook that drops the per-test databases at process exit. Already in

@@ -88,7 +88,7 @@ pub struct ConversationItem {
     pub agent_api_key_id: String,
     pub default_agent: bool,
     pub allow_agent_initiated: bool,
-    pub capabilities: crate::services::channel_platform::OutboundCapabilities,
+    pub capabilities: crate::services::channel_platform::ChannelCapabilities,
     pub is_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message_at: Option<String>,
@@ -599,6 +599,8 @@ fn default_per_page() -> u64 {
 /// here. Per the NyxID pure-passthrough principle, message content is no
 /// longer persisted.
 pub struct ConversationMessageItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<super::channel_relay::DeliveryItem>,
     pub id: String,
     pub direction: String,
     pub platform: String,
@@ -634,17 +636,32 @@ pub async fn list_conversation_messages(
     // Resolve owner access on the conversation itself. Read-level access
     // (any active member of the owning org) is sufficient to browse
     // message metadata.
-    let (_owner_id, _conversation) =
+    let (owner_id, conversation) =
         resolve_conversation_owner(&state, &actor, &conversation_id, false).await?;
 
-    let per_page = params.per_page.min(100);
-    let (messages, total) =
-        channel_relay_service::list_messages(&state.db, &conversation_id, params.page, per_page)
-            .await?;
+    let per_page = params.per_page.clamp(1, 100);
+    let (messages, total) = channel_relay_service::list_messages(
+        &state.db,
+        &conversation_id,
+        &owner_id,
+        params.page,
+        per_page,
+    )
+    .await?;
 
+    let mut delivery = crate::services::channel_delivery_service::summaries(
+        &state.db,
+        &messages,
+        &owner_id,
+        conversation.platform_conversation_type == "private",
+    )
+    .await?;
     let items = messages
         .into_iter()
         .map(|m| ConversationMessageItem {
+            delivery: delivery
+                .remove(&m.id)
+                .map(super::channel_relay::DeliveryItem::from),
             id: m.id,
             direction: m.direction,
             platform: m.platform,

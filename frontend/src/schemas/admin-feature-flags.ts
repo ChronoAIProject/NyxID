@@ -54,17 +54,19 @@ export const adminFeatureFlagSchema = z.object({
 export type AdminFeatureFlag = z.infer<typeof adminFeatureFlagSchema>;
 
 /**
- * Full replace: a blank or omitted field clears that side of the metadata, and
- * clearing both restores the code-declared description with no owner.
+ * Sparse PATCH: omission preserves, null/blank clears.
  */
-export const updateAdminFeatureFlagMetadataRequestSchema = z.object({
-  description: z
-    .string()
-    .trim()
-    .max(MAX_FEATURE_FLAG_DESCRIPTION_LENGTH)
-    .nullable(),
-  owner: z.string().trim().max(MAX_FEATURE_FLAG_OWNER_LENGTH).nullable(),
-});
+export const updateAdminFeatureFlagMetadataRequestSchema = z
+  .object({
+    description: z
+      .string()
+      .trim()
+      .max(MAX_FEATURE_FLAG_DESCRIPTION_LENGTH)
+      .nullable(),
+    owner: z.string().trim().max(MAX_FEATURE_FLAG_OWNER_LENGTH).nullable(),
+  })
+  .partial()
+  .strict();
 export type UpdateAdminFeatureFlagMetadataRequest = z.infer<
   typeof updateAdminFeatureFlagMetadataRequestSchema
 >;

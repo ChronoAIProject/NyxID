@@ -1265,7 +1265,7 @@ async fn approval_target(
         mcp_service::McpToolSource::UserManaged {
             user_service_id, ..
         } => user_service_id,
-        mcp_service::McpToolSource::Platform { .. } => {
+        mcp_service::McpToolSource::Platform { .. } | mcp_service::McpToolSource::Internal => {
             return Err(AppError::BadRequest(
                 "exact_service_requires_user_service".to_string(),
             ));
@@ -1790,6 +1790,8 @@ mod tests {
     ) -> mcp_service::McpToolService {
         mcp_service::McpToolService {
             workspace_destinations_pending: false,
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: catalog_service_id.to_string(),
             service_name: "Exact test service".to_string(),
             service_slug: slug.to_string(),
@@ -2415,6 +2417,8 @@ mod tests {
     fn exact_view_membership_rejects_only_delegated_generic_targets() {
         let generic_service = mcp_service::McpToolService {
             workspace_destinations_pending: false,
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: "generic-service".to_string(),
             service_name: "Generic Service".to_string(),
             service_slug: "generic-service".to_string(),
@@ -2570,6 +2574,8 @@ mod tests {
         let delegated = caller();
         let generic_service = mcp_service::McpToolService {
             workspace_destinations_pending: false,
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: "generic-service".to_string(),
             service_name: "Generic Service".to_string(),
             service_slug: "generic-service".to_string(),

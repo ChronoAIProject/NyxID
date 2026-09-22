@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { CHANNEL_PLATFORMS } from "@/lib/channel-platforms";
+import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import {
   openOAuthPopup,
   openOAuthChannel,
@@ -37,7 +37,8 @@ export function ManagedOAuthConnect({
   const [error, setError] = useState<string | null>(null);
   const cleanup = useRef<(() => void) | null>(null);
   const queryClient = useQueryClient();
-  const descriptor = CHANNEL_PLATFORMS[platform];
+  const { getPlatform } = useChannelPlatformViews();
+  const descriptor = getPlatform(platform);
   useEffect(() => () => cleanup.current?.(), []);
 
   function connect() {
@@ -179,6 +180,7 @@ export function ManagedOAuthConnect({
 }
 
 export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
+  const { getPlatform } = useChannelPlatformViews();
   const bootstrap = useManagedOnboarding(bot.platform);
   return (
     <DetailSection title="Connected account">
@@ -188,6 +190,8 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         value={bot.connection_id ?? "Missing"}
         copyable
       />
+      <DetailRow label="Message delivery" value={bot.webhook_registered ? "Real-time webhooks" : "Polling"} />
+      {!bot.webhook_registered && <>
       <DetailRow
         label="Last polled"
         value={bot.last_polled_at ?? "Not yet polled"}
@@ -202,8 +206,9 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         label="Consecutive errors"
         value={String(bot.poll_error_count ?? 0)}
       />
+      </>}
       <div className="space-y-3 py-3">
-        {bot.last_poll_notice && (
+        {!bot.webhook_registered && bot.last_poll_notice && (
           <p role="status" className="text-xs text-warning">{bot.last_poll_notice}</p>
         )}
         {bot.error && <ErrorBanner message={bot.error} />}
@@ -226,7 +231,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         {bootstrap.data && !bootstrap.data.available && (
           <p className="text-xs text-muted-foreground">
             Account connection is not available until an admin configures{" "}
-            {CHANNEL_PLATFORMS[bot.platform].label}.
+            {getPlatform(bot.platform).label}.
           </p>
         )}
       </div>

@@ -3,6 +3,31 @@ use serde::{Deserialize, Serialize};
 
 use super::bson_datetime;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAccountPurpose {
+    #[default]
+    General,
+    Curation,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CurationGrant {
+    pub id: String,
+    pub service_ids: Vec<String>,
+    pub ornn_proxy_service_id: Option<String>,
+    pub issued_by: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub issued_at: DateTime<Utc>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub expires_at: Option<DateTime<Utc>>,
+    pub max_writes: i64,
+    pub window_seconds: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub window_started_at: DateTime<Utc>,
+    pub writes_used: i64,
+}
+
 pub const COLLECTION_NAME: &str = "service_accounts";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,6 +62,15 @@ pub struct ServiceAccount {
 
     /// Whether this service account can authenticate.
     pub is_active: bool,
+
+    #[serde(default)]
+    pub platform_protected: bool,
+    #[serde(default)]
+    pub purpose: ServiceAccountPurpose,
+    #[serde(default)]
+    pub curation_grant: Option<CurationGrant>,
+    #[serde(default)]
+    pub credential_generation: i64,
 
     /// Optional per-account rate limit override (requests per second).
     pub rate_limit_override: Option<u64>,
@@ -83,6 +117,10 @@ mod tests {
             description: Some("Runs CI/CD tasks".to_string()),
             client_id: "sa_abcdef0123456789abcdef01".to_string(),
             client_secret_hash: "deadbeef".repeat(8),
+            platform_protected: false,
+            purpose: crate::models::service_account::ServiceAccountPurpose::General,
+            curation_grant: None,
+            credential_generation: 0,
             secret_prefix: "sas_abcd".to_string(),
             role_ids: vec![],
             allowed_scopes: "proxy:* llm:proxy".to_string(),

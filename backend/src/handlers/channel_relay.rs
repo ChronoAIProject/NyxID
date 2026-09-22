@@ -34,9 +34,11 @@ use crate::models::notification_channel::{
 use crate::models::reply_token_use::{COLLECTION_NAME as REPLY_TOKEN_USES, ReplyTokenUse};
 use crate::mw::auth::{AuthMethod, AuthUser, OptionalAuthUser};
 use crate::services::{
-    audit_service, channel_bot_service,
+    audit_service, channel_bot_service, channel_media_service,
     channel_platform::{OutboundEdit, OutboundReply},
-    channel_relay_service, channel_send_service, org_service,
+    channel_relay_service,
+    channel_send_service::{self, is_concrete_platform_address},
+    org_service,
 };
 use crate::telemetry::{
     TelemetryContext, TelemetryEvent, emit_event, hash_short_id, should_sample_event,
@@ -63,6 +65,8 @@ pub struct AsyncReplyBody {
     pub text: Option<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub attachments: Vec<crate::services::channel_platform::OutboundAttachment>,
 }
 
 impl std::fmt::Debug for AsyncReplyBody {
@@ -96,7 +100,7 @@ pub struct AgentConversationItem {
     pub platform_conversation_type: String,
     pub addressable: bool,
     pub allow_agent_initiated: bool,
-    pub capabilities: crate::services::channel_platform::OutboundCapabilities,
+    pub capabilities: crate::services::channel_platform::ChannelCapabilities,
     pub last_message_at: Option<String>,
 }
 
@@ -157,6 +161,9 @@ pub struct UpdateReplyResponse {
 /// keep their own conversation state.
 #[derive(Debug, Serialize)]
 pub struct MessageItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryItem>,
+    pub attachments: Vec<MessageAttachmentItem>,
     pub id: String,
     pub direction: String,
     pub platform: String,
@@ -172,6 +179,68 @@ pub struct MessageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<String>,
     pub created_at: String,
+}
+
+/// Metadata-only projection of an authorized WhatsApp outbound record.
+#[derive(Debug, Serialize)]
+pub struct DeliveryItem {
+    pub status: &'static str,
+    pub complete: bool,
+    pub expected_components: Option<u32>,
+    pub recipient_only: bool,
+    pub failure_code: Option<u32>,
+    pub components: Vec<DeliveryComponentItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeliveryComponentItem {
+    pub platform_message_id: String,
+    pub status: &'static str,
+    pub sent_at: Option<String>,
+    pub delivered_at: Option<String>,
+    pub read_at: Option<String>,
+    pub played_at: Option<String>,
+    pub failed_at: Option<String>,
+    pub error_codes: Vec<i64>,
+}
+
+impl From<crate::services::channel_delivery_service::DeliverySummary> for DeliveryItem {
+    fn from(summary: crate::services::channel_delivery_service::DeliverySummary) -> Self {
+        Self {
+            status: summary.status,
+            complete: summary.complete,
+            expected_components: summary.expected_components,
+            recipient_only: summary.recipient_only,
+            failure_code: summary.failure_code,
+            components: summary
+                .components
+                .into_iter()
+                .map(|part| DeliveryComponentItem {
+                    platform_message_id: part.id,
+                    status: part.status,
+                    sent_at: part.times.sent_at.map(|time| time.to_rfc3339()),
+                    delivered_at: part.times.delivered_at.map(|time| time.to_rfc3339()),
+                    read_at: part.times.read_at.map(|time| time.to_rfc3339()),
+                    played_at: part.times.played_at.map(|time| time.to_rfc3339()),
+                    failed_at: part.times.failed_at.map(|time| time.to_rfc3339()),
+                    error_codes: part.error_codes,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct MessageAttachmentItem {
+    pub content_type: String,
+    pub url: String,
+    pub download_url: String,
+    pub platform_message_id: Option<String>,
+    pub file_key: Option<String>,
+    pub image_key: Option<String>,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,7 +275,36 @@ fn validate_reply_for_adapter(
     body: &AsyncReplyBody,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
 ) -> AppResult<()> {
-    if body.text.as_deref().is_some_and(|text| !text.is_empty())
+    if body.attachments.len() > 10 {
+        return Err(AppError::ValidationError(
+            "At most 10 attachments are allowed".into(),
+        ));
+    }
+    let supported = adapter.media_capabilities().outbound;
+    for attachment in &body.attachments {
+        if !supported.contains(&attachment.kind) {
+            return Err(AppError::ValidationError(format!(
+                "Unsupported media kind {}; supported kinds: {}",
+                attachment.kind.as_str(),
+                supported
+                    .iter()
+                    .map(|kind| kind.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        if attachment.mime_type.as_deref().is_some_and(|mime| {
+            reqwest::multipart::Part::bytes(Vec::new())
+                .mime_str(mime)
+                .is_err()
+        }) {
+            return Err(AppError::ValidationError(
+                "Invalid attachment MIME type".into(),
+            ));
+        }
+    }
+    if !body.attachments.is_empty()
+        || body.text.as_deref().is_some_and(|text| !text.is_empty())
         || body
             .metadata
             .as_ref()
@@ -250,8 +348,28 @@ fn is_device_reply_forbidden(original_platform: &str, conversation_platform: &st
     original_platform == "device" || conversation_platform == "device"
 }
 
-fn message_to_item(msg: &crate::models::channel_message::ChannelMessage) -> MessageItem {
+fn message_to_item(
+    msg: &crate::models::channel_message::ChannelMessage,
+    base_url: &str,
+) -> MessageItem {
     MessageItem {
+        delivery: None,
+        attachments: msg
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(index, a)| MessageAttachmentItem {
+                content_type: a.content_type.clone(),
+                url: a.provider_ref.clone(),
+                download_url: channel_media_service::download_url(base_url, &msg.id, index),
+                platform_message_id: a.platform_message_id.clone(),
+                file_key: a.file_key.clone(),
+                image_key: a.image_key.clone(),
+                filename: a.filename.clone(),
+                mime_type: a.mime_type.clone(),
+                size_bytes: a.size_bytes,
+            })
+            .collect(),
         id: msg.id.clone(),
         direction: msg.direction.clone(),
         platform: msg.platform.clone(),
@@ -487,10 +605,18 @@ async fn resolve_reply_token_context(
     token: &str,
     body: &AsyncReplyRequest,
 ) -> AppResult<ReplyRequestContext> {
-    let claims = jwt::validate_relay_reply_token(&state.jwt_keys, &state.config, token)?;
+    resolve_reply_token_message_context(state, token, &body.message_id, true).await
+}
 
-    let original = channel_relay_service::get_message(&state.db, &body.message_id).await?;
-    if claims.inbound_message_id != body.message_id {
+async fn resolve_reply_token_message_context(
+    state: &AppState,
+    token: &str,
+    message_id: &str,
+    consume: bool,
+) -> AppResult<ReplyRequestContext> {
+    let claims = jwt::validate_relay_reply_token(&state.jwt_keys, &state.config, token)?;
+    let original = channel_relay_service::get_message(&state.db, message_id).await?;
+    if claims.inbound_message_id != message_id || original.direction != "inbound" {
         return Err(AppError::Unauthorized(
             "Reply token message_id mismatch".to_string(),
         ));
@@ -510,14 +636,14 @@ async fn resolve_reply_token_context(
         return Err(AppError::DeviceChannelReplyNotAllowed);
     }
 
-    // Unlike the API-key branch we do NOT re-check
-    // `conversation.agent_api_key_id` against `claims.api_key_id`. The token
+    // Legacy chat tokens do not re-check conversation assignment. The token
     // was minted for this specific inbound message; allowing the agent who
     // received that callback to complete its reply — even if the
     // conversation has since been reassigned — avoids dropping in-flight
     // LLM responses. Scope narrowness is enforced by the token's other
     // bindings (conversation_id, inbound_message_id) and by the live
-    // `api_key.is_active` re-check below.
+    // `api_key.is_active` re-check below. Adapters with durable reply attempts
+    // additionally revalidate the current route before accepting a retry.
     let api_key = load_active_api_key(state, &claims.api_key_id).await?;
     let bot = load_active_bot(state, &original).await?;
     validate_message_bot_scope(&original, &conversation, &bot)?;
@@ -528,7 +654,18 @@ async fn resolve_reply_token_context(
         ));
     }
 
-    consume_reply_token_use(state, &claims).await?;
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    if adapter.persists_reply_attempt() {
+        if original.agent_api_key_id.as_deref() != Some(&claims.api_key_id)
+            || conversation.agent_api_key_id != claims.api_key_id
+        {
+            return Err(AppError::Unauthorized(
+                "Email reply route has been reassigned".into(),
+            ));
+        }
+    } else if consume {
+        consume_reply_token_use(state, &claims).await?;
+    }
 
     Ok(ReplyRequestContext {
         original,
@@ -561,6 +698,9 @@ async fn resolve_api_key_reply_context(
     body: &AsyncReplyRequest,
 ) -> AppResult<ReplyRequestContext> {
     reject_relay_auth(auth_user)?;
+    if auth_user.auth_method != AuthMethod::ApiKey {
+        return Err(AppError::Forbidden("Agent API key required".into()));
+    }
 
     let original = channel_relay_service::get_message(&state.db, &body.message_id).await?;
     let conversation = load_active_conversation(state, &original.conversation_id).await?;
@@ -575,6 +715,7 @@ async fn resolve_api_key_reply_context(
         ));
     }
 
+    load_active_api_key(state, caller_api_key_id).await?;
     Ok(ReplyRequestContext {
         original,
         conversation,
@@ -874,11 +1015,17 @@ async fn deliver_initiated_message(
             "idempotency_key must contain 1 to 128 characters".to_string(),
         ));
     }
+    let attachment_kinds: Vec<_> = body.message.attachments.iter().map(|a| a.kind).collect();
+    let content_type = attachment_kinds
+        .first()
+        .map_or("text", |kind| kind.as_str());
     let claim = if let Some(key) = &body.idempotency_key {
         let fingerprint = channel_send_service::delivery_fingerprint(
             body.message.text.as_deref(),
             body.message.metadata.as_ref(),
-        );
+            &body.message.attachments,
+            state.config.channel_media_max_bytes,
+        )?;
         match channel_send_service::claim_send(&state.db, &conversation.id, key, &fingerprint)
             .await?
         {
@@ -897,7 +1044,18 @@ async fn deliver_initiated_message(
         None
     };
 
+    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        bot,
+        auth_user.api_key_id.as_deref(),
+    );
     let send_result = async {
+        let attachments = channel_media_service::materialize(
+            &body.message.attachments,
+            state.config.channel_media_max_bytes,
+        )
+        .await?;
         let token = crate::services::channel_credentials::resolve_bot_token(
             &state.db,
             &state.encryption_keys,
@@ -919,15 +1077,17 @@ async fn deliver_initiated_message(
             None
         };
         adapter
-            .send_reply(
+            .send_reply_outcome(
                 &state.http_client,
                 &crate::services::channel_platform::BotCredentials {
+                    billing: billing.as_ref(),
                     token: &token,
                     platform_bot_id: Some(&bot.platform_bot_id),
                     platform_secrets: platform_secrets.as_ref(),
                 },
                 &conversation.platform_conversation_id,
                 &OutboundReply {
+                    attachments,
                     text: body.message.text,
                     reply_to_platform_message_id: None,
                     metadata: body.message.metadata,
@@ -936,15 +1096,34 @@ async fn deliver_initiated_message(
             .await
     }
     .await;
-    let platform_message_id = match send_result {
-        Ok(id) => id,
+    let mut outcome = match send_result {
+        Ok(outcome) => outcome,
         Err(error) => {
-            if let Some(claim) = &claim {
+            if crate::services::channel_billing_service::blocks_channel(&error)
+                && crate::services::channel_billing_service::suspend(
+                    &crate::services::channel_inbound_service::InboundDeps::from(state),
+                    bot,
+                    adapter,
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
+            }
+            if let Some(claim) = &claim
+                && !billing
+                    .as_ref()
+                    .is_some_and(|context| context.has_forwarded())
+            {
                 channel_send_service::release_send(&state.db, claim).await?;
             }
             return Err(error);
         }
     };
+    if let Some(observation) = &mut outcome.observation {
+        observation.waba_id = bot.app_id.clone();
+    }
+    let platform_message_id = outcome.final_id;
     // After upstream acceptance, retain pending claims on persistence failure.
     // An uncertain outcome must never automatically dispatch a second copy.
     let stored = channel_relay_service::store_outbound_message(
@@ -957,8 +1136,13 @@ async fn deliver_initiated_message(
         None,
         platform_message_id.as_deref(),
         Some(&conversation.platform_conversation_id),
+        content_type,
+        outcome.observation,
     )
     .await?;
+    if let Some(error) = outcome.error {
+        return Err(error);
+    }
     if let Some(claim) = &claim {
         channel_send_service::complete_send(
             &state.db,
@@ -975,6 +1159,7 @@ async fn deliver_initiated_message(
         Some(serde_json::json!({
             "conversation_id": conversation.id, "platform": bot.platform,
             "channel_bot_id": bot.id, "agent_api_key_id": conversation.agent_api_key_id,
+            "attachment_kinds": attachment_kinds, "attachment_count": attachment_kinds.len(),
         })),
         None,
         header_value(headers, "user-agent"),
@@ -1060,12 +1245,28 @@ pub async fn async_reply(
     OptionalAuthUser(auth_user): OptionalAuthUser,
     Json(body): Json<AsyncReplyRequest>,
 ) -> AppResult<Json<AsyncReplyResponse>> {
+    let context =
+        resolve_reply_request_context(&state, &headers, auth_user.as_ref(), &body).await?;
+    if is_device_reply_forbidden(&context.original.platform, &context.conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+    let adapter = resolve_adapter(&context.conversation.platform, &state.token_exchange_cache)?;
+    deliver_async_reply(&state, &headers, context, body, adapter.as_ref()).await
+}
+
+async fn deliver_async_reply(
+    state: &AppState,
+    headers: &HeaderMap,
+    context: ReplyRequestContext,
+    body: AsyncReplyRequest,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<Json<AsyncReplyResponse>> {
     let ReplyRequestContext {
         original,
         conversation,
         attributed_api_key_id,
         validated_bot,
-    } = resolve_reply_request_context(&state, &headers, auth_user.as_ref(), &body).await?;
+    } = context;
 
     // Device channels are one-way (HTTP Event Gateway, NyxID#221 / ADR-013):
     // the spec explicitly says device events have no reply surface. Refuse
@@ -1077,19 +1278,19 @@ pub async fn async_reply(
 
     let bot = match validated_bot {
         Some(bot) => bot,
-        None => load_active_bot(&state, &original).await?,
+        None => load_active_bot(state, &original).await?,
     };
 
+    validate_message_bot_scope(&original, &conversation, &bot)?;
     // Validate reply content against the target platform's capabilities.
     // Runs after bot lookup so we can reject card-only replies destined
     // for platforms (Telegram/Discord) that would otherwise emit an empty
     // message downstream.
-    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
-    validate_reply_for_adapter(&body.reply, adapter.as_ref())?;
+    validate_reply_for_adapter(&body.reply, adapter)?;
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
         &state.encryption_keys,
-        adapter.as_ref(),
+        adapter,
         &bot,
     )
     .await?;
@@ -1109,6 +1310,11 @@ pub async fn async_reply(
     );
 
     let outbound = OutboundReply {
+        attachments: channel_media_service::materialize(
+            &body.reply.attachments,
+            state.config.channel_media_max_bytes,
+        )
+        .await?,
         text: body.reply.text,
         reply_to_platform_message_id: original.platform_message_id.clone(),
         metadata,
@@ -1120,7 +1326,7 @@ pub async fn async_reply(
             crate::services::channel_managed::build_verify_secrets(
                 &state.db,
                 &state.encryption_keys,
-                adapter.as_ref(),
+                adapter,
                 &bot,
             )
             .await?,
@@ -1128,10 +1334,20 @@ pub async fn async_reply(
     } else {
         None
     };
-    let platform_msg_id = adapter
-        .send_reply(
+    let billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        Some(&attributed_api_key_id),
+    );
+    let send_result = adapter
+        .send_bound_reply_outcome(
+            &state.db,
             &state.http_client,
+            &bot,
+            &original,
             &crate::services::channel_platform::BotCredentials {
+                billing: billing.as_ref(),
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: platform_secrets.as_ref(),
@@ -1139,8 +1355,30 @@ pub async fn async_reply(
             platform_conversation_id,
             &outbound,
         )
-        .await?;
+        .await;
+    let mut outcome = match send_result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if billing.is_some()
+                && crate::services::channel_billing_service::blocks_channel(&error)
+                && crate::services::channel_billing_service::suspend(
+                    &crate::services::channel_inbound_service::InboundDeps::from(state),
+                    &bot,
+                    adapter,
+                )
+                .await
+                .is_err()
+            {
+                tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
+            }
+            return Err(error);
+        }
+    };
 
+    if let Some(observation) = &mut outcome.observation {
+        observation.waba_id = bot.app_id.clone();
+    }
+    let platform_msg_id = outcome.final_id;
     // Store outbound-message metadata only (per ADR-013). The reply text
     // is already on the wire to the platform; we do not persist it.
     let stored = channel_relay_service::store_outbound_message(
@@ -1153,8 +1391,34 @@ pub async fn async_reply(
         Some(&original.id),
         platform_msg_id.as_deref(),
         original.platform_conversation_id.as_deref(),
+        outbound
+            .attachments
+            .first()
+            .map_or("text", |a| a.kind.as_str()),
+        outcome.observation,
     )
     .await?;
+
+    if let Some(error) = outcome.error {
+        return Err(error);
+    }
+
+    if !outbound.attachments.is_empty() {
+        let kinds: Vec<_> = outbound.attachments.iter().map(|a| a.kind).collect();
+        audit_service::log_async(
+            state.db.clone(),
+            Some(bot.user_id.clone()),
+            "channel_relay.reply.sent".into(),
+            Some(
+                serde_json::json!({"conversation_id": conversation.id, "platform": bot.platform,
+                "bot_id": bot.id, "api_key_id": attributed_api_key_id, "attachment_kinds": kinds, "attachment_count": kinds.len()}),
+            ),
+            None,
+            header_value(headers, "user-agent"),
+            Some(attributed_api_key_id.clone()),
+            None,
+        );
+    }
 
     // Telemetry: channel.reply_sent is sampled at 10% per
     // docs/TELEMETRY.md §6.5. Sampling key is the conversation hash (not
@@ -1202,6 +1466,17 @@ pub async fn async_reply(
     }))
 }
 
+#[cfg(test)]
+pub(crate) async fn async_reply_with_test_adapter(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: AsyncReplyRequest,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<Json<AsyncReplyResponse>> {
+    let context = resolve_reply_request_context(state, headers, None, &body).await?;
+    deliver_async_reply(state, headers, context, body, adapter).await
+}
+
 /// POST /api/v1/channel-relay/reply/update
 ///
 /// Edit a previously-sent asynchronous reply by its upstream platform message
@@ -1213,6 +1488,11 @@ pub async fn update_reply(
     OptionalAuthUser(auth_user): OptionalAuthUser,
     Json(body): Json<UpdateReplyRequest>,
 ) -> AppResult<Json<UpdateReplyResponse>> {
+    if !body.reply.attachments.is_empty() {
+        return Err(AppError::ValidationError(
+            "Reply updates do not accept attachments".into(),
+        ));
+    }
     // Deliberately rate-limit before auth/DB work so unauth floods fail on one cheap hashmap check.
     check_message_edit_rate_limit(&state, &body.message_id).await?;
 
@@ -1222,6 +1502,20 @@ pub async fn update_reply(
     }
     let adapter = resolve_adapter(&context.bot.platform, &state.token_exchange_cache)?;
     edit_resolved_reply(&state, &headers, context, body, adapter.as_ref()).await
+}
+
+/// Pre-0.21.0 outbound rows lack the platform address; recover it from their
+/// inbound anchor, then from a concrete route when that anchor is unavailable.
+fn resolve_edit_conversation_id<'a>(
+    outbound: Option<&'a str>,
+    inbound: Option<&'a str>,
+    conversation: &'a str,
+) -> AppResult<&'a str> {
+    [outbound, inbound, Some(conversation)]
+        .into_iter()
+        .flatten()
+        .find(|id| is_concrete_platform_address(id))
+        .ok_or(AppError::ChannelConversationNotAddressable)
 }
 
 async fn edit_resolved_reply(
@@ -1237,7 +1531,33 @@ async fn edit_resolved_reply(
         bot,
         attributed_api_key_id,
     } = context;
+    if !body.reply.attachments.is_empty() {
+        return Err(AppError::ValidationError(
+            "Reply updates do not accept attachments".into(),
+        ));
+    }
     validate_reply_for_adapter(&body.reply, adapter)?;
+    let inbound = if !outbound
+        .platform_conversation_id
+        .as_deref()
+        .is_some_and(is_concrete_platform_address)
+        && let Some(inbound_id) = outbound.reply_to_message_id.as_deref()
+    {
+        match channel_relay_service::get_message(&state.db, inbound_id).await {
+            Ok(message) => Some(message),
+            Err(AppError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let platform_conversation_id = resolve_edit_conversation_id(
+        outbound.platform_conversation_id.as_deref(),
+        inbound
+            .as_ref()
+            .and_then(|row| row.platform_conversation_id.as_deref()),
+        &conversation.platform_conversation_id,
+    )?;
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
         &state.encryption_keys,
@@ -1245,13 +1565,37 @@ async fn edit_resolved_reply(
         &bot,
     )
     .await?;
+    let platform_secrets = if bot.credential_source == "platform" {
+        Some(
+            crate::services::channel_managed::build_verify_secrets(
+                &state.db,
+                &state.encryption_keys,
+                adapter,
+                &bot,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let edit = OutboundEdit {
         text: body.reply.text,
         metadata: body.reply.metadata,
     };
 
     adapter
-        .edit_reply(&state.http_client, &bot_token, &body.message_id, &edit)
+        .edit_reply(
+            &state.http_client,
+            &crate::services::channel_platform::BotCredentials {
+                billing: None,
+                token: &bot_token,
+                platform_bot_id: Some(&bot.platform_bot_id),
+                platform_secrets: platform_secrets.as_ref(),
+            },
+            platform_conversation_id,
+            &body.message_id,
+            &edit,
+        )
         .await?;
 
     let edited_at = Utc::now();
@@ -1284,6 +1628,129 @@ async fn edit_resolved_reply(
     }))
 }
 
+/// Authenticated, read-only media access. Reading never consumes a reply-token JTI.
+pub async fn fetch_attachment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    OptionalAuthUser(auth_user): OptionalAuthUser,
+    Path((message_id, index)): Path<(String, usize)>,
+) -> AppResult<axum::response::Response> {
+    let context = if let Some(token) = extract_bearer_token(&headers)?
+        && token_targets_reply_audience(&token)
+    {
+        resolve_reply_token_message_context(&state, &token, &message_id, false).await?
+    } else {
+        let auth = auth_user.as_ref().ok_or_else(|| {
+            AppError::Unauthorized("Agent API key or reply token required".into())
+        })?;
+        crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth).await?;
+        let body = AsyncReplyRequest {
+            message_id,
+            reply: AsyncReplyBody {
+                text: None,
+                metadata: None,
+                attachments: vec![],
+            },
+        };
+        resolve_api_key_reply_context(&state, auth, &body).await?
+    };
+    if is_device_reply_forbidden(&context.original.platform, &context.conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+    let adapter = resolve_adapter(&context.conversation.platform, &state.token_exchange_cache)?;
+    fetch_resolved_attachment(&state, context, index, adapter.as_ref()).await
+}
+
+async fn fetch_resolved_attachment(
+    state: &AppState,
+    context: ReplyRequestContext,
+    index: usize,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<axum::response::Response> {
+    if is_device_reply_forbidden(&context.original.platform, &context.conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+    let bot = match context.validated_bot {
+        Some(bot) => bot,
+        None => load_active_bot(state, &context.original).await?,
+    };
+    validate_message_bot_scope(&context.original, &context.conversation, &bot)?;
+    let attachment = context
+        .original
+        .attachments
+        .get(index)
+        .filter(|_| context.original.direction == "inbound")
+        .ok_or(AppError::ChannelAttachmentNotFound)?;
+    let inbound = crate::services::channel_platform::InboundAttachment {
+        content_type: attachment.content_type.clone(),
+        url: attachment.provider_ref.clone(),
+        platform_message_id: attachment.platform_message_id.clone(),
+        file_key: attachment.file_key.clone(),
+        image_key: attachment.image_key.clone(),
+        filename: attachment.filename.clone(),
+        mime_type: attachment.mime_type.clone(),
+        size_bytes: attachment.size_bytes,
+    };
+    let token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter,
+        &bot,
+    )
+    .await?;
+    let secrets = if bot.credential_source == "platform" {
+        Some(
+            crate::services::channel_managed::build_verify_secrets(
+                &state.db,
+                &state.encryption_keys,
+                adapter,
+                &bot,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let fetched = adapter
+        .fetch_attachment(
+            &state.http_client,
+            &crate::services::channel_platform::BotCredentials {
+                billing: None,
+                token: &token,
+                platform_bot_id: Some(&bot.platform_bot_id),
+                platform_secrets: secrets.as_ref(),
+            },
+            &inbound,
+            state.config.channel_media_max_bytes,
+        )
+        .await?;
+    tracing::debug!(message_id = %context.original.id, index, byte_count = fetched.bytes.len(), "Channel attachment fetched");
+    let content_type = fetched
+        .mime_type
+        .as_deref()
+        .and_then(|value| axum::http::HeaderValue::from_str(value).ok())
+        .unwrap_or_else(|| axum::http::HeaderValue::from_static("application/octet-stream"));
+    let length = fetched.bytes.len();
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        channel_media_service::safe_filename(fetched.filename.as_deref())
+    );
+    let mut response = axum::response::Response::new(axum::body::Body::from(fetched.bytes));
+    let headers = response.headers_mut();
+    headers.insert(axum::http::header::CONTENT_TYPE, content_type);
+    headers.insert(axum::http::header::CONTENT_LENGTH, length.into());
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        axum::http::HeaderValue::from_str(&disposition)
+            .map_err(|_| channel_media_service::fetch_failed())?,
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
+}
+
 /// GET /api/v1/channel-relay/messages/{conversation_id}
 ///
 /// List messages for a conversation. The calling agent must be the assigned
@@ -1306,18 +1773,39 @@ pub async fn list_messages(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Conversation not found: {conversation_id}")))?;
 
-    if conversation.agent_api_key_id != caller_api_key_id {
+    if conversation.agent_api_key_id != caller_api_key_id
+        || conversation.user_id != auth_user.user_id.to_string()
+    {
         return Err(AppError::Forbidden(
             "API key is not the assigned agent for this conversation".to_string(),
         ));
     }
 
-    let per_page = params.per_page.min(100);
-    let (messages, total) =
-        channel_relay_service::list_messages(&state.db, &conversation_id, params.page, per_page)
-            .await?;
+    let per_page = params.per_page.clamp(1, 100);
+    let (messages, total) = channel_relay_service::list_messages(
+        &state.db,
+        &conversation_id,
+        &conversation.user_id,
+        params.page,
+        per_page,
+    )
+    .await?;
 
-    let items = messages.iter().map(message_to_item).collect();
+    let mut delivery = crate::services::channel_delivery_service::summaries(
+        &state.db,
+        &messages,
+        &conversation.user_id,
+        conversation.platform_conversation_type == "private",
+    )
+    .await?;
+    let items = messages
+        .iter()
+        .map(|msg| {
+            let mut item = message_to_item(msg, &state.config.base_url);
+            item.delivery = delivery.remove(&msg.id).map(DeliveryItem::from);
+            item
+        })
+        .collect();
 
     Ok(Json(MessageListResponse {
         messages: items,
@@ -1392,6 +1880,7 @@ pub async fn resolve_sender(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::TryStreamExt;
     use jsonwebtoken::{Algorithm, Header, encode};
     use mongodb::bson::doc;
     use uuid::Uuid;
@@ -1409,40 +1898,123 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingSendAdapter {
+        whatsapp_base: Option<String>,
         calls: std::sync::atomic::AtomicUsize,
+        media: bool,
+        recorded_media: std::sync::Mutex<Vec<bytes::Bytes>>,
         fail: std::sync::atomic::AtomicBool,
-        /// Mock the native Lark edit contract when enabled.
-        editable: bool,
+        billing_error: bool,
+        /// Select the native edit contract to record when enabled.
+        edit_platform: Option<&'static str>,
+        edit_calls: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     #[async_trait::async_trait]
     impl crate::services::channel_platform::PlatformAdapter for RecordingSendAdapter {
+        fn media_capabilities(&self) -> crate::services::channel_platform::MediaCapabilities {
+            if self.media {
+                crate::services::channel_platform::MediaCapabilities::ALL
+            } else {
+                crate::services::channel_platform::MediaCapabilities::NONE
+            }
+        }
+        async fn fetch_attachment(
+            &self,
+            _http: &reqwest::Client,
+            credentials: &crate::services::channel_platform::BotCredentials<'_>,
+            _attachment: &crate::services::channel_platform::InboundAttachment,
+            _max_bytes: u64,
+        ) -> AppResult<crate::services::channel_platform::FetchedMedia> {
+            assert_eq!(credentials.token, "bot-token");
+            Ok(crate::services::channel_platform::FetchedMedia {
+                bytes: bytes::Bytes::from_static(b"private document"),
+                mime_type: Some("application/pdf".into()),
+                filename: Some("unsafe\"\r\n.pdf".into()),
+            })
+        }
         fn platform_id(&self) -> &str {
-            if self.editable { "lark" } else { "telegram" }
+            self.edit_platform.unwrap_or("telegram")
+        }
+        fn platform_credentials(
+            &self,
+        ) -> Option<crate::services::channel_managed::PlatformCredentialDescriptor> {
+            (self.edit_platform == Some("telegram-new"))
+                .then(crate::services::channel_adapters::telegram_new::credential_descriptor)
         }
         fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
             crate::services::channel_platform::OutboundCapabilities {
                 initiated_send: true,
-                reply_to: !self.editable,
-                thread: !self.editable,
-                edit: self.editable,
+                reply_to: self.edit_platform.is_none(),
+                thread: self.edit_platform.is_none(),
+                edit: self.edit_platform.is_some(),
             }
         }
         async fn edit_reply(
             &self,
             _http: &reqwest::Client,
-            token: &str,
+            credentials: &crate::services::channel_platform::BotCredentials<'_>,
+            conversation_id: &str,
             message_id: &str,
             edit: &OutboundEdit,
         ) -> AppResult<()> {
-            if !self.editable {
+            if self.edit_platform.is_none() {
                 return Err(AppError::ChannelPlatformEditUnsupported);
             }
-            assert_eq!(token, "bot-token");
-            assert_eq!(message_id, "initiated-receipt");
+            assert_eq!(credentials.token, "bot-token");
+            assert_eq!(credentials.platform_bot_id, Some("bot_123"));
+            assert_eq!(
+                credentials.platform_secrets.is_some(),
+                self.edit_platform == Some("telegram-new")
+            );
+            self.edit_calls
+                .lock()
+                .unwrap()
+                .push((conversation_id.into(), message_id.into()));
             assert_eq!(edit.text.as_deref(), Some("Updated digest"));
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
+        }
+        async fn send_bound_reply_outcome(
+            &self,
+            db: &mongodb::Database,
+            http: &reqwest::Client,
+            bot: &ChannelBot,
+            original: &ChannelMessage,
+            credentials: &crate::services::channel_platform::BotCredentials<'_>,
+            target: &str,
+            reply: &OutboundReply,
+        ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+            if self.whatsapp_base.is_some() {
+                self.send_reply_outcome(http, credentials, target, reply)
+                    .await
+            } else {
+                self.send_bound_reply(db, http, bot, original, credentials, target, reply)
+                    .await
+                    .map(crate::services::channel_platform::SendOutcome::legacy)
+            }
+        }
+        async fn send_reply_outcome(
+            &self,
+            http: &reqwest::Client,
+            credentials: &crate::services::channel_platform::BotCredentials<'_>,
+            target: &str,
+            reply: &OutboundReply,
+        ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+            if let Some(base) = &self.whatsapp_base {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::services::channel_adapters::whatsapp::send_outcome_at(
+                    http,
+                    credentials,
+                    target,
+                    reply,
+                    base,
+                )
+                .await
+            } else {
+                self.send_reply(http, credentials, target, reply)
+                    .await
+                    .map(crate::services::channel_platform::SendOutcome::legacy)
+            }
         }
         async fn send_reply(
             &self,
@@ -1453,8 +2025,17 @@ mod tests {
         ) -> AppResult<Option<String>> {
             assert_eq!(target, "chat_123");
             assert_eq!(credentials.token, "bot-token");
-            assert!(reply.reply_to_platform_message_id.is_none());
+            if !self.media {
+                assert!(reply.reply_to_platform_message_id.is_none());
+            }
+            self.recorded_media
+                .lock()
+                .unwrap()
+                .extend(reply.attachments.iter().map(|a| a.bytes.clone()));
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.billing_error {
+                return Err(AppError::InsufficientCredits);
+            }
             if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(AppError::ChannelPlatformError(
                     "Simulated upstream failure".into(),
@@ -1596,7 +2177,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        for field in ["text", "attachments", "raw_platform_data", "metadata"] {
+        assert!(raw.get_array("attachments").unwrap().is_empty());
+        for field in ["text", "raw_platform_data", "metadata"] {
             assert!(!raw.contains_key(field));
         }
         let claim = fixture
@@ -1618,6 +2200,310 @@ mod tests {
         ));
         assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_agent_message_page_enriches_only_authorized_owner_rows() {
+        let fixture = setup_reply_token_fixture("channel_wa_receipt_page")
+            .await
+            .unwrap();
+        let db = &fixture.state.db;
+        crate::services::channel_delivery_service::ensure_indexes(db)
+            .await
+            .unwrap();
+        let mut bot = fixture.bot.clone();
+        bot.platform = "whatsapp".into();
+        bot.platform_bot_id = "123".into();
+        let row = channel_relay_service::store_outbound_message(
+            db,
+            &bot.id,
+            &fixture.conversation.id,
+            &bot.user_id,
+            "whatsapp",
+            &fixture.api_key.id,
+            None,
+            Some("wamid.page"),
+            Some("789"),
+            "text",
+            Some(crate::models::channel_delivery::PlatformSendRecord {
+                phone_number_id: "123".into(),
+                waba_id: bot.app_id.clone(),
+                recipient_id: "789".into(),
+                component_ids: vec!["wamid.page".into()],
+                expected_components: 1,
+                complete: true,
+                uncertain: false,
+                failure_code: None,
+            }),
+        )
+        .await
+        .unwrap();
+        crate::services::channel_delivery_service::observe(
+            db,
+            &bot,
+            &[
+                crate::services::channel_delivery_service::ReceiptObservation {
+                    message_id: "wamid.page".into(),
+                    recipient_id: "789".into(),
+                    status: crate::services::channel_delivery_service::ReceiptStatus::Read,
+                    provider_at: Utc::now(),
+                    error_codes: vec![],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        let auth = api_key_auth_user(&fixture.api_key);
+        let response = list_messages(
+            State(fixture.state.clone()),
+            auth.clone(),
+            Path(fixture.conversation.id.clone()),
+            Query(ListMessagesQuery {
+                page: 1,
+                per_page: 50,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let item = response
+            .messages
+            .iter()
+            .find(|message| message.id == row.id)
+            .unwrap();
+        assert_eq!(item.delivery.as_ref().unwrap().status, "read");
+        let json = serde_json::to_value(item).unwrap();
+        assert!(json["delivery"]["components"][0]["read_at"].is_string());
+        assert!(json["delivery"].get("recipient_id").is_none());
+        assert!(json.get("platform_send").is_none());
+        let mut wrong = auth.clone();
+        wrong.user_id = Uuid::new_v4();
+        assert!(matches!(
+            list_messages(
+                State(fixture.state.clone()),
+                wrong,
+                Path(fixture.conversation.id.clone()),
+                Query(ListMessagesQuery {
+                    page: 1,
+                    per_page: 50
+                })
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        let mut wrong_key = auth;
+        wrong_key.api_key_id = Some(Uuid::new_v4().to_string());
+        assert!(matches!(
+            list_messages(
+                State(fixture.state.clone()),
+                wrong_key,
+                Path(fixture.conversation.id.clone()),
+                Query(ListMessagesQuery {
+                    page: 1,
+                    per_page: 50
+                })
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_whatsapp_bound_partial_reply_persists_all_accepted_evidence() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let mut fixture = setup_reply_token_fixture("channel_wa_partial_reply")
+            .await
+            .unwrap();
+        fixture.bot.platform = "whatsapp".into();
+        fixture.bot.platform_bot_id = "123".into();
+        fixture.bot.app_id = Some("456".into());
+        fixture.conversation.platform = "whatsapp".into();
+        fixture.conversation.platform_conversation_id = "789".into();
+        fixture.message.platform = "whatsapp".into();
+        fixture.message.platform_conversation_id = Some("789".into());
+        let server = MockServer::start().await;
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .and(path("/123/messages"))
+            .respond_with(move |_: &wiremock::Request| {
+                if counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"messages":[{"id":"wamid.accepted"}]}))
+                } else {
+                    ResponseTemplate::new(503)
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let adapter = RecordingSendAdapter {
+            whatsapp_base: Some(server.uri()),
+            ..Default::default()
+        };
+        let context = ReplyRequestContext {
+            original: fixture.message.clone(),
+            conversation: fixture.conversation.clone(),
+            attributed_api_key_id: fixture.api_key.id.clone(),
+            validated_bot: Some(fixture.bot.clone()),
+        };
+        let request = AsyncReplyRequest {
+            message_id: fixture.message.id.clone(),
+            reply: body(Some(&"t".repeat(4097)), None),
+        };
+        assert!(
+            deliver_async_reply(
+                &fixture.state,
+                &HeaderMap::new(),
+                context,
+                request,
+                &adapter
+            )
+            .await
+            .is_err()
+        );
+        let stored = fixture
+            .state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .find_one(doc! {"platform":"whatsapp", "direction":"outbound"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.reply_to_message_id.as_deref(),
+            Some(fixture.message.id.as_str())
+        );
+        assert_eq!(
+            stored.platform_message_id.as_deref(),
+            Some("wamid.accepted")
+        );
+        let record = stored.platform_send.unwrap();
+        assert_eq!(record.component_ids, vec!["wamid.accepted"]);
+        assert!(!record.complete);
+        assert!(record.uncertain);
+        assert_eq!(record.waba_id.as_deref(), Some("456"));
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_whatsapp_initiated_claims_follow_real_provider_certainty() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for mode in ["refused", "unknown", "partial", "complete"] {
+            let mut fixture = setup_reply_token_fixture("channel_wa_send_certainty")
+                .await
+                .unwrap();
+            enable_initiated(&mut fixture).await;
+            fixture.bot.platform = "whatsapp".into();
+            fixture.bot.platform_bot_id = "123".into();
+            fixture.bot.app_id = Some("456".into());
+            fixture.conversation.platform = "whatsapp".into();
+            fixture.conversation.platform_conversation_id = "789".into();
+            fixture
+                .state
+                .db
+                .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+                .replace_one(doc! {"_id":&fixture.bot.id}, &fixture.bot)
+                .await
+                .unwrap();
+            fixture
+                .state
+                .db
+                .collection::<ChannelConversation>(CONVERSATIONS)
+                .replace_one(doc! {"_id":&fixture.conversation.id}, &fixture.conversation)
+                .await
+                .unwrap();
+            let server = MockServer::start().await;
+            let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = counter.clone();
+            Mock::given(method("POST"))
+                .and(path("/123/messages"))
+                .respond_with(move |_: &wiremock::Request| {
+                    let attempt = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if mode == "refused" || (mode == "partial" && attempt == 1) {
+                        ResponseTemplate::new(400).set_body_json(
+                            serde_json::json!({"error":{"code":190,"message":"private"}}),
+                        )
+                    } else if mode == "unknown" {
+                        ResponseTemplate::new(503).set_body_string("upstream unavailable")
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(
+                            serde_json::json!({"messages":[{"id":format!("wamid.{attempt}")}]}),
+                        )
+                    }
+                })
+                .mount(&server)
+                .await;
+            let adapter = RecordingSendAdapter {
+                whatsapp_base: Some(server.uri()),
+                ..Default::default()
+            };
+            let auth = api_key_auth_user(&fixture.api_key);
+            let request = || {
+                let mut request = send_body(&fixture, Some("stable-key"));
+                request.message.text = Some("t".repeat(4097));
+                request
+            };
+            let first = send_with_adapter(&fixture, &auth, request(), &adapter).await;
+            assert_eq!(first.is_ok(), mode == "complete");
+            let second = send_with_adapter(&fixture, &auth, request(), &adapter).await;
+            let rows = fixture
+                .state
+                .db
+                .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+                .find(doc! {"platform":"whatsapp", "direction":"outbound"})
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            if mode == "refused" {
+                assert!(matches!(second, Err(AppError::ChannelPlatformError(_))));
+                assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+                assert!(rows.is_empty());
+                assert_eq!(
+                    fixture
+                        .state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::channel_send_claim::COLLECTION_NAME
+                        )
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    0
+                );
+            } else {
+                assert_eq!(rows.len(), 1);
+                let record = rows[0].platform_send.as_ref().unwrap();
+                assert_eq!(record.waba_id.as_deref(), Some("456"));
+                assert_eq!(record.phone_number_id, "123");
+                assert_eq!(record.recipient_id, "789");
+                assert_eq!(record.complete, mode == "complete");
+                assert_eq!(record.uncertain, mode == "unknown");
+                assert_eq!(
+                    record.component_ids.len(),
+                    match mode {
+                        "complete" => 2,
+                        "partial" => 1,
+                        _ => 0,
+                    }
+                );
+                assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                if mode == "complete" {
+                    assert_eq!(first.unwrap().message_id, second.unwrap().message_id);
+                } else {
+                    assert!(matches!(second, Err(AppError::Conflict(_))));
+                }
+            }
+            fixture.state.db.drop().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1665,7 +2551,8 @@ mod tests {
         .unwrap();
         assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         let fingerprint =
-            channel_send_service::delivery_fingerprint(Some("private test text"), None);
+            channel_send_service::delivery_fingerprint(Some("private test text"), None, &[], 1024)
+                .unwrap();
         let (a, b) = tokio::join!(
             channel_send_service::claim_send(
                 &fixture.state.db,
@@ -1922,6 +2809,235 @@ mod tests {
         fixture.state.db.drop().await.unwrap();
     }
 
+    #[test]
+    fn edit_conversation_id_resolution_prefers_message_addresses() {
+        for (outbound, inbound, route, expected) in [
+            (Some("outbound"), Some("inbound"), "route", Some("outbound")),
+            (None, Some("inbound"), "route", Some("inbound")),
+            (None, None, "route", Some("route")),
+            (Some(""), Some("inbound"), "*", Some("inbound")),
+            (Some("*"), Some(""), "route", Some("route")),
+            (None, None, "*", None),
+            (None, None, "", None),
+            (None, None, "   ", None),
+        ] {
+            let result = resolve_edit_conversation_id(outbound, inbound, route);
+            match expected {
+                Some(id) => assert_eq!(result.unwrap(), id),
+                None => assert!(matches!(
+                    result,
+                    Err(AppError::ChannelConversationNotAddressable)
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_edit_resolves_initiated_and_legacy_addresses_before_dispatch() {
+        use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+        // Exercise actual auth/context loading and dispatch for all new native
+        // platforms, including legacy anchors on wildcard routes.
+        for (platform, initiated, outbound_address, inbound_address, route, expected) in [
+            (
+                "telegram",
+                true,
+                Some("outbound-chat"),
+                Some("other-chat"),
+                "*",
+                Some("outbound-chat"),
+            ),
+            (
+                "discord",
+                true,
+                Some("outbound-chat"),
+                None,
+                "*",
+                Some("outbound-chat"),
+            ),
+            (
+                "telegram-new",
+                true,
+                Some("outbound-chat"),
+                None,
+                "*",
+                Some("outbound-chat"),
+            ),
+            (
+                "slack",
+                true,
+                Some("outbound-chat"),
+                None,
+                "*",
+                Some("outbound-chat"),
+            ),
+            (
+                "telegram",
+                false,
+                None,
+                Some("inbound-chat"),
+                "*",
+                Some("inbound-chat"),
+            ),
+            (
+                "discord",
+                false,
+                None,
+                Some("inbound-chat"),
+                "*",
+                Some("inbound-chat"),
+            ),
+            (
+                "slack",
+                false,
+                None,
+                Some("inbound-chat"),
+                "*",
+                Some("inbound-chat"),
+            ),
+            (
+                "telegram",
+                false,
+                None,
+                None,
+                "route-chat",
+                Some("route-chat"),
+            ),
+            ("telegram", false, None, None, "*", None),
+            ("telegram", true, None, None, "*", None),
+        ] {
+            let Some(mut fixture) = setup_reply_token_fixture("channel_edit_address").await else {
+                eprintln!("no local MongoDB available");
+                return;
+            };
+            fixture.bot.platform = platform.into();
+            if platform == "telegram-new" {
+                fixture.bot.credential_source = "platform".into();
+            }
+            fixture.conversation.platform = platform.into();
+            fixture.conversation.platform_conversation_id = route.into();
+            fixture.message.platform = platform.into();
+            fixture.message.platform_conversation_id = inbound_address.map(str::to_string);
+            fixture.outbound_message.platform = platform.into();
+            fixture.outbound_message.platform_conversation_id =
+                outbound_address.map(str::to_string);
+            if initiated {
+                fixture.outbound_message.reply_to_message_id = None;
+            }
+            let db = &fixture.state.db;
+            for (collection, row) in [
+                (
+                    crate::models::channel_bot::COLLECTION_NAME,
+                    bson::to_document(&fixture.bot).unwrap(),
+                ),
+                (
+                    CONVERSATIONS,
+                    bson::to_document(&fixture.conversation).unwrap(),
+                ),
+                (
+                    crate::models::channel_message::COLLECTION_NAME,
+                    bson::to_document(&fixture.message).unwrap(),
+                ),
+                (
+                    crate::models::channel_message::COLLECTION_NAME,
+                    bson::to_document(&fixture.outbound_message).unwrap(),
+                ),
+            ] {
+                db.collection::<bson::Document>(collection)
+                    .replace_one(doc! {"_id": row.get_str("_id").unwrap()}, row.clone())
+                    .await
+                    .unwrap();
+            }
+            let auth = api_key_auth_user(&fixture.api_key);
+            let request = UpdateReplyRequest {
+                message_id: fixture
+                    .outbound_message
+                    .platform_message_id
+                    .clone()
+                    .unwrap(),
+                reply: body(Some("Updated digest"), None),
+            };
+            let context = resolve_edit_request_context(
+                &fixture.state,
+                &HeaderMap::new(),
+                Some(&auth),
+                &request,
+            )
+            .await
+            .unwrap();
+            let adapter = RecordingSendAdapter {
+                edit_platform: Some(platform),
+                ..Default::default()
+            };
+            let audit_written = audit_service::notify_on_audit_write_for_user(
+                "channel_relay.reply.edit",
+                &fixture.bot.user_id,
+            );
+            let result = edit_resolved_reply(
+                &fixture.state,
+                &HeaderMap::new(),
+                context,
+                request,
+                &adapter,
+            )
+            .await;
+            if let Some(address) = expected {
+                let response = result.unwrap().0;
+                assert_eq!(response.upstream_message_id, "platform_reply_123");
+                assert_eq!(
+                    *adapter.edit_calls.lock().unwrap(),
+                    vec![(address.into(), "platform_reply_123".into())]
+                );
+                assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                let audit_id =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), audit_written)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let audit = db
+                    .collection::<AuditLog>(AUDIT_LOG)
+                    .find_one(doc! {"_id": audit_id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let data = audit.event_data.unwrap();
+                assert_eq!(
+                    data["inbound_message_id"],
+                    serde_json::json!(fixture.outbound_message.reply_to_message_id)
+                );
+                assert!(!data.to_string().contains("Updated digest"));
+                let stored = db
+                    .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+                    .find_one(doc! {"_id": &fixture.outbound_message.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!stored.to_string().contains("Updated digest"));
+                if initiated {
+                    let claims = valid_reply_claims(&fixture);
+                    insert_reply_token_use(&fixture, &claims).await;
+                    let error = resolve_reply_token_edit_context(
+                        &fixture.state,
+                        &encode_reply_claims(&fixture.state, &claims),
+                        &update_reply_request("platform_reply_123"),
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(
+                        matches!(error, AppError::Unauthorized(message) if message.contains("inbound_message_id mismatch"))
+                    );
+                }
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(AppError::ChannelConversationNotAddressable)
+                ));
+                assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert!(adapter.edit_calls.lock().unwrap().is_empty());
+            }
+            db.drop().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn channel_initiated_edit_updates_timestamp_and_audits_null_inbound_id() {
         use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
@@ -1965,7 +3081,7 @@ mod tests {
                 .await
                 .unwrap();
         let adapter = RecordingSendAdapter {
-            editable: true,
+            edit_platform: Some("lark"),
             ..Default::default()
         };
         let audit_written = audit_service::notify_on_audit_write_for_user(
@@ -1983,6 +3099,10 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *adapter.edit_calls.lock().unwrap(),
+            vec![("chat_123".into(), "initiated-receipt".into())]
+        );
         let updated = channel_relay_service::get_message(db, &fixture.outbound_message.id)
             .await
             .unwrap();
@@ -2107,7 +3227,7 @@ mod tests {
                 .iter()
                 .any(|row| row.platform == "device"
                     && !row.addressable
-                    && !row.capabilities.initiated_send)
+                    && !row.capabilities.outbound.initiated_send)
         );
         assert!(
             response
@@ -2115,13 +3235,13 @@ mod tests {
                 .iter()
                 .any(|row| row.platform == "telegram"
                     && !row.addressable
-                    && row.capabilities.initiated_send)
+                    && row.capabilities.outbound.initiated_send)
         );
         assert!(
             response
                 .conversations
                 .iter()
-                .any(|row| row.platform == "openclaw" && !row.capabilities.initiated_send)
+                .any(|row| row.platform == "openclaw" && !row.capabilities.outbound.initiated_send)
         );
         let page = list_agent_conversations(
             State(fixture.state.clone()),
@@ -2283,6 +3403,7 @@ mod tests {
 
     fn body(text: Option<&str>, metadata: Option<serde_json::Value>) -> AsyncReplyBody {
         AsyncReplyBody {
+            attachments: vec![],
             text: text.map(String::from),
             metadata,
         }
@@ -2468,6 +3589,7 @@ mod tests {
             updated_at: Some(now),
             description: None,
             allowed_service_ids: vec![],
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: vec![],
             allow_all_services: true,
             allow_auto_connected_services: false,
@@ -2481,6 +3603,7 @@ mod tests {
         };
 
         let bot = ChannelBot {
+            last_verification: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             platform: "telegram".to_string(),
@@ -2531,6 +3654,8 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            platform_send: None,
+            attachments: vec![],
             id: Uuid::new_v4().to_string(),
             channel_bot_id: Some(bot.id.clone()),
             conversation_id: conversation.id.clone(),
@@ -2552,6 +3677,8 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            platform_send: None,
+            attachments: vec![],
             id: Uuid::new_v4().to_string(),
             channel_bot_id: Some(bot.id.clone()),
             conversation_id: conversation.id.clone(),
@@ -2747,6 +3874,8 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            platform_send: None,
+            attachments: vec![],
             id: Uuid::new_v4().to_string(),
             platform_message_id: Some("msg_456".to_string()),
             created_at: Utc::now(),
@@ -2982,6 +4111,7 @@ mod tests {
         let db = fixture.state.db.clone();
         let now = Utc::now();
         let other_bot = ChannelBot {
+            last_verification: None,
             id: Uuid::new_v4().to_string(),
             user_id: fixture.bot.user_id.clone(),
             platform: "lark".to_string(),
@@ -3286,16 +4416,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_reply_returns_501_on_telegram() {
+    async fn update_reply_returns_501_on_whatsapp() {
         let cache = std::sync::Arc::new(
             crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
         );
-        let adapter = resolve_adapter("telegram", &cache).expect("telegram adapter");
+        let adapter = resolve_adapter("whatsapp", &cache).expect("whatsapp adapter");
 
         let err = adapter
             .edit_reply(
                 &reqwest::Client::new(),
-                "bot-token",
+                &"bot-token".into(),
+                "chat",
                 "platform-msg-id",
                 &OutboundEdit {
                     text: Some("hello".to_string()),
@@ -3454,6 +4585,24 @@ mod tests {
             return;
         };
         let db = fixture.state.db.clone();
+        // Use a platform with no edit API so the first request cannot make an
+        // external call. Telegram now implements native editing.
+        for (collection, id) in [
+            (crate::models::channel_bot::COLLECTION_NAME, &fixture.bot.id),
+            (CONVERSATIONS, &fixture.conversation.id),
+            (
+                crate::models::channel_message::COLLECTION_NAME,
+                &fixture.outbound_message.id,
+            ),
+        ] {
+            db.collection::<bson::Document>(collection)
+                .update_one(
+                    doc! { "_id": id },
+                    doc! { "$set": { "platform": "whatsapp" } },
+                )
+                .await
+                .unwrap();
+        }
 
         let mut state = fixture.state.clone();
         state.per_message_edit_limiter =
@@ -3481,12 +4630,571 @@ mod tests {
         let second = update_reply(
             State(state),
             HeaderMap::new(),
-            OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))),
+            OptionalAuthUser(None),
             Json(update_reply_request(&platform_message_id)),
         )
         .await;
         assert!(matches!(second, Err(AppError::RateLimited)));
 
         db.drop().await.unwrap();
+    }
+    fn media_body() -> AsyncReplyBody {
+        AsyncReplyBody {
+            text: None,
+            metadata: None,
+            attachments: vec![crate::services::channel_platform::OutboundAttachment {
+                kind: crate::services::channel_platform::MediaKind::File,
+                source: crate::services::channel_platform::OutboundMediaSource::Base64 {
+                    data: "ZG9jdW1lbnQ=".into(),
+                },
+                filename: Some("private-name.pdf".into()),
+                mime_type: Some("application/pdf".into()),
+                caption: Some("private caption".into()),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn x_async_reply_suspends_on_billing_failure_but_not_transient_provider_failure() {
+        for billing_error in [true, false] {
+            let mut fixture = setup_reply_token_fixture("x_reply_billing_failure")
+                .await
+                .expect("MongoDB required");
+            fixture.bot.platform = "x".into();
+            fixture.bot.webhook_registered = false;
+            fixture.conversation.platform = "x".into();
+            fixture.message.platform = "x".into();
+            fixture
+                .state
+                .db
+                .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+                .replace_one(doc! {"_id": &fixture.bot.id}, &fixture.bot)
+                .await
+                .unwrap();
+            let adapter = RecordingSendAdapter {
+                media: true,
+                edit_platform: Some("x"),
+                billing_error,
+                fail: std::sync::atomic::AtomicBool::new(true),
+                ..Default::default()
+            };
+            let context = ReplyRequestContext {
+                original: fixture.message.clone(),
+                conversation: fixture.conversation.clone(),
+                attributed_api_key_id: fixture.api_key.id.clone(),
+                validated_bot: Some(fixture.bot.clone()),
+            };
+            let result = deliver_async_reply(
+                &fixture.state,
+                &HeaderMap::new(),
+                context,
+                AsyncReplyRequest {
+                    message_id: fixture.message.id.clone(),
+                    reply: body(Some("reply"), None),
+                },
+                &adapter,
+            )
+            .await;
+            if billing_error {
+                assert!(matches!(result, Err(AppError::InsufficientCredits)));
+            } else {
+                assert!(matches!(result, Err(AppError::ChannelPlatformError(_))));
+            }
+            assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let current = channel_bot_service::get_bot(&fixture.state.db, &fixture.bot.id)
+                .await
+                .unwrap();
+            assert_eq!(
+                current.status,
+                if billing_error { "failed" } else { "active" }
+            );
+            fixture.state.db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_media_relay_send_reply_and_idempotency_store_no_content() {
+        let Some(mut fixture) = setup_reply_token_fixture("channel_media_send").await else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        enable_initiated(&mut fixture).await;
+        let adapter = RecordingSendAdapter {
+            media: true,
+            ..Default::default()
+        };
+        let auth = api_key_auth_user(&fixture.api_key);
+        let request = || SendMessageRequest {
+            conversation_id: fixture.conversation.id.clone(),
+            message: media_body(),
+            idempotency_key: Some("media".into()),
+        };
+        let sent = send_with_adapter(&fixture, &auth, request(), &adapter)
+            .await
+            .unwrap();
+        let replay = send_with_adapter(&fixture, &auth, request(), &adapter)
+            .await
+            .unwrap();
+        assert_eq!(sent.message_id, replay.message_id);
+        let mut changed = request();
+        changed.message.attachments[0].caption = Some("different".into());
+        assert!(matches!(
+            send_with_adapter(&fixture, &auth, changed, &adapter).await,
+            Err(AppError::Conflict(_))
+        ));
+        let body = AsyncReplyRequest {
+            message_id: fixture.message.id.clone(),
+            reply: media_body(),
+        };
+        let context = resolve_api_key_reply_context(&fixture.state, &auth, &body)
+            .await
+            .unwrap();
+        let reply = deliver_async_reply(&fixture.state, &HeaderMap::new(), context, body, &adapter)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            *adapter.recorded_media.lock().unwrap(),
+            vec![
+                bytes::Bytes::from_static(b"document"),
+                bytes::Bytes::from_static(b"document")
+            ]
+        );
+        for id in [sent.message_id, reply.message_id] {
+            let row = fixture
+                .state
+                .db
+                .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.get_str("content_type").unwrap(), "file");
+            assert!(row.get_array("attachments").unwrap().is_empty());
+            for prohibited in [
+                "bytes",
+                "caption",
+                "filename",
+                "private-name",
+                "private caption",
+                "ZG9jdW1lbnQ=",
+            ] {
+                assert!(!row.to_string().contains(prohibited));
+            }
+        }
+        assert!(matches!(
+            validate_reply_for_adapter(&media_body(), &RecordingSendAdapter::default()),
+            Err(AppError::ValidationError(_))
+        ));
+        let mut many = media_body();
+        many.attachments = vec![many.attachments[0].clone(); 11];
+        assert!(matches!(
+            validate_reply_for_adapter(&many, &adapter),
+            Err(AppError::ValidationError(_))
+        ));
+        assert!(matches!(
+            update_reply(
+                State(fixture.state.clone()),
+                HeaderMap::new(),
+                OptionalAuthUser(Some(auth)),
+                Json(UpdateReplyRequest {
+                    message_id: "platform".into(),
+                    reply: media_body()
+                })
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    async fn store_media_fixture(fixture: &mut ReplyTokenFixture) {
+        fixture.message.attachments = vec![crate::models::channel_message::StoredAttachment {
+            content_type: "file".into(),
+            provider_ref: "provider-file-id".into(),
+            platform_message_id: Some("123".into()),
+            file_key: None,
+            image_key: None,
+            filename: Some("private.pdf".into()),
+            mime_type: Some("application/pdf".into()),
+            size_bytes: Some(16),
+        }];
+        fixture
+            .state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .replace_one(doc! {"_id": &fixture.message.id}, &fixture.message)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_media_reads_auth_bindings_and_never_consume_reply_token() {
+        let Some(mut fixture) = setup_reply_token_fixture("channel_media_reads").await else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        store_media_fixture(&mut fixture).await;
+        let adapter = RecordingSendAdapter {
+            media: true,
+            ..Default::default()
+        };
+        let token = valid_reply_token(&fixture);
+        let claims =
+            jwt::validate_relay_reply_token(&fixture.state.jwt_keys, &fixture.state.config, &token)
+                .unwrap();
+        for _ in 0..2 {
+            let context = resolve_reply_token_message_context(
+                &fixture.state,
+                &token,
+                &fixture.message.id,
+                false,
+            )
+            .await
+            .unwrap();
+            let response = fetch_resolved_attachment(&fixture.state, context, 0, &adapter)
+                .await
+                .unwrap();
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            assert_eq!(response.headers()["content-type"], "application/pdf");
+            assert_eq!(response.headers()["content-length"], "16");
+            assert!(
+                !response.headers()["content-disposition"]
+                    .to_str()
+                    .unwrap()
+                    .contains('\r')
+            );
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 100)
+                    .await
+                    .unwrap(),
+                b"private document"[..]
+            );
+        }
+        assert!(
+            !reply_token_has_been_consumed(&fixture.state, &claims.jti)
+                .await
+                .unwrap()
+        );
+        let body = AsyncReplyRequest {
+            message_id: fixture.message.id.clone(),
+            reply: media_body(),
+        };
+        let auth = api_key_auth_user(&fixture.api_key);
+        let context = resolve_api_key_reply_context(&fixture.state, &auth, &body)
+            .await
+            .unwrap();
+        assert!(
+            fetch_resolved_attachment(&fixture.state, context, 0, &adapter)
+                .await
+                .is_ok()
+        );
+        let context = resolve_api_key_reply_context(&fixture.state, &auth, &body)
+            .await
+            .unwrap();
+        let missing = fetch_resolved_attachment(&fixture.state, context, 1, &adapter)
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, AppError::ChannelAttachmentNotFound));
+        assert_eq!(
+            axum::response::IntoResponse::into_response(missing).status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+        for method in [
+            AuthMethod::Relay,
+            AuthMethod::Delegated,
+            AuthMethod::ServiceAccount,
+        ] {
+            let mut wrong = auth.clone();
+            wrong.auth_method = method;
+            assert!(matches!(
+                resolve_api_key_reply_context(&fixture.state, &wrong, &body).await,
+                Err(AppError::Forbidden(_))
+            ));
+        }
+        let mut wrong = auth.clone();
+        wrong.api_key_id = Some(Uuid::new_v4().to_string());
+        assert!(matches!(
+            resolve_api_key_reply_context(&fixture.state, &wrong, &body).await,
+            Err(AppError::Forbidden(_))
+        ));
+        let other = fixture.outbound_message.id.clone();
+        assert!(
+            resolve_reply_token_message_context(&fixture.state, &token, &other, false)
+                .await
+                .is_err()
+        );
+        // Still available for the single authorized send after repeated downloads.
+        resolve_reply_token_context(&fixture.state, &token, &body)
+            .await
+            .unwrap();
+        assert!(
+            reply_token_has_been_consumed(&fixture.state, &claims.jti)
+                .await
+                .unwrap()
+        );
+        fixture
+            .state
+            .db
+            .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &fixture.bot.id},
+                doc! {"$set":{"is_active":false}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            resolve_reply_token_message_context(&fixture.state, &token, &fixture.message.id, false)
+                .await,
+            Err(AppError::ChannelBotInactive(_))
+        ));
+        fixture.conversation.platform = "device".into();
+        fixture
+            .state
+            .db
+            .collection::<ChannelConversation>(CONVERSATIONS)
+            .replace_one(
+                doc! {"_id": &fixture.conversation.id},
+                &fixture.conversation,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            resolve_reply_token_message_context(&fixture.state, &token, &fixture.message.id, false)
+                .await,
+            Err(AppError::DeviceChannelReplyNotAllowed)
+        ));
+        fixture.state.db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn channel_media_http_auth_and_route_body_limits() {
+        use axum::{
+            body::Body,
+            extract::DefaultBodyLimit,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+        let Some(mut fixture) = setup_reply_token_fixture("channel_media_http").await else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        store_media_fixture(&mut fixture).await;
+        fixture.message.attachments[0].provider_ref = "https://unapproved.example/private".into();
+        fixture
+            .state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .replace_one(doc! {"_id": &fixture.message.id}, &fixture.message)
+            .await
+            .unwrap();
+        let raw_key = "nyxid_ag_media_http_fixture";
+        fixture
+            .state
+            .db
+            .collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! {"_id": &fixture.api_key.id},
+                doc! {"$set":{"key_hash": crate::crypto::token::hash_token(raw_key)}},
+            )
+            .await
+            .unwrap();
+        fixture
+            .state
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &fixture.api_key.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        // The production outer 1 MiB cap must be overridden only for reply/send.
+        fixture.state.config.channel_media_max_bytes = 1024 * 1024;
+        let (_, router) = crate::routes::build_router_with_state(fixture.state.clone());
+        let app = router
+            .layer(DefaultBodyLimit::max(1024 * 1024))
+            .with_state(fixture.state.clone());
+        let token = valid_reply_token(&fixture);
+        let claims =
+            jwt::validate_relay_reply_token(&fixture.state.jwt_keys, &fixture.state.config, &token)
+                .unwrap();
+        for bearer in [&token, raw_key] {
+            for (index, status) in [(0, StatusCode::BAD_GATEWAY), (1, StatusCode::NOT_FOUND)] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!(
+                                "/api/v1/channel-relay/messages/{}/attachments/{index}",
+                                fixture.message.id
+                            ))
+                            .header("authorization", format!("Bearer {bearer}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                let bytes = axum::body::to_bytes(response.into_body(), 8192)
+                    .await
+                    .unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains("unapproved.example"));
+            }
+        }
+        assert!(
+            !reply_token_has_been_consumed(&fixture.state, &claims.jti)
+                .await
+                .unwrap()
+        );
+        let text = "x".repeat(1024 * 1024 + 100);
+        for path in ["reply", "send", "reply/update"] {
+            let body = if path == "send" {
+                serde_json::json!({"conversation_id":fixture.conversation.id,"message":{"text":text}})
+            } else {
+                serde_json::json!({"message_id":"missing", "reply":{"text":text}})
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/channel-relay/{path}"))
+                        .header("authorization", format!("Bearer {raw_key}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if path == "reply/update" {
+                assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            } else {
+                assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            }
+        }
+        // A body above the configured route cap fails before any platform effect.
+        let large = serde_json::json!({"message_id":"missing","reply":{"text":"x".repeat(2 * 1024 * 1024)}});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/channel-relay/reply")
+                    .header("authorization", format!("Bearer {raw_key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(large.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // Downloads consume the assigned key's configured bucket before provider work.
+        fixture
+            .state
+            .db
+            .collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! {"_id": &fixture.api_key.id},
+                doc! {"$set": {"rate_limit_per_second": 1, "rate_limit_burst": 1}},
+            )
+            .await
+            .unwrap();
+        for expected in [StatusCode::BAD_GATEWAY, StatusCode::TOO_MANY_REQUESTS] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/v1/channel-relay/messages/{}/attachments/0",
+                            fixture.message.id
+                        ))
+                        .header("authorization", format!("Bearer {raw_key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        fixture.state.db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn aurinko_reply_auth_retries_preflight_and_rejects_old_route_authority() {
+        let mut fixture = setup_reply_token_fixture("aurinko_reply_auth")
+            .await
+            .expect("real Mongo required");
+        for (collection, id) in [
+            (crate::models::channel_bot::COLLECTION_NAME, &fixture.bot.id),
+            (
+                crate::models::channel_conversation::COLLECTION_NAME,
+                &fixture.conversation.id,
+            ),
+            (
+                crate::models::channel_message::COLLECTION_NAME,
+                &fixture.message.id,
+            ),
+        ] {
+            fixture
+                .state
+                .db
+                .collection::<bson::Document>(collection)
+                .update_one(
+                    doc! { "_id": id },
+                    doc! { "$set": { "platform": "aurinko" } },
+                )
+                .await
+                .unwrap();
+        }
+        fixture.bot.platform = "aurinko".into();
+        fixture.conversation.platform = "aurinko".into();
+        fixture.message.platform = "aurinko".into();
+        let token = valid_reply_token(&fixture);
+        let request = reply_request(&fixture.message.id);
+        for _ in 0..2 {
+            resolve_reply_token_context(&fixture.state, &token, &request)
+                .await
+                .unwrap();
+            resolve_api_key_reply_context(
+                &fixture.state,
+                &api_key_auth_user(&fixture.api_key),
+                &request,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            fixture
+                .state
+                .db
+                .collection::<ReplyTokenUse>(REPLY_TOKEN_USES)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        fixture
+            .state
+            .db
+            .collection::<ChannelConversation>(CONVERSATIONS)
+            .update_one(
+                doc! { "_id": &fixture.conversation.id },
+                doc! { "$set": { "agent_api_key_id": Uuid::new_v4().to_string() } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            resolve_reply_token_context(&fixture.state, &token, &request)
+                .await
+                .is_err()
+        );
+        assert!(
+            resolve_api_key_reply_context(
+                &fixture.state,
+                &api_key_auth_user(&fixture.api_key),
+                &request
+            )
+            .await
+            .is_err()
+        );
     }
 }

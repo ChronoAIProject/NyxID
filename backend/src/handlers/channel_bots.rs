@@ -174,6 +174,7 @@ pub struct ChannelBotListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotDetailResponse {
+    pub last_verification: Option<BotVerificationResponse>,
     #[serde(flatten)]
     pub connection: ChannelConnectionState,
     pub credential_source: String,
@@ -238,9 +239,43 @@ pub struct CreateChannelBotResponse {
 
 #[derive(Debug, Serialize)]
 pub struct VerifyBotResponse {
+    pub last_verification: Option<BotVerificationResponse>,
     pub id: String,
     pub status: String,
     pub webhook_registered: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BotVerificationResponse {
+    pub id: String,
+    pub status: &'static str,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub message: Option<String>,
+}
+
+impl From<crate::models::channel_bot::BotVerification> for BotVerificationResponse {
+    fn from(check: crate::models::channel_bot::BotVerification) -> Self {
+        use crate::models::channel_bot::VerificationStatus;
+        let status = match check.status {
+            VerificationStatus::Incomplete => "incomplete",
+            VerificationStatus::Pending => "pending",
+            VerificationStatus::Verified => "verified",
+            VerificationStatus::Failed => "failed",
+        };
+        Self {
+            id: check.attempt_id,
+            status,
+            started_at: check.started_at.to_rfc3339(),
+            completed_at: check.completed_at.map(|date| date.to_rfc3339()),
+            message: check.message,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteChannelBotResponse {
+    pub webhook_cleanup: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -285,7 +320,8 @@ impl CreateChannelBotResponse {
     ) -> AppResult<Self> {
         let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
         Ok(Self {
-            webhook_ingestion: descriptor.webhook_ingestion,
+            webhook_ingestion: descriptor.webhook_ingestion
+                && (bot.credential_source != "connection" || bot.webhook_registered),
             connection_id: bot.connection_id.clone(),
             credential_source: bot.credential_source.clone(),
             managed_setup: bot.managed_setup.as_ref().map(Into::into),
@@ -297,10 +333,18 @@ impl CreateChannelBotResponse {
             },
             webhook_secret: descriptor
                 .webhook_secret_label
-                .filter(|_| bot.credential_source != "platform")
+                .filter(|_| {
+                    !matches!(
+                        bot.credential_source.as_str(),
+                        "platform" | "telegram_manager"
+                    )
+                })
                 .map(|_| webhook_secret),
             webhook_secret_label: descriptor.webhook_secret_label,
-            setup_instructions: if bot.credential_source == "platform" {
+            setup_instructions: if matches!(
+                bot.credential_source.as_str(),
+                "platform" | "telegram_manager"
+            ) {
                 &[]
             } else {
                 descriptor.setup_instructions
@@ -308,7 +352,11 @@ impl CreateChannelBotResponse {
             id: bot.id,
             platform: bot.platform,
             platform_bot_username: bot.platform_bot_username,
-            status: descriptor.create_response_status.to_string(),
+            status: if bot.credential_source == "connection" {
+                bot.status
+            } else {
+                descriptor.create_response_status.to_string()
+            },
             permission_setup_url,
             permission_setup_scopes,
         })
@@ -336,7 +384,8 @@ impl ChannelConnectionState {
     ) -> Self {
         let next = match adapter.ingestion() {
             crate::services::channel_platform::Ingestion::Poll { min_interval_secs }
-                if config.channel_poll_interval_secs > 0
+                if !bot.webhook_registered
+                    && config.channel_poll_interval_secs > 0
                     && bot.is_active
                     && bot.status == "active" =>
             {
@@ -356,7 +405,8 @@ impl ChannelConnectionState {
             _ => None,
         };
         Self {
-            webhook_ingestion: adapter.registration().webhook_ingestion,
+            webhook_ingestion: adapter.registration().webhook_ingestion
+                && (bot.credential_source != "connection" || bot.webhook_registered),
             connection_id: bot.connection_id.clone(),
             poll_cursor: bot.poll_cursor.clone(),
             last_polled_at: bot.last_polled_at.map(|d| d.to_rfc3339()),
@@ -556,10 +606,7 @@ pub async fn create_bot(
     let webhook_secret = create_result.webhook_secret;
 
     // Build the per-bot webhook URL (platform-specific path)
-    let webhook_url = format!(
-        "{}/api/v1/webhooks/channel/{}/{}",
-        state.config.base_url, body.platform, bot_id
-    );
+    let webhook_url = channel_bot_service::webhook_url(&state.config.base_url, &create_result.bot);
 
     // Register the webhook with the platform
     let reg_result = channel_bot_service::register_webhook(
@@ -575,7 +622,9 @@ pub async fn create_bot(
 
     if let Err(e) = reg_result {
         // Webhook registration failed: mark the bot as failed and return error
-        let _ = channel_bot_service::mark_bot_failed(&state.db, &bot_id).await;
+        if !adapter.serializes_lifecycle() {
+            let _ = channel_bot_service::mark_bot_failed(&state.db, &bot_id).await;
+        }
         return Err(AppError::BadRequest(format!(
             "Webhook registration failed: {e}"
         )));
@@ -682,7 +731,7 @@ pub async fn update_bot(
         None => None,
     };
 
-    let updated = channel_bot_service::update_bot(
+    let mut updated = channel_bot_service::update_bot(
         &state.db,
         &state.encryption_keys,
         &state.http_client,
@@ -721,18 +770,30 @@ pub async fn update_bot(
     );
 
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&updated);
+    channel_bot_service::apply_manager_configuration_status(
+        &state.db,
+        std::slice::from_mut(&mut updated),
+    )
+    .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        last_verification: crate::services::channel_verification_service::current(
+            &state.db,
+            adapter.as_ref(),
+            &updated,
+        )
+        .await?
+        .map(Into::into),
         connection: ChannelConnectionState::new(&updated, adapter.as_ref(), &state.config),
         credential_source: updated.credential_source.clone(),
         managed_setup: updated.managed_setup.as_ref().map(Into::into),
         platform_config: adapter.registration().configuration(&updated)?,
-        webhook_url: format!(
-            "{}/api/v1/webhooks/channel/{}/{}",
-            state.config.base_url, updated.platform, updated.id
-        ),
+        webhook_url: channel_bot_service::webhook_url(&state.config.base_url, &updated),
         webhook_secret_label: adapter.registration().webhook_secret_label,
-        setup_instructions: if updated.credential_source == "platform" {
+        setup_instructions: if matches!(
+            updated.credential_source.as_str(),
+            "platform" | "telegram_manager"
+        ) {
             &[]
         } else {
             adapter.registration().setup_instructions
@@ -765,7 +826,8 @@ pub async fn list_bots(
 ) -> AppResult<Json<ChannelBotListResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_list_owner(&state, &actor, query.org_id.as_deref()).await?;
-    let bots = channel_bot_service::list_bots(&state.db, &owner_id).await?;
+    let mut bots = channel_bot_service::list_bots(&state.db, &owner_id).await?;
+    channel_bot_service::apply_manager_configuration_status(&state.db, &mut bots).await?;
     let total = bots.len() as u64;
     let items = bots.iter().map(bot_to_item).collect();
     Ok(Json(ChannelBotListResponse { bots: items, total }))
@@ -778,7 +840,7 @@ pub async fn get_bot(
     Path(bot_id): Path<String>,
 ) -> AppResult<Json<ChannelBotDetailResponse>> {
     let actor = auth_user.user_id.to_string();
-    let (_owner_id, bot) = resolve_bot_owner_for_read(&state, &actor, &bot_id).await?;
+    let (_owner_id, mut bot) = resolve_bot_owner_for_read(&state, &actor, &bot_id).await?;
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
     // Count active conversations for this bot
@@ -792,18 +854,30 @@ pub async fn get_bot(
         .await?;
 
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
+    channel_bot_service::apply_manager_configuration_status(
+        &state.db,
+        std::slice::from_mut(&mut bot),
+    )
+    .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        last_verification: crate::services::channel_verification_service::current(
+            &state.db,
+            adapter.as_ref(),
+            &bot,
+        )
+        .await?
+        .map(Into::into),
         connection: ChannelConnectionState::new(&bot, adapter.as_ref(), &state.config),
         credential_source: bot.credential_source.clone(),
         managed_setup: bot.managed_setup.as_ref().map(Into::into),
         platform_config: adapter.registration().configuration(&bot)?,
-        webhook_url: format!(
-            "{}/api/v1/webhooks/channel/{}/{}",
-            state.config.base_url, bot.platform, bot.id
-        ),
+        webhook_url: channel_bot_service::webhook_url(&state.config.base_url, &bot),
         webhook_secret_label: adapter.registration().webhook_secret_label,
-        setup_instructions: if bot.credential_source == "platform" {
+        setup_instructions: if matches!(
+            bot.credential_source.as_str(),
+            "platform" | "telegram_manager"
+        ) {
             &[]
         } else {
             adapter.registration().setup_instructions
@@ -874,7 +948,13 @@ pub async fn delete_bot(
         })),
     );
 
-    Ok(StatusCode::NO_CONTENT)
+    if adapter.serializes_lifecycle() {
+        return Ok(Json(DeleteChannelBotResponse {
+            webhook_cleanup: managed_webhook_cleanup,
+        })
+        .into_response());
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// POST /api/v1/channel-bots/{id}/verify
@@ -885,6 +965,42 @@ pub async fn verify_bot(
 ) -> AppResult<Json<VerifyBotResponse>> {
     let actor = auth_user.user_id.to_string();
     let (_owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    verify_bot_with_adapter(
+        &state,
+        bot,
+        adapter.as_ref(),
+        &crate::services::telegram_new_api::TelegramApi::new(&state.http_client),
+        auth_user.api_key_id.as_deref(),
+    )
+    .await
+}
+
+pub(crate) async fn verify_bot_with_adapter(
+    state: &AppState,
+    bot: crate::models::channel_bot::ChannelBot,
+    adapter: &dyn PlatformAdapter,
+    telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
+    api_key_id: Option<&str>,
+) -> AppResult<Json<VerifyBotResponse>> {
+    if bot.platform == "telegram" {
+        let verified = channel_bot_service::verify_telegram_bot(
+            &state.db,
+            &state.encryption_keys,
+            telegram_api,
+            adapter,
+            &bot.id,
+            &bot.user_id,
+            &state.config.base_url,
+        )
+        .await?;
+        return Ok(Json(VerifyBotResponse {
+            last_verification: None,
+            id: verified.id,
+            status: verified.status,
+            webhook_registered: verified.webhook_registered,
+        }));
+    }
     if bot.platform == "telegram-new" {
         if !bot.is_active || bot.status == "suspended" {
             return Err(AppError::Conflict(
@@ -898,13 +1014,60 @@ pub async fn verify_bot(
             ));
         }
     }
-    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    if adapter.records_verification_result() {
+        let check = crate::services::channel_verification_service::verify(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter,
+            &bot,
+        )
+        .await?;
+        let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+        let observed =
+            crate::services::channel_verification_service::current(&state.db, adapter, &current)
+                .await?
+                .filter(|observed| observed.attempt_id == check.attempt_id)
+                .ok_or_else(|| {
+                    AppError::Conflict(
+                        "Bot credentials or verification changed. Run verification again.".into(),
+                    )
+                })?;
+        return Ok(Json(VerifyBotResponse {
+            id: current.id,
+            status: current.status,
+            webhook_registered: current.webhook_registered,
+            last_verification: Some(observed.into()),
+        }));
+    }
 
-    // Decrypt the token and verify it is still valid with the platform
+    if adapter.serializes_lifecycle() {
+        let url = format!(
+            "{}/api/v1/webhooks/channel/{}/{}",
+            state.config.base_url, bot.platform, bot.id
+        );
+        let verified = channel_bot_service::verify_serialized_bot(
+            &state.db,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter,
+            &bot.id,
+            &bot.user_id,
+            &url,
+        )
+        .await?;
+        return Ok(Json(VerifyBotResponse {
+            last_verification: None,
+            id: verified.id,
+            status: verified.status,
+            webhook_registered: verified.webhook_registered,
+        }));
+    }
+
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
         &state.encryption_keys,
-        adapter.as_ref(),
+        adapter,
         &bot,
     )
     .await?;
@@ -913,7 +1076,7 @@ pub async fn verify_bot(
             crate::services::channel_managed::build_verify_secrets(
                 &state.db,
                 &state.encryption_keys,
-                adapter.as_ref(),
+                adapter,
                 &bot,
             )
             .await?,
@@ -922,10 +1085,17 @@ pub async fn verify_bot(
         None
     };
 
+    let channel_billing = crate::services::channel_billing_service::ChannelBilling::for_bot(
+        &state.db,
+        &state.billing,
+        &bot,
+        api_key_id,
+    );
     adapter
         .verify_bot_token(
             &state.http_client,
             &BotCredentials {
+                billing: channel_billing.as_ref(),
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
                 platform_secrets: platform_secrets.as_ref(),
@@ -933,11 +1103,37 @@ pub async fn verify_bot(
         )
         .await?;
 
-    ensure_verify_material_present(&bot, adapter.as_ref())?;
+    if bot.credential_source != "connection" {
+        ensure_verify_material_present(&bot, adapter)?;
+    }
+
+    if bot.credential_source == "connection" {
+        if crate::services::channel_connection_webhook_service::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter,
+            &bot,
+            &state.config.base_url,
+        )
+        .await?
+        {
+            let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+            return Ok(Json(VerifyBotResponse {
+                last_verification: None,
+                id: current.id,
+                status: current.status,
+                webhook_registered: current.webhook_registered,
+            }));
+        }
+        ensure_verify_material_present(&bot, adapter)?;
+    }
 
     // Some subscription protocols bind the dashboard to the original secret.
     if adapter.registration().preserve_subscription_on_verify || bot.platform == "telegram-new" {
         return Ok(Json(VerifyBotResponse {
+            last_verification: None,
             id: bot.id,
             status: bot.status,
             webhook_registered: bot.webhook_registered,
@@ -968,7 +1164,7 @@ pub async fn verify_bot(
     let reg_result = channel_bot_service::register_webhook(
         &state.db,
         &state.http_client,
-        adapter.as_ref(),
+        adapter,
         &bot.id,
         &bot_token,
         &webhook_url,
@@ -999,6 +1195,7 @@ pub async fn verify_bot(
     };
 
     Ok(Json(VerifyBotResponse {
+        last_verification: None,
         id: bot.id,
         status,
         webhook_registered,
@@ -1039,6 +1236,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),
@@ -1112,6 +1310,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),
@@ -1156,7 +1355,8 @@ mod tests {
             scopes.unwrap(),
             vec![
                 "im:message".to_string(),
-                "im:message:send_as_bot".to_string()
+                "im:message:send_as_bot".to_string(),
+                "im:resource".to_string()
             ]
         );
     }

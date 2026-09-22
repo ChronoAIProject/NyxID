@@ -1,3 +1,10 @@
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+  normalizedSet,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -44,11 +51,15 @@ import { Checkbox } from "@/components/ui/checkbox";
 
 export function AdminRoleDetailPage() {
   const { roleId } = useParams({ strict: false }) as { roleId: string };
+  return <AdminRoleDetailPageEditor key={roleId} roleId={roleId} />;
+}
+
+function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
 
-  const { data: role, isLoading, error } = useRole(roleId);
+  const { data: role, isLoading } = useRole(roleId);
   const updateMutation = useUpdateRole();
   const deleteMutation = useDeleteRole();
   const bulkAssignMutation = useBulkAssignRole();
@@ -70,43 +81,53 @@ export function AdminRoleDetailPage() {
     },
   });
 
-  function openEditDialog() {
-    if (!role) return;
-    form.reset({
+  const normalize = (value: UpdateRoleFormData) => ({
+    ...value,
+    description: value.description ?? "",
+    permissions: normalizedSet((value.permissions ?? "").split(",")),
+  });
+  function editValues(): UpdateRoleFormData {
+    if (!role) return form.getValues();
+    return {
       name: role.name,
       slug: role.slug,
       description: role.description ?? "",
       permissions: role.permissions.join(", "),
       is_default: role.is_default,
-    });
+    };
+  }
+
+  function openEditDialog() {
+    if (!role) return;
+    form.reset(editValues());
+    editReview.cancel();
     setEditOpen(true);
   }
 
-  async function handleEdit(data: UpdateRoleFormData) {
-    try {
-      const permissions = data.permissions
-        ? data.permissions
-            .split(",")
-            .map((p) => p.trim())
-            .filter((p) => p.length > 0)
-        : [];
-      await updateMutation.mutateAsync({
-        roleId,
-        data: {
-          name: data.name,
-          slug: data.slug,
-          description: data.description || undefined,
-          permissions,
-          is_default: data.is_default,
-        },
-      });
+  const editReview = useChangeReview<
+    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...variables }) => {
+      void _before;
+      await updateMutation.mutateAsync(variables);
       toast.success("Role updated successfully");
       setEditOpen(false);
-    } catch (err) {
-      toast.error(
-        err instanceof ApiError ? err.message : "Failed to update role",
-      );
-    }
+    },
+    (pending) =>
+      !role ||
+      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+    roleId,
+  );
+
+  function handleEdit(data: UpdateRoleFormData) {
+    const before = normalize(
+      form.formState.defaultValues as UpdateRoleFormData,
+    );
+    const patch = changedFields(before, normalize(data));
+    editReview.review(
+      { roleId, data: patch, before },
+      describeChanges(before, patch),
+    );
   }
 
   async function handleDelete() {
@@ -138,7 +159,7 @@ export function AdminRoleDetailPage() {
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !role) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -147,7 +168,7 @@ export function AdminRoleDetailPage() {
     );
   }
 
-  if (error || !role) {
+  if (!role) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
@@ -175,15 +196,16 @@ export function AdminRoleDetailPage() {
         actions={
           canWrite ? (
             <>
-              <Button
-                variant="outline"
-                onClick={() => setBulkAssignOpen(true)}
-              >
-                <ButtonIcon><Users className="h-3 w-3" /></ButtonIcon>
+              <Button variant="outline" onClick={() => setBulkAssignOpen(true)}>
+                <ButtonIcon>
+                  <Users className="h-3 w-3" />
+                </ButtonIcon>
                 Assign All
               </Button>
               <Button variant="outline" onClick={openEditDialog}>
-                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <Pencil className="h-3 w-3" />
+                </ButtonIcon>
                 Edit
               </Button>
               {!role.is_system && (
@@ -191,7 +213,9 @@ export function AdminRoleDetailPage() {
                   variant="destructive"
                   onClick={() => setDeleteOpen(true)}
                 >
-                  <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+                  <ButtonIcon variant="destructive">
+                    <Trash2 className="h-3 w-3 text-destructive" />
+                  </ButtonIcon>
                   Delete
                 </Button>
               )}
@@ -227,12 +251,18 @@ export function AdminRoleDetailPage() {
         {role.permissions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SmartRemoteIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">No permissions assigned.</p>
+            <p className="text-[12px] text-muted-foreground">
+              No permissions assigned.
+            </p>
           </div>
         ) : (
           <div className="flex flex-wrap gap-2 px-4 py-3">
             {role.permissions.map((perm) => (
-              <Badge key={perm} variant="secondary" className="font-mono text-xs">
+              <Badge
+                key={perm}
+                variant="secondary"
+                className="font-mono text-xs"
+              >
                 {perm}
               </Badge>
             ))}
@@ -241,6 +271,7 @@ export function AdminRoleDetailPage() {
       </DetailSection>
 
       {/* Edit Dialog */}
+      {editReview.dialog}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -343,7 +374,11 @@ export function AdminRoleDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  isLoading={updateMutation.isPending}
+                >
                   Save Changes
                 </Button>
               </DialogFooter>

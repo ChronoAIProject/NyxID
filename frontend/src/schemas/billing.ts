@@ -1,3 +1,4 @@
+import { BILLING_METRICS } from "./billing-metrics";
 import { z } from "zod";
 
 export const BILLING_USAGE_PERIODS = [
@@ -10,7 +11,20 @@ export const BILLING_USAGE_PERIODS = [
 
 export type BillingUsagePeriod = (typeof BILLING_USAGE_PERIODS)[number];
 
-export const billingMetricSchema = z.enum(["tokens", "requests", "bytes"]);
+// Optional for compatibility with servers predating exact settlement display.
+const fundingBreakdownShape = {
+  wallet_credits_micros: z.number().int().nonnegative().nullable().optional(),
+  grant_credits_micros: z.number().int().nonnegative().nullable().optional(),
+  allowance_credits_micros: z
+    .number()
+    .int()
+    .nonnegative()
+    .nullable()
+    .optional(),
+  allowance_quantity: z.number().int().nonnegative().optional(),
+};
+
+export const billingMetricSchema = z.enum(BILLING_METRICS);
 export const billingPlanKindSchema = z.enum([
   "prepaid",
   "subscription",
@@ -42,9 +56,10 @@ export const billingTokenBreakdownSchema = z.object({
 });
 
 export const billingUsageRowSchema = z.object({
+  ...fundingBreakdownShape,
   service_slug: z.string().nullable().optional(),
   service_id: z.string().nullable().optional(),
-  metric: billingMetricSchema,
+  metric: z.string(),
   lago_metric_code: z.string(),
   layer: z.string(),
   // Optional so an older backend without the model/agent breakdown still
@@ -63,6 +78,7 @@ export const billingUsageRowSchema = z.object({
 });
 
 export const billingUsageTotalsSchema = z.object({
+  ...fundingBreakdownShape,
   quantity: z.number().int(),
   requests: z.number().int(),
   bytes: z.number().int(),

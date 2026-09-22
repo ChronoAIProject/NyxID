@@ -52,3 +52,16 @@ export const updateServiceAccountSchema = z.object({
 export type UpdateServiceAccountFormData = z.infer<
   typeof updateServiceAccountSchema
 >;
+
+const uuid = z.uuid();
+export const curationGrantSchema = z.object({
+  service_ids: z.string().refine((value) => {
+    const ids = value.split(/[,\s]+/).filter(Boolean);
+    return ids.length >= 1 && ids.length <= 100 && new Set(ids).size === ids.length && ids.every((id) => uuid.safeParse(id).success);
+  }, "Enter 1–100 distinct catalog service UUIDs"),
+  ornn_proxy_service_id: z.string().refine((value) => value === "" || uuid.safeParse(value).success, "Enter a catalog service UUID"),
+  expires_at: z.string().refine((value) => value === "" || (!Number.isNaN(Date.parse(value)) && Date.parse(value) > Date.now()), "Choose a future expiry"),
+  max_writes: z.string().regex(/^[1-9]\d*$/, "Enter a whole number").refine((value) => Number(value) <= 10_000, "At most 10,000 writes"),
+  window_seconds: z.string().regex(/^\d+$/, "Enter a whole number").refine((value) => Number(value) >= 60 && Number(value) <= 86_400, "Use 60–86,400 seconds"),
+});
+export type CurationGrantFormData = z.infer<typeof curationGrantSchema>;

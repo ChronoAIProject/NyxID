@@ -16,7 +16,6 @@ use crate::models::usage_meter::{
 use super::lago_client::{Entitlement, LagoApi};
 use super::route_context::BillingRouteContext;
 
-const CREDIT_MICROS: i64 = 1_000_000;
 const RECOVERY_BATCH_SIZE: i64 = 100;
 const SETTLEMENT_LOCK_RETRIES: usize = 4;
 const SETTLEMENT_STRANDED_AFTER_SECS: i64 = 30;
@@ -42,8 +41,11 @@ pub(crate) enum SettlementFailureDisposition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayerReservation {
     pub layer: BillingLayer,
+    pub metric: crate::models::service_billing::BillingMetric,
+    pub lago_metric_code: String,
     pub estimated_quantity: i64,
     pub credits_per_unit_micros: i64,
+    pub credits_per_unit_pico: Option<i64>,
     pub reserved_credits: i64,
     pub allowance_reservations: Vec<AllowanceReservationAllocation>,
     pub grant_reservations: Vec<GrantReservationAllocation>,
@@ -55,16 +57,6 @@ pub struct BillingReservation {
     pub wallet_id: String,
     pub total_reserved_credits: i64,
     pub layers: Vec<LayerReservation>,
-}
-
-impl BillingReservation {
-    pub fn reserved_for(&self, layer: BillingLayer) -> i64 {
-        self.layers
-            .iter()
-            .find(|reservation| reservation.layer == layer)
-            .map(|reservation| reservation.reserved_credits)
-            .unwrap_or(0)
-    }
 }
 
 pub async fn gate_and_reserve(
@@ -133,7 +125,7 @@ pub async fn gate_and_reserve(
     let total_reserved_credits = layers
         .iter()
         .map(|reservation| reservation.reserved_credits)
-        .sum::<i64>();
+        .fold(0_i64, i64::saturating_add);
 
     if total_reserved_credits == 0 {
         return Ok(Some(BillingReservation {
@@ -1094,49 +1086,41 @@ async fn estimate_layer_reservations(
 ) -> AppResult<Vec<LayerReservation>> {
     let mut reservations = Vec::new();
 
-    if ctx.platform_billable {
+    let platform = ctx
+        .platform_specs()
+        .filter(|_| ctx.platform_billable)
+        .map(|(metric, code)| (BillingLayer::Platform, metric, code));
+    let resale = ctx.resale.iter().map(|spec| {
+        (
+            BillingLayer::Resale,
+            spec.metric,
+            spec.lago_metric_code.as_str(),
+        )
+    });
+    for (layer, metric, code) in platform.chain(resale) {
+        let rate = fresh_rate(db, code, None, rate_cache_ttl_secs).await?;
+        let rate_pico =
+            super::amounts::rate_pico(rate.credits_per_unit_pico, rate.credits_per_unit_micros);
+        // Preserve the existing one-unit gate for standalone legacy charges
+        // and resale. New component configurations estimate every platform unit.
+        let estimated_quantity = if layer == BillingLayer::Resale
+            || (ctx.platform_components.is_empty() && metric.is_legacy())
+        {
+            1
+        } else {
+            ctx.estimated_quantity(metric)
+        };
         reservations.push(LayerReservation {
-            layer: BillingLayer::Platform,
-            estimated_quantity: 1,
-            credits_per_unit_micros: fresh_rate_micros(
-                db,
-                &ctx.platform_lago_metric_code,
-                None,
-                rate_cache_ttl_secs,
-            )
-            .await?,
-            reserved_credits: estimate_fresh_credits(
-                db,
-                &ctx.platform_lago_metric_code,
-                None,
-                1,
-                rate_cache_ttl_secs,
-            )
-            .await?,
-            allowance_reservations: Vec::new(),
-            grant_reservations: Vec::new(),
-        });
-    }
-
-    if let Some(resale) = &ctx.resale {
-        reservations.push(LayerReservation {
-            layer: BillingLayer::Resale,
-            estimated_quantity: 1,
-            credits_per_unit_micros: fresh_rate_micros(
-                db,
-                &resale.lago_metric_code,
-                None,
-                rate_cache_ttl_secs,
-            )
-            .await?,
-            reserved_credits: estimate_fresh_credits(
-                db,
-                &resale.lago_metric_code,
-                None,
-                1,
-                rate_cache_ttl_secs,
-            )
-            .await?,
+            layer,
+            metric,
+            lago_metric_code: code.to_string(),
+            estimated_quantity,
+            credits_per_unit_micros: rate.credits_per_unit_micros,
+            credits_per_unit_pico: rate.credits_per_unit_pico,
+            reserved_credits: super::amounts::whole_credits(super::amounts::cost_pico(
+                rate_pico,
+                estimated_quantity,
+            )),
             allowance_reservations: Vec::new(),
             grant_reservations: Vec::new(),
         });
@@ -1145,17 +1129,12 @@ async fn estimate_layer_reservations(
     Ok(reservations)
 }
 
-async fn estimate_fresh_credits(
+async fn fresh_rate(
     db: &mongodb::Database,
     lago_metric_code: &str,
     model: Option<&str>,
-    quantity: i64,
     rate_cache_ttl_secs: u64,
-) -> AppResult<i64> {
-    if quantity <= 0 {
-        return Ok(0);
-    }
-
+) -> AppResult<BillingRateCache> {
     let rate = find_rate(db, lago_metric_code, model)
         .await?
         .ok_or_else(|| {
@@ -1169,30 +1148,7 @@ async fn estimate_fresh_credits(
             "billing rate cache is stale for metric {lago_metric_code}"
         )));
     }
-
-    Ok(credits_from_micros(rate.credits_per_unit_micros, quantity))
-}
-
-async fn fresh_rate_micros(
-    db: &mongodb::Database,
-    lago_metric_code: &str,
-    model: Option<&str>,
-    rate_cache_ttl_secs: u64,
-) -> AppResult<i64> {
-    let rate = find_rate(db, lago_metric_code, model)
-        .await?
-        .ok_or_else(|| {
-            AppError::BillingNotConfigured(format!(
-                "billing rate cache is missing for metric {lago_metric_code}"
-            ))
-        })?;
-    let max_age_secs = i64::try_from(rate_cache_ttl_secs).unwrap_or(i64::MAX);
-    if rate.synced_at < Utc::now() - Duration::seconds(max_age_secs) {
-        return Err(AppError::BillingNotConfigured(format!(
-            "billing rate cache is stale for metric {lago_metric_code}"
-        )));
-    }
-    Ok(rate.credits_per_unit_micros.max(0))
+    Ok(rate)
 }
 
 async fn estimate_credits(
@@ -1212,7 +1168,10 @@ async fn estimate_credits(
                 "billing rate cache is missing for metric {lago_metric_code}"
             ))
         })?;
-    Ok(credits_from_micros(rate.credits_per_unit_micros, quantity))
+    Ok(super::amounts::whole_credits(super::amounts::cost_pico(
+        super::amounts::rate_pico(rate.credits_per_unit_pico, rate.credits_per_unit_micros),
+        quantity,
+    )))
 }
 
 pub(crate) async fn find_rate(
@@ -1232,24 +1191,6 @@ pub(crate) async fn find_rate(
         .find_one(doc! { "_id": BillingRateCache::cache_id(lago_metric_code, None) })
         .await
         .map_err(Into::into)
-}
-
-pub(crate) fn credits_from_micros(credits_per_unit_micros: i64, quantity: i64) -> i64 {
-    if credits_per_unit_micros <= 0 || quantity <= 0 {
-        return 0;
-    }
-
-    let micros = i128::from(credits_per_unit_micros) * i128::from(quantity);
-    let credits = (micros + i128::from(CREDIT_MICROS - 1)) / i128::from(CREDIT_MICROS);
-    credits.min(i128::from(i64::MAX)) as i64
-}
-
-pub(crate) fn whole_credits_for_micros(micros: i64) -> i64 {
-    if micros <= 0 {
-        return 0;
-    }
-    let credits = (i128::from(micros) + i128::from(CREDIT_MICROS - 1)) / i128::from(CREDIT_MICROS);
-    credits.min(i128::from(i64::MAX)) as i64
 }
 
 async fn release_one_unforwarded_row(
@@ -1453,6 +1394,7 @@ mod tests {
                 lago_metric_code: "platform_requests".to_string(),
                 model: None,
                 credits_per_unit_micros: credits * 1_000_000,
+                credits_per_unit_pico: None,
                 synced_at: Utc::now(),
             })
             .await

@@ -529,7 +529,7 @@ export function NodeDetailPage() {
                     <FormItem>
                       <FormLabel>Field name</FormLabel>
                       <FormControl>
-                        <Input {...field} placeholder="X-API-Key" />
+                        <Input readOnly={credentialPushForm.watch("injection_method") === "ifttt-webhook"} {...field} placeholder="X-API-Key" />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -553,6 +553,7 @@ export function NodeDetailPage() {
                             credentialPushForm.getValues("field_name");
                           field.onChange(method);
                           if (
+                            method === "ifttt-webhook" ||
                             currentFieldName.trim() === "" ||
                             currentFieldName === previousDefault
                           ) {
@@ -576,6 +577,7 @@ export function NodeDetailPage() {
                           <SelectItem value="path-prefix">
                             Path prefix
                           </SelectItem>
+                          <SelectItem value="ifttt-webhook">IFTTT Webhooks</SelectItem>
                         </SelectContent>
                       </Select>
                       <FormMessage />

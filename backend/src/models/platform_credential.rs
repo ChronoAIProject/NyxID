@@ -7,6 +7,8 @@ pub const COLLECTION_NAME: &str = "platform_credentials";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PlatformCredential {
+    #[serde(default)]
+    pub channel_observation_version: i64,
     #[serde(rename = "_id")]
     pub id: String,
     pub provider: String,

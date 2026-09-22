@@ -17,7 +17,7 @@ use crate::models::service_provider_requirement::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::services::{catalog_spec_sync, org_service, role_service};
+use crate::services::{org_service, role_service};
 
 /// A catalog entry combining DownstreamService + ProviderConfig info.
 pub struct CatalogEntry {
@@ -98,6 +98,9 @@ pub struct CatalogEntry {
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: i64,
+    pub skills_manifest_digest: String,
     /// Declared credential fields for `token_exchange` services. When set,
     /// clients should render one input per field (text vs password per the
     /// `secret` flag) and compose a JSON object from the values before
@@ -128,6 +131,9 @@ fn build_catalog_entry(
     let requires_credential =
         svc.requires_user_credential || svc.auth_method != "none" || spr.is_some();
     let platform_client_id_present = oauth_client_id.is_some();
+    let skills_manifest_digest = crate::services::catalog_skill_service::manifest_digest(
+        &crate::services::catalog_skill_service::state(&svc),
+    );
     let google_product = provider
         .filter(|p| p.slug == "google")
         .and_then(|_| super::google_workspace::GoogleProduct::from_slug(&svc.slug));
@@ -269,6 +275,9 @@ fn build_catalog_entry(
         required_permissions: svc.required_permissions,
         examples_url: svc.examples_url,
         recommended_skills: svc.recommended_skills,
+        recommended_skill_refs: svc.recommended_skill_refs,
+        skills_revision: svc.skills_revision,
+        skills_manifest_digest,
         token_exchange_credential_fields: svc.token_exchange_config.map(|c| c.credential_fields),
         default_request_headers: svc.default_request_headers,
     }
@@ -314,7 +323,7 @@ async fn provider_platform_secret_nonempty(
 
 /// MongoDB filter for visibility that hides private services from non-owners.
 /// Public services and legacy documents without a visibility field are visible to all.
-fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
+pub(crate) fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
     doc! {
         "$or": [
             { "visibility": { "$ne": "private" } },
@@ -371,6 +380,7 @@ pub async fn list_catalog(
                 {
                     "$nor": [
                         { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+                        { "service_category": crate::services::retired_service_service::RETIRED_CATEGORY },
                     ],
                 },
                 visibility_filter(user_id),
@@ -394,6 +404,7 @@ pub async fn list_catalog_all(
             {
                 "$nor": [
                     { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+                        { "service_category": crate::services::retired_service_service::RETIRED_CATEGORY },
                 ],
             },
             visibility_filter(user_id),
@@ -452,7 +463,13 @@ async fn list_catalog_filtered(
             .as_ref()
             .and_then(|pid| providers.iter().find(|p| &p.id == pid));
 
-        let spr = sprs.iter().find(|r| r.service_id == svc.id);
+        let spr = sprs.iter().find(|r| {
+            r.service_id == svc.id
+                && svc
+                    .provider_config_id
+                    .as_deref()
+                    .is_none_or(|id| id == r.provider_config_id)
+        });
 
         let oauth_client_id = match provider {
             Some(provider) if provider.credential_mode != "user" => {
@@ -529,7 +546,7 @@ pub async fn get_downstream_service_by_slug(
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
-    if catalog_spec_sync::is_platform_vendor_service(&svc) {
+    if crate::services::retired_service_service::is_retired(&svc) {
         return Err(AppError::NotFound("Catalog entry not found".to_string()));
     }
 
@@ -637,7 +654,7 @@ pub async fn get_catalog_entry(
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
-    if catalog_spec_sync::is_platform_vendor_service(&svc) {
+    if crate::services::retired_service_service::is_retired(&svc) {
         return Err(AppError::NotFound("Catalog entry not found".to_string()));
     }
 
@@ -653,7 +670,7 @@ pub async fn get_catalog_entry(
 
     let spr = db
         .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
-        .find_one(doc! { "service_id": &svc.id })
+        .find_one(crate::services::provider_link_service::primary_requirement_filter(&svc))
         .await?;
 
     let oauth_client_id = match provider.as_ref() {
@@ -972,6 +989,8 @@ mod tests {
     fn make_catalog_service(slug: &str, name: &str, user_id: &str) -> DownstreamService {
         DownstreamService {
             destination_targets: Default::default(),
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             slug: slug.to_string(),
             name: name.to_string(),

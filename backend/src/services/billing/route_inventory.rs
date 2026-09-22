@@ -7,6 +7,8 @@ pub enum BillingIngress {
     SshExec,
     SshTunnel,
     SshWebTerminal,
+    ChannelInbound,
+    ChannelOutbound,
 }
 
 impl BillingIngress {
@@ -19,6 +21,8 @@ impl BillingIngress {
             Self::SshExec => "ssh_exec",
             Self::SshTunnel => "ssh_tunnel",
             Self::SshWebTerminal => "ssh_web_terminal",
+            Self::ChannelInbound => "channel_inbound",
+            Self::ChannelOutbound => "channel_outbound",
         }
     }
 }
@@ -32,6 +36,8 @@ pub const ALL_BILLING_INGRESSES: &[BillingIngress] = &[
     BillingIngress::SshExec,
     BillingIngress::SshTunnel,
     BillingIngress::SshWebTerminal,
+    BillingIngress::ChannelInbound,
+    BillingIngress::ChannelOutbound,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -146,6 +152,21 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         handler: "handlers::proxy::list_proxy_services",
         route: "/api/v1/proxy/services",
         policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::turns",
+        route: "/api/v1/assistant/nyxagent/turns",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::models",
+        route: "/api/v1/assistant/nyxagent/models",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_nyxagent::delete",
+        route: "/api/v1/assistant/nyxagent/conversations/{id}",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
         handler: "handlers::assistant_direct::completions",

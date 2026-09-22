@@ -368,6 +368,19 @@ fn pin_test_db_uri(uri: &str) -> bool {
     pin_test_db_uri_in(&TEST_DB_PINNED_URI, uri)
 }
 
+// Docker publishes a loopback seed at a different port from the replica set's
+// advertised member. Preserve explicit topology options; otherwise stay on the
+// caller's single local seed. Transactions still require the real replica set.
+fn local_test_connection(options: &mut mongodb::options::ClientOptions) {
+    if options.direct_connection.is_none()
+        && options.hosts.len() == 1
+        && matches!(&options.hosts[0], mongodb::options::ServerAddress::Tcp { host, .. }
+            if matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1"))
+    {
+        options.direct_connection = Some(true);
+    }
+}
+
 async fn probe_test_mongo_uri(
     uri: &str,
     db_name: &str,
@@ -382,6 +395,7 @@ async fn probe_test_mongo_uri(
     // milliseconds. These more generous driver timeouts cover a real mongod and
     // remote explicit overrides. Under cargo llvm-cov, argon2 plus instrumentation
     // can starve the heartbeat monitor long enough to otherwise clear the pool.
+    local_test_connection(&mut options);
     options.server_selection_timeout = Some(Duration::from_secs(30));
     options.connect_timeout = Some(Duration::from_secs(20));
     // The cleanup guard is released only after the driver's SDAM monitor exits.
@@ -714,10 +728,20 @@ fn test_db_heartbeat_loop(uri: String, run_id: String, started_at_secs: u64, sto
         match stop.recv_timeout(TEST_DB_RUN_HEARTBEAT_INTERVAL) {
             Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let _ = runtime.block_on(tokio::time::timeout(
-                    STALE_TEST_DB_METADATA_TIMEOUT,
-                    renew_test_db_run_record(&client, &run_id, started_at_secs, unix_time_secs()),
-                ));
+                // Construct the timer inside the runtime; constructing timeout
+                // on this std thread panics on the first 60-second heartbeat.
+                let _ = runtime.block_on(async {
+                    tokio::time::timeout(
+                        STALE_TEST_DB_METADATA_TIMEOUT,
+                        renew_test_db_run_record(
+                            &client,
+                            &run_id,
+                            started_at_secs,
+                            unix_time_secs(),
+                        ),
+                    )
+                    .await
+                });
             }
         }
     }
@@ -1168,6 +1192,7 @@ async fn test_db_cleanup_client(uri: &str) -> Option<mongodb::Client> {
     else {
         return None;
     };
+    local_test_connection(&mut options);
     options.server_selection_timeout = Some(Duration::from_secs(3));
     options.connect_timeout = Some(Duration::from_secs(3));
     options.max_pool_size = Some(2);
@@ -1684,6 +1709,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         platform_service_rate_limit_per_second: 2,
         platform_service_rate_limit_burst: 10,
         trusted_proxy_ips: vec![],
+        rate_limit_exempt_ips: vec![],
         mtls_client_cert_header: None,
         broker_require_sender_constraint: false,
         broker_require_admin_capability: false,
@@ -1757,6 +1783,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         channel_poll_interval_secs: 30,
         channel_relay_max_bots_per_user: 5,
         channel_relay_message_ttl_days: 30,
+        channel_media_max_bytes: crate::config::DEFAULT_CHANNEL_MEDIA_MAX_BYTES,
         channel_relay_edit_rate_limit_per_second: 10,
         channel_relay_edit_rate_limit_burst: 20,
         channel_relay_initiate_rate_limit_per_second: 1,
@@ -2133,6 +2160,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             crate::services::cloud_response_cache::CloudResponseCache::new(0),
         ),
         billing,
+        audit_event_types: Arc::default(),
         telemetry: None,
     }
 }
@@ -2580,6 +2608,8 @@ pub(crate) fn test_auto_connected_catalog_service()
         required_permissions: None,
         examples_url: None,
         recommended_skills: None,
+        recommended_skill_refs: None,
+        skills_revision: 0,
         custom_user_agent: None,
         default_request_headers: None,
         ws_frame_injections: Vec::new(),
@@ -3486,5 +3516,21 @@ mod tests {
             remaining >= min_remaining.as_millis() - 50,
             "expected at least ~{min_remaining:?} left in the bin, got {remaining} ms"
         );
+    }
+    #[tokio::test]
+    async fn local_seed_defaults_direct_but_preserves_explicit_topologies() {
+        for (uri, expected) in [
+            ("mongodb://127.0.0.1:27019", Some(true)),
+            (
+                "mongodb://127.0.0.1:27019/?directConnection=false",
+                Some(false),
+            ),
+            ("mongodb://127.0.0.1:27019,127.0.0.1:27020", None),
+            ("mongodb://mongo.example:27019", None),
+        ] {
+            let mut options = mongodb::options::ClientOptions::parse(uri).await.unwrap();
+            local_test_connection(&mut options);
+            assert_eq!(options.direct_connection, expected);
+        }
     }
 }

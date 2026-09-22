@@ -184,6 +184,14 @@ describe("PROBE_REGISTRY — table-driven coverage (typo trap)", () => {
 });
 
 describe("recipeForSlug — suffix strip edge cases", () => {
+  it.each(["api-aurinko", "api-aurinko-2"])(
+    "%s probes the authenticated account endpoint from the unversioned base",
+    (slug) => {
+      expect(recipeForSlug(slug)).toEqual({ path: "v1/account" });
+      expect(probePathForSlug(slug)).toBe("v1/account");
+      expect(isTestable(slug)).toBe(true);
+    },
+  );
   it("does NOT strip letter-only suffixes (llm-openai-abc → miss)", () => {
     expect(recipeForSlug("llm-openai-abc")).toBeUndefined();
     expect(probePathForSlug("llm-openai-abc")).toBe("");

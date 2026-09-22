@@ -105,6 +105,10 @@ pub async fn build_verify_secrets(
     bot: &crate::models::channel_bot::ChannelBot,
 ) -> AppResult<PlatformVerifySecrets> {
     let mut secrets = adapter.build_verify_secrets(keys, bot).await?;
+    if bot.credential_source == "connection" && adapter.platform_webhook() {
+        let descriptor = adapter.platform_credentials().ok_or_else(unavailable)?;
+        return super::platform_credential_service::load_decrypted(db, keys, &descriptor).await;
+    }
     if bot.credential_source == "platform" {
         let descriptor = adapter.platform_credentials().ok_or_else(unavailable)?;
         let credentials =

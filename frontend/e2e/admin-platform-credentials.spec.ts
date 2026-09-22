@@ -92,6 +92,10 @@ for (const viewport of [
       .getByLabel("Embedded Signup Configuration ID", { exact: true })
       .fill("222");
     await page.getByRole("button", { name: "Save credentials" }).click();
+    const review = page.getByRole("dialog", { name: "Review changes" });
+    await expect(review).not.toContainText("private-secret-never-returned");
+    expect(updates).toEqual([]);
+    await review.getByRole("button", { name: "Confirm changes" }).click();
     await expect(page.getByLabel("App Secret", { exact: true })).toHaveValue(
       "",
     );

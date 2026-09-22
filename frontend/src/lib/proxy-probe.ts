@@ -108,6 +108,7 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   // `.../user` (works with both OAuth and PAT bearer tokens).
   "api-github": { path: "user" },
   "api-github-pat": { path: "user" },
+  "api-aurinko": { path: "v1/account" },
 
   // Bot APIs — dedicated bot-identity endpoints. Telegram Bot's path
   // is bare because the token is injected via `path` auth method
@@ -146,6 +147,7 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   // No suitable status endpoint / requires special auth we don't emulate
   "api-firecrawl": null, // no public status endpoint
   "api-tiktok": null, // /oauth/userinfo needs POST body
+  "api-ifttt": null, // Every valid operation triggers an Applet; no automatic probe.
   "api-lark-bot": null, // OpenAPI probe path needs OAuth context
   "api-feishu-bot": null, // same as lark-bot
 

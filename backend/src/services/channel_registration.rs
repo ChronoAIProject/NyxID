@@ -12,6 +12,7 @@ use crate::models::channel_bot::ChannelBot;
 pub struct RegistrationField {
     pub name: &'static str,
     pub label: &'static str,
+    pub hint: Option<&'static str>,
     pub storage: &'static str,
     pub secret: bool,
     pub required: bool,
@@ -30,6 +31,7 @@ pub const BOT_TOKEN_FIELD: RegistrationField = RegistrationField {
     patchable: false,
     clearable: false,
     webhook_secret: false,
+    hint: None,
     platform_fallback: None,
 };
 
@@ -45,6 +47,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -56,6 +59,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -67,6 +71,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -78,6 +83,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
     RegistrationField {
@@ -89,12 +95,14 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: true,
         webhook_secret: false,
+        hint: None,
         platform_fallback: None,
     },
 ];
 
 #[derive(Clone, Copy, Debug)]
 pub struct RegistrationDescriptor {
+    pub documentation_url: Option<&'static str>,
     pub fields: &'static [RegistrationField],
     pub token_fields: &'static [&'static str],
     pub extra_fields: &'static [RegistrationField],
@@ -115,6 +123,7 @@ pub struct RegistrationDescriptor {
 impl Default for RegistrationDescriptor {
     fn default() -> Self {
         Self {
+            documentation_url: None,
             fields: &[BOT_TOKEN_FIELD],
             token_fields: &["bot_token"],
             extra_fields: LEGACY_OPTIONAL_FIELDS,
@@ -256,6 +265,7 @@ pub struct BotCredentials<'a> {
     pub token: &'a str,
     pub platform_bot_id: Option<&'a str>,
     pub platform_secrets: Option<&'a super::channel_platform::PlatformVerifySecrets>,
+    pub billing: Option<&'a super::channel_billing_service::ChannelBilling>,
 }
 
 impl std::fmt::Debug for BotCredentials<'_> {
@@ -273,6 +283,7 @@ impl<'a> From<&'a str> for BotCredentials<'a> {
             token,
             platform_bot_id: None,
             platform_secrets: None,
+            billing: None,
         }
     }
 }

@@ -45,7 +45,14 @@ fn shared_provider(row: &Value) -> Option<&str> {
         .flatten()
 }
 
-fn shared_clear_warning(provider: &str) -> String {
+fn shared_clear_warning(provider: &str, fields: &[String]) -> String {
+    if provider == "aurinko" {
+        return if fields == ["signing_secret"] {
+            "Clearing the webhook signing secret stops managed bot webhook verification until restored. Application credentials and AI Service mailbox tokens are retained."
+        } else {
+            "Clearing application credentials prevents new mailbox authorizations and reconnects until restored. Clearing the webhook signing secret stops managed bot webhook verification. Manual connections keep their own credentials."
+        }.into();
+    }
     format!(
         "These credentials are shared with the {provider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored."
     )
@@ -149,8 +156,14 @@ pub async fn run(command: AdminPlatformCredentialsCommands) -> Result<()> {
         } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let descriptor = descriptor(&mut api, &provider).await?;
-            if let Some(shared) = shared_provider(&descriptor) {
-                let warning = shared_clear_warning(shared);
+            if let Some(shared) = shared_provider(&descriptor).filter(|_| {
+                provider != "x"
+                    || fields.is_empty()
+                    || fields
+                        .iter()
+                        .any(|name| matches!(name.as_str(), "client_id" | "client_secret"))
+            }) {
+                let warning = shared_clear_warning(shared, &fields);
                 eprintln!("{warning}");
                 if !confirm_shared_provider {
                     bail!("{warning} Pass --confirm-shared-provider to confirm.");
@@ -330,15 +343,64 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn aurinko_set_accepts_three_separate_secret_environment_fields() {
+        let _guard = env_lock().lock().unwrap_or_else(|error| error.into_inner());
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/v1/admin/platform-credentials"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "provider": "aurinko", "backing": {"type": "provider_oauth", "provider_slug": "aurinko"},
+                "fields": [{"name": "client_id", "secret": true}, {"name": "client_secret", "secret": true}, {"name": "signing_secret", "secret": true}]
+            }]))).expect(1).mount(&server).await;
+        Mock::given(method("PATCH")).and(path("/api/v1/admin/platform-credentials/aurinko"))
+            .and(body_json(json!({"fields": {"client_id": "app-id", "client_secret": "app-secret", "signing_secret": "webhook-secret"}, "regenerate_verify_token": false})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"provider": "aurinko"}))).expect(1).mount(&server).await;
+        let vars = [
+            ("NYXID_TEST_AURINKO_ID", "app-id"),
+            ("NYXID_TEST_AURINKO_CLIENT", "app-secret"),
+            ("NYXID_TEST_AURINKO_SIGNING", "webhook-secret"),
+        ];
+        for (name, value) in vars {
+            unsafe {
+                std::env::set_var(name, value);
+            }
+        }
+        let result = run(AdminPlatformCredentialsCommands::Set {
+            provider: "aurinko".into(),
+            fields: vec![],
+            field_envs: vec![
+                "client_id=NYXID_TEST_AURINKO_ID".into(),
+                "client_secret=NYXID_TEST_AURINKO_CLIENT".into(),
+                "signing_secret=NYXID_TEST_AURINKO_SIGNING".into(),
+            ],
+            app_id: None,
+            embedded_signup_config_id: None,
+            app_secret_env: None,
+            regenerate_verify_token: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        for (name, _) in vars {
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+        result.unwrap();
+        let warning = shared_clear_warning("aurinko", &["signing_secret".into()]);
+        assert!(warning.contains("AI Service mailbox tokens are retained"));
+        assert!(!warning.contains("OAuth connections and logins"));
+    }
+
+    #[tokio::test]
     async fn shared_provider_clears_require_explicit_confirmation_for_fields_and_provider() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/admin/platform-credentials"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
                 "provider": "x", "backing": {"type": "provider_oauth", "provider_slug": "twitter"},
-                "fields": [{"name": "client_secret", "secret": true}]
+                "fields": [{"name": "client_secret", "secret": true}, {"name": "consumer_secret", "secret": true}]
             }])))
-            .expect(4)
+            .expect(5)
             .mount(&server)
             .await;
         Mock::given(method("PATCH"))
@@ -362,10 +424,25 @@ mod tests {
                 auth: mock_auth(server.uri()),
             };
             let error = run(command(false)).await.unwrap_err().to_string();
-            assert!(error.contains(&shared_clear_warning("twitter")));
+            assert!(error.contains(&shared_clear_warning("twitter", &[])));
             assert!(error.contains("--confirm-shared-provider"));
             run(command(true)).await.unwrap();
         }
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/admin/platform-credentials/x"))
+            .and(body_json(json!({"fields": {"consumer_secret": null}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(AdminPlatformCredentialsCommands::Clear {
+            provider: "x".into(),
+            fields: vec!["consumer_secret".into()],
+            confirm_shared_provider: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

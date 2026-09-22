@@ -8,12 +8,14 @@ This is a channel configuration capability. The wider onboarding wizard, onboard
 
 Starting from the website takes two application steps:
 
-1. **Continue in Telegram.** Choose a personal or organization destination and enter a label on `/channel-bots?connect=telegram-new`. One click saves the authenticated creation request with `auto_connect: true` and opens the manager chat. This action authorizes NyxID to connect one fresh bot created through that private handoff.
+1. **Continue in Telegram.** Choose **Telegram** in the **Add Channel Bot** modal and use its **Scope** and **Label** fields. `/channel-bots?connect=telegram-new` opens the same modal over the Channel Bots list. One click saves the authenticated creation request with `auto_connect: true` and opens the manager chat. This action authorizes NyxID to connect one fresh bot created through that private handoff.
 2. **Create your bot.** The manager chat names the destination and website and explains that creating the bot connects it automatically. Tap **Start** if Telegram asks, then **Create bot** and finish Telegram’s native name/username form. Suggestions come from the saved label and remain editable. The verified creation webhook records the bot; a server worker retrieves and encrypts the token and installs the message webhook. No separate **Approve this bot** or **Connect bot** action is required for new website requests.
 
-The page updates automatically and opens the connected bot’s settings. The manager also sends a best-effort completion message with **Open your bot** as the primary action, linking directly to the new Telegram chat. **Bot settings** is a secondary link. The user can stay in Telegram throughout creation and connection; no return to NyxID is required to finish connecting. Telegram requires the user to tap the chat link; the manager cannot force a chat switch. Connection continues if the user closes the browser. Choosing an AI agent for replies remains part of the existing bot settings; connecting the channel alone does not configure an agent.
+The modal updates automatically, closes on connection, and opens the connected bot’s settings. The manager also sends a best-effort completion message with **Open your bot** as the primary action, linking directly to the new Telegram chat. **Bot settings** is a secondary link. The user can stay in Telegram throughout creation and connection; no return to NyxID is required to finish connecting. Telegram requires the user to tap the chat link; the manager cannot force a chat switch. Connection continues if the user closes the modal or the browser. Only **Cancel setup** cancels the request. Choosing an AI agent for replies remains part of the existing bot settings; connecting the channel alone does not configure an agent.
 
 These are two application steps, not a guarantee of two physical taps. Telegram controls its Start prompt and creation form. The direct `t.me/newbot/...` form link cannot carry an arbitrary setup identifier, and `ManagedBotCreated` does not echo the keyboard’s `request_id`. The private `/start` handoff is retained to correlate the Telegram sender with the saved NyxID request. It does not establish a verified Telegram login identity for the NyxID account.
+
+The manager sends the setup instructions and destination in an ordinary text message before sending a separate **Create bot** keyboard message. The instructions have no reply keyboard attached, so displaying them does not require support for Telegram's managed-bot keyboard. They explain how to retry with `/start` or continue in the latest Telegram app if the next message is blank or the button is missing. Both the website handoff and plain `/start` use this sequence; a bound request keeps its account and bot-name suggestions when restarted. The website link still includes the setup challenge, and creation still uses the native keyboard to preserve the verified creation-event handoff. An instruction-send failure remains retryable. Once the instructions are delivered, a keyboard-send failure is logged and the webhook is acknowledged so Telegram does not repeatedly send the instructions or keep the manager queue pending; the user can retry with `/start`.
 
 Starting from the Telegram manager chat also has two application steps:
 
@@ -26,7 +28,7 @@ The normal customer path does not use BotFather or require copying a token. The 
 
 ## Administrator setup
 
-Use a dedicated manager per environment. Do not reuse the NyxID notification/approval bot or a bot already registered as a channel.
+Use a dedicated manager per environment. Do not reuse the NyxID notification/approval bot. Configure the manager before connecting it as a channel; an existing ordinary channel bot cannot be promoted to manager in place.
 
 1. In BotFather, create or select the platform's manager bot and enable management of other bots. Its Bot API `getMe` response must contain `can_manage_bots: true`.
 2. Confirm that `BASE_URL` is the externally reachable HTTPS backend origin and `FRONTEND_URL` is the browser application origin. Telegram must be able to POST to the backend. The customer return link must reach the frontend.
@@ -39,7 +41,7 @@ Use a dedicated manager per environment. Do not reuse the NyxID notification/app
 
 5. Run the staging checks below before enabling this configuration for customers.
 
-The manager webhook subscribes to `message`, `callback_query`, and `managed_bot`, with one concurrent delivery connection. Configuration does not discard pending Telegram updates. A manager pointing at a different webhook is rejected.
+The manager webhook subscribes to `message`, `edited_message`, `channel_post`, `callback_query`, and `managed_bot`, with one concurrent delivery connection. Configuration does not discard pending Telegram updates. A manager pointing at a different webhook is rejected.
 
 Rotating the manager token for the same bot preserves the webhook verification secret. This version rejects explicit webhook-secret regeneration. To change manager identity, delete the saved managed channel connections and finish or cancel active creation requests, then clear the configuration and save the new manager. Clearing permanently deletes NyxID's saved manager token, identity, webhook secret, and observation period. It also attempts to remove the manager's own webhook, preserving any webhook belonging to another application. A Telegram API failure is logged and does not prevent local deletion, including when the manager was already deleted in BotFather or its token was revoked. It does not delete child bots from Telegram.
 
@@ -52,13 +54,35 @@ Deleting and recreating a manager in BotFather gives it a new numeric bot ID and
 
 This clears NyxID's saved configuration. If the public Telegram profile shows the replacement but a Telegram client still opens "Deleted Account", check the username in another Telegram client; clearing NyxID cannot reset Telegram's own username resolution or chat history.
 
+## Using the manager as a channel bot
+
+After configuring the manager, connect the same bot through **Channel Bots → Add Channel Bot → Telegram bot token**, supplying its current token and choosing the channel's personal or organization owner. The ordinary CLI token-registration path works too. Possession of the valid bot token and write access to the selected NyxID owner are required; the remote bot can have only one active channel connection. A channel bot that has not yet been configured as the manager must first be disconnected, configured in Platform Credentials, and connected again.
+
+Verification of a deleted channel is rejected, and repeating its deletion cannot change the manager webhook. If another operation on the same Telegram bot is still running, NyxID returns a conflict; retry after that operation finishes. Before changing an ordinary channel's webhook, NyxID verifies that its token belongs to the recorded Telegram bot. A mismatched stored token cannot change another bot's webhook.
+
+NyxID keeps the manager webhook and its verification secret. Ordinary private, group, and channel messages flow through the channel's conversation routes. For public help, assign a dedicated Agent Key with a callback URL as the **default agent**; unmatched senders then reach that agent. An exact conversation route can choose a different agent for a particular chat. For personal-only conversations, use your private Telegram chat ID (your numeric Telegram user ID) and leave the default agent off. Telegram's group privacy mode still controls which group messages Telegram delivers; use appropriate bot/admin permissions or disable privacy mode in BotFather if the bot should receive ordinary group messages.
+
+**Every manager-channel callback carries only delivery authentication and a message-bound reply token.** NyxID never adds `X-NyxID-User-Token` for this credential source, including explicit conversation and sender routes. The receiving agent can reply through `POST /api/v1/channel-relay/reply`, but an inbound Telegram message does not delegate the channel owner's NyxID service permissions. Other channel bots retain their existing scoped owner-token behavior. Scope any credentials held directly by the public agent separately. Telegram senders are not automatically mapped to NyxID accounts; account-specific operations require a separate authenticated workflow.
+
+A plain `/start` welcomes chat users and offers **Create bot** when the manager channel is active. Payload-bearing setup links and `/recover` keep their existing workflow, including commands addressed to the configured manager username. Creation events, manager commands, and callback queries remain reserved and are never forwarded to the agent. Generic agent inline-button callbacks are not supported. Ordinary replies retain the referenced message ID but omit quoted message content. Recognizable claim codes are removed from ordinary text, captions, and supported link metadata before relay; claim messages use Telegram's protected-content option. This reduces accidental disclosure, but is not a general secret detector: users must still enter claim codes only in NyxID. Neither raw updates nor message bodies are persisted by NyxID.
+
+After authentication and classification, ordinary messages are acknowledged without waiting for the agent callback. Ordinary lookup, parsing, and callback failures are logged with metadata and dropped. Authentication and management-event failures still return errors so Telegram can retry them. Each backend process allows **32 concurrent background deliveries**, each bounded by the existing callback timeout plus ten seconds for other work. At capacity, NyxID acknowledges and drops the ordinary message with a metadata-only warning. This limit is deliberately retained in this version. Deliveries can complete out of order; a process shutdown or callback failure can lose a reply, with no durable queue or automatic replay. Telegram may redeliver if it does not receive the acknowledgement, so agents must also tolerate duplicates. Telegram's shared pending-update and delivery-error checks still apply to creation: heavy ingress or a shared outage can delay or prevent automatic connection. With a remote KMS, per-request credential decryption also adds network work; no production throughput guarantee is implied.
+
+The channel reports `credential_source: "telegram_manager"`. Replies and media operations resolve the current manager token from Platform Credentials, so token rotation there takes effect without editing the channel. Rotation does not revoke this channel binding. The channel does not retain a second token or expose the shared webhook secret. **Verify Bot** checks the live Telegram webhook URL and all five required update subscriptions without changing them; a mismatch reports an error directing the operator to Platform Credentials. Existing managers saved before this support need an administrator to save Platform Credentials again to subscribe to edited messages and channel posts. Saving credentials temporarily marks the manager unready; a failed save keeps both roles unavailable, and channel responses show that configuration problem. Save successfully and use Verify Bot if the channel needs reactivation.
+
+Deleting the channel disables its routes and leaves bot creation available. Clearing or replacing the manager requires deleting this channel connection first, in addition to completing the existing managed-child/request cleanup. Upgrade **all backend replicas before registering the manager channel**: older replicas drop ordinary manager messages and do not understand its shared credential source.
+
+The implementation acceptance plan and verification record are in [TELEGRAM_MANAGER_CHANNEL_PLAN.md](TELEGRAM_MANAGER_CHANNEL_PLAN.md).
+
 ## Returning and recovering
 
-An unfinished request is saved on the server for 15 minutes, bound to the signed-in NyxID actor and its original destination. **Channel Bots** displays **Resume Telegram setup** while a request is active. If the browser session was lost, sign in to the same account first.
+An unfinished request is saved on the server for 15 minutes, bound to the signed-in NyxID actor and its original destination. **Channel Bots** displays **Resume Telegram setup** while a request is active; this reopens the modal. The bot detail page’s **Continue Telegram setup** link and the manager’s return link also open this modal. If the browser session was lost, sign in to the same account first.
 
-The selected flow, draft label, and draft destination are retained in the page URL. Once a request exists, its server-saved label and destination take precedence and the fields are locked until cancellation. The nonsecret `request_id` is also retained so that reloading the setup page can find an already completed request. Reading it still requires the initiating actor and current destination access. Launch challenges and bot tokens are never stored in browser storage or the NyxID page URL. A claim arrives in the link’s `claim` query parameter, which is removed with `history.replaceState` before router construction, authentication requests, or telemetry boot. The nonsecret `claim_entry=true` flag identifies the manual-entry screen. A signed-in visitor’s code stays in page memory. For sign-in redirects only, the code and a bounded expiry temporarily use `sessionStorage`; the authenticated setup page reads them once and removes them. The form waits for the actual user identity before consuming this handoff. Codes never enter `localStorage`, cookies, `return_to`, query keys, or mutation variables. Redemption, expiry, leaving the setup page, and an account switch discard the code; reloading after the page consumed it requires the original link or manual entry.
+While the modal is open, its selected flow, draft label, draft destination, and nonsecret request ID are retained in `/channel-bots?connect=telegram-new&label=...&target_org_id=...&request_id=...` using replacement navigation. Label and Scope lock as soon as saving starts; once a request exists, its server-saved label and destination take precedence and the fields stay locked until cancellation. Reloading or reopening that URL restores the modal and can find an already completed request. Dismissing the modal removes `connect` while retaining the draft and request ID; refresh then keeps the list visible, and **Resume Telegram setup** reopens the flow. A response arriving after dismissal does not reopen the modal. Switching platforms clears credential fields without cancelling the saved Telegram request. Reading a saved request still requires the initiating actor and current destination access. Launch challenges and bot tokens are never stored in browser storage or the NyxID page URL.
 
-The page polls active requests every two seconds while visible, refreshes on focus, and offers **Check progress**. **Reopen Telegram** issues a fresh launch link for the same saved request. A blocked popup has an **Open Telegram** fallback link. Neither returning nor polling creates a new request.
+A claim arrives in the link’s `claim` query parameter, which is removed with `history.replaceState` before router construction, authentication requests, or telemetry boot. The nonsecret `claim_entry=true` flag identifies the standalone claim page, which remains separate from the creation modal. A signed-in visitor’s code stays in page memory. For sign-in redirects only, the code and a bounded expiry temporarily use `sessionStorage`; the authenticated claim page reads them once and removes them. The form waits for the actual user identity before consuming this handoff. Codes never enter `localStorage`, cookies, `return_to`, query keys, or mutation variables. Redemption, expiry, leaving the claim page, and an account switch discard the code; reloading after the page consumed it requires the original link or manual entry.
+
+The open Telegram flow polls active requests every two seconds while visible, refreshes on focus, and offers **Check progress**. Closing the modal or choosing another platform stops its polling; the list's resume banner refreshes on focus and after setup actions. **Reopen Telegram** issues a fresh launch link for the same saved request. A blocked popup has an **Open Telegram** fallback link. Neither returning nor polling creates a new request.
 
 After a fresh creation event, a database-backed worker completes the connection independently of the browser. Every backend replica scans due requests; atomic scheduling claims and the existing per-bot renewable lease coordinate attempts. Connection work is deferred from the webhook response so Telegram can acknowledge the creation delivery before the worker checks for pending updates. Temporary failures retry with backoff. Setup retains its 15-minute expiry until a pending channel bot is saved; provisioning then survives expiry and reuses the saved bot ID, encrypted token, and webhook secret. It cannot reactivate a deleted/suspended bot. Cancellation before provisioning releases the request, but does not delete a bot already created inside Telegram.
 
@@ -132,6 +156,41 @@ No real manager token was configured, no live Telegram bot was created, and no p
 
 ## Local verification record
 
+Manager public-channel validation on 2026-09-20:
+
+- All 59 Telegram-focused backend tests passed with an isolated MongoDB replica
+  set and simulated Telegram/agent endpoints. A real local HTTP ingress/reply
+  test interleaves private/group chat, exact/default routing, asynchronous
+  replies, and bot creation. Regressions cover no owner delegation, reply-token
+  isolation, reserved commands, claim redaction, nested setup content, live
+  webhook verification, token rotation, failed readiness, and deletion.
+- All 479 broader channel backend tests passed; none were ignored. This run
+  overlaps the focused suite and checks existing adapters, routing, and replies.
+- All 55 focused frontend tests and all three CLI channel-show tests passed.
+  Desktop and mobile browser flows passed at 1440×1000 and 390×844, including
+  registration, exact/public routing, wildcard rejection, Verify failure across
+  reload, recovery, and deletion. TypeScript, the production frontend build,
+  and changed-file ESLint passed. Full frontend lint retained 27 existing
+  warnings outside the changed files and had no errors.
+- Workspace Clippy passed for all targets with warnings denied; Rust formatting
+  and diff whitespace checks passed.
+- Fable was consulted on the design. Independent Astra review at xhigh closed
+  all four findings after fixes and re-review: nested setup content, encoded
+  claim links, stale health after token failure, and implicit wildcard routing.
+  The final review reported no unresolved findings against the agreed spec.
+
+These checks use simulated Telegram and browser API fixtures, not live Telegram
+credentials. See [the implementation and acceptance record](TELEGRAM_MANAGER_CHANNEL_PLAN.md)
+for the validation boundary and final completion status.
+
+Inline-modal validation on 2026-09-16:
+
+- The full frontend suite passed: 3,220 tests across 320 files. Modal coverage includes draft persistence, server-saved personal/org destination locking, request-ID resume, dismissal without cancellation, explicit cancellation, completion navigation, and manager unavailability. The unchanged `TelegramNew` tests also passed.
+- Fifteen Playwright checks passed across Telegram creation, Telegram claims, X, and managed WhatsApp. Telegram creation rehydrates the modal after reload and a closed browser page at 390px and 1440px; checks also cover dismissal/resume, the pending bot detail link, platform switching, and scrolling to the final actions at a 700px viewport height. Both modal layouts and their scrolled states were visually inspected. Claim tests were unchanged.
+- `npm run lint` passed with zero errors and the existing 27 warnings outside this change. The production build and `git diff --check` passed.
+
+These checks used simulated API responses. No live Telegram bot was created, and no backend file was changed.
+
 Open-chat completion validation on 2026-09-15: the existing webhook-to-connection regression passed against an isolated MongoDB replica set and WireMock after adding assertions for the creator's chat, the primary **Open your bot** URL, and the secondary **Bot settings** URL. Rust formatting and diff checks also passed. This focused follow-up did not rerun the full suites recorded below.
 
 Telegram-first claim validation on 2026-09-15:
@@ -155,7 +214,7 @@ These checks used simulated Telegram responses. No live Telegram bot was created
 
 Copy and connected-step validation on 2026-09-14: all 23 Telegram-focused backend tests passed against an isolated MongoDB replica set and WireMock, including readable personal/org identity, HTML escaping, consent, and the return action. All 100 channel-related frontend tests passed. Telegram browser checks passed at 390px and 1440px in light and dark mode, including reload and reopening; the connected steps were visually reviewed. TypeScript, targeted ESLint, Rust formatting, and the frontend production build passed. These checks did not send messages to a live Telegram chat.
 
-Setup-page persistence validation on 2026-09-14: 100 channel-related frontend tests passed, along with 11 browser checks covering Telegram, X, and WhatsApp. Telegram was checked at 390px and 1440px: draft reload, saved destination locking, fresh launch for the same request, closing and reopening the browser page, resuming from Channel Bots, and returning after consent. TypeScript, targeted ESLint, and the frontend production build passed. Browser checks use simulated API responses and do not establish live Telegram client behavior.
+Historical standalone-page persistence validation on 2026-09-14 (before the modal replaced it): 100 channel-related frontend tests passed, along with 11 browser checks covering Telegram, X, and WhatsApp. Telegram was checked at 390px and 1440px: draft reload, saved destination locking, fresh launch for the same request, closing and reopening the browser page, resuming from Channel Bots, and returning after consent. TypeScript, targeted ESLint, and the frontend production build passed. Browser checks use simulated API responses and do not establish live Telegram client behavior.
 
 Final integration validation on 2026-09-14, after rebasing onto `main` at `04c44f5b`:
 

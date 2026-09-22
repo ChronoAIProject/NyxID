@@ -2,6 +2,8 @@
 #[openapi(
     modifiers(&SecurityAddon),
     paths(
+        crate::handlers::admin_usage::get_usage,
+        crate::handlers::options::get_options,
         crate::handlers::docs::docs_ui,
         crate::handlers::docs::catalog_ui,
         crate::handlers::docs::openapi_json,
@@ -115,6 +117,8 @@
         crate::handlers::billing_credits::create_allowance,
         crate::handlers::billing_credits::admin_list_allowances,
         crate::handlers::billing_credits::update_allowance,
+        crate::handlers::billing_credits::replace_allowance_bundle,
+        crate::handlers::billing_credits::set_allowance_bundle_active,
         crate::handlers::billing_credits::user_list_allowances,
         crate::handlers::billing_credit_schedules::create_schedule,
         crate::handlers::billing_credit_schedules::list_schedules,
@@ -124,6 +128,9 @@
     ),
     components(
         schemas(
+            crate::services::options_service::OptionsResponse,
+            crate::services::options_service::OptionItem,
+            crate::services::options_service::OptionsFreshness,
             crate::errors::ErrorResponse,
             crate::handlers::auth_agent_key::RequestBody,
             crate::handlers::auth_agent_key::RequestResponse,
@@ -262,6 +269,11 @@
             crate::handlers::billing_credits::CreditGrantResponse,
             crate::handlers::billing_credits::CreditGrantListResponse,
             crate::handlers::billing_credits::CreateAllowanceRequest,
+            crate::handlers::billing_credits::CreateAllowanceResponse,
+            crate::handlers::billing_credits::AllowanceBundleResponse,
+            crate::handlers::billing_credits::ReplaceAllowanceBundleRequest,
+            crate::handlers::billing_credits::SetAllowanceBundleActiveRequest,
+            crate::services::billing::allowances::AllowanceUnitInput,
             crate::handlers::billing_credits::UpdateAllowanceRequest,
             crate::handlers::billing_credits::UsageAllowanceResponse,
             crate::handlers::billing_credits::UsageAllowanceListResponse,

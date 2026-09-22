@@ -234,6 +234,8 @@ mod tests {
     fn catalog_service(created_by: &str, identity_propagating: bool) -> DownstreamService {
         DownstreamService {
             destination_targets: Default::default(),
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: Uuid::new_v4().to_string(),
             name: "Catalog".to_string(),
             slug: format!("svc-{}", Uuid::new_v4().simple()),

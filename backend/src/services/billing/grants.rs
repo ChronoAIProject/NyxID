@@ -18,6 +18,8 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 pub const CREDIT_MICROS: i64 = 1_000_000;
 pub const MAX_GRANT_CREDITS: i64 = 1_000_000;
 pub const MAX_SELECTED_USERS: usize = 500;
+/// Bounded expansion for organization/group one-shot grants.
+pub const MAX_MEMBER_RECIPIENTS: usize = 100_000;
 pub const MAX_SCOPED_SERVICES: usize = 100;
 pub const MAX_GRANT_REASON_LEN: usize = 2_000;
 const EXPIRY_SWEEP_BATCH: i64 = 500;
@@ -47,6 +49,8 @@ pub struct IssueCreditGrantInput {
     pub amount_credits: i64,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub all_services: bool,
     pub service_refs: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
@@ -59,7 +63,14 @@ pub async fn issue_grants(
     input: IssueCreditGrantInput,
 ) -> AppResult<Vec<CreditGrant>> {
     validate_issue_input(&input)?;
-    let recipients = resolve_recipients(db, input.target_kind, &input.target_user_ids).await?;
+    let recipients = resolve_recipients(
+        db,
+        input.target_kind,
+        &input.target_user_ids,
+        &input.target_org_ids,
+        &input.target_group_ids,
+    )
+    .await?;
     if recipients.is_empty() {
         return Err(AppError::ValidationError(
             "credit grant has no eligible user recipients".to_string(),
@@ -87,6 +98,8 @@ pub async fn issue_grants(
             schedule_origin: None,
             recipient_user_id,
             target_kind: input.target_kind,
+            target_org_ids: input.target_org_ids.clone(),
+            target_group_ids: input.target_group_ids.clone(),
             amount_credits: input.amount_credits,
             amount_micros,
             remaining_micros: amount_micros,
@@ -440,18 +453,12 @@ fn validate_issue_input(input: &IssueCreditGrantInput) -> AppResult<()> {
             "amount_credits must be between 1 and {MAX_GRANT_CREDITS}"
         )));
     }
-    if input.target_kind == BillingTargetKind::SelectedUsers
-        && (input.target_user_ids.is_empty() || input.target_user_ids.len() > MAX_SELECTED_USERS)
-    {
-        return Err(AppError::ValidationError(format!(
-            "selected grants require 1-{MAX_SELECTED_USERS} target users"
-        )));
-    }
-    if input.target_kind == BillingTargetKind::AllUsers && !input.target_user_ids.is_empty() {
-        return Err(AppError::ValidationError(
-            "all-users grants must not include target_user_ids".to_string(),
-        ));
-    }
+    super::targets::validate_shape(
+        input.target_kind,
+        &input.target_user_ids,
+        &input.target_org_ids,
+        &input.target_group_ids,
+    )?;
     if input.all_services && !input.service_refs.is_empty() {
         return Err(AppError::ValidationError(
             "all-services grants must not include service_refs".to_string(),
@@ -484,29 +491,41 @@ fn validate_issue_input(input: &IssueCreditGrantInput) -> AppResult<()> {
     Ok(())
 }
 
+/// Resolve recipients after `validate_issue_input` has checked target shape.
 pub(super) async fn resolve_recipients(
     db: &mongodb::Database,
     target_kind: BillingTargetKind,
     selected: &[String],
+    orgs: &[String],
+    groups: &[String],
 ) -> AppResult<Vec<String>> {
+    if matches!(
+        target_kind,
+        BillingTargetKind::OrgMembers | BillingTargetKind::Groups
+    ) {
+        super::targets::validate_existing(db, target_kind, selected, orgs, groups).await?;
+        let recipients = super::targets::member_recipients(
+            db,
+            target_kind,
+            orgs,
+            groups,
+            None,
+            None,
+            MAX_MEMBER_RECIPIENTS + 1,
+        )
+        .await?;
+        if recipients.len() > MAX_MEMBER_RECIPIENTS {
+            return Err(AppError::ValidationError(format!(
+                "credit grant exceeds {MAX_MEMBER_RECIPIENTS} resolved recipients; use a credit schedule"
+            )));
+        }
+        return Ok(recipients);
+    }
     // Billing owners are polymorphic user rows: both people and organization
     // accounts may own a wallet and consume a grant.
     let mut filter = doc! { "is_active": true };
     if target_kind == BillingTargetKind::SelectedUsers {
-        let unique: std::collections::BTreeSet<&str> = selected
-            .iter()
-            .map(|id| id.trim())
-            .filter(|id| !id.is_empty())
-            .collect();
-        if unique.len() != selected.len() {
-            return Err(AppError::ValidationError(
-                "target_user_ids must be unique, non-empty user ids".to_string(),
-            ));
-        }
-        filter.insert(
-            "_id",
-            doc! { "$in": unique.into_iter().collect::<Vec<_>>() },
-        );
+        filter.insert("_id", doc! { "$in": selected });
     }
     let users: Vec<User> = db
         .collection::<User>(USERS)
@@ -614,6 +633,8 @@ mod tests {
             amount_credits: 10,
             target_kind: BillingTargetKind::SelectedUsers,
             target_user_ids: vec!["user-1".to_string()],
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             all_services: true,
             service_refs: Vec::new(),
             expires_at: Some(Utc::now() + chrono::Duration::days(1)),
@@ -660,6 +681,8 @@ mod tests {
                 amount_credits: 25,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -709,6 +732,8 @@ mod tests {
                 amount_credits: 10,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -771,6 +796,8 @@ mod tests {
             schedule_origin: None,
             recipient_user_id: "owner-1".to_string(),
             target_kind: BillingTargetKind::SelectedUsers,
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             amount_credits: 2,
             amount_micros: 2 * CREDIT_MICROS,
             remaining_micros: 2 * CREDIT_MICROS,
@@ -842,6 +869,8 @@ mod tests {
                 schedule_origin: None,
                 recipient_user_id: format!("owner-expiry-budget-{index:04}"),
                 target_kind: BillingTargetKind::SelectedUsers,
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 amount_credits: 1,
                 amount_micros: CREDIT_MICROS,
                 remaining_micros: CREDIT_MICROS,
@@ -902,6 +931,8 @@ mod tests {
                 schedule_origin: None,
                 recipient_user_id: "owner-ledger-recovery".to_string(),
                 target_kind: BillingTargetKind::SelectedUsers,
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 amount_credits: 3,
                 amount_micros: 3 * CREDIT_MICROS,
                 remaining_micros: 0,

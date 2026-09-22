@@ -43,6 +43,32 @@ pub async fn execute_proxy_request(
     use_binary_proxy_chunks: bool,
     http_client: &Client,
 ) {
+    execute_proxy_request_with_ifttt_client(
+        request,
+        credentials,
+        signing_secret,
+        replay_guard,
+        metrics,
+        tx,
+        use_binary_proxy_chunks,
+        http_client,
+        nyxid_service_adapters::ifttt::client(),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_proxy_request_with_ifttt_client(
+    request: &serde_json::Value,
+    credentials: &CredentialStore,
+    signing_secret: Option<&str>,
+    replay_guard: &tokio::sync::Mutex<ReplayGuard>,
+    metrics: &NodeMetrics,
+    tx: &mpsc::Sender<NodeWsMessage>,
+    use_binary_proxy_chunks: bool,
+    http_client: &Client,
+    ifttt_client: &nyxid_service_adapters::ifttt::Client,
+) {
     let request_id = request["request_id"].as_str().unwrap_or("");
     let service_slug = request["service_slug"].as_str().unwrap_or("");
 
@@ -209,6 +235,94 @@ pub async fn execute_proxy_request(
     } else {
         format!("/{path}")
     };
+
+    if let Some(key) = cred.ifttt_key() {
+        let method = match reqwest::Method::from_bytes(method_str.as_bytes()) {
+            Ok(method) => method,
+            Err(_) => {
+                metrics.record_error();
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(request_id, "Invalid HTTP method", 400, false),
+                )
+                .await;
+                return;
+            }
+        };
+        let body = match request.get("body").and_then(serde_json::Value::as_str) {
+            Some(encoded) => match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                Ok(bytes) => Some(bytes),
+                Err(_) => {
+                    metrics.record_error();
+                    let _ = send_ws_message(
+                        tx,
+                        proxy_error_response(request_id, "Invalid base64 request body", 400, false),
+                    )
+                    .await;
+                    return;
+                }
+            },
+            None => None,
+        };
+        let ifttt_headers = request["headers"]
+            .as_object()
+            .map(|headers| {
+                headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        value
+                            .as_str()
+                            .map(|value| (name.clone(), value.to_string()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        match ifttt_client
+            .forward(
+                effective_base_url,
+                &method,
+                path,
+                query,
+                key,
+                body.as_deref(),
+                &ifttt_headers,
+            )
+            .await
+        {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                // The adapter returns a locally constructed, credential-free receipt.
+                let headers = extract_response_headers(&response);
+                let bytes = response.bytes().await.expect("buffered IFTTT receipt");
+                metrics.record_success();
+                let _ = send_ws_message(
+                    tx,
+                    serde_json::json!({
+                        "type": "proxy_response", "request_id": request_id,
+                        "status": status, "headers": headers,
+                        "body": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    })
+                    .to_string(),
+                )
+                .await;
+            }
+            Err(error) => {
+                metrics.record_error();
+                let status = if matches!(error, nyxid_service_adapters::ifttt::Error::Transport(_))
+                {
+                    502
+                } else {
+                    400
+                };
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(request_id, &error.to_string(), status, false),
+                )
+                .await;
+            }
+        }
+        return;
+    }
 
     // Path-prefix injection: prepend /{prefix}{credential} to the URL path
     let final_path = if let Some((prefix, credential)) = cred.path_prefix() {
@@ -718,6 +832,133 @@ mod tests {
                 .is_err(),
             "the configured local target must receive no connection"
         );
+    }
+
+    #[tokio::test]
+    async fn ifttt_node_uses_local_encrypted_key_and_rejects_unsafe_calls() {
+        use super::super::config::NodeConfig;
+        use super::super::secret_backend::SecretBackend;
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::new("file", "node", dir.path()).unwrap();
+        let mut config: NodeConfig = serde_json::from_value(serde_json::json!({
+            "server":{"url":"ws://localhost"}, "node":{"id":"node","auth_token_encrypted":""}
+        }))
+        .unwrap();
+        let key = "ifttt_node_test_key-NOT_REAL";
+        config
+            .add_ifttt_credential_via("api-ifttt", key, None, &backend)
+            .unwrap();
+        assert_eq!(
+            config.credentials["api-ifttt"].injection_method,
+            "ifttt_webhook"
+        );
+        assert!(!toml::to_string(&config).unwrap().contains(key));
+        let credentials = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
+        assert!(credentials.get("api-ifttt").unwrap().header().is_none());
+        assert!(
+            credentials
+                .get("api-ifttt")
+                .unwrap()
+                .raw_credential()
+                .is_none()
+        );
+        let mut fixture = nyxid_service_adapters::test_support::fixture(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let body = br#"{"event":"inside","body":{"nested":true},"authorization":"payload"}"#;
+        let mut request = serde_json::json!({
+            "request_id":"request", "service_slug":"api-ifttt", "base_url":"",
+            "method":"POST", "path":"trigger/event/json", "body":base64::engine::general_purpose::STANDARD.encode(body),
+            "headers":{"User-Agent":"node-custom/1"}
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let guard = tokio::sync::Mutex::new(ReplayGuard::new());
+        let metrics = NodeMetrics::new();
+        let http_client = build_http_client().unwrap();
+        execute_proxy_request_with_ifttt_client(
+            &request,
+            &credentials,
+            None,
+            &guard,
+            &metrics,
+            &tx,
+            false,
+            &http_client,
+            &fixture.client,
+        )
+        .await;
+        let NodeWsMessage::Text(receipt) = rx.recv().await.unwrap() else {
+            panic!("expected text receipt")
+        };
+        assert!(!receipt.contains(key));
+        let received = fixture.requests.recv().await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&received)
+                .starts_with(&format!("POST /trigger/event/json/with/key/{key} HTTP/1.1"))
+        );
+        assert!(String::from_utf8_lossy(&received).contains("user-agent: node-custom/1"));
+        assert!(received.ends_with(body));
+        // Backend node frames encode absent HTTP bodies as empty base64 strings.
+        request["path"] = "trigger/event_only".into();
+        request["body"] = "".into();
+        execute_proxy_request_with_ifttt_client(
+            &request,
+            &credentials,
+            None,
+            &guard,
+            &metrics,
+            &tx,
+            false,
+            &http_client,
+            &fixture.client,
+        )
+        .await;
+        let NodeWsMessage::Text(receipt) = rx.recv().await.unwrap() else {
+            panic!("expected receipt")
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&receipt).unwrap()["status"],
+            200
+        );
+        let received = fixture.requests.recv().await.unwrap();
+        assert!(received.ends_with(b"\r\n\r\n{}"));
+        for (method, path) in [
+            ("GET", "trigger/event"),
+            ("POST", "trigger/e/with/key/injected"),
+            ("POST", "trigger/%252f/json"),
+        ] {
+            request["method"] = method.into();
+            request["path"] = path.into();
+            execute_proxy_request_with_ifttt_client(
+                &request,
+                &credentials,
+                None,
+                &guard,
+                &metrics,
+                &tx,
+                false,
+                &http_client,
+                &fixture.client,
+            )
+            .await;
+            let NodeWsMessage::Text(error) = rx.recv().await.unwrap() else {
+                panic!("expected error")
+            };
+            let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+            assert_eq!(error["type"], "proxy_error");
+            assert_eq!(error["retryable"], false);
+            assert_eq!(error["status"], 400);
+            assert!(fixture.requests.try_recv().is_err());
+        }
+        // Unknown modes fail closed at store load; they never fall back to Header.
+        config
+            .credentials
+            .get_mut("api-ifttt")
+            .unwrap()
+            .injection_method = "future_adapter".into();
+        assert!(CredentialStore::from_config_with_backend(&config, &backend).is_err());
     }
 
     #[test]

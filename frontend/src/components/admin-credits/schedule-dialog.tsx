@@ -29,7 +29,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { ServicePicker, UserPicker } from "./credit-pickers";
+import { ServicePicker } from "./credit-pickers";
+import { RecipientTargetFields } from "./recipient-targets";
 
 type ScheduleFormApi = UseFormReturn<ScheduleForm>;
 
@@ -51,7 +52,6 @@ export function ScheduleDialog({
   readonly onSubmit: (value: ScheduleForm) => Promise<void>;
 }) {
   const expiry = form.watch("expiry");
-  const targetKind = form.watch("target_kind");
   const allServices = form.watch("all_services");
 
   return (
@@ -195,7 +195,7 @@ export function ScheduleDialog({
                   />
                 ) : null}
 
-                <TargetFields form={form} targetKind={targetKind} />
+                <RecipientTargetFields description="Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period." />
 
                 <FormField
                   control={form.control}
@@ -312,64 +312,5 @@ function ExpiryOption({
         </span>
       </span>
     </label>
-  );
-}
-
-function TargetFields({
-  form,
-  targetKind,
-}: {
-  readonly form: ScheduleFormApi;
-  readonly targetKind: ScheduleForm["target_kind"];
-}) {
-  return (
-    <>
-      <FormField
-        control={form.control}
-        name="target_kind"
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>Recipients</FormLabel>
-            <Select
-              value={field.value}
-              onValueChange={(value) => {
-                field.onChange(value);
-                if (value === "all_users") {
-                  form.setValue("target_user_ids", []);
-                }
-              }}
-            >
-              <FormControl>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-              </FormControl>
-              <SelectContent>
-                <SelectItem value="all_users">All billing owners</SelectItem>
-                <SelectItem value="selected_users">Selected owners</SelectItem>
-              </SelectContent>
-            </Select>
-            <FormDescription className="text-[11px]">
-              All-owner membership is captured when each period opens.
-            </FormDescription>
-          </FormItem>
-        )}
-      />
-      {targetKind === "selected_users" ? (
-        <FormField
-          control={form.control}
-          name="target_user_ids"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Owners</FormLabel>
-              <FormControl>
-                <UserPicker selected={field.value} onChange={field.onChange} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-      ) : null}
-    </>
   );
 }

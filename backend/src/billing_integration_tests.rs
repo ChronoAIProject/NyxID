@@ -1,3 +1,5 @@
+mod usage;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -183,6 +185,18 @@ const COVERAGE_CASES: &[CoverageCase] = &[
         node_intent: NodeIntent::Node,
         metric: BillingMetric::Bytes,
     },
+    CoverageCase {
+        ingress: BillingIngress::ChannelInbound,
+        scenario: "x-webhook",
+        node_intent: NodeIntent::Direct,
+        metric: BillingMetric::Requests,
+    },
+    CoverageCase {
+        ingress: BillingIngress::ChannelOutbound,
+        scenario: "x-dm-send",
+        node_intent: NodeIntent::Direct,
+        metric: BillingMetric::Requests,
+    },
 ];
 
 #[derive(Default)]
@@ -356,6 +370,20 @@ async fn run_billing_route_coverage_smoke() {
     assert!(String::from_utf8_lossy(&direct_response).contains("\"total_tokens\":149"));
     exercised_routes.insert("/api/v1/assistant/direct/completions");
     assert_direct_reported_usage(&db, &direct_catalog).await;
+
+    Box::pin(exercise_nyxagent_routes(
+        &db,
+        &app,
+        &owner_id,
+        &token,
+        &downstream_url,
+    ))
+    .await;
+    exercised_routes.extend([
+        "/api/v1/assistant/nyxagent/turns",
+        "/api/v1/assistant/nyxagent/models",
+        "/api/v1/assistant/nyxagent/conversations/{id}",
+    ]);
 
     call_mounted_route(
         &app,
@@ -1087,6 +1115,7 @@ async fn billing_gate_rejects_missing_and_stale_rate_cache_entries() {
             lago_metric_code: "platform_requests".to_string(),
             model: None,
             credits_per_unit_micros: 1_000_000,
+            credits_per_unit_pico: None,
             synced_at: Utc::now() - Duration::seconds(901),
         })
         .await
@@ -1435,9 +1464,106 @@ async fn exercise_codex_verification_route(
     assert_route_settled(db, &imported_service.slug, BillingMetric::Requests).await;
 }
 
+async fn exercise_nyxagent_routes(
+    db: &mongodb::Database,
+    app: &Router,
+    owner: &str,
+    token: &str,
+    upstream: &str,
+) {
+    crate::services::assistant_nyxagent::ensure_indexes(db)
+        .await
+        .unwrap();
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = Uuid::new_v4().to_string();
+    catalog.slug = "llm-nyx".into();
+    catalog.base_url = format!("{upstream}/nyxagent");
+    catalog.service_category = "internal".into();
+    catalog.auth_method = "none".into();
+    catalog.requires_user_credential = false;
+    catalog.forward_access_token = true;
+    catalog.inject_delegation_token = false;
+    catalog.credential_encrypted.clear();
+    catalog.billing = Some(ServiceBilling {
+        platform_billable: true,
+        platform_charge_nyxid_credentials_only: false,
+        platform_metric: Some(BillingMetric::Requests),
+        ..Default::default()
+    });
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let response = call_mounted_route(
+        app,
+        route_request(
+            Method::POST,
+            "/api/v1/assistant/nyxagent/turns",
+            token,
+            Body::from(r#"{"text":"billing route boundary"}"#),
+        ),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&response).contains("\"status\":\"completed\""));
+    let row = crate::services::assistant_nyxagent::list(db, owner, 1, None)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(row.nyxagent_session_id.is_some());
+    let models = call_mounted_route(
+        app,
+        route_request(
+            Method::GET,
+            "/api/v1/assistant/nyxagent/models",
+            token,
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&models).contains("nyxagent/research"));
+    call_mounted_route(
+        app,
+        route_request(
+            Method::DELETE,
+            &format!("/api/v1/assistant/nyxagent/conversations/{}", row.id),
+            token,
+            Body::empty(),
+        ),
+    )
+    .await;
+    assert_route_settled_count(db, &catalog.slug, BillingMetric::Requests, 3).await;
+}
+
 async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
     async fn respond(request: Request<Body>) -> axum::response::Response {
         let path = request.uri().path().to_string();
+        if path == "/nyxagent/v1/responses" {
+            assert!(
+                request.headers()["authorization"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("Bearer nyxid_ag_")
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(request.into_body(), 100_000).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["input"], "billing route boundary");
+            let event = serde_json::json!({"type":"response.completed","sequence_number":0,"response":{
+                "id":"resp_11111111111111111111111111111111_22222222222222222222222222222222",
+                "conversation":{"id":"conv_11111111111111111111111111111111"},"status":"completed",
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]
+            }});
+            return (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                format!("data: {event}\n\n"),
+            )
+                .into_response();
+        }
+        if path == "/nyxagent/v1/models" {
+            return Json(serde_json::json!({"object":"list","data":[{"id":"nyxagent/research"}]}))
+                .into_response();
+        }
+
         if path == "/codex-connection/responses" {
             assert_eq!(
                 request.headers().get("authorization").unwrap(),
@@ -2445,6 +2571,7 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
         }
         BillingMetric::Requests => (PlatformUsage::single_request(9), 1),
         BillingMetric::Bytes => (PlatformUsage::single_request(23), 23),
+        _ => panic!("Legacy route matrix uses legacy metrics"),
     }
 }
 
@@ -2478,6 +2605,7 @@ fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRateCache {
         lago_metric_code: metric.to_string(),
         model: None,
         credits_per_unit_micros: 1_000_000,
+        credits_per_unit_pico: None,
         synced_at,
     }
 }

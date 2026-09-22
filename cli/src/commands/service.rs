@@ -635,7 +635,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 let method = match auth_method {
                     Some(m) => m,
                     None => prompt_line_default(
-                        "Auth method [bearer/header/query/path/basic/body/bot_bearer/none]: ",
+                        "Auth method [bearer/header/query/path/basic/body/bot_bearer/ifttt_webhook/none]: ",
                         "bearer",
                         "auth-method",
                     )?,
@@ -2455,7 +2455,10 @@ fn is_headless_environment() -> bool {
 }
 
 fn requires_auth_key_name_prompt(method: &str, auth_key_name_provided: bool) -> bool {
-    !auth_key_name_provided && method != "bot_bearer" && method != "none"
+    !auth_key_name_provided
+        && method != "bot_bearer"
+        && method != "ifttt_webhook"
+        && method != "none"
 }
 
 fn requires_credential_prompt(method: &str, has_node: bool) -> bool {
@@ -2516,6 +2519,7 @@ fn default_auth_key_name(method: &str) -> &'static str {
         "header" => "X-API-Key",
         "query" => "key",
         "path" => "bot",
+        "ifttt_webhook" => "",
         "body" => "app_secret",
         _ => "Authorization",
     }
@@ -2527,6 +2531,7 @@ fn default_auth_key_name(method: &str) -> &'static str {
 fn credential_prompt_label(auth_method: &str, auth_key_name: &str) -> String {
     match auth_method {
         "bot_bearer" => "Enter bot token: ".to_string(),
+        "ifttt_webhook" => "Enter raw IFTTT Webhooks key (not URL): ".to_string(),
         "basic" => "Enter username:password: ".to_string(),
         "body" => {
             let field = auth_key_name.trim();

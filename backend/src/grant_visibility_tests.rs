@@ -87,6 +87,8 @@ fn grant(recipient_user_id: &str, issued_ledgered_at: Option<DateTime<Utc>>) -> 
         schedule_origin: None,
         recipient_user_id: recipient_user_id.to_string(),
         target_kind: BillingTargetKind::SelectedUsers,
+        target_org_ids: Vec::new(),
+        target_group_ids: Vec::new(),
         amount_credits: 5,
         amount_micros: 5_000_000,
         remaining_micros: 5_000_000,
@@ -115,6 +117,7 @@ fn grant(recipient_user_id: &str, issued_ledgered_at: Option<DateTime<Utc>>) -> 
 fn allowance() -> UsageAllowance {
     let now = Utc::now();
     UsageAllowance {
+        bundle_id: None,
         id: Uuid::new_v4().to_string(),
         service_id: Uuid::new_v4().to_string(),
         service_slug: "visibility-service".to_string(),
@@ -123,6 +126,8 @@ fn allowance() -> UsageAllowance {
         recurrence: AllowanceRecurrence::Monthly,
         target_kind: BillingTargetKind::AllUsers,
         target_user_ids: Vec::new(),
+        target_org_ids: Vec::new(),
+        target_group_ids: Vec::new(),
         is_active: true,
         created_by: "platform-admin".to_string(),
         created_at: now,
@@ -238,6 +243,8 @@ async fn admin_grant_responses_expose_rollout_and_pending_activation() {
             amount_credits: 10,
             target_kind: BillingTargetKind::SelectedUsers,
             target_user_ids: vec![fixture.personal_id.clone(), fixture.non_member_id.clone()],
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             all_services: true,
             service_refs: Vec::new(),
             expires_at: None,

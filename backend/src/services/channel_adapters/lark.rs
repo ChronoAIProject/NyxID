@@ -34,6 +34,9 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "chat does not exist",
 ];
 
+use crate::services::channel_media_service as media;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
+
 use std::sync::Arc;
 
 use aes::Aes256;
@@ -64,7 +67,7 @@ type Aes256CbcDec = cbc::Decryptor<Aes256>;
 ///
 /// `card.action.trigger` callbacks ride on the same event subscription as
 /// inbound messages, so they don't need their own scope.
-pub const REQUIRED_BOT_SCOPES: &[&str] = &["im:message", "im:message:send_as_bot"];
+pub const REQUIRED_BOT_SCOPES: &[&str] = &["im:message", "im:message:send_as_bot", "im:resource"];
 
 /// Build the `TokenExchangeConfig` that matches Lark / Feishu's tenant
 /// token endpoint. Shared with the proxy catalog seeds so there is exactly
@@ -209,6 +212,7 @@ impl LarkFamilyAdapter {
         };
 
         Ok(PreparedWebhook {
+            activate_bot: true,
             body: effective_body,
             challenge_response,
         })
@@ -437,7 +441,7 @@ fn extract_attachments(
                 }]
             })
             .unwrap_or_default(),
-        "file" => content
+        "file" | "audio" | "media" | "video" => content
             .get("file_key")
             .and_then(|v| v.as_str())
             .filter(|key| !key.is_empty())
@@ -445,7 +449,7 @@ fn extract_attachments(
                 let content_type = detect_content_type(message_type);
                 vec![InboundAttachment {
                     content_type: content_type.to_string(),
-                    url: lark_resource_url(base_url, message_id, file_key, message_type),
+                    url: lark_resource_url(base_url, message_id, file_key, "file"),
                     platform_message_id: Some(message_id.to_string()),
                     file_key: Some(file_key.to_string()),
                     image_key: None,
@@ -557,7 +561,7 @@ fn detect_content_type(message_type: &str) -> &'static str {
         "image" => "image",
         "file" => "file",
         "audio" => "audio",
-        "video" => "video",
+        "video" | "media" => "video",
         "interactive" => "text",
         _ => "unknown",
     }
@@ -705,6 +709,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: false,
                 webhook_secret: true,
+                hint: Some("Event Subscriptions > Security in the Lark/Feishu console."),
                 platform_fallback: None,
             },
             RegistrationField {
@@ -716,6 +721,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: false,
                 webhook_secret: false,
+                hint: None,
                 platform_fallback: None,
             },
             RegistrationField {
@@ -727,6 +733,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: false,
                 webhook_secret: false,
+                hint: None,
                 platform_fallback: None,
             },
             RegistrationField {
@@ -738,8 +745,14 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: true,
                 webhook_secret: true,
+                hint: Some(
+                    "Optional. Required only when encrypted callbacks are enabled in the platform console.",
+                ),
                 platform_fallback: None,
             },
+        ],
+        setup_instructions: &[
+            "In Lark/Feishu Event Subscriptions, copy the Verification Token from Security settings. Encrypt Key is optional and should match the Encrypt Key field from the same panel if you enabled encrypted callbacks.",
         ],
         ..RegistrationDescriptor::default()
     }
@@ -766,8 +779,29 @@ pub(crate) fn updated_lark_token(
     ))))
 }
 
+#[cfg(test)]
+impl LarkFamilyAdapter {
+    pub(super) fn media_test_adapter(base: &str, platform: &str) -> Self {
+        Self {
+            base_url: base.into(),
+            platform: platform.into(),
+            token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for LarkFamilyAdapter {
+    fn display_name(&self) -> &str {
+        if self.platform == "feishu" {
+            "Feishu"
+        } else {
+            "Lark"
+        }
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::ALL
+    }
     fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
         crate::services::channel_platform::OutboundCapabilities {
             initiated_send: true,
@@ -782,7 +816,14 @@ impl PlatformAdapter for LarkFamilyAdapter {
     }
 
     fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
-        lark_registration()
+        super::super::channel_platform::RegistrationDescriptor {
+            documentation_url: Some(if self.platform == "feishu" {
+                "https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case"
+            } else {
+                "https://open.larksuite.com/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case"
+            }),
+            ..lark_registration()
+        }
     }
 
     fn updated_token_error(&self, error: AppError) -> AppError {
@@ -885,6 +926,36 @@ impl PlatformAdapter for LarkFamilyAdapter {
         }
     }
 
+    async fn fetch_attachment(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        attachment: &InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        let base = url::Url::parse(&self.base_url).map_err(|_| media::fetch_failed())?;
+        let host = base.host_str().ok_or_else(media::fetch_failed)?;
+        // Validate before token acquisition, and again on the actual byte request.
+        media::media_client(&attachment.url, Some(&[host]), Some(&self.base_url)).await?;
+        let (app_id, app_secret) = credentials
+            .token
+            .split_once(':')
+            .ok_or_else(media::fetch_failed)?;
+        let token = zeroize::Zeroizing::new(
+            self.get_tenant_access_token(http, app_id, app_secret)
+                .await?,
+        );
+        media::download(
+            &attachment.url,
+            &[host],
+            Some(&self.base_url),
+            Some(&token),
+            attachment,
+            max_bytes,
+        )
+        .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
@@ -892,6 +963,82 @@ impl PlatformAdapter for LarkFamilyAdapter {
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        if !reply.attachments.is_empty() {
+            if reply.text.as_deref().is_some_and(|s| !s.is_empty())
+                || reply
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|m| self.supports_reply_metadata(m))
+            {
+                let mut text = reply.clone();
+                text.attachments.clear();
+                self.send_reply(http, credentials, conversation_id, &text)
+                    .await?;
+            }
+            let (app_id, app_secret) = credentials
+                .token
+                .split_once(':')
+                .ok_or_else(media::upload_failed)?;
+            let token = zeroize::Zeroizing::new(
+                self.get_tenant_access_token(http, app_id, app_secret)
+                    .await?,
+            );
+            let mut last = None;
+            for attachment in &reply.attachments {
+                if let Some(caption) = &attachment.caption {
+                    let text = OutboundReply {
+                        attachments: vec![],
+                        text: Some(caption.clone()),
+                        metadata: None,
+                        reply_to_platform_message_id: None,
+                    };
+                    self.send_reply(http, credentials, conversation_id, &text)
+                        .await?;
+                }
+                let image = attachment.kind == MediaKind::Image;
+                let (endpoint, field, key) = if image {
+                    ("images", "image", "image_key")
+                } else {
+                    ("files", "file", "file_key")
+                };
+                let mut form =
+                    reqwest::multipart::Form::new().part(field, media::multipart_part(attachment)?);
+                if image {
+                    form = form.text("image_type", "message");
+                } else {
+                    form = form.text("file_type", "stream").text(
+                        "file_name",
+                        media::safe_filename(attachment.filename.as_deref()),
+                    );
+                }
+                let upload = media::response_json(
+                    http.post(format!("{}/open-apis/im/v1/{endpoint}", self.base_url))
+                        .bearer_auth(token.as_str())
+                        .multipart(form),
+                )
+                .await?;
+                if upload["code"] != 0 {
+                    return Err(media::upload_failed());
+                }
+                let handle = upload["data"][key]
+                    .as_str()
+                    .ok_or_else(media::upload_failed)?;
+                let content = serde_json::json!({key: handle}).to_string();
+                let response = media::response_json(http.post(format!("{}/open-apis/im/v1/messages", self.base_url))
+                    .query(&[("receive_id_type", "chat_id")]).bearer_auth(token.as_str())
+                    .json(&serde_json::json!({"receive_id": conversation_id, "msg_type": field, "content": content}))).await?;
+                if response["code"] != 0 {
+                    return Err(media::upload_failed());
+                }
+                last = Some(
+                    response["data"]["message_id"]
+                        .as_str()
+                        .ok_or_else(media::upload_failed)?
+                        .to_string(),
+                );
+            }
+            return Ok(last);
+        }
         let bot_token = credentials.token;
         // For Lark/Feishu, bot_token is stored as "app_id:app_secret".
         // We must exchange it for a tenant_access_token first.
@@ -971,10 +1118,12 @@ impl PlatformAdapter for LarkFamilyAdapter {
     async fn edit_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        _conversation_id: &str,
         platform_message_id: &str,
         edit: &OutboundEdit,
     ) -> AppResult<()> {
+        let bot_token = credentials.token;
         let (app_id, app_secret) = bot_token.split_once(':').ok_or_else(|| {
             AppError::ChannelPlatformError(format!(
                 "{} bot_token must be in app_id:app_secret format",
@@ -1123,6 +1272,7 @@ mod tests {
 
     fn make_test_bot(platform: &str) -> ChannelBot {
         ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: platform.to_string(),
@@ -1854,6 +2004,7 @@ mod tests {
     #[test]
     fn build_body_plain_text() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".to_string()),
             reply_to_platform_message_id: None,
             metadata: None,
@@ -1866,6 +2017,7 @@ mod tests {
     #[test]
     fn build_body_text_missing_defaults_to_empty() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: None,
             reply_to_platform_message_id: None,
             metadata: None,
@@ -1888,6 +2040,7 @@ mod tests {
             ]
         });
         let reply = OutboundReply {
+            attachments: vec![],
             text: None,
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "card": card.clone() })),
@@ -1902,6 +2055,7 @@ mod tests {
     #[test]
     fn build_body_card_wins_over_text() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("ignored fallback".to_string()),
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "card": { "elements": [] } })),
@@ -1913,6 +2067,7 @@ mod tests {
     #[test]
     fn build_body_metadata_without_card_uses_text() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("plain".to_string()),
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "other": "value" })),
@@ -1960,6 +2115,7 @@ mod tests {
     #[test]
     fn initiated_request_contains_only_target_and_content() {
         let mut reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".into()),
             reply_to_platform_message_id: None,
             metadata: None,
@@ -2002,7 +2158,8 @@ mod tests {
             adapter
                 .edit_reply(
                     &reqwest::Client::new(),
-                    "app:secret",
+                    &"app:secret".into(),
+                    "chat",
                     "message",
                     &OutboundEdit {
                         text: Some("updated".into()),
@@ -2087,12 +2244,14 @@ mod tests {
                     .send_reply(
                         &reqwest::Client::new(),
                         &crate::services::channel_platform::BotCredentials {
+                            billing: None,
                             token: "app:secret",
                             platform_bot_id: None,
                             platform_secrets: None,
                         },
                         "chat",
                         &OutboundReply {
+                            attachments: vec![],
                             text: Some("hello".into()),
                             reply_to_platform_message_id: None,
                             metadata: None,

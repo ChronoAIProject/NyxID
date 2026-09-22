@@ -444,6 +444,50 @@ describe("useAssistantChat", () => {
     expect(result.current.session?.messages.at(-1)?.error).toBeUndefined();
   });
 
+  it("accepts an immediate follow-up after Stop while the sidebar refresh is pending", async () => {
+    const prompts: unknown[] = [];
+    installDefaultMock((body) => {
+      if (body.type === "task.stop") return json({ accepted: true }, 202);
+      prompts.push(body.prompt);
+      return sse(
+        [{ runStarted: { actorId: ACTOR_ID, runId: "turn-open" } }],
+        true,
+      );
+    });
+    const delegate = globalThis.__nyxidAssistantHttpMock!;
+    let holdRefresh = false;
+    let releaseRefresh: (() => void) | undefined;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    globalThis.__nyxidAssistantHttpMock = async (request) => {
+      if (holdRefresh && request.endpoint === "/assistant/conversations") {
+        await refreshGate;
+      }
+      return delegate(request);
+    };
+    const { result, unmount } = renderHook(() => useAssistantChat({}));
+    await waitFor(() => expect(result.current.listLoading).toBe(false));
+    let first: Promise<void>;
+    act(() => {
+      first = result.current.send("First turn");
+    });
+    await waitFor(() => expect(result.current.session?.latestTurnId).toBe("turn-open"));
+    holdRefresh = true;
+    await act(async () => result.current.stop());
+    await waitFor(() => expect(result.current.session?.status).toBe("stopped"));
+    let second: Promise<void>;
+    act(() => {
+      second = result.current.send("Immediate follow-up");
+    });
+    await waitFor(() => expect(prompts).toEqual(["First turn", "Immediate follow-up"]));
+    await act(async () => {
+      releaseRefresh!();
+      unmount();
+      await Promise.all([first!, second!]);
+    });
+  });
+
   it("stops locally while response headers are still pending", async () => {
     globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
       if (endpoint === "/assistant/conversations") {

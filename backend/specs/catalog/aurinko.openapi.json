@@ -1,0 +1,4180 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Aurinko Email",
+    "version": "v1-nyxid-overlay",
+    "description": "Curated from https://apirefs.aurinko.io/assets/swagger.json (2026-09-16). Account bearer token required. Mail.Read for reads, Mail.Send for sends, Mail.Drafts for drafts. Send IDs are best effort; Incomplete processing can follow successful submission. Do not blindly retry uncertain sends."
+  },
+  "servers": [
+    {
+      "url": "https://api.aurinko.io"
+    }
+  ],
+  "paths": {
+    "/v1/account": {
+      "get": {
+        "operationId": "get_my_account",
+        "tags": [
+          "Account"
+        ],
+        "summary": "Get account status",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "pingProvider",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "If true, the provider will be pinged to check if the token is still valid. Currently supported only for Google, Office365, Salesforce, NetSuite, IMAP."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "description": "Format: int64."
+                    },
+                    "parentId": {
+                      "type": "integer",
+                      "description": "Format: int64."
+                    },
+                    "serviceType": {
+                      "type": "string",
+                      "enum": [
+                        "Google",
+                        "GoogleBot",
+                        "Office365",
+                        "EWS",
+                        "IMAP",
+                        "Salesforce",
+                        "Salesflare",
+                        "Repfabric",
+                        "MsTeamsBot",
+                        "Slack",
+                        "SlackBot",
+                        "SugarCRM",
+                        "HighLevel",
+                        "Hubspot",
+                        "Zoom",
+                        "ZoomBot",
+                        "Webex",
+                        "WebexBot",
+                        "Pipedrive",
+                        "EclipseERP",
+                        "AutoQuotes",
+                        "NetSuite",
+                        "MCTrade",
+                        "SpecPath",
+                        "Zoho",
+                        "Clientify",
+                        "QuickBooks",
+                        "ActiveCampaign",
+                        "Creatio",
+                        "ConstantContact",
+                        "Fishbowl",
+                        "iCloud"
+                      ]
+                    },
+                    "serviceProvider": {
+                      "type": "string",
+                      "enum": [
+                        "Office365",
+                        "Google",
+                        "Zoho",
+                        "IMAP",
+                        "EWS",
+                        "Yahoo",
+                        "AOL",
+                        "iCloud",
+                        "BigPond",
+                        "Fastmail",
+                        "Repfabric",
+                        "Salesforce",
+                        "Salesflare",
+                        "SugarCRM",
+                        "HighLevel",
+                        "Hubspot",
+                        "Pipedrive",
+                        "AutoQuotes",
+                        "SpecPath",
+                        "Clientify",
+                        "EclipseERP",
+                        "NetSuite",
+                        "Fishbowl",
+                        "Slack",
+                        "Zoom",
+                        "Webex",
+                        "MCTrade",
+                        "Creatio",
+                        "QuickBooks",
+                        "ActiveCampaign",
+                        "ConstantContact",
+                        "Yoxel"
+                      ]
+                    },
+                    "active": {
+                      "type": "boolean",
+                      "description": "The account is always active in the current API version"
+                    },
+                    "tokenStatus": {
+                      "type": "string",
+                      "enum": [
+                        "active",
+                        "invalid",
+                        "dead"
+                      ],
+                      "description": "* active - means the token is active and ready for use\n* invalid - means that Aurinko failed to access provider API with authentication data.\n   Basically it indicates that Aurinko has received a 401 http status from provider and marked this token as non-active.\n* dead - this is a special variant of \"invalid\" status that can occur only with OAuth 2.0 accounts.\n   It means that Aurinko failed to refresh OAuth access token and received \"invalid_grant\" error which indicates\n   that the access/refresh tokens pair cannot be used anymore and is basically dead.\n   The difference between invalid and dead is that with invalid tokens Aurinko will still try to\n   access provider API and with dead Aurinko won't even attempt:\n   trying to use dead token, Aurinko will just return 401 without making calls to the provider.\n"
+                    },
+                    "tokenError": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "daemon",
+                        "personal",
+                        "managed"
+                      ]
+                    },
+                    "daemon": {
+                      "type": "boolean"
+                    },
+                    "loginString": {
+                      "type": "string"
+                    },
+                    "email": {
+                      "type": "string"
+                    },
+                    "email2": {
+                      "type": "string"
+                    },
+                    "mailboxAddress": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "name2": {
+                      "type": "string"
+                    },
+                    "serverUrl": {
+                      "type": "string"
+                    },
+                    "serverUrl2": {
+                      "type": "string"
+                    },
+                    "clientOrgId": {
+                      "type": "string"
+                    },
+                    "authUserId": {
+                      "type": "string"
+                    },
+                    "authOrgId": {
+                      "type": "string"
+                    },
+                    "timezone": {
+                      "type": "string"
+                    },
+                    "tokenIssuedAt": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    },
+                    "tokenLastActivity": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    },
+                    "authScopes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "Calendar.Read",
+                          "Calendar.ReadWrite",
+                          "Mail.Read",
+                          "Mail.ReadWrite",
+                          "Mail.Send",
+                          "Mail.Drafts",
+                          "Mail.All",
+                          "Contacts.Read",
+                          "Contacts.ReadWrite",
+                          "Tasks.Read",
+                          "Tasks.ReadWrite"
+                        ],
+                        "description": "Space separated list of scopes"
+                      }
+                    },
+                    "authNativeScopes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "description": "Native scope from provider's API."
+                      }
+                    },
+                    "authObtainedAt": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    },
+                    "authExpiresAt": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    },
+                    "userId": {
+                      "type": "string"
+                    },
+                    "copyToSent": {
+                      "type": "boolean",
+                      "description": "Copy sent emails to \u201cSent Messages\u201d folder"
+                    },
+                    "trustServer": {
+                      "type": "boolean"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    },
+                    "updatedAt": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "get_my_account",
+          "description": "Get account status",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/v1/email/messages": {
+      "get": {
+        "operationId": "messages",
+        "tags": [
+          "Messages"
+        ],
+        "summary": "List email messages",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "pageToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only return messages matching the specified query. For example, \"from:someuser@example.com after:01/01/2020\"\n"
+          },
+          {
+            "in": "query",
+            "name": "bodyType",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            },
+            "description": "Supported by Google and Office365 accounts only. Body preview (snippet) is returned for other providers. Always, check the omitted[] array to determine if the response contains full body."
+          },
+          {
+            "in": "query",
+            "name": "includeTrashAndJunk",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nativeProperties",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextPageToken": {
+                      "type": "string"
+                    },
+                    "length": {
+                      "type": "integer"
+                    },
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "threadId": {
+                            "type": "string"
+                          },
+                          "createdTime": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "lastModifiedTime": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "sentAt": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "receivedAt": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "internetMessageId": {
+                            "type": "string"
+                          },
+                          "subject": {
+                            "type": "string"
+                          },
+                          "sysLabels": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "junk",
+                                "trash",
+                                "sent",
+                                "inbox",
+                                "unread",
+                                "flagged",
+                                "important",
+                                "draft"
+                              ]
+                            }
+                          },
+                          "keywords": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "sysClassifications": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "personal",
+                                "social",
+                                "promotions",
+                                "updates",
+                                "forums"
+                              ]
+                            }
+                          },
+                          "sensitivity": {
+                            "type": "string",
+                            "enum": [
+                              "normal",
+                              "private",
+                              "personal",
+                              "confidential"
+                            ]
+                          },
+                          "meetingMessageMethod": {
+                            "type": "string",
+                            "enum": [
+                              "request",
+                              "reply",
+                              "cancel",
+                              "counter",
+                              "other"
+                            ]
+                          },
+                          "from": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "address": {
+                                "type": "string",
+                                "description": "Format: email."
+                              },
+                              "raw": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "to": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "cc": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "bcc": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "replyTo": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "hasAttachments": {
+                            "type": "boolean"
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "bodySnippet": {
+                            "type": "string"
+                          },
+                          "attachments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "mimeType": {
+                                  "type": "string"
+                                },
+                                "size": {
+                                  "type": "integer"
+                                },
+                                "inline": {
+                                  "type": "boolean"
+                                },
+                                "contentId": {
+                                  "type": "string"
+                                },
+                                "content": {
+                                  "type": "string"
+                                },
+                                "contentLocation": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "inReplyTo": {
+                            "type": "string"
+                          },
+                          "references": {
+                            "type": "string"
+                          },
+                          "threadIndex": {
+                            "type": "string"
+                          },
+                          "internetHeaders": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "nativeProperties": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          },
+                          "folderId": {
+                            "type": "string"
+                          },
+                          "webLink": {
+                            "type": "string"
+                          },
+                          "omitted": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "threadId",
+                                "body",
+                                "attachments",
+                                "recipients",
+                                "internetHeaders"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "messages",
+          "description": "List email messages",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      },
+      "post": {
+        "operationId": "send",
+        "tags": [
+          "Messages"
+        ],
+        "summary": "Send a new message",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "bodyType",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "returnIds",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "return message id and thread id if possible"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "address": {
+                        "type": "string",
+                        "description": "Format: email."
+                      },
+                      "raw": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "subject": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "inReplyTo": {
+                    "type": "string"
+                  },
+                  "references": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "cc": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "bcc": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "replyTo": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "xHeaders": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "listHeaders": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "description": "`List` family of email headers to be set. Behavior depends on the provider:\n* Google, IMAP: All provided headers are applied to the email as-is.\n* Office 365, EWS: Only the `List-Unsubscribe` header is supported.\n* Other providers: Headers are currently not supported.\n"
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "inline": {
+                          "type": "boolean"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "mimeType": {
+                          "type": "string"
+                        },
+                        "contentId": {
+                          "type": "string"
+                        },
+                        "content": {
+                          "type": "string",
+                          "description": "Format: base64."
+                        }
+                      }
+                    }
+                  },
+                  "tracking": {
+                    "type": "object",
+                    "properties": {
+                      "threadReplies": {
+                        "type": "boolean"
+                      },
+                      "opens": {
+                        "type": "boolean"
+                      },
+                      "links": {
+                        "type": "boolean"
+                      },
+                      "trackOpensAfterSendDelay": {
+                        "type": "integer",
+                        "description": "number of seconds to wait after a send before enabling tracking",
+                        "default": 5
+                      },
+                      "context": {
+                        "type": "string",
+                        "description": "User-defined tracking data that will be associated with this email."
+                      },
+                      "customDomainAlias": {
+                        "type": "string",
+                        "description": "A custom domain for the tracking pixel url. Aurinko\u2019s default is used if not present. Example `tracking.company.com`"
+                      }
+                    }
+                  },
+                  "followUp": {
+                    "type": "object",
+                    "properties": {
+                      "ruleId": {
+                        "type": "integer"
+                      },
+                      "actionVars": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "Ok"
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "submittedMessageId": {
+                      "type": "string",
+                      "description": "Message-Id header generated by Aurinko when SMTP sending. Note that some SMTP servers will override it."
+                    },
+                    "threadId": {
+                      "type": "string"
+                    },
+                    "trackingId": {
+                      "type": "string",
+                      "description": "A tracking identifier for the sent message"
+                    },
+                    "processingStatus": {
+                      "type": "string",
+                      "enum": [
+                        "Ok",
+                        "Incomplete"
+                      ]
+                    },
+                    "processingError": {
+                      "type": "object",
+                      "properties": {
+                        "failedSteps": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "tracking",
+                              "followUp",
+                              "keywords",
+                              "returnIds"
+                            ],
+                            "description": "Action that should have been performed, but were not performed due to an error"
+                          }
+                        },
+                        "errorMessage": {
+                          "type": "string",
+                          "description": "An error occurred after a successful submission while processing the result"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "send",
+          "description": "Send a new message",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        }
+      }
+    },
+    "/v1/email/messages/{messageId}": {
+      "get": {
+        "operationId": "message",
+        "tags": [
+          "Messages"
+        ],
+        "summary": "Get a message",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "messageId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "email message identifier"
+          },
+          {
+            "in": "query",
+            "name": "bodyType",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            },
+            "description": "Default html"
+          },
+          {
+            "in": "query",
+            "name": "nativeProperties",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "in": "query",
+            "name": "loadInlines",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "automatically pre-load relevant inline attachments"
+          },
+          {
+            "in": "query",
+            "name": "stripQuoted",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "strip quoted elements from message body"
+          },
+          {
+            "in": "query",
+            "name": "requireThreadId",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "For IMAP accounts not supporting threads, wait for Aurinko to discover threads and provide its threadId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "threadId": {
+                      "type": "string"
+                    },
+                    "createdTime": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    },
+                    "lastModifiedTime": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    },
+                    "sentAt": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    },
+                    "receivedAt": {
+                      "type": "string",
+                      "description": "Format: date-time."
+                    },
+                    "internetMessageId": {
+                      "type": "string"
+                    },
+                    "subject": {
+                      "type": "string"
+                    },
+                    "sysLabels": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "junk",
+                          "trash",
+                          "sent",
+                          "inbox",
+                          "unread",
+                          "flagged",
+                          "important",
+                          "draft"
+                        ]
+                      }
+                    },
+                    "keywords": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "sysClassifications": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "personal",
+                          "social",
+                          "promotions",
+                          "updates",
+                          "forums"
+                        ]
+                      }
+                    },
+                    "sensitivity": {
+                      "type": "string",
+                      "enum": [
+                        "normal",
+                        "private",
+                        "personal",
+                        "confidential"
+                      ]
+                    },
+                    "meetingMessageMethod": {
+                      "type": "string",
+                      "enum": [
+                        "request",
+                        "reply",
+                        "cancel",
+                        "counter",
+                        "other"
+                      ]
+                    },
+                    "from": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "to": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "address": {
+                            "type": "string",
+                            "description": "Format: email."
+                          },
+                          "raw": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "cc": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "address": {
+                            "type": "string",
+                            "description": "Format: email."
+                          },
+                          "raw": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "bcc": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "address": {
+                            "type": "string",
+                            "description": "Format: email."
+                          },
+                          "raw": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "replyTo": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "address": {
+                            "type": "string",
+                            "description": "Format: email."
+                          },
+                          "raw": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "hasAttachments": {
+                      "type": "boolean"
+                    },
+                    "body": {
+                      "type": "string"
+                    },
+                    "bodySnippet": {
+                      "type": "string"
+                    },
+                    "attachments": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "mimeType": {
+                            "type": "string"
+                          },
+                          "size": {
+                            "type": "integer"
+                          },
+                          "inline": {
+                            "type": "boolean"
+                          },
+                          "contentId": {
+                            "type": "string"
+                          },
+                          "content": {
+                            "type": "string"
+                          },
+                          "contentLocation": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "inReplyTo": {
+                      "type": "string"
+                    },
+                    "references": {
+                      "type": "string"
+                    },
+                    "threadIndex": {
+                      "type": "string"
+                    },
+                    "internetHeaders": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "nativeProperties": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "folderId": {
+                      "type": "string"
+                    },
+                    "webLink": {
+                      "type": "string"
+                    },
+                    "omitted": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "threadId",
+                          "body",
+                          "attachments",
+                          "recipients",
+                          "internetHeaders"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "threadId may be yet unavailable for some IMAP providers",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "message",
+          "description": "Get a message",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/v1/email/conversations/{threadId}": {
+      "get": {
+        "operationId": "conversation",
+        "tags": [
+          "Messages"
+        ],
+        "summary": "Get messages in a conversation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "threadId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "conversation/thread identifier"
+          },
+          {
+            "in": "query",
+            "name": "bodyType",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            },
+            "description": "Supported by Google and Office365 accounts only. Body preview (snippet) is returned for other providers. Always, check the omitted[] array to determine if the response contains full body."
+          },
+          {
+            "in": "query",
+            "name": "pageToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextPageToken": {
+                      "type": "string"
+                    },
+                    "length": {
+                      "type": "integer"
+                    },
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "threadId": {
+                            "type": "string"
+                          },
+                          "createdTime": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "lastModifiedTime": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "sentAt": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "receivedAt": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "internetMessageId": {
+                            "type": "string"
+                          },
+                          "subject": {
+                            "type": "string"
+                          },
+                          "sysLabels": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "junk",
+                                "trash",
+                                "sent",
+                                "inbox",
+                                "unread",
+                                "flagged",
+                                "important",
+                                "draft"
+                              ]
+                            }
+                          },
+                          "keywords": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "sysClassifications": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "personal",
+                                "social",
+                                "promotions",
+                                "updates",
+                                "forums"
+                              ]
+                            }
+                          },
+                          "sensitivity": {
+                            "type": "string",
+                            "enum": [
+                              "normal",
+                              "private",
+                              "personal",
+                              "confidential"
+                            ]
+                          },
+                          "meetingMessageMethod": {
+                            "type": "string",
+                            "enum": [
+                              "request",
+                              "reply",
+                              "cancel",
+                              "counter",
+                              "other"
+                            ]
+                          },
+                          "from": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "address": {
+                                "type": "string",
+                                "description": "Format: email."
+                              },
+                              "raw": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "to": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "cc": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "bcc": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "replyTo": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "hasAttachments": {
+                            "type": "boolean"
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "bodySnippet": {
+                            "type": "string"
+                          },
+                          "attachments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "mimeType": {
+                                  "type": "string"
+                                },
+                                "size": {
+                                  "type": "integer"
+                                },
+                                "inline": {
+                                  "type": "boolean"
+                                },
+                                "contentId": {
+                                  "type": "string"
+                                },
+                                "content": {
+                                  "type": "string"
+                                },
+                                "contentLocation": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "inReplyTo": {
+                            "type": "string"
+                          },
+                          "references": {
+                            "type": "string"
+                          },
+                          "threadIndex": {
+                            "type": "string"
+                          },
+                          "internetHeaders": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "nativeProperties": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          },
+                          "folderId": {
+                            "type": "string"
+                          },
+                          "webLink": {
+                            "type": "string"
+                          },
+                          "omitted": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "threadId",
+                                "body",
+                                "attachments",
+                                "recipients",
+                                "internetHeaders"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "conversation",
+          "description": "Get messages in a conversation",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/v1/email/messages/{messageId}/attachments/{attachmentId}": {
+      "get": {
+        "operationId": "email_attachment",
+        "tags": [
+          "Messages"
+        ],
+        "summary": "Get a message attachment",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "messageId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "email message identifier"
+          },
+          {
+            "in": "path",
+            "name": "attachmentId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "attachment identifier"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "content": {
+                      "type": "string",
+                      "description": "Format: base64."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "email_attachment",
+          "description": "Get a message attachment",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/v1/email/messages/{messageId}/reply": {
+      "post": {
+        "operationId": "reply",
+        "tags": [
+          "Messages"
+        ],
+        "summary": "Reply to a message",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "messageId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "an identifier of a message the response is for"
+          },
+          {
+            "in": "query",
+            "name": "bodyType",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "returnIds",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "return message id and thread id if possible"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "address": {
+                        "type": "string",
+                        "description": "Format: email."
+                      },
+                      "raw": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "subject": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "cc": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "bcc": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "replyTo": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "xHeaders": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "listHeaders": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "description": "`List` family of email headers to be set. Behavior depends on the provider:\n* Google, IMAP: All provided headers are applied to the email as-is.\n* Office 365, EWS: Only the `List-Unsubscribe` header is supported.\n* Other providers: Headers are currently not supported.\n"
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "inline": {
+                          "type": "boolean"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "mimeType": {
+                          "type": "string"
+                        },
+                        "contentId": {
+                          "type": "string"
+                        },
+                        "content": {
+                          "type": "string",
+                          "description": "Format: base64."
+                        }
+                      }
+                    }
+                  },
+                  "tracking": {
+                    "type": "object",
+                    "properties": {
+                      "threadReplies": {
+                        "type": "boolean"
+                      },
+                      "opens": {
+                        "type": "boolean"
+                      },
+                      "links": {
+                        "type": "boolean"
+                      },
+                      "trackOpensAfterSendDelay": {
+                        "type": "integer",
+                        "description": "number of seconds to wait after a send before enabling tracking",
+                        "default": 5
+                      },
+                      "context": {
+                        "type": "string",
+                        "description": "User-defined tracking data that will be associated with this email."
+                      },
+                      "customDomainAlias": {
+                        "type": "string",
+                        "description": "A custom domain for the tracking pixel url. Aurinko\u2019s default is used if not present. Example `tracking.company.com`"
+                      }
+                    }
+                  },
+                  "followUp": {
+                    "type": "object",
+                    "properties": {
+                      "ruleId": {
+                        "type": "integer"
+                      },
+                      "actionVars": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "Ok"
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "submittedMessageId": {
+                      "type": "string",
+                      "description": "Message-Id header generated by Aurinko when SMTP sending. Note that some SMTP servers will override it."
+                    },
+                    "threadId": {
+                      "type": "string"
+                    },
+                    "trackingId": {
+                      "type": "string",
+                      "description": "A tracking identifier for the sent message"
+                    },
+                    "processingStatus": {
+                      "type": "string",
+                      "enum": [
+                        "Ok",
+                        "Incomplete"
+                      ]
+                    },
+                    "processingError": {
+                      "type": "object",
+                      "properties": {
+                        "failedSteps": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "tracking",
+                              "followUp",
+                              "keywords",
+                              "returnIds"
+                            ],
+                            "description": "Action that should have been performed, but were not performed due to an error"
+                          }
+                        },
+                        "errorMessage": {
+                          "type": "string",
+                          "description": "An error occurred after a successful submission while processing the result"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "reply",
+          "description": "Reply to a message",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        }
+      }
+    },
+    "/v1/email/drafts": {
+      "post": {
+        "operationId": "create_draft",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "Create a new draft message",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "bodyType",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "address": {
+                        "type": "string",
+                        "description": "Format: email."
+                      },
+                      "raw": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "subject": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "inReplyTo": {
+                    "type": "string"
+                  },
+                  "references": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "cc": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "bcc": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "replyTo": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "xHeaders": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "listHeaders": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "description": "`List` family of email headers to be set. Behavior depends on the provider:\n* Google, IMAP: All provided headers are applied to the email as-is.\n* Office 365, EWS: Only the `List-Unsubscribe` header is supported.\n* Other providers: Headers are currently not supported.\n"
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "inline": {
+                          "type": "boolean"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "mimeType": {
+                          "type": "string"
+                        },
+                        "contentId": {
+                          "type": "string"
+                        },
+                        "content": {
+                          "type": "string",
+                          "description": "Format: base64."
+                        }
+                      }
+                    }
+                  },
+                  "tracking": {
+                    "type": "object",
+                    "properties": {
+                      "threadReplies": {
+                        "type": "boolean"
+                      },
+                      "opens": {
+                        "type": "boolean"
+                      },
+                      "links": {
+                        "type": "boolean"
+                      },
+                      "trackOpensAfterSendDelay": {
+                        "type": "integer",
+                        "description": "number of seconds to wait after a send before enabling tracking",
+                        "default": 5
+                      },
+                      "context": {
+                        "type": "string",
+                        "description": "User-defined tracking data that will be associated with this email."
+                      },
+                      "customDomainAlias": {
+                        "type": "string",
+                        "description": "A custom domain for the tracking pixel url. Aurinko\u2019s default is used if not present. Example `tracking.company.com`"
+                      }
+                    }
+                  },
+                  "followUp": {
+                    "type": "object",
+                    "properties": {
+                      "ruleId": {
+                        "type": "integer"
+                      },
+                      "actionVars": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "webLink": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "create_draft",
+          "description": "Create a new draft message",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        }
+      }
+    },
+    "/v1/email/drafts/{draftId}": {
+      "get": {
+        "operationId": "get_draft",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "Get a draft message",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draftId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "draft message identifier"
+          },
+          {
+            "in": "query",
+            "name": "bodyType",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "nativeProperties",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "in": "query",
+            "name": "loadInlines",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "automatically pre-load relevant inline attachments"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "threadId": {
+                          "type": "string"
+                        },
+                        "createdTime": {
+                          "type": "string",
+                          "description": "Format: date-time."
+                        },
+                        "lastModifiedTime": {
+                          "type": "string",
+                          "description": "Format: date-time."
+                        },
+                        "sentAt": {
+                          "type": "string",
+                          "description": "Format: date-time."
+                        },
+                        "receivedAt": {
+                          "type": "string",
+                          "description": "Format: date-time."
+                        },
+                        "internetMessageId": {
+                          "type": "string"
+                        },
+                        "subject": {
+                          "type": "string"
+                        },
+                        "sysLabels": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "junk",
+                              "trash",
+                              "sent",
+                              "inbox",
+                              "unread",
+                              "flagged",
+                              "important",
+                              "draft"
+                            ]
+                          }
+                        },
+                        "keywords": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "sysClassifications": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "personal",
+                              "social",
+                              "promotions",
+                              "updates",
+                              "forums"
+                            ]
+                          }
+                        },
+                        "sensitivity": {
+                          "type": "string",
+                          "enum": [
+                            "normal",
+                            "private",
+                            "personal",
+                            "confidential"
+                          ]
+                        },
+                        "meetingMessageMethod": {
+                          "type": "string",
+                          "enum": [
+                            "request",
+                            "reply",
+                            "cancel",
+                            "counter",
+                            "other"
+                          ]
+                        },
+                        "from": {
+                          "type": "object",
+                          "properties": {
+                            "name": {
+                              "type": "string"
+                            },
+                            "address": {
+                              "type": "string",
+                              "description": "Format: email."
+                            },
+                            "raw": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "to": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "address": {
+                                "type": "string",
+                                "description": "Format: email."
+                              },
+                              "raw": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "cc": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "address": {
+                                "type": "string",
+                                "description": "Format: email."
+                              },
+                              "raw": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "bcc": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "address": {
+                                "type": "string",
+                                "description": "Format: email."
+                              },
+                              "raw": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "replyTo": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "address": {
+                                "type": "string",
+                                "description": "Format: email."
+                              },
+                              "raw": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "hasAttachments": {
+                          "type": "boolean"
+                        },
+                        "body": {
+                          "type": "string"
+                        },
+                        "bodySnippet": {
+                          "type": "string"
+                        },
+                        "attachments": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string"
+                              },
+                              "name": {
+                                "type": "string"
+                              },
+                              "mimeType": {
+                                "type": "string"
+                              },
+                              "size": {
+                                "type": "integer"
+                              },
+                              "inline": {
+                                "type": "boolean"
+                              },
+                              "contentId": {
+                                "type": "string"
+                              },
+                              "content": {
+                                "type": "string"
+                              },
+                              "contentLocation": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "inReplyTo": {
+                          "type": "string"
+                        },
+                        "references": {
+                          "type": "string"
+                        },
+                        "threadIndex": {
+                          "type": "string"
+                        },
+                        "internetHeaders": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "value": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        },
+                        "nativeProperties": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        },
+                        "folderId": {
+                          "type": "string"
+                        },
+                        "webLink": {
+                          "type": "string"
+                        },
+                        "omitted": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "threadId",
+                              "body",
+                              "attachments",
+                              "recipients",
+                              "internetHeaders"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "scheduled": {
+                      "type": "object",
+                      "properties": {
+                        "jobId": {
+                          "type": "integer",
+                          "description": "Format: int64."
+                        },
+                        "sendTime": {
+                          "type": "string",
+                          "description": "Format: date-time."
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "scheduled",
+                            "sent",
+                            "failed"
+                          ]
+                        },
+                        "errorMessage": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "get_draft",
+          "description": "Get a draft message",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      },
+      "put": {
+        "operationId": "update_draft",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "Update a draft message",
+        "description": "Works for Google and Office365 only",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draftId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "draft message identifier"
+          },
+          {
+            "in": "query",
+            "name": "bodyType",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "from": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "address": {
+                        "type": "string",
+                        "description": "Format: email."
+                      },
+                      "raw": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "subject": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "inReplyTo": {
+                    "type": "string"
+                  },
+                  "references": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "cc": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "bcc": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "replyTo": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "string",
+                          "description": "Format: email."
+                        },
+                        "raw": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "xHeaders": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "listHeaders": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "description": "`List` family of email headers to be set. Behavior depends on the provider:\n* Google, IMAP: All provided headers are applied to the email as-is.\n* Office 365, EWS: Only the `List-Unsubscribe` header is supported.\n* Other providers: Headers are currently not supported.\n"
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "inline": {
+                          "type": "boolean"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "mimeType": {
+                          "type": "string"
+                        },
+                        "contentId": {
+                          "type": "string"
+                        },
+                        "content": {
+                          "type": "string",
+                          "description": "Format: base64."
+                        }
+                      }
+                    }
+                  },
+                  "tracking": {
+                    "type": "object",
+                    "properties": {
+                      "threadReplies": {
+                        "type": "boolean"
+                      },
+                      "opens": {
+                        "type": "boolean"
+                      },
+                      "links": {
+                        "type": "boolean"
+                      },
+                      "trackOpensAfterSendDelay": {
+                        "type": "integer",
+                        "description": "number of seconds to wait after a send before enabling tracking",
+                        "default": 5
+                      },
+                      "context": {
+                        "type": "string",
+                        "description": "User-defined tracking data that will be associated with this email."
+                      },
+                      "customDomainAlias": {
+                        "type": "string",
+                        "description": "A custom domain for the tracking pixel url. Aurinko\u2019s default is used if not present. Example `tracking.company.com`"
+                      }
+                    }
+                  },
+                  "followUp": {
+                    "type": "object",
+                    "properties": {
+                      "ruleId": {
+                        "type": "integer"
+                      },
+                      "actionVars": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "webLink": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "update_draft",
+          "description": "Update a draft message",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        }
+      },
+      "delete": {
+        "operationId": "delete_draft",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "Delete a draft message",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draftId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "an identifier of a draft message"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "Ok"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "delete_draft",
+          "description": "Delete a draft message",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        }
+      }
+    },
+    "/v1/email/drafts/{draftId}/send": {
+      "post": {
+        "operationId": "send_draft",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "Send a draft message",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draftId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "an identifier of a draft message"
+          },
+          {
+            "in": "query",
+            "name": "sendTime",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Format: date-time."
+            }
+          },
+          {
+            "in": "query",
+            "name": "returnIds",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "return message id and thread id if possible"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "tracking": {
+                    "type": "object",
+                    "properties": {
+                      "threadReplies": {
+                        "type": "boolean"
+                      },
+                      "opens": {
+                        "type": "boolean"
+                      },
+                      "links": {
+                        "type": "boolean"
+                      },
+                      "trackOpensAfterSendDelay": {
+                        "type": "integer",
+                        "description": "number of seconds to wait after a send before enabling tracking",
+                        "default": 5
+                      },
+                      "context": {
+                        "type": "string",
+                        "description": "User-defined tracking data that will be associated with this email."
+                      },
+                      "customDomainAlias": {
+                        "type": "string",
+                        "description": "A custom domain for the tracking pixel url. Aurinko\u2019s default is used if not present. Example `tracking.company.com`"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "Ok",
+                        "Scheduled"
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "threadId": {
+                      "type": "string"
+                    },
+                    "trackingId": {
+                      "type": "string",
+                      "description": "A tracking identifier for the sent message"
+                    },
+                    "processingStatus": {
+                      "type": "string",
+                      "enum": [
+                        "Ok",
+                        "Incomplete"
+                      ]
+                    },
+                    "processingError": {
+                      "type": "object",
+                      "properties": {
+                        "failedSteps": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "tracking",
+                              "followUp",
+                              "keywords",
+                              "returnIds"
+                            ],
+                            "description": "Action that should have been performed, but were not performed due to an error"
+                          }
+                        },
+                        "errorMessage": {
+                          "type": "string",
+                          "description": "An error occurred after a successful submission while processing the result"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Access token is missing or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "A message describing the error."
+                    },
+                    "requestId": {
+                      "type": "string",
+                      "description": "A unique identifier for the request. Format: uuid."
+                    },
+                    "originalError": {
+                      "type": "object",
+                      "description": "Optional. The original error or additional context as a JSON value.\n"
+                    }
+                  }
+                },
+                "examples": {
+                  "missingToken": {
+                    "value": {
+                      "code": "unauthorized",
+                      "message": "unauthorized",
+                      "requestId": "82414de3-3815-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "deadToken": {
+                    "value": {
+                      "code": "token.dead",
+                      "message": "Not authorized",
+                      "requestId": "82414de3-3835-47ef-aca1-6745e42a60d6"
+                    }
+                  },
+                  "invalidToken": {
+                    "value": {
+                      "code": "token.refresh.failed",
+                      "message": "Invalid data: refreshToken missing",
+                      "requestId": "e0587d2f-d612-4c06-902d-5f3d807e5ca7"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "See \"Handling errors\" section for details"
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "send_draft",
+          "description": "Send a draft message",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        }
+      }
+    },
+    "/v1/email/sync": {
+      "post": {
+        "operationId": "start_email_sync",
+        "tags": [
+          "EmailSync"
+        ],
+        "summary": "Start a new email sync",
+        "description": "Requires Mail.Read. Synchronizes the authorized mailbox through NyxID. Keep sync cursors in the caller; this operation does not expose mailbox credentials.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "daysWithin",
+            "schema": {
+              "type": "integer"
+            },
+            "required": false,
+            "description": "Scan emails received within last 'daysWithin' days.\n"
+          },
+          {
+            "in": "query",
+            "name": "bodyType",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "html",
+                "text"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "syncUpdatedToken": {
+                      "type": "string"
+                    },
+                    "syncDeletedToken": {
+                      "type": "string"
+                    },
+                    "ready": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "start_email_sync",
+          "description": "Start a new email sync",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        }
+      }
+    },
+    "/v1/email/sync/updated": {
+      "get": {
+        "operationId": "get_updated_emails",
+        "tags": [
+          "EmailSync"
+        ],
+        "summary": "Request changed emails (deltas)",
+        "description": "Requires Mail.Read. Synchronizes the authorized mailbox through NyxID. Keep sync cursors in the caller; this operation does not expose mailbox credentials.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "deltaToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A token received as nextDeltaToken from a previous sync request or a start sync request"
+          },
+          {
+            "in": "query",
+            "name": "pageToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A token received as nextPageToken from a previous page request"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextPageToken": {
+                      "type": "string",
+                      "description": "A token received as nextPageToken from a previous page request"
+                    },
+                    "nextDeltaToken": {
+                      "type": "string",
+                      "description": "A token received as nextDeltaToken from a previous sync request or a start sync request"
+                    },
+                    "length": {
+                      "type": "integer"
+                    },
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "threadId": {
+                            "type": "string"
+                          },
+                          "createdTime": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "lastModifiedTime": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "sentAt": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "receivedAt": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          },
+                          "internetMessageId": {
+                            "type": "string"
+                          },
+                          "subject": {
+                            "type": "string"
+                          },
+                          "sysLabels": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "junk",
+                                "trash",
+                                "sent",
+                                "inbox",
+                                "unread",
+                                "flagged",
+                                "important",
+                                "draft"
+                              ]
+                            }
+                          },
+                          "keywords": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "sysClassifications": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "personal",
+                                "social",
+                                "promotions",
+                                "updates",
+                                "forums"
+                              ]
+                            }
+                          },
+                          "sensitivity": {
+                            "type": "string",
+                            "enum": [
+                              "normal",
+                              "private",
+                              "personal",
+                              "confidential"
+                            ]
+                          },
+                          "meetingMessageMethod": {
+                            "type": "string",
+                            "enum": [
+                              "request",
+                              "reply",
+                              "cancel",
+                              "counter",
+                              "other"
+                            ]
+                          },
+                          "from": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              },
+                              "address": {
+                                "type": "string",
+                                "description": "Format: email."
+                              },
+                              "raw": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "to": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "cc": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "bcc": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "replyTo": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "address": {
+                                  "type": "string",
+                                  "description": "Format: email."
+                                },
+                                "raw": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "hasAttachments": {
+                            "type": "boolean"
+                          },
+                          "body": {
+                            "type": "string"
+                          },
+                          "bodySnippet": {
+                            "type": "string"
+                          },
+                          "attachments": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "mimeType": {
+                                  "type": "string"
+                                },
+                                "size": {
+                                  "type": "integer"
+                                },
+                                "inline": {
+                                  "type": "boolean"
+                                },
+                                "contentId": {
+                                  "type": "string"
+                                },
+                                "content": {
+                                  "type": "string"
+                                },
+                                "contentLocation": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "inReplyTo": {
+                            "type": "string"
+                          },
+                          "references": {
+                            "type": "string"
+                          },
+                          "threadIndex": {
+                            "type": "string"
+                          },
+                          "internetHeaders": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "nativeProperties": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
+                          },
+                          "folderId": {
+                            "type": "string"
+                          },
+                          "webLink": {
+                            "type": "string"
+                          },
+                          "omitted": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "threadId",
+                                "body",
+                                "attachments",
+                                "recipients",
+                                "internetHeaders"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Sync cursor expired. Start a new email sync and use its new sync tokens."
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "get_updated_emails",
+          "description": "Request changed emails (deltas)",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    },
+    "/v1/email/sync/deleted": {
+      "get": {
+        "operationId": "get_deleted_emails",
+        "tags": [
+          "EmailSync"
+        ],
+        "summary": "Request deleted emails (deltas)",
+        "description": "Requires Mail.Read. Synchronizes the authorized mailbox through NyxID. Keep sync cursors in the caller; this operation does not expose mailbox credentials.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "deltaToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A token received as nextDeltaToken from a previous sync request or a start sync request"
+          },
+          {
+            "in": "query",
+            "name": "pageToken",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A token received as nextPageToken from a previous page request"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextPageToken": {
+                      "type": "string",
+                      "description": "A token received as nextPageToken from a previous page request"
+                    },
+                    "nextDeltaToken": {
+                      "type": "string",
+                      "description": "A token received as nextDeltaToken from a previous sync request or a start sync request"
+                    },
+                    "length": {
+                      "type": "integer"
+                    },
+                    "records": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "folderId": {
+                            "type": "string"
+                          },
+                          "internetMessageId": {
+                            "type": "string"
+                          },
+                          "timestamp": {
+                            "type": "string",
+                            "description": "Format: date-time."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Sync cursor expired. Start a new email sync and use its new sync tokens."
+          }
+        },
+        "x-aevatar-tool": {
+          "name": "get_deleted_emails",
+          "description": "Request deleted emails (deltas)",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        }
+      }
+    }
+  }
+}

@@ -13,6 +13,9 @@ use crate::errors::{AppError, AppResult};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 
+#[cfg(test)]
+tokio::task_local! { pub(crate) static ISSUANCE_BARRIER: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Barrier>); }
+
 #[derive(Debug, Serialize)]
 pub struct ClientCredentialsResponse {
     pub access_token: String,
@@ -129,6 +132,10 @@ pub async fn create_service_account_with_id(
         description: description.map(String::from),
         client_id,
         client_secret_hash: secret_hash,
+        platform_protected: false,
+        purpose: crate::models::service_account::ServiceAccountPurpose::General,
+        curation_grant: None,
+        credential_generation: 0,
         secret_prefix,
         role_ids: role_ids.to_vec(),
         allowed_scopes: allowed_scopes.to_string(),
@@ -220,9 +227,21 @@ pub async fn update_service_account(
     role_ids: Option<&[String]>,
     rate_limit_override: Option<Option<u64>>,
     is_active: Option<bool>,
+    platform_admin: bool,
 ) -> AppResult<ServiceAccount> {
     // Verify it exists first
-    let _existing = get_service_account(db, sa_id).await?;
+    let existing = get_service_account(db, sa_id).await?;
+    if existing.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+        && let Some(scopes) = allowed_scopes
+    {
+        super::curation_grant_service::validate_scopes(
+            scopes,
+            existing
+                .curation_grant
+                .as_ref()
+                .and_then(|g| g.ornn_proxy_service_id.as_deref()),
+        )?;
+    }
 
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
@@ -297,26 +316,47 @@ pub async fn update_service_account(
         set_doc.insert("is_active", active);
     }
 
-    db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
-        .update_one(doc! { "_id": sa_id }, doc! { "$set": set_doc })
+    let mut filter = management_filter(sa_id, platform_admin);
+    filter.insert(
+        "purpose",
+        if existing.purpose == crate::models::service_account::ServiceAccountPurpose::Curation {
+            bson::Bson::String("curation".into())
+        } else {
+            bson::Bson::Document(doc! {"$ne": "curation"})
+        },
+    );
+    let mut update = doc! {"$set": set_doc};
+    if is_active == Some(false) {
+        update.insert("$inc", doc! {"credential_generation": 1_i64});
+    }
+    let result = db
+        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+        .update_one(filter, update)
         .await?;
+    require_managed_match(result.matched_count)?;
 
     get_service_account(db, sa_id).await
 }
 
 /// Rotate the client secret. Revokes all outstanding tokens.
 /// Returns (updated ServiceAccount, new raw_client_secret).
-pub async fn rotate_secret(db: &Database, sa_id: &str) -> AppResult<(ServiceAccount, String)> {
+pub async fn rotate_secret(
+    db: &Database,
+    sa_id: &str,
+    platform_admin: bool,
+) -> AppResult<(ServiceAccount, String)> {
     let _existing = get_service_account(db, sa_id).await?;
 
     let raw_secret = generate_client_secret();
     let secret_hash = hash_token(&raw_secret);
     let secret_prefix = raw_secret[..8].to_string();
 
-    db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+    let result = db
+        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
         .update_one(
-            doc! { "_id": sa_id },
+            management_filter(sa_id, platform_admin),
             doc! {
+                "$inc": { "credential_generation": 1_i64 },
                 "$set": {
                     "client_secret_hash": &secret_hash,
                     "secret_prefix": &secret_prefix,
@@ -326,21 +366,27 @@ pub async fn rotate_secret(db: &Database, sa_id: &str) -> AppResult<(ServiceAcco
         )
         .await?;
 
-    // Revoke all outstanding tokens
-    revoke_all_tokens(db, sa_id).await?;
+    require_managed_match(result.matched_count)?;
+    revoke_token_rows(db, sa_id).await?;
 
     let updated = get_service_account(db, sa_id).await?;
     Ok((updated, raw_secret))
 }
 
 /// Soft-delete (deactivate) a service account and revoke all tokens.
-pub async fn delete_service_account(db: &Database, sa_id: &str) -> AppResult<()> {
+pub async fn delete_service_account(
+    db: &Database,
+    sa_id: &str,
+    platform_admin: bool,
+) -> AppResult<()> {
     let _existing = get_service_account(db, sa_id).await?;
 
-    db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+    let result = db
+        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
         .update_one(
-            doc! { "_id": sa_id },
+            management_filter(sa_id, platform_admin),
             doc! {
+                "$inc": {"credential_generation": 1_i64},
                 "$set": {
                     "is_active": false,
                     "updated_at": bson::DateTime::from_chrono(Utc::now()),
@@ -349,31 +395,47 @@ pub async fn delete_service_account(db: &Database, sa_id: &str) -> AppResult<()>
         )
         .await?;
 
-    revoke_all_tokens(db, sa_id).await?;
+    require_managed_match(result.matched_count)?;
+    revoke_token_rows(db, sa_id).await?;
 
     Ok(())
 }
 
 /// Revoke all active tokens for a service account.
-pub async fn revoke_all_tokens(db: &Database, sa_id: &str) -> AppResult<u64> {
+fn management_filter(sa_id: &str, platform_admin: bool) -> bson::Document {
+    let mut filter = doc! {"_id": sa_id};
+    if !platform_admin {
+        filter.insert("platform_protected", doc! {"$ne": true});
+        filter.insert("purpose", doc! {"$ne": "curation"});
+    }
+    filter
+}
+
+fn require_managed_match(count: u64) -> AppResult<()> {
+    if count == 1 {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "Service account changed or requires platform administration".into(),
+        ))
+    }
+}
+
+pub async fn revoke_all_tokens(db: &Database, sa_id: &str, platform_admin: bool) -> AppResult<u64> {
+    let result = db.collection::<ServiceAccount>(SERVICE_ACCOUNTS).update_one(management_filter(sa_id, platform_admin),
+        doc! {"$inc": {"credential_generation": 1_i64}, "$set": {"updated_at": bson::DateTime::from_chrono(Utc::now())}}).await?;
+    require_managed_match(result.matched_count)?;
+    revoke_token_rows(db, sa_id).await
+}
+
+async fn revoke_token_rows(db: &Database, sa_id: &str) -> AppResult<u64> {
     let result = db
         .collection::<ServiceAccountToken>(SA_TOKENS)
         .update_many(
-            doc! { "service_account_id": sa_id, "revoked": false },
-            doc! { "$set": { "revoked": true } },
+            doc! {"service_account_id": sa_id, "revoked": false},
+            doc! {"$set": {"revoked": true}},
         )
         .await?;
-
-    // Revocation is an observable service-account mutation even when there
-    // are no currently live tokens. Advance the account timestamp so the
-    // authorization projection can prove the action causally.
-    db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
-        .update_one(
-            doc! { "_id": sa_id },
-            doc! { "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) } },
-        )
-        .await?;
-
     Ok(result.modified_count)
 }
 
@@ -407,6 +469,12 @@ pub async fn authenticate_client_credentials(
         ));
     }
 
+    #[cfg(test)]
+    if let Ok((validated, resume)) = ISSUANCE_BARRIER.try_with(Clone::clone) {
+        validated.wait().await;
+        resume.wait().await;
+    }
+
     // Validate requested scopes are a subset of allowed_scopes
     let granted_scope = match requested_scope {
         Some(req) if !req.is_empty() => {
@@ -427,8 +495,14 @@ pub async fn authenticate_client_credentials(
 
     let ttl = config.sa_token_ttl_secs;
 
-    let (token, jti) =
-        jwt::generate_service_account_token(jwt_keys, config, &sa.id, &granted_scope, ttl)?;
+    let (token, jti) = jwt::generate_service_account_token(
+        jwt_keys,
+        config,
+        &sa.id,
+        &granted_scope,
+        ttl,
+        sa.credential_generation,
+    )?;
 
     // Persist token record for revocation support
     let token_record = ServiceAccountToken {
@@ -438,6 +512,7 @@ pub async fn authenticate_client_credentials(
         scope: granted_scope.clone(),
         expires_at: Utc::now() + Duration::seconds(ttl),
         revoked: false,
+        credential_generation: sa.credential_generation,
         created_at: Utc::now(),
     };
 
@@ -459,6 +534,42 @@ pub async fn authenticate_client_credentials(
         expires_in: ttl,
         scope: granted_scope,
     })
+}
+
+pub(crate) fn validate_token_record(
+    sa: &ServiceAccount,
+    claims: &crate::crypto::jwt::Claims,
+    record: &ServiceAccountToken,
+) -> Result<(), AppError> {
+    if !sa.is_active
+        || record.revoked
+        || record.expires_at <= chrono::Utc::now()
+        || record.service_account_id != sa.id
+        || claims.sub != sa.id
+        || record.jti != claims.jti
+        || record.scope != claims.scope
+        || claims.sgen.unwrap_or(0) != sa.credential_generation
+        || record.credential_generation != sa.credential_generation
+    {
+        return Err(AppError::Unauthorized(
+            "Invalid service account token".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn validate_access_token(
+    db: &Database,
+    claims: &jwt::Claims,
+) -> AppResult<ServiceAccount> {
+    let sa = get_service_account(db, &claims.sub).await?;
+    let record = db
+        .collection::<ServiceAccountToken>(SA_TOKENS)
+        .find_one(doc! {"jti": &claims.jti})
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Service account token not found".into()))?;
+    validate_token_record(&sa, claims, &record)?;
+    Ok(sa)
 }
 
 #[cfg(test)]
@@ -669,5 +780,89 @@ mod tests {
         .await
         .expect_err("bad role ids");
         assert!(matches!(err, AppError::ValidationError(_)));
+    }
+}
+
+#[cfg(test)]
+mod custom_scope_regression_tests {
+    use super::*;
+    use crate::test_utils::{connect_test_database, test_app_state};
+
+    #[tokio::test]
+    async fn custom_scopes_remain_permissive_and_token_subsets_are_exact() {
+        let db = connect_test_database("sa_custom_scope_compat")
+            .await
+            .expect("MongoDB required");
+        let state = test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        let original = "custom:read 未知:scope proxy:* custom:read";
+        let (sa, secret) =
+            create_service_account(&db, "Custom bot", None, original, &[], None, &owner)
+                .await
+                .unwrap();
+        assert_eq!(sa.allowed_scopes, original);
+        let token = authenticate_client_credentials(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &sa.client_id,
+            &secret,
+            Some("custom:read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(token.scope, "custom:read");
+        let claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &token.access_token).unwrap();
+        assert!(
+            authenticate_client_credentials(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                &sa.client_id,
+                &secret,
+                Some("proxy")
+            )
+            .await
+            .is_err()
+        );
+        let updated = "new:custom proxy:service:not-a-grant";
+        let sa = update_service_account(
+            &db,
+            &sa.id,
+            None,
+            None,
+            Some(updated),
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sa.allowed_scopes, updated);
+        let record = db
+            .collection::<ServiceAccountToken>(SA_TOKENS)
+            .find_one(doc! { "jti": &claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !record.revoked,
+            "Editing suggestions must not change existing token semantics"
+        );
+        assert_eq!(record.scope, "custom:read");
+        let current = authenticate_client_credentials(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &sa.client_id,
+            &secret,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(current.scope, updated);
+        assert!(!crate::mw::auth::scope_allows_rest_proxy(&current.scope));
     }
 }

@@ -43,6 +43,10 @@ pub struct CreditGrant {
     pub schedule_origin: Option<CreditGrantScheduleOrigin>,
     pub recipient_user_id: String,
     pub target_kind: BillingTargetKind,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
     pub amount_credits: i64,
     /// Exact internal accounting. One credit is 1,000,000 microcredits.
     pub amount_micros: i64,

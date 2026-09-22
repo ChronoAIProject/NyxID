@@ -1308,6 +1308,50 @@ export function modelItemMatches(itemText, targets, exact) {
 const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
   Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
 const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
+// Clamp a composer bounding rect to the region actually on screen and return
+// the centre of what remains, or null when nothing is visible. Intersect the
+// rect with the viewport, then with each scroll/clip ancestor (clips: entries
+// of { x, y, left, right, top, bottom } where x/y say the axis is clipped).
+// A very long draft can push the composer's geometric centre tens of thousands
+// of pixels above the viewport, where elementFromPoint returns null and the
+// composer is wrongly judged obstructed (composer_unobstructed_failed).
+// NOTE: keep this in sync with the inline copy inside ensureComposerUnobstructed
+// (same maths, separate runtime), mirroring the fileMime split noted below.
+export function composerVisibleHitPoint(rect, clips = [], viewport = {}) {
+  if (!rect) return null;
+  let left = Math.max(0, rect.left);
+  let right = Math.min(viewport.width, rect.right);
+  let top = Math.max(0, rect.top);
+  let bottom = Math.min(viewport.height, rect.bottom);
+  for (const clip of clips) {
+    if (clip.x) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
+    if (clip.y) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+  }
+  if (!(right > left && bottom > top)) return null;
+  return { x: (left + right) / 2, y: (top + bottom) / 2 };
+}
+
+// A composer holds a draft worth clearing when it contains any non-whitespace.
+// Used by clearComposerDraft to skip the clear on an already-empty composer.
+export function composerHasDraft(text) {
+  return typeof text === "string" && text.trim().length > 0;
+}
+
+// A draft this long defeats the ordinary clear. fill("") has to drive a
+// select-all and delete through React over tens of thousands of characters,
+// which does not finish inside PRE_SEND_ACTION_MS; the clear is best-effort,
+// so the timeout is swallowed and the draft survives. Model selection then
+// runs against the heavy composer and dies as operation_timeout@selecting_model
+// - and because the draft outlives a browser relaunch, every worker that picks
+// the task up is stranded the same way. Observed 2026-09-21: one 83,046
+// character prompt walked through a 15-worker pool, disabling each tab it
+// touched until the task was cancelled by hand.
+export const COMPOSER_FAST_CLEAR_CHARS = 2000;
+
+export function draftNeedsFastClear(length) {
+  return Number.isFinite(length) && length >= COMPOSER_FAST_CLEAR_CHARS;
+}
+
 export const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
@@ -1325,13 +1369,25 @@ const MODEL_LEVELS = [
 // Canonical levels only, with word boundaries so e.g. "Profile" is not Pro.
 // Preserve the existing Chinese aliases; structural discovery handles locale.
 export function detectPillLevel(text) {
-  const label = String(text || '').trim().split(/\r?\n/)[0]
+  const canonical = (value) => String(value || '')
     .replace(/^(?:(?:chatgpt|gpt)[\s._-]*)?\d+(?:\.\d+)*[\s._-]*/i, '')
     .toLowerCase().replace(/[·:()|/—._-]+/g, ' ').replace(/\s+/g, ' ').trim();
   // Accept only a vocabulary of level tokens, never prose containing "Pro".
-  if (/^(?:thinking|pro|专业|extended|standard|扩展|标准)(?: (?:thinking|pro|专业|extended|standard|扩展|标准))*$/.test(label) &&
-      /(?:^| )(?:pro|专业|extended|standard|扩展|标准)(?: |$)/.test(label)) return 'Pro';
-  return MODEL_LEVELS.find(aliases => aliases.some(alias => alias.toLowerCase() === label))?.[0] || null;
+  const classify = (label) => {
+    if (/^(?:thinking|pro|专业|extended|standard|扩展|标准)(?: (?:thinking|pro|专业|extended|standard|扩展|标准))*$/.test(label) &&
+        /(?:^| )(?:pro|专业|extended|standard|扩展|标准)(?: |$)/.test(label)) return 'Pro';
+    return MODEL_LEVELS.find(aliases => aliases.some(alias => alias.toLowerCase() === label))?.[0] || null;
+  };
+  const trimmed = String(text || '').trim();
+  // First line only, as before: a menu entry's second line is usually a
+  // description, and folding it in would wreck an otherwise exact match.
+  const firstLine = classify(canonical(trimmed.split(/\r?\n/)[0]));
+  if (firstLine) return firstLine;
+  // Only when that yields nothing, retry with the newlines flattened. The
+  // composer pill renders the family and the level as separate text nodes
+  // ("6\nPro"), so first-line-only reads "6", strips it as a version number,
+  // and reports the live GPT-6 Pro pill as unrecognized.
+  return trimmed.includes('\n') ? classify(canonical(trimmed.replace(/\s*\r?\n+\s*/g, ' '))) : null;
 }
 
 // Unrecognized composer controls can be explored but are not negative evidence.
@@ -1556,12 +1612,24 @@ export function modelSelectionDetail(result) {
 }
 
 // Use the same preference for structural pills and composer-local fallbacks.
+// Whether a picker menu offers the Pro Standard / Pro Extended split at all.
+// Some accounts no longer have it: the menu lists model versions instead, and
+// carries the tier only as an unselectable heading.
+export function splitTierOffered(items) {
+  return (items || []).some((item) => ["pro_extended", "pro_standard"].includes(effortMetadata(item?.text)));
+}
+
 export function preferredModelPillIndex(labels) {
   if (!labels.length) return -1;
   const recognized = labels.findIndex((text) => detectPillLevel(text) !== null);
   if (recognized >= 0) return recognized;
-  const legacy = labels.findIndex((text) => /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text));
-  return legacy >= 0 ? legacy : 0;
+  const legacy = labels.findIndex((text) => /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b\d(?:\.\d+)?\b/i.test(text));
+  if (legacy >= 0) return legacy;
+  // Never fall back to index 0 blindly. The composer region also holds
+  // icon-only menu buttons such as composer-plus-btn ("Add files and more"),
+  // whose label is empty; picking one clicks the wrong control and no model
+  // menu ever opens. Prefer the first candidate that at least has a label.
+  return labels.findIndex((text) => String(text || '').trim().length > 0);
 }
 
 export function modelSelectionDiagnostics(snapshot) {
@@ -1685,7 +1753,25 @@ export async function pickerSnapshot(page, budget = interactionBudget(1000)) {
     if (!form) while (region && !region.querySelector(sendSelector)) region = region.parentElement;
     if (region === body || region === document.documentElement) region = null;
     // Model tiers are not effort evidence, even when the trigger looks like a pill.
-    const pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]:not([data-nyx-switcher])')].filter(visible);
+    let pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]:not([data-nyx-switcher])')].filter(visible);
+    // Self-heal a stranded switcher marker. readModelSwitcher stamps
+    // data-nyx-switcher on whichever control it claims, and on a page with no
+    // header switcher that claim lands on the composer pill itself - so the
+    // selector above skips the only pill there is and we report
+    // pill_source=none. Nothing else clears the attribute: readModelSwitcher
+    // is the sole clear site and it re-stamps the same pill on the next
+    // attempt, so the worker rebuilds the fault on every retry and can never
+    // select a model again. Unmark a marked composer pill only when it left us
+    // with no candidate at all; a marker on a real header switcher is
+    // load-bearing (it is how the effort step avoids re-picking the switcher)
+    // and must stay.
+    if (!pills.length) {
+      const stranded = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"][data-nyx-switcher]')].filter(visible);
+      if (stranded.length) {
+        stranded.forEach((el) => el.removeAttribute('data-nyx-switcher'));
+        pills = stranded;
+      }
+    }
     const candidates = pills.length ? pills : [...(region?.querySelectorAll('button[aria-haspopup="menu"]:not([data-nyx-switcher])') || [])].filter(visible);
     const menus = window.__nyx?.modelPickerMenus(pickerId) || [];
     const items = (window.__nyx?.modelPickerItems(pickerId) || []).map((el) => ({
@@ -1693,7 +1779,17 @@ export async function pickerSnapshot(page, budget = interactionBudget(1000)) {
       checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true",
     }));
     return {
-      candidates: candidates.map((el) => (el.innerText || el.textContent || "").trim()),
+      // Adapt a compact pill label the way readModelSwitcher and
+      // chooseSwitcherEntry already do. The composer pill renders family and
+      // tier on separate lines ("6\nPro"); every metadata helper deliberately
+      // refuses to read an un-adapted compact label, so leaving it raw makes
+      // pillShowsLevel false and effortMetadata 'unrecognized' for a pill that
+      // plainly shows Pro - the worker then skips already_selected, hunts a
+      // Pro Extended entry the menu lacks, and fails level_unavailable.
+      candidates: candidates.map((el) => {
+        const raw = (el.innerText || el.textContent || "").trim();
+        return window.__nyx?.compactModelLabel(raw) || raw;
+      }),
       structural: !!pills.length, form: !!form,
       open: menus.length > 0, items, submenu: !!window.__nyx?.modelPickerTrigger(pickerId),
     };
@@ -1882,6 +1978,22 @@ async function selectModelInner(page, targets, budget, result) {
   }
   if (!clicked) {
     interactionOptions(budget);
+    // ChatGPT has removed the Pro Standard / Pro Extended split on some
+    // accounts. The pill's menu now lists model versions - Latest, GPT-5.6,
+    // GPT-5.5 - and carries "6 Pro" only as a heading with aria-checked unset,
+    // so it cannot be clicked. modelLevelTargets still asks for Pro Extended on
+    // every Pro request (no pool setting yields a bare Pro), so the hunt can
+    // never succeed and every task dies level_unavailable while the pill sits
+    // on the requested model the whole time. Observed 2026-09-21: a 15-worker
+    // pool fully down, each task rerouted through all 15 before failing.
+    // When nothing in the menu offers the split, the pill already shows the
+    // requested level and there is nothing left to click.
+    if (targets[0] === "Pro" && pillShowsLevel(result.observed, targets) &&
+        !splitTierOffered(budget.picker?.snapshot?.items)) {
+      await closeOpenMenus(page, budget);
+      result.reason = "already_selected";
+      return;
+    }
     result.reason = "level_unavailable";
     return;
   }
@@ -1904,6 +2016,51 @@ async function selectModelInner(page, targets, budget, result) {
 // Clear overlays before typing and again immediately before Send. Never force
 // a click through an obstruction: failure stays pre-send and enters the
 // existing browser recovery / infrastructure retry path.
+// Clear a stale draft left in the composer by an earlier attempt on this tab.
+// Model selection runs before the prompt is typed, but a very long leftover
+// draft makes the page heavy enough that the selection interactions exceed
+// MODEL_SELECT_TIMEOUT_MS and the task fails as operation_timeout@selecting_model
+// on every subsequent pickup. The prompt is (re)typed after selection, so
+// clearing here is a no-op on a fresh composer and never drops real work.
+async function clearComposerDraft(page) {
+  const budget = interactionBudget(PRE_SEND_ACTION_MS);
+  const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
+  try {
+    const draft = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
+      if (Date.now() >= deadline) return { head: "", length: 0 };
+      window.__nyx?.discoverControls();
+      const input = body.querySelector(composerSelector);
+      if (!input) return { head: "", length: 0 };
+      const text = String(input.value ?? input.innerText ?? "");
+      return { head: text.trim().slice(0, 8), length: text.length };
+    }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+    if (!composerHasDraft(draft.head)) return;
+    // Drop an oversized draft in a single DOM assignment rather than typing it
+    // away; the prompt is (re)typed after selection, so nothing real is lost.
+    if (draftNeedsFastClear(draft.length)) {
+      const emptied = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
+        if (Date.now() >= deadline) return false;
+        const input = body.querySelector(composerSelector);
+        if (!input) return false;
+        if (typeof input.value === "string") input.value = "";
+        else { input.focus(); input.textContent = ""; }
+        input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+        return String(input.value ?? input.innerText ?? "").trim().length === 0;
+      }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+      if (emptied) return;
+    }
+    const input = page.locator(COMPOSER_SELECTOR).first();
+    await input.click(interactionOptions(budget)).catch(() => {});
+    await input.fill("", interactionOptions(budget)).catch(() => {});
+  } catch (error) {
+    if (stableErrorCode(error) === "page_crashed") throw error;
+    // Best-effort: a failed clear must not consume a recovery attempt.
+  } finally {
+    budget.controller.abort();
+    clearTimeout(timer);
+  }
+}
+
 async function ensureComposerUnobstructed(page) {
   const budget = interactionBudget(PRE_SEND_ACTION_MS);
   const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
@@ -1913,9 +2070,35 @@ async function ensureComposerUnobstructed(page) {
       const state = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
         if (Date.now() >= deadline) return null;
         window.__nyx?.discoverControls();
-    const input = body.querySelector(composerSelector);
+        const input = body.querySelector(composerSelector);
         const rect = input?.getBoundingClientRect();
-        const hit = rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        // Hit-test the composer's VISIBLE centre, not its geometric centre. A
+        // long draft can make the composer taller than the viewport and push
+        // its midpoint far off screen, where elementFromPoint returns null and
+        // the composer is wrongly judged obstructed. Intersect the composer rect
+        // with the viewport and every scroll/clip ancestor, then test the middle
+        // of what remains. Keep this in sync with composerVisibleHitPoint (same
+        // maths, separate runtime: this copy runs in the page and cannot import).
+        let visible = rect && {
+          left: Math.max(0, rect.left),
+          right: Math.min(window.innerWidth, rect.right),
+          top: Math.max(0, rect.top),
+          bottom: Math.min(window.innerHeight, rect.bottom),
+        };
+        for (let ancestor = input?.parentElement; visible && ancestor; ancestor = ancestor.parentElement) {
+          const style = getComputedStyle(ancestor);
+          const bounds = ancestor.getBoundingClientRect();
+          if (/auto|scroll|hidden|clip/.test(style.overflowX)) {
+            visible.left = Math.max(visible.left, bounds.left);
+            visible.right = Math.min(visible.right, bounds.right);
+          }
+          if (/auto|scroll|hidden|clip/.test(style.overflowY)) {
+            visible.top = Math.max(visible.top, bounds.top);
+            visible.bottom = Math.min(visible.bottom, bounds.bottom);
+          }
+        }
+        const hasVisibleArea = !!visible && visible.right > visible.left && visible.bottom > visible.top;
+        const hit = hasVisibleArea && document.elementFromPoint((visible.left + visible.right) / 2, (visible.top + visible.bottom) / 2);
         const main = body.querySelector("main");
         const mainRect = main?.getBoundingClientRect();
         const neutral = mainRect && document.elementFromPoint(mainRect.x + 4, mainRect.y + 4) === main;
@@ -2256,6 +2439,9 @@ async function handlePrompt(runtime, page, task, recovering) {
     await failModelSelection(runtime, task, header.metadata, effortMetadata(pill.observed), 'model_unavailable');
   }
   if (readyError) throw new TaskFailure(readyError);
+  // A stale draft from a prior attempt makes model selection time out; clear
+  // it so each attempt selects the model against a light, empty composer.
+  await clearComposerDraft(page);
   if (task.model && task.model !== "unknown") {
     if (await ack(runtime, task, "selecting_model")) throw new TaskFailure("cancelled");
     const headerSelection = await selectModelSwitcher(page, task.model);

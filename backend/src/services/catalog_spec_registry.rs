@@ -24,8 +24,16 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "ifttt",
+        include_str!("../../specs/catalog/ifttt.openapi.json"),
+    ),
+    (
         "notion",
         include_str!("../../specs/catalog/notion.openapi.json"),
+    ),
+    (
+        "aurinko",
+        include_str!("../../specs/catalog/aurinko.openapi.json"),
     ),
     (
         "anthropic",
@@ -136,6 +144,10 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/telegram-bot.openapi.json"),
     ),
     (
+        "telnyx",
+        include_str!("../../specs/catalog/telnyx.openapi.json"),
+    ),
+    (
         "twitch",
         include_str!("../../specs/catalog/twitch.openapi.json"),
     ),
@@ -151,7 +163,9 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
+    ("api-ifttt", "ifttt"),
     ("api-notion", "notion"),
+    ("api-aurinko", "aurinko"),
     ("api-discord", "discord"),
     ("api-discord-bot", "discord-bot"),
     ("api-elevenlabs", "elevenlabs"),
@@ -177,6 +191,7 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-slack-bot", "slack"),
     ("api-spotify", "spotify"),
     ("api-telegram-bot", "telegram-bot"),
+    ("api-telnyx", "telnyx"),
     ("api-twitch", "twitch"),
     ("api-twilio", "twilio"),
     ("api-twitter", "twitter"),
@@ -205,7 +220,7 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = L
         let mut workspace = (*specs["google-drive"]).clone();
         workspace["info"]["title"] = "Google Workspace".into();
         workspace["info"]["description"] =
-            "Google Workspace uses one Google OAuth connection for Drive, Calendar, Gmail, Docs, Sheets, and Slides. The root server https://www.googleapis.com serves Drive, Calendar, and Gmail; Docs, Sheets, and Slides paths declare their respective https://docs.googleapis.com, https://sheets.googleapis.com, and https://slides.googleapis.com servers. Standard OpenAPI server precedence applies: operation servers override path servers, which override the root server. During the operator-controlled upgrade window, editor requests return workspace_destinations_not_activated (12100) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
+            "Google Workspace uses one Google OAuth connection for Drive, Calendar, Gmail, Docs, Sheets, and Slides. The root server https://www.googleapis.com serves Drive, Calendar, and Gmail; Docs, Sheets, and Slides paths declare their respective https://docs.googleapis.com, https://sheets.googleapis.com, and https://slides.googleapis.com servers. Standard OpenAPI server precedence applies: operation servers override path servers, which override the root server. During the operator-controlled upgrade window, editor requests return workspace_destinations_not_activated (12300) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
                 .into();
         for key in ["google-calendar", "google-gmail"] {
             workspace["paths"]

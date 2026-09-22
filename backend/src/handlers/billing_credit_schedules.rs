@@ -31,6 +31,10 @@ pub struct CreateCreditScheduleRequest {
     pub target_kind: BillingTargetKind,
     #[serde(default)]
     pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
     pub all_services: bool,
     #[serde(default)]
     pub service_refs: Vec<String>,
@@ -44,6 +48,8 @@ pub struct UpdateCreditScheduleRequest {
     pub expiry: Option<CreditExpiryPolicy>,
     pub target_kind: Option<BillingTargetKind>,
     pub target_user_ids: Option<Vec<String>>,
+    pub target_org_ids: Option<Vec<String>>,
+    pub target_group_ids: Option<Vec<String>>,
     pub all_services: Option<bool>,
     pub service_refs: Option<Vec<String>>,
     #[serde(
@@ -56,6 +62,10 @@ pub struct UpdateCreditScheduleRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CreditSchedulePeriodResponse {
+    pub target_kind: BillingTargetKind,
+    pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
     pub status: SchedulePeriodStatus,
@@ -82,6 +92,8 @@ pub struct CreditScheduleResponse {
     pub expiry: CreditExpiryPolicy,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub scope: BillingServiceScope,
     pub reason: Option<String>,
     pub is_active: bool,
@@ -123,6 +135,8 @@ pub async fn create_schedule(
             expiry: body.expiry,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             all_services: body.all_services,
             service_refs: body.service_refs,
             reason: body.reason,
@@ -134,7 +148,12 @@ pub async fn create_schedule(
         state.db.clone(),
         &auth_user,
         "billing.credit_schedule.created",
-        Some(serde_json::json!({ "schedule_id": schedule.id })),
+        Some(serde_json::json!({ "schedule_id": schedule.id,
+            "target_kind": schedule.target_kind,
+            "target_user_count": schedule.target_user_ids.len(),
+            "target_org_count": schedule.target_org_ids.len(),
+            "target_group_count": schedule.target_group_ids.len(),
+        })),
     );
     Ok(Json(response_after_mutation(&state.db, schedule).await?))
 }
@@ -186,6 +205,8 @@ pub async fn update_schedule(
             expiry: body.expiry,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             all_services: body.all_services,
             service_refs: body.service_refs,
             reason: body.reason,
@@ -199,6 +220,10 @@ pub async fn update_schedule(
         "billing.credit_schedule.updated",
         Some(serde_json::json!({
             "schedule_id": schedule.id,
+            "target_kind": schedule.target_kind,
+            "target_user_count": schedule.target_user_ids.len(),
+            "target_org_count": schedule.target_org_ids.len(),
+            "target_group_count": schedule.target_group_ids.len(),
             "is_active": schedule.is_active,
         })),
     );
@@ -259,6 +284,8 @@ fn schedule_response(
         expiry: schedule.expiry,
         target_kind: schedule.target_kind,
         target_user_ids: schedule.target_user_ids,
+        target_org_ids: schedule.target_org_ids,
+        target_group_ids: schedule.target_group_ids,
         scope: schedule.scope,
         reason: schedule.reason,
         is_active: schedule.is_active,
@@ -269,6 +296,10 @@ fn schedule_response(
         last_disbursed_at: schedule.last_disbursed_at,
         skipped_periods: schedule.skipped_periods,
         current_period: period.map(|period| CreditSchedulePeriodResponse {
+            target_kind: period.target_kind,
+            target_user_ids: period.target_user_ids,
+            target_org_ids: period.target_org_ids,
+            target_group_ids: period.target_group_ids,
             start: period.period_start,
             end: period.period_end,
             status: period.status,
@@ -366,6 +397,8 @@ mod tests {
             expiry: CreditExpiryPolicy::EndOfPeriod,
             target_kind,
             target_user_ids: targets,
+            target_org_ids: Vec::new(),
+            target_group_ids: Vec::new(),
             all_services: true,
             service_refs: Vec::new(),
             reason: Some("Monthly credits".to_string()),
@@ -516,6 +549,8 @@ mod tests {
                 amount_credits: 1,
                 target_kind: BillingTargetKind::SelectedUsers,
                 target_user_ids: vec![user_id],
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -555,3 +590,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod target_tests;

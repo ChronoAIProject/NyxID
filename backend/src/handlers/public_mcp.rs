@@ -206,6 +206,8 @@ mod tests {
     fn safe_anonymous_service() -> DownstreamService {
         DownstreamService {
             destination_targets: Default::default(),
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: Uuid::new_v4().to_string(),
             name: "Public Catalog".to_string(),
             slug: "public-catalog".to_string(),
@@ -359,6 +361,7 @@ mod tests {
             platform_key_pricing: None,
             byok_pricing_cleanup_metric_code: None,
             platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

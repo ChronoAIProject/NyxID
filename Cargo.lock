@@ -996,6 +996,9 @@ name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bytes-utils"
@@ -4047,7 +4050,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.21.1"
+version = "0.29.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4083,6 +4086,7 @@ dependencies = [
  "mongodb",
  "nyxid-cli",
  "nyxid-cloud-auth",
+ "nyxid-service-adapters",
  "open",
  "p256",
  "rand 0.8.5",
@@ -4123,7 +4127,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.21.1"
+version = "0.29.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4148,6 +4152,7 @@ dependencies = [
  "nix 0.31.2",
  "nyxid-cloud-auth",
  "nyxid-crypto",
+ "nyxid-service-adapters",
  "open",
  "plist",
  "rand 0.8.5",
@@ -4223,6 +4228,19 @@ name = "nyxid-mcp-demo"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "nyxid-service-adapters"
+version = "0.1.0"
+dependencies = [
+ "http 1.4.0",
+ "rcgen",
+ "reqwest 0.12.28",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls 0.26.4",
 ]
 
 [[package]]

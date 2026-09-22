@@ -18,7 +18,7 @@ use crate::models::user_api_key::UserApiKey;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
-use crate::mw::auth::AuthUser;
+use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
     catalog_service, cloud_credential_verify, credential_push_service, lark_permission,
     node_service, org_service, proxy_discovery_service, unified_key_service, user_api_key_service,
@@ -565,6 +565,9 @@ pub struct KeyResponse {
     /// `recommended_skills` when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: Option<i64>,
+    pub skills_manifest_digest: Option<String>,
     /// Provenance: personal credentials, or inherited from an org membership.
     /// Mirrors the same field on the `/user-services` response so the
     /// frontend can group AI Services by personal vs each org section.
@@ -1226,6 +1229,8 @@ pub(crate) async fn create_key_with_service_id(
     tag = "AI Services"
 )]
 /// GET /api/v1/keys
+/// API-key readable without provisioning. Key scope filters personal and
+/// Member/Admin org inventory; an org-owned key lists its own rows as personal.
 pub async fn list_keys(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -1233,11 +1238,25 @@ pub async fn list_keys(
     let user_id_str = auth_user.user_id.to_string();
 
     let providers = crate::services::platform_key_service::load_providers(&state.db).await?;
-    let views =
+    let views = if auth_user.auth_method == AuthMethod::ApiKey {
+        unified_key_service::list_keys_read_only(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            &providers,
+        )
+        .await?
+    } else {
         unified_key_service::list_keys(&state.db, &state.encryption_keys, &user_id_str, &providers)
-            .await?;
+            .await?
+    };
+    let scope = auth_user.api_key_service_scope();
     let mut keys = views
         .into_iter()
+        .filter(|view| scope.is_none_or(|ids| ids.contains(&view.id)))
+        .filter(|view| {
+            auth_user.auth_method != AuthMethod::ApiKey || !view.credential_source.is_viewer_org()
+        })
         .map(key_response_from_view)
         .collect::<Vec<_>>();
     enrich_key_node_metadata(
@@ -1272,13 +1291,15 @@ pub async fn list_keys(
     tag = "AI Services"
 )]
 /// GET /api/v1/keys/{key_id}
+/// API-key readable within owner/membership ACLs and key scope. Org-owned keys
+/// read their own services; API keys never reconcile pending OAuth rows.
 pub async fn get_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
-    let mut response = resolve_key_response(&state, &actor, &key_id).await?;
+    let mut response = resolve_key_response(&state, &auth_user, &key_id).await?;
     enrich_key_response(
         &state.db,
         &state.node_ws_manager,
@@ -1306,16 +1327,16 @@ pub async fn get_key(
 )]
 /// GET /api/v1/keys/{key_id}/authorization
 ///
-/// Same resolution, ACL, and lazy `pending_auth` reconciliation as
-/// `GET /api/v1/keys/{key_id}`, projected to authorization evidence. Node and
+/// API-key readable with the same owner/membership ACL and service scope as
+/// `GET /api/v1/keys/{key_id}`; org-owned keys read their own services. Pending
+/// OAuth reconciliation runs only for non-API-key callers. Node and
 /// proxy-URL enrichment is skipped because no evidence property depends on it.
 pub async fn get_key_authorization(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<KeyAuthorizationEvidenceResponse>> {
-    let actor = auth_user.user_id.to_string();
-    let response = resolve_key_response(&state, &actor, &key_id).await?;
+    let response = resolve_key_response(&state, &auth_user, &key_id).await?;
     Ok(Json(KeyAuthorizationEvidenceResponse::from_key_response(
         response,
     )))
@@ -1326,10 +1347,15 @@ pub async fn get_key_authorization(
 /// un-enriched response; callers add whatever their representation needs.
 async fn resolve_key_response(
     state: &AppState,
-    actor: &str,
+    auth_user: &AuthUser,
     key_id: &str,
 ) -> AppResult<KeyResponse> {
-    let access = resolve_key_read_owner(state, actor, key_id).await?;
+    let actor = auth_user.user_id.to_string();
+    let access = resolve_key_read_owner(state, &actor, key_id).await?;
+    crate::services::key_service::ensure_api_key_service_scope(
+        auth_user.api_key_service_scope(),
+        std::slice::from_ref(&access.service_id),
+    )?;
 
     // Lazy reconciliation of pending_auth OAuth placeholders (issue #653).
     // Wizard polling hits this handler every ~2s; treating each poll as a
@@ -1337,11 +1363,12 @@ async fn resolve_key_response(
     // against silent OAuth-callback failures and abandoned flows. No-op for
     // non-OAuth or already-terminal rows. Best-effort: errors are logged
     // and swallowed so the read still proceeds.
-    if let Some(svc) = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": &access.service_id })
-        .await?
+    if auth_user.auth_method != AuthMethod::ApiKey
+        && let Some(svc) = state
+            .db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &access.service_id })
+            .await?
         && let Some(api_key_id) = svc.api_key_id.as_deref()
         && let Err(e) = user_api_key_service::reconcile_pending_oauth_placeholder(
             &state.db,
@@ -1498,7 +1525,9 @@ pub async fn update_key(
                 serde_json::json!({ "service_id": &key_id, "credential_binding": if use_platform_key { "platform" } else { "user" } }),
             ),
         );
-        return Ok(Json(resolve_key_response(&state, &actor, &key_id).await?));
+        return Ok(Json(
+            resolve_key_response(&state, &auth_user, &key_id).await?,
+        ));
     }
     if view.credential_binding == "platform" && !view.auto_connected {
         let current =
@@ -1572,7 +1601,9 @@ pub async fn update_key(
             },
             Some(serde_json::json!({ "service_id": &key_id })),
         );
-        return Ok(Json(resolve_key_response(&state, &actor, &key_id).await?));
+        return Ok(Json(
+            resolve_key_response(&state, &auth_user, &key_id).await?,
+        ));
     }
 
     if view.auto_connected {
@@ -2551,6 +2582,9 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
     .to_string();
 
     KeyResponse {
+        recommended_skill_refs: None,
+        skills_revision: None,
+        skills_manifest_digest: None,
         id: result.service.id.clone(),
         name: label.clone(),
         label,
@@ -2685,6 +2719,9 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
     let endpoint_url = (!view.auto_connected).then_some(view.endpoint_url);
 
     KeyResponse {
+        recommended_skill_refs: None,
+        skills_revision: None,
+        skills_manifest_digest: None,
         id: view.id,
         name: view
             .catalog_service_name
@@ -2940,6 +2977,26 @@ async fn enrich_key_discovery_metadata(
         let Some(service) = service_by_id.get(key.id.as_str()) else {
             continue;
         };
+
+        let inherited_catalog = key
+            .catalog_service_id
+            .as_deref()
+            .and_then(|id| catalog_by_id.get(id));
+        let effective_skills = if key.recommended_skills.is_some() {
+            crate::models::catalog_skill_revision::SkillState {
+                recommended_skills: key.recommended_skills.clone(),
+                recommended_skill_refs: None,
+            }
+        } else if let Some(catalog) = inherited_catalog {
+            key.recommended_skill_refs = catalog.recommended_skill_refs.clone();
+            key.skills_revision = Some(catalog.skills_revision);
+            crate::services::catalog_skill_service::state(catalog)
+        } else {
+            Default::default()
+        };
+        key.skills_manifest_digest = Some(crate::services::catalog_skill_service::manifest_digest(
+            &effective_skills,
+        ));
 
         let projection = if let Some(catalog_id) = key.catalog_service_id.as_deref() {
             catalog_by_id.get(catalog_id).map(|catalog| {
@@ -3719,7 +3776,7 @@ mod tests {
         let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
         catalog.id = catalog_id.clone();
         catalog.name = "Platform Service".to_string();
-        catalog.slug = "platform-service".to_string();
+        catalog.slug = "shared-service".to_string();
         catalog.base_url = "https://api.example.com".to_string();
         catalog.visibility = "public".to_string();
         catalog.service_category = "internal".to_string();

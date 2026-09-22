@@ -27,6 +27,10 @@ pub struct IssueGrantRequest {
     pub target_kind: BillingTargetKind,
     #[serde(default)]
     pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
     pub all_services: bool,
     #[serde(default)]
     pub service_refs: Vec<String>,
@@ -36,6 +40,9 @@ pub struct IssueGrantRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct IssueGrantResponse {
+    pub target_kind: BillingTargetKind,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub batch_id: String,
     pub created_count: usize,
     /// Recipients whose immutable issuance ledger entry was confirmed inline.
@@ -90,6 +97,8 @@ pub struct CreditGrantResponse {
     pub recipient_billing_enabled: Option<bool>,
     pub activation_state: CreditGrantActivationState,
     pub target_kind: BillingTargetKind,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub amount_credits: i64,
     pub amount_micros: i64,
     pub remaining_micros: i64,
@@ -114,15 +123,59 @@ pub struct CreditGrantListResponse {
     pub total: u64,
 }
 
+fn present_allowance_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateAllowanceRequest {
+    pub units: Option<Vec<billing::allowances::AllowanceUnitInput>>,
     pub service_ref: String,
-    pub metric: Option<crate::models::service_billing::BillingMetric>,
-    pub quantity: i64,
-    pub recurrence: AllowanceRecurrence,
+    #[serde(default, deserialize_with = "present_allowance_field")]
+    pub metric: Option<Option<crate::models::service_billing::BillingMetric>>,
+    #[serde(default, deserialize_with = "present_allowance_field")]
+    pub quantity: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "present_allowance_field")]
+    pub recurrence: Option<Option<AllowanceRecurrence>>,
     pub target_kind: BillingTargetKind,
     #[serde(default)]
     pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ReplaceAllowanceBundleRequest {
+    pub service_ref: String,
+    pub units: Vec<billing::allowances::AllowanceUnitInput>,
+    pub target_kind: BillingTargetKind,
+    #[serde(default)]
+    pub target_user_ids: Vec<String>,
+    #[serde(default)]
+    pub target_org_ids: Vec<String>,
+    #[serde(default)]
+    pub target_group_ids: Vec<String>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetAllowanceBundleActiveRequest {
+    pub is_active: bool,
+}
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AllowanceBundleResponse {
+    pub bundle_id: String,
+    pub allowances: Vec<UsageAllowanceResponse>,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum CreateAllowanceResponse {
+    Single(UsageAllowanceResponse),
+    Bundle(AllowanceBundleResponse),
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
@@ -133,12 +186,15 @@ pub struct UpdateAllowanceRequest {
     pub recurrence: Option<AllowanceRecurrence>,
     pub target_kind: Option<BillingTargetKind>,
     pub target_user_ids: Option<Vec<String>>,
+    pub target_org_ids: Option<Vec<String>>,
+    pub target_group_ids: Option<Vec<String>>,
     pub is_active: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UsageAllowanceResponse {
     pub id: String,
+    pub bundle_id: Option<String>,
     pub service_id: String,
     pub service_slug: String,
     pub metric: crate::models::service_billing::BillingMetric,
@@ -146,6 +202,8 @@ pub struct UsageAllowanceResponse {
     pub recurrence: AllowanceRecurrence,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
+    pub target_org_ids: Vec<String>,
+    pub target_group_ids: Vec<String>,
     pub is_active: bool,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
@@ -189,12 +247,16 @@ pub async fn issue_grant(
     Json(body): Json<IssueGrantRequest>,
 ) -> AppResult<Json<IssueGrantResponse>> {
     require_admin(&state, &auth_user).await?;
+    let target_org_ids = body.target_org_ids.clone();
+    let target_group_ids = body.target_group_ids.clone();
     let grants = billing::grants::issue_grants(
         &state.db,
         billing::grants::IssueCreditGrantInput {
             amount_credits: body.amount_credits,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             all_services: body.all_services,
             service_refs: body.service_refs,
             expires_at: body.expires_at,
@@ -239,10 +301,16 @@ pub async fn issue_grant(
         Some(serde_json::json!({
             "batch_id": batch_id,
             "recipient_count": grants.len(),
+            "target_kind": body.target_kind,
+            "target_org_count": target_org_ids.len(),
+            "target_group_count": target_group_ids.len(),
             "amount_credits_each": body.amount_credits,
         })),
     );
     Ok(Json(IssueGrantResponse {
+        target_kind: body.target_kind,
+        target_org_ids,
+        target_group_ids,
         batch_id,
         created_count: grants.len(),
         activated_count,
@@ -365,24 +433,59 @@ pub async fn user_list_grants(
     path = "/api/v1/admin/credits/allowances",
     tag = "Admin Credits",
     request_body = CreateAllowanceRequest,
-    responses((status = 200, body = UsageAllowanceResponse)),
+    responses((status = 200, body = CreateAllowanceResponse)),
     security(("bearer_auth" = []))
 )]
 pub async fn create_allowance(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<CreateAllowanceRequest>,
-) -> AppResult<Json<UsageAllowanceResponse>> {
+) -> AppResult<Json<CreateAllowanceResponse>> {
     require_admin(&state, &auth_user).await?;
+    if let Some(units) = body.units {
+        if body.metric.is_some() || body.quantity.is_some() || body.recurrence.is_some() {
+            return Err(AppError::ValidationError(
+                "units cannot be combined with metric, quantity, or recurrence".into(),
+            ));
+        }
+        let rows = billing::allowances::create_allowance_bundle(
+            &state.db,
+            billing::allowances::AllowanceBundleInput {
+                service_ref: body.service_ref,
+                units,
+                target_kind: body.target_kind,
+                target_user_ids: body.target_user_ids,
+                target_org_ids: body.target_org_ids,
+                target_group_ids: body.target_group_ids,
+                created_by: auth_user.user_id.to_string(),
+            },
+        )
+        .await?;
+        audit_bundle(
+            &state,
+            &auth_user,
+            "billing.usage_allowance_bundle.created",
+            &rows,
+        );
+        return Ok(Json(CreateAllowanceResponse::Bundle(bundle_response(rows))));
+    }
     let allowance = billing::allowances::create_allowance(
         &state.db,
         billing::allowances::CreateAllowanceInput {
-            metric: body.metric,
+            metric: body.metric.flatten(),
             service_ref: body.service_ref,
-            quantity: body.quantity,
-            recurrence: body.recurrence,
+            quantity: body
+                .quantity
+                .flatten()
+                .ok_or_else(|| AppError::ValidationError("quantity is required".into()))?,
+            recurrence: body
+                .recurrence
+                .flatten()
+                .ok_or_else(|| AppError::ValidationError("recurrence is required".into()))?,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             created_by: auth_user.user_id.to_string(),
         },
     )
@@ -391,9 +494,90 @@ pub async fn create_allowance(
         state.db.clone(),
         &auth_user,
         "billing.usage_allowance.created",
-        Some(serde_json::json!({ "allowance_id": allowance.id })),
+        Some(serde_json::json!({ "allowance_id": allowance.id,
+            "target_kind": allowance.target_kind,
+            "target_user_count": allowance.target_user_ids.len(),
+            "target_org_count": allowance.target_org_ids.len(),
+            "target_group_count": allowance.target_group_ids.len(),
+        })),
     );
-    Ok(Json(allowance_response(allowance)))
+    Ok(Json(CreateAllowanceResponse::Single(allowance_response(
+        allowance,
+    ))))
+}
+
+fn bundle_response(rows: Vec<UsageAllowance>) -> AllowanceBundleResponse {
+    AllowanceBundleResponse {
+        bundle_id: rows[0]
+            .bundle_id
+            .clone()
+            .unwrap_or_else(|| rows[0].id.clone()),
+        allowances: rows.into_iter().map(allowance_response).collect(),
+    }
+}
+fn audit_bundle(state: &AppState, auth: &AuthUser, event: &str, rows: &[UsageAllowance]) {
+    audit_service::log_for_user(
+        state.db.clone(),
+        auth,
+        event,
+        Some(serde_json::json!({
+            "bundle_id": rows[0].bundle_id.as_ref().unwrap_or(&rows[0].id),
+            "allowance_ids": rows.iter().map(|r| &r.id).collect::<Vec<_>>(), "count": rows.len(),
+            "metrics": rows.iter().map(|r| r.metric).collect::<Vec<_>>(),
+            "active_count": rows.iter().filter(|r| r.is_active).count(),
+        })),
+    );
+}
+#[utoipa::path(put, path = "/api/v1/admin/credits/allowances/bundles/{bundle_key}", tag = "Admin Credits",
+    params(("bundle_key" = String, Path)), request_body = ReplaceAllowanceBundleRequest,
+    responses((status = 200, body = AllowanceBundleResponse)), security(("bearer_auth" = [])))]
+pub async fn replace_allowance_bundle(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(key): Path<String>,
+    Json(body): Json<ReplaceAllowanceBundleRequest>,
+) -> AppResult<Json<AllowanceBundleResponse>> {
+    require_admin(&state, &auth).await?;
+    let rows = billing::allowances::replace_allowance_bundle(
+        &state.db,
+        &key,
+        billing::allowances::AllowanceBundleInput {
+            service_ref: body.service_ref,
+            units: body.units,
+            target_kind: body.target_kind,
+            target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
+            created_by: auth.user_id.to_string(),
+        },
+    )
+    .await?;
+    audit_bundle(
+        &state,
+        &auth,
+        "billing.usage_allowance_bundle.replaced",
+        &rows,
+    );
+    Ok(Json(bundle_response(rows)))
+}
+#[utoipa::path(patch, path = "/api/v1/admin/credits/allowances/bundles/{bundle_key}", tag = "Admin Credits",
+    params(("bundle_key" = String, Path)), request_body = SetAllowanceBundleActiveRequest,
+    responses((status = 200, body = AllowanceBundleResponse)), security(("bearer_auth" = [])))]
+pub async fn set_allowance_bundle_active(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(key): Path<String>,
+    Json(body): Json<SetAllowanceBundleActiveRequest>,
+) -> AppResult<Json<AllowanceBundleResponse>> {
+    require_admin(&state, &auth).await?;
+    let rows = billing::allowances::set_bundle_active(&state.db, &key, body.is_active).await?;
+    audit_bundle(
+        &state,
+        &auth,
+        "billing.usage_allowance_bundle.toggled",
+        &rows,
+    );
+    Ok(Json(bundle_response(rows)))
 }
 
 #[utoipa::path(
@@ -440,6 +624,8 @@ pub async fn update_allowance(
             recurrence: body.recurrence,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
+            target_org_ids: body.target_org_ids,
+            target_group_ids: body.target_group_ids,
             is_active: body.is_active,
         },
     )
@@ -450,6 +636,10 @@ pub async fn update_allowance(
         "billing.usage_allowance.updated",
         Some(serde_json::json!({
             "allowance_id": allowance_id,
+            "target_kind": allowance.target_kind,
+            "target_user_count": allowance.target_user_ids.len(),
+            "target_org_count": allowance.target_org_ids.len(),
+            "target_group_count": allowance.target_group_ids.len(),
             "is_active": allowance.is_active,
         })),
     );
@@ -511,6 +701,8 @@ fn grant_response(
         recipient_billing_enabled,
         activation_state,
         target_kind: grant.target_kind,
+        target_org_ids: grant.target_org_ids,
+        target_group_ids: grant.target_group_ids,
         amount_credits: grant.amount_credits,
         amount_micros: grant.amount_micros,
         remaining_micros: grant.remaining_micros,
@@ -531,6 +723,7 @@ fn grant_response(
 fn allowance_response(allowance: UsageAllowance) -> UsageAllowanceResponse {
     UsageAllowanceResponse {
         id: allowance.id,
+        bundle_id: allowance.bundle_id,
         service_id: allowance.service_id,
         service_slug: allowance.service_slug,
         metric: allowance.metric,
@@ -538,6 +731,8 @@ fn allowance_response(allowance: UsageAllowance) -> UsageAllowanceResponse {
         recurrence: allowance.recurrence,
         target_kind: allowance.target_kind,
         target_user_ids: allowance.target_user_ids,
+        target_org_ids: allowance.target_org_ids,
+        target_group_ids: allowance.target_group_ids,
         is_active: allowance.is_active,
         created_by: allowance.created_by,
         created_at: allowance.created_at,
@@ -648,6 +843,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allowance_bundles_reject_mixed_fields_and_non_admin_writes() {
+        let (state, admin_id, operator_id, user_id) = setup("bundle_handler_validation")
+            .await
+            .expect("MongoDB required");
+        let body = serde_json::json!({
+            "service_ref": "service", "target_kind": "all_users",
+            "units": [{ "metric": "tokens", "quantity": 100, "recurrence": "daily" }],
+        });
+        for (field, value) in [
+            ("metric", serde_json::json!("tokens")),
+            ("quantity", serde_json::json!(100)),
+            ("recurrence", serde_json::json!("daily")),
+        ] {
+            for value in [value, serde_json::Value::Null] {
+                let mut mixed = body.clone();
+                mixed[field] = value;
+                let error = create_allowance(
+                    State(state.clone()),
+                    test_auth_user(&admin_id),
+                    Json(serde_json::from_value(mixed).unwrap()),
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    matches!(error, AppError::ValidationError(ref message) if message.contains("cannot be combined"))
+                );
+            }
+        }
+        for actor in [operator_id, user_id] {
+            let auth = test_auth_user(&actor);
+            let create = create_allowance(
+                State(state.clone()),
+                auth.clone(),
+                Json(serde_json::from_value(body.clone()).unwrap()),
+            )
+            .await
+            .unwrap_err();
+            let replace = replace_allowance_bundle(
+                State(state.clone()),
+                auth.clone(),
+                Path("bundle".into()),
+                Json(serde_json::from_value(body.clone()).unwrap()),
+            )
+            .await
+            .unwrap_err();
+            let toggle = set_allowance_bundle_active(
+                State(state.clone()),
+                auth,
+                Path("bundle".into()),
+                Json(SetAllowanceBundleActiveRequest { is_active: false }),
+            )
+            .await
+            .unwrap_err();
+            for error in [create, replace, toggle] {
+                assert!(matches!(error, AppError::Forbidden(_)));
+            }
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<UsageAllowance>(crate::models::usage_allowance::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn operator_reads_credit_admin_surfaces_but_cannot_mutate_them() {
         let Some((state, _admin_id, operator_id, _user_id)) =
             setup("billing_credits_operator_access").await
@@ -679,6 +944,8 @@ mod tests {
                 amount_credits: 1,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -700,10 +967,13 @@ mod tests {
             Json(CreateAllowanceRequest {
                 metric: None,
                 service_ref: "service-1".to_string(),
-                quantity: 1,
-                recurrence: AllowanceRecurrence::Daily,
+                quantity: Some(Some(1)),
+                recurrence: Some(Some(AllowanceRecurrence::Daily)),
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
+                units: None,
             }),
         )
         .await
@@ -776,6 +1046,8 @@ mod tests {
                 amount_credits: 0,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 all_services: true,
                 service_refs: Vec::new(),
                 expires_at: None,
@@ -790,10 +1062,13 @@ mod tests {
             Json(CreateAllowanceRequest {
                 metric: None,
                 service_ref: "service-1".to_string(),
-                quantity: 0,
-                recurrence: AllowanceRecurrence::Monthly,
+                quantity: Some(Some(0)),
+                recurrence: Some(Some(AllowanceRecurrence::Monthly)),
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
+                units: None,
             }),
         )
         .await
@@ -803,3 +1078,6 @@ mod tests {
         assert!(matches!(allowance, AppError::ValidationError(_)));
     }
 }
+
+#[cfg(test)]
+mod target_tests;

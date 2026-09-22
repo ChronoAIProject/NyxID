@@ -5,6 +5,8 @@ pub const COLLECTION_NAME: &str = "channel_bots";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
+    #[serde(default)]
+    pub last_verification: Option<BotVerification>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -85,6 +87,33 @@ fn default_credential_source() -> String {
     "user".to_string()
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    Pending,
+    Incomplete,
+    Verified,
+    Failed,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BotVerification {
+    pub attempt_id: String,
+    pub credential_fingerprint: String,
+    pub status: VerificationStatus,
+    pub message: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub started_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for BotVerification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BotVerification([REDACTED])")
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ManagedBotSetup {
     pub subscription: String,
@@ -111,6 +140,37 @@ impl std::fmt::Debug for ChannelBot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_timestamps_and_private_debug_are_safe() {
+        let now = bson::DateTime::now().to_chrono();
+        let check = BotVerification {
+            attempt_id: "attempt".into(),
+            credential_fingerprint: "private-fingerprint".into(),
+            status: VerificationStatus::Verified,
+            message: None,
+            started_at: now,
+            completed_at: Some(now),
+        };
+        let encoded = bson::to_document(&check).unwrap();
+        assert_eq!(encoded.get_datetime("started_at").unwrap().to_chrono(), now);
+        assert_eq!(
+            encoded.get_datetime("completed_at").unwrap().to_chrono(),
+            now
+        );
+        assert!(!format!("{check:?}").contains("private-fingerprint"));
+        let dto = crate::handlers::channel_bots::BotVerificationResponse::from(check);
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(!json.contains("credential_fingerprint"));
+        let mut legacy = bson::to_document(&make_channel_bot()).unwrap();
+        legacy.remove("last_verification");
+        assert!(
+            bson::from_document::<ChannelBot>(legacy)
+                .unwrap()
+                .last_verification
+                .is_none()
+        );
+    }
 
     #[test]
     fn collection_name() {
@@ -162,6 +222,7 @@ mod tests {
 
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),

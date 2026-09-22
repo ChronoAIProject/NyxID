@@ -1,3 +1,4 @@
+import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -392,10 +393,7 @@ export function OrgServiceAccountsTab({
                     <FormItem>
                       <FormLabel>Allowed Scopes</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="e.g. openid proxy:* llm:proxy"
-                          {...field}
-                        />
+                        <ServiceAccountScopePicker ownerId={orgId} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>

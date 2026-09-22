@@ -1,3 +1,4 @@
+import type { ProxyOperationPolicy } from "@/schemas/services";
 import type { InferenceMetadata, PlatformKeyConfig, LanePricingView } from "@/schemas/platform-keys";
 import type { BillingMetric } from "@/schemas/billing";
 
@@ -97,6 +98,7 @@ export function canAdminWrite(
 }
 
 export interface ApiKey {
+  readonly assistant_conversation_id?: string | null;
   readonly id: string;
   readonly name: string;
   readonly description: string | null;
@@ -211,6 +213,9 @@ export interface OAuthClient {
 }
 
 export interface DownstreamService {
+  readonly provider_config_id?: string | null;
+  readonly credential_configured?: boolean | null;
+  readonly proxy_operation_policy?: ProxyOperationPolicy | null;
   readonly inference?: InferenceMetadata | null;
   readonly platform_key?: PlatformKeyConfig | null;
   readonly id: string;
@@ -252,12 +257,17 @@ export interface DownstreamService {
   readonly billing?: ServiceBilling | null;
   /** Backend-resolved unit used by service allowances and platform metering. */
   readonly effective_platform_metric: BillingMetric;
+  /** Backend-accepted allowance units; absent on older replicas. */
+  readonly allowance_metrics?: readonly BillingMetric[];
   readonly legacy_public_master?: boolean;
   readonly auth_notes?: string | null;
   readonly known_limitations?: string | null;
   readonly required_permissions?: readonly string[] | null;
   readonly examples_url?: string | null;
   readonly recommended_skills?: readonly string[] | null;
+  readonly recommended_skill_refs?: readonly SkillReference[] | null;
+  readonly skills_revision?: number;
+  readonly skills_manifest_digest?: string;
   readonly developer_app_ids?: readonly string[] | null;
   /**
    * NyxID#356: admin-configured default HTTP headers injected on every
@@ -355,6 +365,7 @@ export interface ServiceBilling {
   readonly platform_metric?: string;
   /** NyxID-authored price and its synchronization state in Lago. */
   readonly platform_pricing?: ServicePlatformPricing | null;
+  readonly platform_pricing_cleanup_metric_code?: string | null;
   readonly resale_billable?: boolean;
   readonly resale_metric?: string;
   readonly lago_resale_metric_code?: string | null;
@@ -388,6 +399,11 @@ export interface SshServiceConfigInput {
 
 export type CreateServicePayload =
   | {
+      readonly provider_config_id?: string;
+      readonly inference?: InferenceMetadata | null;
+      readonly platform_key?: PlatformKeyConfig;
+      readonly billing?: ServiceBilling;
+      readonly proxy_operation_policy?: ProxyOperationPolicy | null;
       readonly name: string;
       readonly description?: string;
       readonly service_type: "http";
@@ -413,6 +429,7 @@ export type CreateServicePayload =
 
 export type UpdateServicePayload =
   | {
+      readonly proxy_operation_policy?: ProxyOperationPolicy | null;
       readonly name?: string;
       readonly description?: string;
       readonly visibility?: string;
@@ -441,6 +458,10 @@ export type UpdateServicePayload =
       readonly required_permissions?: readonly string[];
       readonly examples_url?: string;
       readonly recommended_skills?: readonly string[];
+      readonly recommended_skill_refs?: readonly SkillReference[];
+      readonly skills_revision?: number;
+      readonly skills_request_id?: string;
+      readonly clear_skill_refs?: boolean;
       readonly developer_app_ids?: readonly string[];
       readonly anonymous_endpoints?: readonly AnonymousEndpointRule[];
       /**
@@ -615,6 +636,11 @@ export interface ProviderConfig {
     | "telegram_widget";
   readonly revocation?: ProviderRevocationConfig | null;
   readonly has_oauth_config: boolean;
+  readonly authorization_url?: string | null;
+  readonly token_url?: string | null;
+  readonly revocation_url?: string | null;
+  readonly has_client_id?: boolean;
+  readonly has_client_secret?: boolean;
   readonly credential_mode: CredentialMode;
   readonly default_scopes: readonly string[] | null;
   readonly supports_oauth_scopes?: boolean;
@@ -776,4 +802,13 @@ export interface TelegramLoginData {
   readonly photo_url?: string;
   readonly auth_date: number;
   readonly hash: string;
+}
+
+export interface SkillReference {
+  readonly source: string;
+  readonly skill_id: string;
+  readonly name: string;
+  readonly version: string;
+  readonly sha256: string;
+  readonly dependencies: readonly Omit<SkillReference, "dependencies">[];
 }

@@ -1,3 +1,4 @@
+import { ProviderServices } from "@/components/providers/provider-services";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useProvider, useDeleteProvider } from "@/hooks/use-providers";
@@ -110,6 +111,8 @@ export function ProviderDetailPage() {
           </>
         }
       />
+
+      <ProviderServices provider={provider} />
 
       <DetailSection title="General">
         <DetailRow label="Slug" value={provider.slug} copyable />

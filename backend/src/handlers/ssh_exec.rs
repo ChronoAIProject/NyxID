@@ -223,10 +223,15 @@ pub async fn ssh_exec(
         )
     })?;
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
+    let credential_class = CredentialClass::NodeManaged;
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, &auth_context.owner_user_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            &auth_context.owner_user_id,
+            credential_class,
+        )
         .await?;
     let node_intent = if node_route.fallback_node_ids.is_empty() {
         crate::services::billing::NodeIntent::Node
@@ -244,7 +249,7 @@ pub async fn ssh_exec(
         Some(service_slug.clone()),
         node_intent,
         "ssh".to_string(),
-        CredentialClass::NodeManaged,
+        credential_class,
         BillingMetric::Bytes,
         None,
         false,

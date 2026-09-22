@@ -481,7 +481,7 @@ async fn workspace_inactive_errors_are_actionable_on_rest_and_mcp() {
     .unwrap_err();
     assert!(matches!(error, AppError::WorkspaceDestinationsNotActivated));
 
-    assert_eq!(error.error_code(), 12100);
+    assert_eq!(error.error_code(), 12300);
     assert_eq!(
         axum::response::IntoResponse::into_response(error).status(),
         503

@@ -88,6 +88,13 @@ host route. If route detection fails, NyxID falls back to `HOSTNAME` and then
 
 ## Assistant Diagnostics
 
+The default NyxAgent assistant introduces **no environment variable**. Its catalog
+slug `llm-nyx` and default-on feature flag `assistant:nyxagent-engine` are code-level
+configuration. The catalog row provides the upstream base URL. Readiness reports
+its required authentication settings; see [NyxAgent engine](chat/08-nyxagent-engine.md).
+Existing encryption-provider settings protect its per-conversation assistant credentials. Chat acknowledgements and access modes
+introduce no environment variables; permissions are stored per conversation.
+
 The Aevatar assistant chat wire-log diagnostic has no environment variable. It
 is gated by the `experimental:aevatar-chat-wire-log` runtime feature flag
 (default off), toggled platform-wide, per org cohort, or per user through the
@@ -164,6 +171,12 @@ Admins may set an exact `credits_per_unit` price in a catalog service's `billing
 
 Credit benefits use five collections. `credit_grants` stores one attributable row per recipient. `credit_schedules` stores recurring credit policy, and `credit_schedule_periods` stores derived walk progress. `usage_allowances` stores recurring free-unit definitions. `usage_allowance_periods` stores each owner's consumption and reservations for a UTC window. Platform admins manage grants, schedules, and allowances under `/api/v1/admin/credits`. Operators may read those admin endpoints but cannot mutate them. Flagged users read active balances from `GET /api/v1/billing/grants` and `GET /api/v1/billing/allowances`. An authorized organization member may pass `owner_id` to read the organization's benefits. Wallet mutations remain restricted to organization admins.
 
+All three benefits support four recipient kinds: `all_users` (all active person and organization wallets), `selected_users` with `target_user_ids` (specific person or organization wallets), `org_members` with `target_org_ids` (the personal wallets of active people with non-revoked membership in the selected organizations, including viewers), and `groups` with `target_group_ids` (active people's direct `User.group_ids` membership, without parent/child expansion). Organization-member and group-member benefits never fund an organization wallet. Select the organization under `selected_users` to fund its shared wallet instead. Exactly the matching list must be non-empty; all other lists must be empty. Each selected list accepts 1–500 unique ids; organizations must be active organization users and groups must exist. New org/group one-shot expansion is capped at 100,000 resolved recipients before any grants are written; use a schedule for larger populations. Overlapping organizations or groups produce one benefit per person. A kind change in a partial update must supply the matching list; omitted previous lists are cleared.
+
+One-shot grants snapshot recipients at issuance and retain the selected organization/group ids as provenance. Schedule periods freeze the kind and all target lists at claim time, then walk active recipients by user `_id`: organization memberships and users must have been created by the claim timestamp; group recipients use the user creation cutoff. Membership revocation and user deactivation ahead of the cursor take effect while walking. Direct group membership has no join timestamp, so changes to an existing person's groups can affect pages still ahead of the cursor; this is a policy/signup snapshot, not a historical copy of group membership. Allowances use live active organization membership and direct groups for both displayed balances and funding. Removal immediately prevents new matching, but existing `usage_allowance_periods` and already-admitted reservation settlement remain intact. An organization `owner_id` never matches either member kind.
+
+The new provenance vectors default to empty when absent. This is an additive wire/storage change for upgraded replicas; older replicas cannot deserialize the new enum values. Upgrade all readers and writers before enabling the new target kinds, and migrate every persisted new-kind row before rolling back to older binaries.
+
 An "all users" one-shot grant snapshots active person and organization owners at issuance. A recurring schedule takes that snapshot when it claims the UTC period. An "all users" allowance applies dynamically as each owner spends. A scheduled grant's UUID v5 `_id` is derived from the schedule ID, the period start, and the recipient ID. That `_id` is the disbursement identity. Period progress and leases do not decide whether NyxID paid a recipient. Retries converge on the same ordinary grant and the existing `grant-issued:{grant_id}` ledger key. Schedule catch-up opens only the current window and never backfills elapsed credits. A paused schedule finishes an open period but opens no later period.
 
 One-shot issuance journals at most 50 recipients inline to bound a platform-wide request. Scheduled walks use the reconcile sweep's recipient budget. Unjournaled grants remain unspendable until recovery confirms their issuance entries. Credit schedules use `BILLING_RECONCILE_INTERVAL_SECS`; they add no environment variable.
@@ -179,6 +192,8 @@ Billing policy for public and relay paths:
 - Public proxy (`/public/s/{slug}`) is block-not-meter. It has no `AuthUser`, API key, or wallet owner, so enabled anonymous endpoints cannot be combined with `ServiceBilling.resale_billable=true`; writes and runtime reads reject that shape with `AnonymousIncompatibleBilling` (`11304`) before forwarding.
 - Public MCP (`/public/mcp`) is discovery-only. `tools/list` may describe safe anonymous endpoints, but `tools/call` returns `"Public MCP tool execution is not supported"` and never forwards traffic.
 - Oracle relay (`/api/v1/oracle`) is explicitly exempt. Tasks run on user-supplied browser worker capacity; NyxID does not supply downstream model credentials, tokens, or paid compute on that path. If NyxID-hosted Oracle workers or NyxID-paid model capacity are introduced later, they must attach a `BillingRouteContext` before dispatch.
+
+X channel billing also uses these controls. With `BILLING_ENABLED=true`, configure the `api-twitter` shared-OAuth request price (`billing.byok_pricing`), enable the billing feature flag for the intended owners, and configure X Activity webhook credentials. Billable channels require webhooks and stop before legacy DM polling. Successful account verification reads, delivered DM events, and individual outgoing DM requests use the existing funding and ledger paths. See [X channel billing](CHANNEL_BOT_RELAY.md#nyxid-channel-billing) for pricing, recovery and unknown-outcome reservations. Subscription cleanup for failed and deleted X channels retries every 60 seconds when `CHANNEL_POLL_INTERVAL_SECS=0`, including when customer billing is disabled.
 
 Configure Lago to send webhooks to `<BASE_URL>/api/v1/webhooks/lago` with the same shared secret as `LAGO_WEBHOOK_SECRET`. NyxID verifies `X-Lago-Signature` over the raw request body before processing and uses `X-Lago-Unique-Key` only as metadata. Wallet events refresh the local wallet balance from Lago and clear accounted `pending_lago_debits`; subscription or entitlement events invalidate the local billing decision marker. The reconcile sweep remains enabled for missed or delayed webhooks unless `BILLING_RECONCILE_INTERVAL_SECS=0`.
 
@@ -201,7 +216,7 @@ Complete the Stripe sandbox checkout opened by the command. The verifier passes 
 | `JWT_ISSUER` | `nyxid` | JWT `iss` claim value |
 | `JWT_ACCESS_TTL_SECS` | `900` (15 min) | Access token lifetime in seconds |
 | `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Refresh token lifetime in seconds |
-| `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens are single-use, scoped to one inbound message + conversation + agent, and cannot be used against other NyxID endpoints. |
+| `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens authorize one send, scoped to one inbound message + conversation + agent. Repeated attachment downloads do not consume the send; edits require the consumed send token. |
 | `JWT_RELAY_CALLBACK_TTL_SECS` | `300` (5 min) | Lifetime of the signed channel-relay callback JWT sent in `X-NyxID-Callback-Token`. |
 | `JWT_RELAY_ACCESS_TTL_SECS` | `300` (5 min) | Lifetime of the `X-NyxID-User-Token` relay access token shipped to a bot callback URL. Kept short (vs. the 900s general access token) because it is a first-party bearer credential that leaves NyxID's trust boundary. It is usable only on proxy/LLM surfaces (rejected elsewhere), inherits the originating agent key's service/node allowlist, and is invalidated when that agent key is revoked. |
 | `JWT_ASSISTANT_FORWARD_TTL_SECS` | `300` (5 min) | **LEGACY / tombstone.** Was the TTL of the retired `assistant_forward` marker token. Live assistant capability uses a standard delegated access token whose 300-second lifetime is the compile-time constant `crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS`; there is no environment variable for that lifetime, so setting this variable changes no live assistant token. See [Assistant Chat Architecture](chat/01-architecture.md#authorization-is-not-caller-passthrough). |
@@ -237,8 +252,24 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
 | `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | When true, a platform-credentialed catalog row with no `proxy_operation_policy` is refused on actor-addressed paths (`/proxy/s/{slug}`, `/llm/*`). Ships **disabled** so deploying changes no existing behaviour; enable per environment once every such row either carries a policy or is confirmed to receive no actor-addressed traffic. Server-chosen surfaces (the assistant) are unaffected either way — they cannot name an operation, so a policy has no meaning there. |
 | `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` (IPv4) or `/128` (IPv6); IPv4-mapped IPv6 addresses are normalized to IPv4. **Only list proxies configured to overwrite client-supplied forwarded headers.** From an allowlisted peer, resolution prefers `CF-Connecting-IP`, then scans `X-Forwarded-For` right-to-left while skipping trusted proxy hops, then uses `X-Real-IP`, then the TCP peer. `CF-Connecting-IP` is the primary Cloudflare path because it does not depend on a complete proxy-hop list. The XFF fallback requires every hop to be listed, including Cloudflare's published IPv4 and IPv6 ranges when Cloudflare is in front; otherwise the rightmost unlisted Cloudflare edge becomes the apparent client and rate-limit key. From an untrusted peer, strict public/device-login paths ignore all forwarded headers. The global limiter and node WebSocket attribution retain their legacy XFF-first behavior only while this setting is empty, then switch to the trusted resolver when configured. Invalid entries are dropped with a warning. Until this is set behind an internal ingress, requester IP and country are unavailable and strict public per-IP buckets can collapse to the ingress peer. |
+| `RATE_LIMIT_EXEMPT_IPS` | *(empty)* | Comma-separated client IPv4/IPv6 addresses or CIDRs exempt from the general per-IP and cluster-wide global request budgets. Matching requests consume neither budget and are admitted even when the global budget is exhausted. Invalid entries are dropped with a warning. This does not exempt authentication, account, API-key/agent, platform-service, public-proxy, device/login, or other dedicated protocol limits, nor connection capacity limits. |
 
 Deploy the resolver code before changing `TRUSTED_PROXY_IPS`. The code-only deploy is backward compatible for the global limiter and node WebSocket path. Setting the variable is the activation step: Cloudflare client attribution becomes verified, auth-device request/poll/preview limits key by the actual client, and the global/WS paths stop accepting forwarded headers from peers outside the allowlist.
+
+`TRUSTED_PROXY_IPS` authenticates forwarding hops; it never grants a rate-limit
+exemption by itself. To exempt an operator-controlled client, set
+`RATE_LIMIT_EXEMPT_IPS=192.0.2.25,2001:db8:1234::/48` with that client's actual
+addresses. Behind ingress, also configure `TRUSTED_PROXY_IPS` with the sanitized
+forwarding hops. Do not use a shared ingress/NAT address as a client exemption
+unless every client represented by that address is intended to be exempt.
+
+Exemptions always use the TCP peer trust boundary, even when the general bucket
+key still uses legacy forwarded-header behavior with `TRUSTED_PROXY_IPS` empty.
+An untrusted peer cannot claim an exempt address in a forwarding header. A
+trusted proxy must supply a usable client header: missing/malformed headers do
+not fall back to exempting the proxy itself, and malformed intervening XFF hops
+are not skipped to find an exempt prefix. Missing peer information never becomes
+an exempt loopback address. IPv4-mapped IPv6 addresses normalize to IPv4.
 
 Before enabling trusted proxy attribution in production:
 
@@ -481,6 +512,7 @@ Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL
 |----------|---------|-------------|
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND` | `1` | Shared per-conversation proactive send rate, checked before authentication; deliberately lower than replies because unsolicited messages are a spam surface |
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST` | `5` | Burst capacity for proactive sends, including retries/idempotent replays |
+| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/reply` and `/send` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64. |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
@@ -502,6 +534,6 @@ See [ORACLE_RELAY.md](ORACLE_RELAY.md) for the full design.
 
 ### Workspace multi-origin upgrade gate
 
-`GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED` defaults to `false`. This temporary gate orders upgraded readers before the catalog writer. Deploying with the default does not activate Workspace's 13 Docs, Sheets, and Slides operations. The hosted Workspace spec always lists all 38 operations; before activation, editor calls return HTTP 503, code 12100, `workspace_destinations_not_activated`, with operator instructions.
+`GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED` defaults to `false`. This temporary gate orders upgraded readers before the catalog writer. Deploying with the default does not activate Workspace's 13 Docs, Sheets, and Slides operations. The hosted Workspace spec always lists all 38 operations; before activation, editor calls return HTTP 503, code 12300, `workspace_destinations_not_activated`, with operator instructions.
 
 On the first startup with `true`, NyxID compares and sets the known default Workspace policy and absent destination map, then additively synchronizes the 13 editor endpoints. Admin-edited policies/maps are preserved. The writes are idempotent, and leaving the gate enabled afterward is safe. Turning it off does not undo activation. The gate is scheduled for removal once every environment has activated. Upgrade all backend readers and the participating node agents before enabling it; see [Google Workspace OAuth](GOOGLE_WORKSPACE_OAUTH.md) for the rollout and approval window.

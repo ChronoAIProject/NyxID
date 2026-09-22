@@ -561,12 +561,15 @@ type CustomAuthMethod =
   | "basic"
   | "body"
   | "bot_bearer"
+  | "ifttt_webhook"
   | "none";
 
 /** Sensible default auth-key-name per method. Mirrors the CLI's
  *  `default_auth_key_name` in `cli/src/commands/service.rs:1437`. */
 function defaultAuthKeyName(method: CustomAuthMethod): string {
   switch (method) {
+    case "ifttt_webhook":
+      return "";
     case "header":
       return "X-API-Key";
     case "query":
@@ -591,6 +594,7 @@ function coerceAuthMethod(raw: string | undefined): CustomAuthMethod {
     case "path":
     case "basic":
     case "body":
+    case "ifttt_webhook":
     case "bot_bearer":
     case "none":
       return raw;
@@ -807,6 +811,7 @@ function CustomServiceForm({
             <option value="header">header (custom header)</option>
             <option value="query">query (?key=…)</option>
             <option value="path">path (path-prefix injection)</option>
+            <option value="ifttt_webhook">IFTTT Webhooks (raw key)</option>
             <option value="basic">basic (Authorization: Basic …)</option>
             <option value="body">body (JSON-body field injection)</option>
             <option value="none">none (no auth injection)</option>

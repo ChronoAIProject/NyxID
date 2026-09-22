@@ -1,8 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test("preferredModelPillIndex never selects an unlabelled control", () => {
+  // The composer region also contains icon-only menu buttons such as
+  // composer-plus-btn ("Add files and more"), whose innerText is empty.
+  // Returning index 0 there makes the worker click the wrong button and no
+  // model menu opens (menu_not_opened, items=0).
+  assert.equal(preferredModelPillIndex(["", "6\nPro"]), 1);
+  assert.equal(preferredModelPillIndex(["", "Some Control"]), 1);
+  assert.equal(preferredModelPillIndex(["", ""]), -1);
+  assert.equal(preferredModelPillIndex([]), -1);
+  // A recognised level still wins outright.
+  assert.equal(preferredModelPillIndex(["", "GPT-5.5 High"]), 1);
+});
+
+
 import {
   PRE_SEND_ACTION_MS,
+  composerHasDraft,
+  draftNeedsFastClear,
+  COMPOSER_FAST_CLEAR_CHARS,
+  composerVisibleHitPoint,
   retryPresendModelRead,
   usageCooldownConfig,
   effortSelectionMismatch,
@@ -38,6 +56,7 @@ import {
   modelSelectionFailureReason,
   modelLevelTargets,
   pillShowsLevel,
+  splitTierOffered,
   detectPillLevel,
   dropCancelledCommand,
   resolveNpmExecutable,
@@ -573,10 +592,69 @@ test("pill text verifies the selected level without cross-matching", () => {
   assert.equal(pillShowsLevel("", high), false);
 });
 
+test("an oversized leftover draft takes the single-assignment clear", () => {
+  // fill("") drives a select-all and delete through React; on a composer
+  // holding tens of thousands of characters that does not finish inside
+  // PRE_SEND_ACTION_MS. The clear is best-effort, so the timeout is swallowed,
+  // the draft survives a browser relaunch, and every worker that picks the task
+  // up dies as operation_timeout@selecting_model. Observed 2026-09-21 with an
+  // 83,046 character draft that walked through a 15-worker pool.
+  assert.equal(draftNeedsFastClear(83046), true);
+  assert.equal(draftNeedsFastClear(COMPOSER_FAST_CLEAR_CHARS), true);
+  // An ordinary leftover still takes the normal path.
+  assert.equal(draftNeedsFastClear(COMPOSER_FAST_CLEAR_CHARS - 1), false);
+  assert.equal(draftNeedsFastClear(12), false);
+  assert.equal(draftNeedsFastClear(0), false);
+  // A missing or unreadable length must never trigger it.
+  assert.equal(draftNeedsFastClear(undefined), false);
+  assert.equal(draftNeedsFastClear(NaN), false);
+  assert.equal(draftNeedsFastClear(Infinity), false);
+  // The emptiness check itself is unchanged.
+  assert.equal(composerHasDraft("  "), false);
+  assert.equal(composerHasDraft("Architec"), true);
+});
+
+test("a menu without the split tier is not a missing level", () => {
+  // Captured from a live Pro account 2026-09-21. The composer pill's menu now
+  // lists model versions; "6 Pro" is a heading with aria-checked unset, so it
+  // cannot be clicked. modelLevelTargets still asks for Pro Extended on every
+  // Pro request, so the hunt can never succeed - the pool went fully down with
+  // every task rerouted through all 15 workers before failing level_unavailable.
+  const liveMenu = [
+    { text: "6 Pro" }, { text: "" }, { text: "Latest" },
+    { text: "GPT-5.6 Sol" }, { text: "GPT-5.5 Leaving on October 14" },
+  ];
+  assert.equal(splitTierOffered(liveMenu), false);
+  // Where the split does exist, nothing changes: the hunt still applies.
+  assert.equal(splitTierOffered([{ text: "Pro Standard" }, { text: "Pro Extended" }]), true);
+  assert.equal(splitTierOffered([{ text: "Pro \u6269\u5c55" }]), true);
+  assert.equal(splitTierOffered([{ text: "Pro \u6807\u51c6" }]), true);
+  // A bare Pro entry is not a split tier.
+  assert.equal(splitTierOffered([{ text: "Pro" }, { text: "GPT 6 Pro" }]), false);
+  // Absent or malformed menus never claim the split.
+  assert.equal(splitTierOffered([]), false);
+  assert.equal(splitTierOffered(undefined), false);
+  assert.equal(splitTierOffered([{}, { text: null }]), false);
+});
+
 test("pill level detection prefers the longest alias", () => {
   assert.equal(detectPillLevel("GPT-5.5 Extra High"), "Extra High");
   assert.equal(detectPillLevel("GPT-5.5 High"), "High");
   assert.equal(detectPillLevel("Pro 扩展"), "Pro");
+  assert.equal(detectPillLevel("GPT-5.5"), null);
+
+  // Observed live on chatgpt.com 2026-09-16: the composer pill renders the
+  // family and the level as separate text nodes, so innerText is "6\nPro".
+  // First-line-only reads "6", strips it as a version, and reports the pill
+  // as unrecognized, after which the worker clicks the wrong control.
+  assert.equal(detectPillLevel("6\nPro"), "Pro");
+  assert.equal(detectPillLevel("GPT-6\nPro"), "Pro");
+  // "Thinking" is not in MODEL_LEVELS, so it is null on one line or two;
+  // the multi-line path must not invent a level that single-line lacks.
+  assert.equal(detectPillLevel("6\nThinking"), detectPillLevel("6 Thinking"));
+  // A single-line label must behave exactly as before.
+  assert.equal(detectPillLevel("6 Pro"), "Pro");
+  // A menu entry whose second line is a description must not be folded in.
   assert.equal(detectPillLevel("GPT-5.5"), null);
 });
 
@@ -996,4 +1074,60 @@ test('pre-send read-back shares PRE_SEND_ACTION_MS across retries and rejects la
   t.mock.timers.tick(PRE_SEND_ACTION_MS);
   await flush();
   assert.equal(attempts, 3);
+});
+
+
+test("composerVisibleHitPoint clamps a tall scrolled composer to its visible centre", () => {
+  // Live capture 2026-09-16 on the Heca worker: a 111,353-char draft made the
+  // composer 55,864px tall with its top at -55,316px in a 764px viewport, so
+  // the geometric centre sat ~27,000px above the viewport. elementFromPoint at
+  // that point returned null and the composer was wrongly judged obstructed
+  // (composer_unobstructed_failed@selecting_model).
+  const rect = { left: 0, right: 800, top: -55316, bottom: 548 };
+  const viewport = { width: 1000, height: 764 };
+  const geometricCentreY = rect.top + (rect.bottom - rect.top) / 2;
+  assert.ok(geometricCentreY < 0); // the old hit-test fell off screen
+  const point = composerVisibleHitPoint(rect, [], viewport);
+  assert.ok(point);
+  assert.ok(point.y >= 0 && point.y <= viewport.height); // the new one does not
+  assert.deepEqual(point, { x: 400, y: 274 });
+});
+
+test("composerVisibleHitPoint leaves a fully visible composer untouched", () => {
+  const rect = { left: 100, right: 900, top: 600, bottom: 700 };
+  assert.deepEqual(composerVisibleHitPoint(rect, [], { width: 1000, height: 764 }), { x: 500, y: 650 });
+});
+
+test("composerVisibleHitPoint intersects scroll/clip ancestor bounds", () => {
+  // Composer spans y 0..800 but a scroll container only reveals 100..500.
+  const clip = { y: true, top: 100, bottom: 500, left: 0, right: 1000 };
+  assert.deepEqual(
+    composerVisibleHitPoint({ left: 0, right: 400, top: 0, bottom: 800 }, [clip], { width: 1000, height: 764 }),
+    { x: 200, y: 300 },
+  );
+});
+
+test("composerVisibleHitPoint returns null when nothing is visible", () => {
+  // Entirely below the fold.
+  assert.equal(composerVisibleHitPoint({ left: 0, right: 800, top: 2000, bottom: 2100 }, [], { width: 1000, height: 764 }), null);
+  // A clipping ancestor hides it on the Y axis.
+  const clip = { y: true, top: 0, bottom: 100, left: 0, right: 1000 };
+  assert.equal(composerVisibleHitPoint({ left: 0, right: 800, top: 300, bottom: 500 }, [clip], { width: 1000, height: 764 }), null);
+  // No composer at all.
+  assert.equal(composerVisibleHitPoint(null, [], { width: 1000, height: 764 }), null);
+});
+
+
+test("composerHasDraft treats only non-whitespace content as a draft to clear", () => {
+  // A stale draft left in the composer by a prior attempt must be cleared
+  // before model selection, or a very long draft makes selection time out
+  // (operation_timeout@selecting_model) on every subsequent task pickup.
+  assert.equal(composerHasDraft("Review this PR"), true);
+  assert.equal(composerHasDraft("6\nPro"), true);
+  // An empty or whitespace-only composer is a no-op: nothing to clear.
+  assert.equal(composerHasDraft(""), false);
+  assert.equal(composerHasDraft("   \n\t "), false);
+  // Non-string reads (missing composer) are not drafts.
+  assert.equal(composerHasDraft(null), false);
+  assert.equal(composerHasDraft(undefined), false);
 });

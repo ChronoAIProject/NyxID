@@ -19,7 +19,7 @@ pub async fn create_platform_key(
         .find_one(doc! { "slug": slug, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Service is no longer available".to_string()))?;
-    if catalog_spec_sync::is_platform_vendor_service(&catalog) {
+    if crate::services::retired_service_service::is_retired(&catalog) {
         return Err(AppError::NotFound(
             "Service is no longer available".to_string(),
         ));
@@ -132,7 +132,7 @@ pub async fn switch_credential_binding(
                     "Credential must not be empty".to_string(),
                 ));
             }
-            validate_token_exchange_catalog_credential(&catalog, value)?;
+            validate_catalog_credential(&catalog, value)?;
         } else {
             let provider = match catalog.provider_config_id.as_deref() {
                 Some(id) => {

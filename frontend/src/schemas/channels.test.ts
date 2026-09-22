@@ -1,13 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
   channelTestMessageSchema,
-  createChannelBotSchema,
+  buildCreateChannelBotSchema,
   updateChannelBotSchema,
   createChannelConversationSchema,
   createDeviceConversationSchema,
   updateChannelConversationSchema,
   conversationPlatformSchema,
 } from "./channels";
+
+import { platformFixtures } from "@/test/fixtures/channel-platforms";
+const createChannelBotSchema = buildCreateChannelBotSchema(platformFixtures);
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -187,9 +190,9 @@ describe("conversation schemas", () => {
 });
 
 describe("conversationPlatformSchema", () => {
-  it("includes device but not slack (read-back set)", () => {
+  it("includes device and slack (read-back set)", () => {
     expect(conversationPlatformSchema.safeParse("device").success).toBe(true);
-    expect(conversationPlatformSchema.safeParse("slack").success).toBe(false);
+    expect(conversationPlatformSchema.safeParse("slack").success).toBe(true);
   });
 });
 
@@ -221,5 +224,20 @@ describe("agent-initiated message settings", () => {
     expect(channelTestMessageSchema.parse({ text: " hello " }).text).toBe(
       "hello",
     );
+  });
+});
+
+
+describe("Aurinko account-token onboarding", () => {
+  const input = { platform: "aurinko", label: "Mailbox", bot_token: "account-token", app_secret: "signing-secret" };
+  it("requires both account token and distinct signing-secret input", () => {
+    expect(createChannelBotSchema.safeParse(input).success).toBe(true);
+    expect(createChannelBotSchema.safeParse({ ...input, app_secret: "" }).success).toBe(false);
+    expect(createChannelBotSchema.safeParse({ ...input, bot_token: "" }).success).toBe(false);
+  });
+  it("accepts mailbox conversations and credential rotation", () => {
+    expect(conversationPlatformSchema.parse("aurinko")).toBe("aurinko");
+    expect(updateChannelBotSchema.safeParse({ bot_token: "replacement", app_secret: "replacement-secret" }).success).toBe(true);
+    expect(createChannelConversationSchema.safeParse({ channel_bot_id: UUID, agent_api_key_id: UUID, platform_conversation_id: `42:${"a".repeat(64)}` }).success).toBe(true);
   });
 });

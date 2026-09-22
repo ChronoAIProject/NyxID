@@ -1,16 +1,15 @@
 //! Shared post-parse channel routing and callback dispatch.
 
 use crate::AppState;
-use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::services::{channel_relay_service, channel_routing_service};
 use crate::telemetry::{
     TelemetryClient, TelemetryContext, TelemetryEvent, emit_event, should_sample_event,
 };
-use bson::doc;
 
 pub(crate) struct InboundDeps<'a> {
     pub(crate) db: &'a crate::db::DbHandle,
     pub(crate) config: &'a crate::config::AppConfig,
+    pub(crate) billing: &'a super::billing::BillingService,
     pub(crate) jwt_keys: &'a crate::crypto::jwt::JwtKeys,
     pub(crate) http_client: &'a reqwest::Client,
     pub(crate) encryption_keys: &'a crate::crypto::aes::EncryptionKeys,
@@ -24,6 +23,7 @@ impl<'a> From<&'a AppState> for InboundDeps<'a> {
         Self {
             db: &value.db,
             config: &value.config,
+            billing: &value.billing,
             jwt_keys: &value.jwt_keys,
             http_client: &value.http_client,
             encryption_keys: value.encryption_keys.as_ref(),
@@ -64,7 +64,24 @@ pub(crate) async fn process_inbound_messages(
 
     let mut complete = true;
     for inbound in messages {
+        if let Some(billing) = super::channel_billing_service::ChannelBilling::for_bot(
+            state.db,
+            state.billing,
+            bot,
+            None,
+        ) && let Err(error) = billing.received(&inbound.platform_message_id).await
+        {
+            if super::channel_billing_service::blocks_channel(&error)
+                && super::channel_billing_service::suspend(&state, bot, adapter)
+                    .await
+                    .is_err()
+            {
+                tracing::warn!(bot_id = %bot.id, "X billing suspension cleanup will retry");
+            }
+            return Err(Box::new(error));
+        }
         if adapter.dedup_inbound_by_platform_message_id()
+            && !adapter.atomic_inbound_admission()
             && channel_relay_service::inbound_platform_message_exists(
                 state.db,
                 &bot.id,
@@ -73,11 +90,6 @@ pub(crate) async fn process_inbound_messages(
             )
             .await?
         {
-            tracing::debug!(
-                bot_id = %bot.id, platform = %bot.platform,
-                platform_message_id = %inbound.platform_message_id,
-                "skipping duplicate inbound platform message"
-            );
             continue;
         }
         // Resolve which agent should handle this message
@@ -86,6 +98,7 @@ pub(crate) async fn process_inbound_messages(
             &bot.id,
             &inbound.conversation_id,
             Some(&inbound.sender_platform_id),
+            &bot.user_id,
         )
         .await
         {
@@ -110,20 +123,35 @@ pub(crate) async fn process_inbound_messages(
         };
 
         // Store the inbound message
-        let stored_message = match channel_relay_service::store_inbound_message(
-            state.db,
-            &bot.id,
-            &route.conversation.id,
-            &bot.user_id,
-            &bot.platform,
-            inbound,
-            &route.api_key_id,
-        )
-        .await
-        {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to store inbound message");
+        let stored = if adapter.atomic_inbound_admission() {
+            let metadata = channel_relay_service::inbound_metadata(
+                &bot.id,
+                &route.conversation.id,
+                &bot.user_id,
+                &bot.platform,
+                inbound,
+                &route.api_key_id,
+                &uuid::Uuid::new_v4().to_string(),
+            );
+            super::channel_admission_service::store(state.db, metadata).await
+        } else {
+            channel_relay_service::store_inbound_message(
+                state.db,
+                &bot.id,
+                &route.conversation.id,
+                &bot.user_id,
+                &bot.platform,
+                inbound,
+                &route.api_key_id,
+            )
+            .await
+            .map(Some)
+        };
+        let stored_message = match stored {
+            Ok(Some(message)) => message,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to admit inbound message");
                 complete = false;
                 continue;
             }
@@ -153,13 +181,14 @@ pub(crate) async fn process_inbound_messages(
         }
 
         // Look up the API key for signing and name attribution
-        let api_key = match state
-            .db
-            .collection::<ApiKey>(API_KEYS)
-            .find_one(doc! { "_id": &route.api_key_id })
-            .await
+        let api_key = match channel_routing_service::load_callback_key(
+            state.db,
+            &route,
+            &bot.user_id,
+        )
+        .await
         {
-            Ok(Some(k)) => k,
+            Ok(k) if route.conversation.platform == bot.platform => k,
             _ => {
                 tracing::warn!(
                     api_key_id = %route.api_key_id,
@@ -175,10 +204,11 @@ pub(crate) async fn process_inbound_messages(
             }
         };
 
-        // Generate a relay token scoped to this agent key's permissions.
-        // The token carries the bot owner's identity but inherits the agent
-        // key's service/node scope restrictions.
-        let user_access_token = {
+        // A manager is a public setup interface, not proof of the sender's
+        // NyxID identity. Its agent receives reply authority only.
+        let user_access_token = if bot.credential_source == "telegram_manager" {
+            None
+        } else {
             let scope = crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES;
             let rbac_data =
                 crate::services::rbac_helpers::build_rbac_claim_data(state.db, &bot.user_id, scope)
@@ -239,9 +269,26 @@ pub(crate) async fn process_inbound_messages(
             &api_key.name,
             inbound,
             Some(reply_token),
+            &state.config.base_url,
         );
 
         // Forward to the agent's callback URL
+        let key_is_current =
+            channel_routing_service::load_callback_key(state.db, &route, &bot.user_id)
+                .await
+                .is_ok_and(|current| {
+                    current.state_version == api_key.state_version
+                        && current.key_hash == api_key.key_hash
+                });
+        if !key_is_current {
+            let _ = channel_relay_service::update_callback_status(
+                state.db,
+                &stored_message.id,
+                "failed",
+            )
+            .await;
+            continue;
+        }
         let delivery = channel_relay_service::forward_to_agent(
             state.http_client,
             state.config,

@@ -12,7 +12,7 @@ import {
 
 const ROOT = "/channel-bots/telegram-new";
 
-export function useTelegramNewConfiguration(requestId?: string) {
+export function useTelegramNewConfiguration(requestId?: string, poll = true) {
   const actor = useAuthStore((state) => state.user?.id);
   return useQuery({
     queryKey: ["telegram-new", actor, requestId],
@@ -21,7 +21,8 @@ export function useTelegramNewConfiguration(requestId?: string) {
     staleTime: 0,
     refetchInterval: (query) => {
       const status = query.state.data?.request?.status;
-      return status &&
+      return poll &&
+        status &&
         !["connected", "cancelled", "expired", "suspended"].includes(status)
         ? 2000
         : false;
@@ -54,6 +55,7 @@ export function useTelegramNew(requestId?: string) {
   }, [client, connectedBotId]);
   const refresh = () => client.invalidateQueries({ queryKey: key });
   const begin = useMutation({
+    mutationKey: key,
     gcTime: 0,
     mutationFn: async (input: {
       label: string;
@@ -66,6 +68,7 @@ export function useTelegramNew(requestId?: string) {
     onSettled: refresh,
   });
   const launch = useMutation({
+    mutationKey: key,
     gcTime: 0,
     mutationFn: async (id: string) =>
       telegramNewLaunchSchema.parse(
@@ -74,10 +77,12 @@ export function useTelegramNew(requestId?: string) {
     onSettled: refresh,
   });
   const cancel = useMutation({
+    mutationKey: key,
     mutationFn: (id: string) => api.delete(`${ROOT}/requests/${id}`),
     onSettled: refresh,
   });
   const connect = useMutation({
+    mutationKey: key,
     mutationFn: async (request: TelegramNewRequest) =>
       telegramNewRequestSchema.parse(
         await api.post(`${ROOT}/requests/${request.id}/connect`, {

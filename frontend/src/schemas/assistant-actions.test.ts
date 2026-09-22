@@ -90,8 +90,8 @@ const WAVE_3_4_ACTIONS = [
     action: "org.update",
     params: {
       orgId: "org-1",
-      displayName: "Platform Ops",
-      slug: "platform-ops",
+      displayName: "Shared Service",
+      slug: "shared-service",
     },
     variant: "org_update",
   },

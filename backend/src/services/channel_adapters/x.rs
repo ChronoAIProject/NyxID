@@ -1,4 +1,10 @@
-//! X user-context Direct Messages. All X protocol and product descriptors live here.
+//! X user-context Direct Messages with X Activity webhook delivery.
+
+#[cfg(test)]
+#[path = "x_webhook_tests.rs"]
+mod webhook_tests;
+#[path = "x_webhooks.rs"]
+mod webhooks;
 
 const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "recipient cannot receive",
@@ -7,6 +13,9 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "cannot send a direct message to this user",
     "not allowed to send a direct message",
 ];
+
+use crate::services::channel_media_service as media;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
 
 use std::time::Duration;
 
@@ -30,6 +39,7 @@ pub const REQUIRED_SCOPES: &[&str] = &[
     "users.read",
     "dm.read",
     "dm.write",
+    "media.write",
     "offline.access",
 ];
 const TEXT_LIMIT: usize = 10_000;
@@ -180,7 +190,7 @@ fn normalize(event: &Value, includes: &Value, own_id: &str) -> AppResult<Option<
             let kind = match media["type"].as_str() {
                 Some("photo") => "image",
                 Some("video" | "animated_gif") => "video",
-                _ => "file",
+                _ => return None,
             };
             let variant = media["variants"].as_array().and_then(|variants| {
                 variants
@@ -278,6 +288,15 @@ fn reply_bodies(reply: &OutboundReply) -> AppResult<Vec<Value>> {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for XAdapter {
+    fn display_name(&self) -> &str {
+        "X (Twitter)"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities {
+            inbound: &[MediaKind::Image, MediaKind::Video],
+            outbound: &[MediaKind::Image, MediaKind::Video],
+        }
+    }
     fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
         crate::services::channel_platform::OutboundCapabilities {
             initiated_send: true,
@@ -306,12 +325,13 @@ impl PlatformAdapter for XAdapter {
 
     fn registration(&self) -> RegistrationDescriptor {
         RegistrationDescriptor {
+            documentation_url: Some("https://docs.x.com/x-api/activity/introduction"),
             fields: &[],
             extra_fields: &[],
             token_fields: &[],
             managed_only: true,
             managed_only_message: "X accounts are connected through Connect X account; developer credentials are not accepted",
-            webhook_ingestion: false,
+            webhook_ingestion: true,
             preserve_subscription_on_verify: true,
             ..Default::default()
         }
@@ -325,6 +345,22 @@ impl PlatformAdapter for XAdapter {
                 provider_slug: "twitter",
             },
             fields: &[
+                PlatformCredentialField {
+                    name: "app_bearer_token",
+                    label: "App bearer token",
+                    secret: true,
+                    required: false,
+                    numeric: false,
+                    help: "X Developer Console > Keys & Tokens > Bearer Token. Configure with the API secret to enable automatic DM webhooks billed to this app.",
+                },
+                PlatformCredentialField {
+                    name: "consumer_secret",
+                    label: "API key secret",
+                    secret: true,
+                    required: false,
+                    numeric: false,
+                    help: "The same X app's API Key Secret, used to verify webhook signatures. This is different from the OAuth 2.0 Client Secret.",
+                },
                 PlatformCredentialField {
                     name: "client_id",
                     label: "Client ID",
@@ -345,8 +381,10 @@ impl PlatformAdapter for XAdapter {
             webhook_secret_field: None,
             setup_checklist: &[
                 "Enable OAuth 2.0 user authentication with a confidential Web App and PKCE in the X Developer Console. Use the OAuth callback URL below.",
-                "Allow tweet.read users.read dm.read dm.write offline.access. Existing accounts must consent again to grant DM access.",
+                "Allow tweet.read users.read dm.read dm.write media.write offline.access. Existing accounts must consent again to grant DM access.",
                 "Fund NyxID's app with paid API credits. All customers' DM traffic consumes this app's credits and limits. Current pricing: https://docs.x.com/x-api/getting-started/pricing (pay-per-usage replaces Basic/Pro subscriptions).",
+                "Set the app bearer token and API key secret from this same app to enable X Activity DM webhooks. NyxID registers the shared HTTPS webhook and per-account subscriptions automatically. Existing connections switch when verified or reconnected; without these fields they keep polling.",
+                "This channel supports unencrypted DMs (dm.received). Encrypted X Chat messages require a separate encryption integration.",
                 "Automated replies require an inbound DM and user consent. NyxID never initiates DM conversations. Publish an opt-out policy for your agent.",
             ],
         })
@@ -374,15 +412,21 @@ impl PlatformAdapter for XAdapter {
         http: &reqwest::Client,
         credentials: &BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
-        let body = response_json(
-            send(
-                http.get(format!("{}/2/users/me", base(self, credentials)))
-                    .query(&[("user.fields", "username,name")])
-                    .bearer_auth(credentials.token),
-            )
-            .await?,
-        )
-        .await?;
+        let request = http
+            .get(format!("{}/2/users/me", base(self, credentials)))
+            .query(&[("user.fields", "username,name")])
+            .bearer_auth(credentials.token);
+        let response = match credentials.billing {
+            Some(billing) => billing.verify_account(request).await?,
+            #[cfg(test)]
+            None if self.api_base.is_some() => send(request).await?,
+            None => {
+                return Err(AppError::BillingNotConfigured(
+                    "X account verification is missing its billing context".into(),
+                ));
+            }
+        };
+        let body = response_json(response).await?;
         let id = body["data"]["id"]
             .as_str()
             .filter(|id| numeric_id(id))
@@ -433,15 +477,24 @@ impl PlatformAdapter for XAdapter {
                 });
             }
             let body = response_json(response).await?;
-            if body.get("errors").is_some() {
-                return Err(protocol_error());
-            }
             let empty = Vec::new();
             let events = match body.get("data") {
                 None if body["meta"]["result_count"] == 0 => &empty,
                 Some(Value::Array(events)) => events,
                 _ => return Err(protocol_error()),
             };
+            if let Some(errors) = body.get("errors") {
+                let errors = errors.as_array().ok_or_else(protocol_error)?;
+                // X can return DMs with failed optional expansions. Only those
+                // errors are safe to ignore when committing the event cursor.
+                let expansion_errors_only = !events.is_empty()
+                    && errors.iter().all(|error| {
+                        matches!(error["resource_type"].as_str(), Some("user" | "media"))
+                    });
+                if !errors.is_empty() && !expansion_errors_only {
+                    return Err(protocol_error());
+                }
+            }
             if page == 0 {
                 if let Some(event) = events.first() {
                     let id = event["id"]
@@ -510,6 +563,24 @@ impl PlatformAdapter for XAdapter {
         metadata.get("attachments").is_some()
     }
 
+    async fn fetch_attachment(
+        &self,
+        _http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        attachment: &InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        media::download(
+            &attachment.url,
+            &["pbs.twimg.com", "video.twimg.com", "ton.twitter.com"],
+            Some(base(self, credentials)),
+            Some(credentials.token),
+            attachment,
+            max_bytes,
+        )
+        .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
@@ -526,20 +597,114 @@ impl PlatformAdapter for XAdapter {
                 "Invalid X DM conversation ID".to_string(),
             ));
         }
+        if !reply.attachments.is_empty() {
+            if let Some(billing) = credentials.billing {
+                billing.admit().await?;
+            }
+            if reply.text.as_deref().is_some_and(|s| !s.is_empty())
+                || reply
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|m| self.supports_reply_metadata(m))
+            {
+                let mut text = reply.clone();
+                text.attachments.clear();
+                self.send_reply(http, credentials, conversation_id, &text)
+                    .await?;
+            }
+            let mut last = None;
+            for attachment in &reply.attachments {
+                let category = match (attachment.kind, attachment.mime_type.as_deref()) {
+                    (MediaKind::Image | MediaKind::Video, Some("image/gif")) => "dm_gif",
+                    (MediaKind::Image, _) => "dm_image",
+                    (MediaKind::Video, _) => "dm_video",
+                    _ => return Err(AppError::ChannelMediaUnsupported),
+                };
+                let upload = response_json(
+                    send(
+                        http.post(format!("{}/2/media/upload", base(self, credentials)))
+                            .bearer_auth(credentials.token)
+                            .multipart(
+                                reqwest::multipart::Form::new()
+                                    .text("media_category", category)
+                                    .part("media", media::multipart_part(attachment)?),
+                            ),
+                    )
+                    .await?,
+                )
+                .await?;
+                let media_id = upload["data"]["id"].as_str().ok_or_else(protocol_error)?;
+                if !numeric_id(media_id) {
+                    return Err(protocol_error());
+                }
+                // Video/GIF uploads may finish asynchronously. Never dispatch a
+                // DM before processing succeeds, and bound the entire wait.
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut processing = upload["data"]["processing_info"].clone();
+                    loop {
+                        match processing["state"].as_str() {
+                            None | Some("succeeded") => return Ok(()),
+                            Some("pending" | "in_progress") => {
+                                let delay = processing["check_after_secs"]
+                                    .as_u64()
+                                    .unwrap_or(1)
+                                    .clamp(1, 10);
+                                tokio::time::sleep(Duration::from_secs(delay)).await;
+                                let status = response_json(
+                                    send(
+                                        http.get(format!(
+                                            "{}/2/media/upload",
+                                            base(self, credentials)
+                                        ))
+                                        .bearer_auth(credentials.token)
+                                        .query(&[("media_id", media_id), ("command", "STATUS")]),
+                                    )
+                                    .await?,
+                                )
+                                .await?;
+                                processing = status["data"]["processing_info"].clone();
+                                if processing.is_null() {
+                                    return Err(protocol_error());
+                                }
+                            }
+                            _ => return Err(protocol_error()),
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| protocol_error())??;
+                let message = OutboundReply {
+                    attachments: vec![],
+                    text: attachment.caption.clone(),
+                    reply_to_platform_message_id: None,
+                    metadata: Some(json!({"attachments": [{"media_id": media_id}]})),
+                };
+                last = self
+                    .send_reply(http, credentials, conversation_id, &message)
+                    .await?;
+            }
+            return Ok(last);
+        }
         let mut last = None;
         for body in reply_bodies(reply)? {
-            let response = send_response_json(
-                send(
-                    http.post(format!(
-                        "{}/2/dm_conversations/{conversation_id}/messages",
-                        base(self, credentials)
-                    ))
-                    .bearer_auth(credentials.token)
-                    .json(&body),
-                )
-                .await?,
-            )
-            .await?;
+            let request = http
+                .post(format!(
+                    "{}/2/dm_conversations/{conversation_id}/messages",
+                    base(self, credentials)
+                ))
+                .bearer_auth(credentials.token)
+                .json(&body);
+            let response = match credentials.billing {
+                Some(billing) => billing.send(request).await?,
+                #[cfg(test)]
+                None if self.api_base.is_some() => send(request).await?,
+                None => {
+                    return Err(AppError::BillingNotConfigured(
+                        "X channel send is missing its billing context".into(),
+                    ));
+                }
+            };
+            let response = send_response_json(response).await?;
             last = Some(
                 response["data"]["dm_event_id"]
                     .as_str()
@@ -550,20 +715,94 @@ impl PlatformAdapter for XAdapter {
         Ok(last)
     }
 
+    fn platform_webhook(&self) -> bool {
+        true
+    }
+
+    fn platform_subscription_content_type(&self) -> &'static str {
+        "application/json"
+    }
+
+    fn webhook_policy(&self, _body: &[u8]) -> crate::services::channel_platform::WebhookPolicy {
+        crate::services::channel_platform::WebhookPolicy::Immediate(None)
+    }
+
+    fn validate_platform_subscription(
+        &self,
+        query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<()> {
+        webhooks::crc_token(query).map(|_| ())
+    }
+
+    fn platform_subscription_handshake(
+        &self,
+        credentials: &PlatformVerifySecrets,
+        query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<String> {
+        webhooks::handshake(credentials, query)
+    }
+
+    fn connection_webhook_configured(&self, credentials: &PlatformVerifySecrets) -> bool {
+        ["app_bearer_token", "consumer_secret"]
+            .iter()
+            .all(|field| credentials.get(field).is_some_and(|s| !s.is_empty()))
+    }
+
+    async fn setup_connection_webhook(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        bot_id: &str,
+        webhook_url: &str,
+    ) -> AppResult<()> {
+        webhooks::setup(self, http, credentials, bot_id, webhook_url).await
+    }
+
+    async fn remove_connection_webhook(
+        &self,
+        http: &reqwest::Client,
+        credentials: &PlatformVerifySecrets,
+        bot_id: &str,
+    ) -> AppResult<()> {
+        webhooks::remove(self, http, credentials, bot_id).await
+    }
+
+    async fn platform_webhook_targets(
+        &self,
+        credentials: &PlatformVerifySecrets,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> AppResult<Vec<String>> {
+        webhooks::verify(credentials, headers, body)?;
+        Ok(webhooks::target(body)?.into_iter().collect())
+    }
+
     async fn verify_webhook(
         &self,
-        _bot: &ChannelBot,
-        _secrets: Option<&PlatformVerifySecrets>,
-        _headers: &HeaderMap,
-        _body: &[u8],
+        bot: &ChannelBot,
+        secrets: Option<&PlatformVerifySecrets>,
+        headers: &HeaderMap,
+        body: &[u8],
     ) -> AppResult<()> {
-        Err(AppError::ChannelWebhookVerificationFailed(
-            "This channel uses polling".to_string(),
-        ))
+        webhooks::verify(
+            secrets.ok_or_else(webhooks::verification_error)?,
+            headers,
+            body,
+        )?;
+        if webhooks::target(body)?.as_deref() != Some(bot.platform_bot_id.as_str()) {
+            return Err(webhooks::verification_error());
+        }
+        let envelope: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
+        if envelope["data"]["tag"].as_str() != Some(format!("nyxid:{}", bot.id).as_str()) {
+            return Err(webhooks::verification_error());
+        }
+        Ok(())
     }
-    async fn parse_inbound(&self, _body: &[u8]) -> AppResult<Vec<InboundMessage>> {
-        Err(protocol_error())
+
+    async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>> {
+        webhooks::parse(body)
     }
+
     async fn register_webhook(
         &self,
         _http: &reqwest::Client,
@@ -585,6 +824,7 @@ mod tests {
 
     fn credentials() -> BotCredentials<'static> {
         BotCredentials {
+            billing: None,
             token: "private-test-token",
             platform_bot_id: Some("10"),
             platform_secrets: None,
@@ -652,6 +892,83 @@ mod tests {
             ["103", "105"]
         );
         assert!(!format!("{outcome:?}").contains("private DM"));
+    }
+
+    #[tokio::test]
+    async fn polling_continues_after_optional_expansion_errors() {
+        let server = MockServer::start().await;
+        let http = reqwest::Client::new();
+        let adapter = adapter(&server);
+        let mut cursor = Some("100".to_string());
+        for id in 101..=106 {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": [event(&id.to_string(), "20"), event("100", "20")],
+                    "errors": [
+                        {"resource_type": "user", "resource_id": "30", "type": "https://api.x.com/2/problems/resource-not-found", "detail": "PRIVATE upstream detail"},
+                        {"resource_type": "media", "resource_id": "3_missing", "type": "https://api.x.com/2/problems/resource-not-found"}
+                    ]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let outcome = adapter
+                .poll_inbound(&http, &credentials(), cursor.as_deref())
+                .await
+                .expect("optional expansion errors must not stop DM polling");
+            assert_eq!(outcome.cursor.as_deref(), Some(id.to_string().as_str()));
+            assert_eq!(outcome.messages.len(), 1);
+            assert_eq!(outcome.messages[0].platform_message_id, id.to_string());
+            assert!(outcome.messages[0].sender_display_name.is_none());
+            cursor = outcome.cursor;
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_error_arrays_do_not_fail_polling_or_initialization() {
+        for cursor in [None, Some("100")] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "meta": {"result_count": 0}, "errors": []
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let outcome = adapter(&server)
+                .poll_inbound(&reqwest::Client::new(), &credentials(), cursor)
+                .await
+                .unwrap();
+            assert_eq!(outcome.cursor.as_deref(), Some(cursor.unwrap_or("0")));
+            assert!(outcome.messages.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_dm_results_still_fail_without_advancing_the_cursor() {
+        for body in [
+            json!({"data": [event("101", "20")], "errors": [{"resource_type": "dm_event", "detail": "PRIVATE upstream detail"}]}),
+            json!({"data": [event("101", "20")], "errors": [{"title": "Unknown failure", "detail": "PRIVATE upstream detail"}]}),
+            json!({"meta": {"result_count": 0}, "errors": [{"resource_type": "user", "detail": "PRIVATE upstream detail"}]}),
+            json!({"errors": [{"resource_type": "media", "detail": "PRIVATE upstream detail"}]}),
+            json!({"data": [event("101", "20")], "errors": {"detail": "PRIVATE upstream detail"}}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/2/dm_events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+            let error = adapter(&server)
+                .poll_inbound(&reqwest::Client::new(), &credentials(), Some("100"))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::ChannelPlatformError(_)));
+            assert!(!error.to_string().contains("PRIVATE"));
+        }
     }
 
     #[tokio::test]
@@ -731,6 +1048,7 @@ mod tests {
             .await;
         let text = "\u{1f642}".repeat(TEXT_LIMIT + 1);
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some(text.clone()),
             metadata: Some(json!({"attachments": [{"media_id": "123"}]})),
             reply_to_platform_message_id: None,
@@ -779,6 +1097,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let reply = OutboundReply {
+                attachments: vec![],
                 text: Some("reply".into()),
                 metadata: None,
                 reply_to_platform_message_id: None,
@@ -818,6 +1137,7 @@ mod tests {
     #[test]
     fn initiated_request_has_no_reply_or_thread_context() {
         let reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".into()),
             reply_to_platform_message_id: None,
             metadata: None,
@@ -844,6 +1164,7 @@ mod tests {
                 &credentials(),
                 "10-20",
                 &OutboundReply {
+                    attachments: vec![],
                     text: Some("hello".into()),
                     reply_to_platform_message_id: None,
                     metadata: None,

@@ -2578,18 +2578,12 @@ pub async fn introspect(
         }
     }
 
-    // For service account tokens, check if revoked in the SA tokens collection
-    if claims.sa == Some(true) {
-        let sa_token = state
-            .db
-            .collection::<ServiceAccountToken>(SA_TOKENS)
-            .find_one(doc! { "jti": &claims.jti })
-            .await;
-        match sa_token {
-            Ok(Some(t)) if t.revoked => return Json(inactive),
-            Err(_) => return Json(inactive),
-            _ => {}
-        }
+    if claims.sa == Some(true)
+        && crate::services::service_account_service::validate_access_token(&state.db, &claims)
+            .await
+            .is_err()
+    {
+        return Json(inactive);
     }
 
     // Fetch user email for username field

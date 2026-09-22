@@ -63,10 +63,14 @@ pub struct BillingUsageRow {
     pub bytes: i64,
     pub events: i64,
     pub lago_acked: bool,
-    /// False for usage metered on a service without platform billing:
-    /// observability only, no cost, never pushed to Lago.
+    /// False for observability-only usage without a chargeable wallet,
+    /// including owners outside rollout: no cost, never pushed to Lago.
     pub billable: bool,
     pub estimated_credits_micros: Option<i64>,
+    pub wallet_credits_micros: Option<i64>,
+    pub grant_credits_micros: Option<i64>,
+    pub allowance_credits_micros: Option<i64>,
+    pub allowance_quantity: i64,
     /// Provider-reported token classes summed over the group (LLM traffic
     /// only). None when no row in the group carried a breakdown.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,6 +84,10 @@ pub struct BillingUsageTotals {
     pub bytes: i64,
     pub events: i64,
     pub estimated_credits_micros: Option<i64>,
+    pub wallet_credits_micros: Option<i64>,
+    pub grant_credits_micros: Option<i64>,
+    pub allowance_credits_micros: Option<i64>,
+    pub allowance_quantity: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -207,10 +215,6 @@ pub async fn get_usage(
     let mut match_doc = doc! {
         "billing_owner_id": &owner_id,
         "quantity": { "$ne": null },
-        // The billing page shows charged usage only: rows without a wallet
-        // were metered for observability (service not platform_billable)
-        // and never cost anything. Resale rows carry a wallet and stay in.
-        "wallet_id": { "$ne": null },
         "created_at": { "$gte": bson::DateTime::from_chrono(since) },
         "status": { "$in": ["finalized", "dead_letter"] },
     };
@@ -224,6 +228,17 @@ pub async fn get_usage(
 
     let pipeline = vec![
         doc! { "$match": match_doc },
+        doc! { "$set": {
+            "exact_cost": { "$ne": [{ "$ifNull": ["$funding.total_charge_micros", null] }, null] },
+            "consumed_grant_micros": { "$sum": { "$map": {
+                "input": { "$ifNull": ["$funding.grant_consumptions", []] },
+                "as": "allocation", "in": "$$allocation.amount_micros",
+            } } },
+            "consumed_allowance_quantity": { "$sum": { "$map": {
+                "input": { "$ifNull": ["$funding.allowance_consumptions", []] },
+                "as": "allocation", "in": "$$allocation.quantity",
+            } } },
+        } },
         doc! {
             "$group": {
                 "_id": {
@@ -244,20 +259,19 @@ pub async fn get_usage(
                     "billable": { "$ne": [{ "$ifNull": ["$wallet_id", null] }, null] },
                 },
                 "quantity": { "$sum": "$quantity" },
-                // Benefit-aware rows persist the exact wallet debit. Legacy
-                // rows retain rate-based estimation for historical parity.
-                "wallet_charge_credits": {
-                    "$sum": { "$ifNull": ["$funding.wallet_charge_credits", 0_i64] }
-                },
-                "legacy_quantity": {
-                    "$sum": {
-                        "$cond": [
-                            { "$eq": [{ "$ifNull": ["$funding", null] }, null] },
-                            "$quantity",
-                            0_i64,
-                        ]
-                    }
-                },
+                // Keep exact settlements separate from historical estimates.
+                // Reductions happen in MongoDB, never by loading individual meters.
+                "exact_rows": { "$sum": { "$cond": ["$exact_cost", 1, 0] } },
+                "total_charge_micros": { "$sum": "$funding.total_charge_micros" },
+                "wallet_funded_micros": { "$sum": "$funding.wallet_funded_micros" },
+                "grant_funded_micros": { "$sum": "$funding.grant_funded_micros" },
+                "allowance_funded_micros": { "$sum": "$funding.allowance_funded_micros" },
+                "allowance_quantity": { "$sum": { "$ifNull": [
+                    "$funding.allowance_funded_quantity", "$consumed_allowance_quantity",
+                ] } },
+                "legacy_quantity": { "$sum": { "$cond": ["$exact_cost", 0, "$quantity"] } },
+                "legacy_grant_micros": { "$sum": { "$cond": ["$exact_cost", 0, "$consumed_grant_micros"] } },
+                "legacy_allowance_quantity": { "$sum": { "$cond": ["$exact_cost", 0, "$consumed_allowance_quantity"] } },
                 "events": { "$sum": 1 },
                 // Token-class observability sums; absent on non-LLM rows
                 // and rows written before breakdown capture shipped.
@@ -288,28 +302,28 @@ pub async fn get_usage(
         let quantity = doc_i64(&doc, "quantity").unwrap_or(0);
         let lago_metric_code = id_doc.get_str("lago_metric_code").unwrap_or("").to_string();
         let billable = id_doc.get_bool("billable").unwrap_or(false);
-        let estimated_credits_micros = if billable {
-            let wallet_charge_micros = doc_i64(&doc, "wallet_charge_credits")
-                .unwrap_or(0)
-                .saturating_mul(1_000_000);
-            let legacy_quantity = doc_i64(&doc, "legacy_quantity").unwrap_or(0);
-            find_rate(&state.db, &lago_metric_code, None)
+        let model = id_doc.get_str("model").ok().map(ToString::to_string);
+        let legacy_quantity = doc_i64(&doc, "legacy_quantity").unwrap_or(0);
+        let rate = if billable && legacy_quantity > 0 {
+            find_rate(&state.db, &lago_metric_code, model.as_deref())
                 .await?
                 .map(|rate| {
-                    wallet_charge_micros.saturating_add(
-                        rate.credits_per_unit_micros.saturating_mul(legacy_quantity),
+                    crate::services::billing::amounts::rate_pico(
+                        rate.credits_per_unit_pico,
+                        rate.credits_per_unit_micros,
                     )
                 })
         } else {
             Some(0)
         };
+        let costs = usage_costs(&doc, billable, rate);
         rows.push(BillingUsageRow {
             service_slug: id_doc.get_str("service_slug").ok().map(ToString::to_string),
             service_id: id_doc.get_str("service_id").ok().map(ToString::to_string),
             metric,
             lago_metric_code,
             layer: id_doc.get_str("layer").unwrap_or("platform").to_string(),
-            model: id_doc.get_str("model").ok().map(ToString::to_string),
+            model,
             api_key_id: id_doc.get_str("api_key_id").ok().map(ToString::to_string),
             api_key_name: None,
             quantity,
@@ -326,7 +340,15 @@ pub async fn get_usage(
             events: doc_i64(&doc, "events").unwrap_or(0),
             lago_acked: id_doc.get_bool("lago_acked").unwrap_or(false),
             billable,
-            estimated_credits_micros,
+            estimated_credits_micros: costs.total,
+            wallet_credits_micros: costs.wallet,
+            grant_credits_micros: costs.grant,
+            allowance_credits_micros: costs.allowance,
+            allowance_quantity: if billable {
+                doc_i64(&doc, "allowance_quantity").unwrap_or(0)
+            } else {
+                0
+            },
             token_breakdown: usage_row_breakdown(&doc),
         });
     }
@@ -339,6 +361,10 @@ pub async fn get_usage(
         bytes: rows.iter().map(|row| row.bytes).sum(),
         events: rows.iter().map(|row| row.events).sum(),
         estimated_credits_micros: sum_optional(rows.iter().map(|row| row.estimated_credits_micros)),
+        wallet_credits_micros: sum_optional(rows.iter().map(|row| row.wallet_credits_micros)),
+        grant_credits_micros: sum_optional(rows.iter().map(|row| row.grant_credits_micros)),
+        allowance_credits_micros: sum_optional(rows.iter().map(|row| row.allowance_credits_micros)),
+        allowance_quantity: rows.iter().map(|row| row.allowance_quantity).sum(),
     };
 
     Ok(Json(BillingUsageResponse {
@@ -835,12 +861,9 @@ async fn resolve_api_key_names(
 }
 
 fn parse_metric(value: &str) -> Option<BillingMetric> {
-    match value {
-        "tokens" => Some(BillingMetric::Tokens),
-        "requests" => Some(BillingMetric::Requests),
-        "bytes" => Some(BillingMetric::Bytes),
-        _ => None,
-    }
+    BillingMetric::ALL
+        .into_iter()
+        .find(|metric| metric.as_str() == value)
 }
 
 /// Summed token-class breakdown for one aggregation group; None when every
@@ -861,6 +884,61 @@ fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
         Bson::Int64(v) => Some(*v),
         Bson::Double(v) => Some(v.round() as i64),
         _ => None,
+    }
+}
+
+/// Exact settlements remain readable without a cached rate. Historical rows
+/// use the current model rate; unknown historical costs retain null semantics.
+struct UsageCosts {
+    total: Option<i64>,
+    wallet: Option<i64>,
+    grant: Option<i64>,
+    allowance: Option<i64>,
+}
+
+fn usage_costs(doc: &Document, billable: bool, rate: Option<i128>) -> UsageCosts {
+    if !billable {
+        return UsageCosts {
+            total: Some(0),
+            wallet: Some(0),
+            grant: Some(0),
+            allowance: Some(0),
+        };
+    }
+    let value = |key| doc_i64(doc, key).unwrap_or(0);
+    let grant = Some(value("grant_funded_micros").saturating_add(value("legacy_grant_micros")));
+    if value("legacy_quantity") > 0 && rate.is_none() {
+        return UsageCosts {
+            total: None,
+            wallet: None,
+            grant,
+            allowance: None,
+        };
+    }
+    let legacy_cost = rate
+        .map(|rate| crate::services::billing::amounts::cost_micros(rate, value("legacy_quantity")));
+    let legacy_allowance = if value("legacy_allowance_quantity") == 0 {
+        Some(0)
+    } else {
+        rate.map(|rate| {
+            crate::services::billing::amounts::cost_micros(rate, value("legacy_allowance_quantity"))
+        })
+    };
+    let legacy_grant = value("legacy_grant_micros");
+    let legacy_wallet = legacy_cost.zip(legacy_allowance).map(|(total, allowance)| {
+        total
+            .saturating_sub(allowance)
+            .saturating_sub(legacy_grant)
+            .max(0)
+    });
+    let combine = |key, legacy| {
+        sum_optional([(value("exact_rows") > 0).then(|| value(key)), legacy].into_iter())
+    };
+    UsageCosts {
+        total: combine("total_charge_micros", legacy_cost),
+        wallet: combine("wallet_funded_micros", legacy_wallet),
+        grant,
+        allowance: combine("allowance_funded_micros", legacy_allowance),
     }
 }
 

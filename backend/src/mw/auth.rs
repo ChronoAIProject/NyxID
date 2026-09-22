@@ -20,6 +20,10 @@ use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, Service
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
+/// Internal chat acknowledgement capability. Never accepted by the public key
+/// scope registry, and never grants management access on human-only REST routes.
+pub const ASSISTANT_ACCOUNT_SCOPE: &str = "assistant:account";
+
 /// Authenticated user extracted from session cookie or Bearer token.
 ///
 /// This acts as an Axum extractor: handlers that include `AuthUser` in their
@@ -134,6 +138,13 @@ fn extract_request_user_agent(parts: &Parts) -> Option<String> {
 }
 
 impl AuthUser {
+    /// Effective service allowlist for restricted API-key inventory reads.
+    /// Other authentication classes retain their existing inventory behavior.
+    pub fn api_key_service_scope(&self) -> Option<&[String]> {
+        (self.auth_method == AuthMethod::ApiKey && !self.allow_all_services)
+            .then_some(self.allowed_service_ids.as_slice())
+    }
+
     /// Resource owner whose approval settings should be consulted.
     pub fn effective_approval_owner_user_id(&self) -> String {
         self.approval_owner_user_id
@@ -294,6 +305,36 @@ pub fn scope_allows_llm_proxy(scopes: &str) -> bool {
     scope_allows_rest_proxy(scopes) || scope_contains(scopes, LLM_PROXY_SCOPE)
 }
 
+fn ensure_service_account_purpose_route(
+    sa: &ServiceAccount,
+    scope: &str,
+    path: &str,
+    websocket: bool,
+) -> Result<(), AppError> {
+    use crate::models::service_account::ServiceAccountPurpose;
+    use crate::services::curation_grant_service::{live_grant, require_scope};
+    if sa.purpose == ServiceAccountPurpose::General {
+        return Ok(());
+    }
+    let grant = live_grant(sa)?;
+    if !websocket {
+        if path_matches_prefix(path, "/api/v1/catalog-curation") {
+            return Ok(());
+        }
+        if let Some(target) = &grant.ornn_proxy_service_id {
+            let prefix = format!("/api/v1/proxy/{target}");
+            if path_matches_prefix(path, &prefix) {
+                require_scope(sa, scope, "proxy")?;
+                return Ok(());
+            }
+        }
+    }
+    Err(AppError::Forbidden(
+        "Curation accounts can only curate granted services and use their exact Ornn HTTP proxy"
+            .into(),
+    ))
+}
+
 fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
     if api_key.purpose != ApiKeyPurpose::ScheduledInvocation {
         return Ok(());
@@ -328,7 +369,6 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
         "/api/v1/channel-relay",
         "/api/v1/delegation",
         "/api/v1/llm",
-        "/api/v1/platform-ops",
         "/api/v1/proxy",
         "/api/v1/ssh",
         "/api/v1/approvals/exact-service",
@@ -421,8 +461,16 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "channel-bots"
                 | "channel-conversations"
                 | "connect-links"
-                | "platform-ops"
+                | "catalog-curation"
         )
+    ) {
+        return true;
+    }
+
+    // Media downloads deliver private content, unlike the platform catalog.
+    if matches!(
+        segments.as_slice(),
+        ["channel-relay", "messages", _, "attachments", _]
     ) {
         return true;
     }
@@ -707,13 +755,22 @@ impl FromRequestParts<AppState> for AuthUser {
                                 AppError::Internal(format!("SA token lookup failed: {e}"))
                             })?;
 
-                        if let Some(record) = token_record
-                            && record.revoked
-                        {
-                            return Err(AppError::Unauthorized(
-                                "Token has been revoked".to_string(),
-                            ));
-                        }
+                        let record = token_record.ok_or_else(|| {
+                            AppError::Unauthorized("Service account token not found".into())
+                        })?;
+                        crate::services::service_account_service::validate_token_record(
+                            &sa, &claims, &record,
+                        )?;
+                        let request_path = parts
+                            .extensions
+                            .get::<OriginalUri>()
+                            .map_or_else(|| parts.uri.path(), |uri| uri.path());
+                        ensure_service_account_purpose_route(
+                            &sa,
+                            &claims.scope,
+                            request_path,
+                            is_websocket_upgrade(&parts.headers),
+                        )?;
 
                         let sa_uuid = Uuid::parse_str(&sa_id).map_err(|_| {
                             AppError::Unauthorized("Invalid service account ID".to_string())
@@ -725,7 +782,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             scope: claims.scope.clone(),
                             acting_client_id: None,
                             oauth_client_id: None,
-                            token_jti: None,
+                            token_jti: Some(claims.jti.clone()),
                             approval_owner_user_id: Some(sa.effective_owner_user_id().to_string()),
                             auth_method: AuthMethod::ServiceAccount,
                             allow_all_services: true,
@@ -1575,7 +1632,6 @@ mod tests {
             "/api/v1/oracle/pools",
             "/api/v1/channel-bots",
             "/api/v1/channel-conversations/conversation-id",
-            "/api/v1/platform-ops/x-search",
             "/api/v1/nodes/ws",
             "/api/v1/nodes/node-id/credentials",
             "/api/v1/nodes/node-id/credentials/pending",
@@ -1761,6 +1817,7 @@ mod tests {
             }),
             delegated: Some(true),
             sa: None,
+            sgen: None,
             cnf: None,
             relay: None,
             relay_api_key_id: None,
@@ -2018,6 +2075,107 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn channel_platform_catalog_accepts_all_management_auth_and_denies_media_delegation() {
+        use crate::{crypto::jwt, models::user::UserType};
+        let Some(db) = crate::test_utils::connect_test_database("channel_catalog_auth").await
+        else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let actor = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor.to_string(),
+                UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let raw_key = "nyxid_ag_catalog_test_token";
+        let key = delegated_fixture_api_key(
+            &Uuid::new_v4().to_string(),
+            &actor.to_string(),
+            &hash_token(raw_key),
+        );
+        db.collection::<crate::models::api_key::ApiKey>(API_KEYS)
+            .insert_one(key)
+            .await
+            .unwrap();
+        let (sa, secret) = crate::services::service_account_service::create_service_account(
+            &db,
+            "Catalog reader",
+            None,
+            "account:read",
+            &[],
+            None,
+            &actor.to_string(),
+        )
+        .await
+        .unwrap();
+        let session = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "account:read",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let delegated = jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "account:read",
+            "catalog-client",
+            3600,
+            None,
+        )
+        .unwrap();
+        let service = crate::services::service_account_service::authenticate_client_credentials(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &sa.client_id,
+            &secret,
+            None,
+        )
+        .await
+        .unwrap()
+        .access_token;
+        let (_, private) = crate::routes::build_router();
+        let app = private.with_state(state);
+        for token in [&session, &delegated, &service, raw_key] {
+            let response =
+                delegated_router_response(&app, Method::GET, "/api/v1/channel-platforms", token)
+                    .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["platforms"].as_array().unwrap().len(), 10);
+        }
+        for token in [&delegated, &service] {
+            let response = delegated_router_response(
+                &app,
+                Method::GET,
+                "/api/v1/channel-relay/messages/nonexistent/attachments/0",
+                token,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        assert!(!delegated_read_denied_path("/api/v1/channel-platforms"));
+        assert!(delegated_read_denied_path(
+            "/api/v1/channel-relay/messages/id/attachments/0"
+        ));
+        db.drop().await.unwrap();
+    }
+
     fn delegated_fixture_api_key(
         id: &str,
         user_id: &str,
@@ -2039,6 +2197,7 @@ mod tests {
             updated_at: Some(chrono::Utc::now()),
             description: None,
             allowed_service_ids: Vec::new(),
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
             allow_auto_connected_services: false,
@@ -3089,7 +3248,6 @@ mod tests {
             (Method::POST, "/api/v1/llm/gateway/v1/chat/completions"),
             (Method::POST, "/api/v1/channel-relay/reply"),
             (Method::POST, "/api/v1/channel-events/conversation-1"),
-            (Method::POST, "/api/v1/platform-ops/x-search"),
             (Method::POST, "/api/v1/ssh/service-1/exec"),
             (Method::POST, "/oauth/token"),
         ];
@@ -3514,5 +3672,38 @@ mod tests {
             &Method::GET,
             "/api/v1/api-keys"
         ));
+    }
+}
+
+#[cfg(test)]
+mod curation_purpose_regressions {
+    use super::*;
+
+    #[test]
+    fn general_service_accounts_keep_the_existing_purpose_route_projection() {
+        let sa: ServiceAccount = bson::from_document(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),"name":"General","client_id":"sa_test","client_secret_hash":"test-only-hash","secret_prefix":"sas_test",
+            "allowed_scopes":"proxy","is_active":true,"created_by":uuid::Uuid::new_v4().to_string(),"role_ids":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        }).unwrap();
+        for path in [
+            "/api/v1/proxy/s/slug/path",
+            "/api/v1/proxy/services",
+            "/api/v1/llm/status",
+            "/api/v1/llm/openai/v1/models",
+            "/api/v1/providers",
+            "/api/v1/connections",
+            "/api/v1/nodes",
+            "/api/v1/oracle/pools",
+            "/api/v1/triggers",
+        ] {
+            assert!(
+                ensure_service_account_purpose_route(&sa, "proxy", path, false).is_ok(),
+                "{path}"
+            );
+            assert!(
+                ensure_service_account_purpose_route(&sa, "proxy", path, true).is_ok(),
+                "{path}"
+            );
+        }
     }
 }

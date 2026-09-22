@@ -1,5 +1,6 @@
 pub mod action_description;
 pub mod admin_audit_service;
+pub mod admin_usage_service;
 pub mod admin_user_service;
 pub mod agent_binding_service;
 pub mod anonymous_endpoint_service;
@@ -24,23 +25,30 @@ pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;
 pub mod catalog_delegation_service;
+pub mod catalog_discovery_service;
 pub mod catalog_identity_service;
 pub mod catalog_service;
 pub mod catalog_spec_registry;
 pub mod catalog_spec_sync;
 pub mod chain_verify_service;
 pub mod channel_adapters;
+pub mod channel_admission_service;
+pub mod channel_billing_service;
 pub mod channel_bot_service;
+pub mod channel_connection_webhook_service;
 pub mod channel_credentials;
+pub mod channel_delivery_service;
 pub mod channel_event_service;
 pub mod channel_inbound_service;
 pub mod channel_managed;
+pub mod channel_media_service;
 pub mod channel_platform;
 pub mod channel_poll_service;
 pub mod channel_registration;
 pub mod channel_relay_service;
 pub mod channel_routing_service;
 pub mod channel_send_service;
+pub mod channel_verification_service;
 #[cfg(test)]
 mod channel_x_tests;
 pub mod chatgpt_translator;
@@ -116,9 +124,7 @@ pub mod org_service;
 pub mod org_slug;
 pub mod par_service;
 pub mod platform_credential_service;
-pub mod platform_operation_service;
 pub mod platform_settings_service;
-pub mod platform_vendor_template_service;
 pub mod provider_service;
 pub mod provider_token_exchange_service;
 pub mod proxy_authorization;
@@ -160,5 +166,23 @@ pub mod user_token_service;
 pub mod webhook_delivery_service;
 pub mod ws_frame_injector;
 
+pub mod catalog_skill_service;
+pub mod curation_grant_service;
 pub mod inference_service;
+pub mod options_service;
 pub mod platform_key_service;
+pub mod service_account_scope_service;
+
+pub mod channel_platform_catalog_service;
+
+pub mod assistant_access_mode_service;
+pub mod assistant_account_tools;
+pub mod assistant_acknowledgement_service;
+pub mod assistant_agent_credential_service;
+pub mod assistant_nyxagent;
+pub mod channel_retry_ingress;
+pub mod provider_link_service;
+pub mod retired_service_service;
+
+#[cfg(test)]
+pub(crate) mod assistant_authority_tests;

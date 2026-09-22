@@ -115,6 +115,7 @@ async fn create(
 ) -> Result<ChannelBot, AppError> {
     channel_bot_service::create_managed_bot(
         &state.db,
+        &state.billing,
         &state.config,
         &state.encryption_keys,
         &state.http_client,
@@ -180,7 +181,7 @@ fn descriptors_keep_all_previous_adapters_on_stored_webhook_defaults() {
                 }
             );
             assert!(adapter.registration().managed_only);
-            assert!(!adapter.registration().webhook_ingestion);
+            assert!(adapter.registration().webhook_ingestion);
             assert!(adapter.registration().fields.is_empty());
             assert!(adapter.dedup_inbound_by_platform_message_id());
             assert_eq!(
@@ -199,13 +200,25 @@ fn descriptors_keep_all_previous_adapters_on_stored_webhook_defaults() {
                 adapter.credential_resolution(),
                 CredentialResolution::StoredToken
             );
-            assert!(!adapter.registration().managed_only);
+            assert_eq!(
+                adapter.registration().managed_only,
+                adapter.platform_id() == "telegram-new"
+            );
             assert!(adapter.registration().webhook_ingestion);
             if let Some(descriptor) = adapter.platform_credentials() {
-                assert!(matches!(
-                    descriptor.backing,
-                    PlatformCredentialBacking::Stored
-                ));
+                if adapter.platform_id() == "aurinko" {
+                    assert!(matches!(
+                        descriptor.backing,
+                        PlatformCredentialBacking::ProviderOAuth {
+                            provider_slug: "aurinko"
+                        }
+                    ));
+                } else {
+                    assert!(matches!(
+                        descriptor.backing,
+                        PlatformCredentialBacking::Stored
+                    ));
+                }
             }
         }
     }
@@ -594,7 +607,7 @@ async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config()
         .unwrap();
     assert_eq!(
         list.iter().map(|p| p.provider).collect::<Vec<_>>(),
-        ["meta", "telegram-new", "x"]
+        ["aurinko", "meta", "telegram-new", "x"]
     );
     let (_, Json(updated)) = admin::update(
         State(state.clone()),
@@ -614,7 +627,7 @@ async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config()
         updated
             .fields
             .iter()
-            .all(|f| f.configured && f.value.is_none())
+            .all(|f| (!f.descriptor.required || f.configured) && f.value.is_none())
     );
     assert!(updated.webhook_verify_token.is_none());
     assert!(
@@ -653,7 +666,7 @@ async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config()
             .count_documents(doc! {"provider": "x"})
             .await
             .unwrap(),
-        0
+        1
     );
     let (_, Json(bootstrap)) =
         channel_managed::bootstrap(State(state.clone()), auth.clone(), Path("x".into()))
@@ -691,6 +704,7 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
     assert!(
         channel_bot_service::reconnect_bot(
             &state.db,
+            &state.billing,
             &state.encryption_keys,
             &state.http_client,
             &adapter,
@@ -711,6 +725,7 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
         .await;
     channel_bot_service::reconnect_bot(
         &state.db,
+        &state.billing,
         &state.encryption_keys,
         &state.http_client,
         &adapter,
@@ -751,3 +766,9 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
 
 #[path = "channel_x_review_tests.rs"]
 mod review;
+
+#[path = "channel_x_webhook_tests.rs"]
+mod webhooks;
+
+#[path = "channel_x_billing_tests.rs"]
+mod billing;

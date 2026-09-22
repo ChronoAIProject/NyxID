@@ -1,4 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminFeatureFlagsPage } from "./admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
@@ -15,7 +22,10 @@ const { mockUseFlags, mockUseUsers, mockSetFlag, mockClearFlag, mockSetMeta } =
 
 vi.mock("@/hooks/use-admin-feature-flags", () => ({
   useAdminFeatureFlags: mockUseFlags,
-  useSetAdminFeatureFlag: () => ({ mutateAsync: mockSetFlag, isPending: false }),
+  useSetAdminFeatureFlag: () => ({
+    mutateAsync: mockSetFlag,
+    isPending: false,
+  }),
   useClearAdminFeatureFlag: () => ({
     mutateAsync: mockClearFlag,
     isPending: false,
@@ -119,7 +129,17 @@ function operatorUser(): User {
 beforeEach(() => {
   mockSetFlag.mockReset().mockResolvedValue(undefined);
   mockClearFlag.mockReset().mockResolvedValue(undefined);
-  mockSetMeta.mockReset().mockResolvedValue(undefined);
+  mockSetMeta.mockReset().mockImplementation(async ({ body }) => {
+    const current = mockUseFlags().data.flags[0];
+    return {
+      ...current,
+      custom_description:
+        body.description === undefined
+          ? current.custom_description
+          : body.description,
+      owner: body.owner === undefined ? current.owner : body.owner,
+    };
+  });
   mockUseUsers.mockReset().mockReturnValue({
     data: { users: [], total: 201, page: 1, per_page: 20 },
     isLoading: false,
@@ -179,7 +199,7 @@ describe("AdminFeatureFlagsPage", () => {
     });
 
     render(<AdminFeatureFlagsPage />);
-    expect(screen.getByText("existing@example.com")).toBeInTheDocument();
+    expect(screen.getAllByText("existing@example.com")[0]).toBeInTheDocument();
   });
 
   it("renders org overrides with their display name and slug", () => {
@@ -205,11 +225,15 @@ describe("AdminFeatureFlagsPage", () => {
     });
 
     render(<AdminFeatureFlagsPage />);
-    expect(screen.getByText("Acme Corp (acme)")).toBeInTheDocument();
+    expect(screen.getAllByText("Acme Corp (acme)")[0]).toBeInTheDocument();
   });
 
   it("shows loading and error states", () => {
-    mockUseFlags.mockReturnValue({ data: undefined, isLoading: true, error: null });
+    mockUseFlags.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      error: null,
+    });
     const { rerender } = render(<AdminFeatureFlagsPage />);
     expect(screen.getByLabelText("Loading feature flags")).toBeInTheDocument();
 
@@ -219,7 +243,9 @@ describe("AdminFeatureFlagsPage", () => {
       error: new Error("failed"),
     });
     rerender(<AdminFeatureFlagsPage />);
-    expect(screen.getByText("Failed to load feature flags")).toBeInTheDocument();
+    expect(
+      screen.getByText("Failed to load feature flags"),
+    ).toBeInTheDocument();
   });
 
   it("finds a user beyond the unsearched first page with server search", async () => {
@@ -272,7 +298,9 @@ describe("AdminFeatureFlagsPage", () => {
     fireEvent.click(screen.getByText("experimental:ai-assistant"));
     // Nothing is suggested — and no request fans out — until the admin
     // actually opens the dropdown.
-    expect(screen.queryByText("suggested-0@example.com")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("suggested-0@example.com"),
+    ).not.toBeInTheDocument();
     expect(mockUseUsers).toHaveBeenCalledWith(1, 8, undefined, "person", {
       enabled: false,
     });
@@ -284,7 +312,9 @@ describe("AdminFeatureFlagsPage", () => {
       await screen.findByText("suggested-0@example.com"),
     ).toBeInTheDocument();
     expect(screen.getByText("suggested-4@example.com")).toBeInTheDocument();
-    expect(screen.queryByText("suggested-5@example.com")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("suggested-5@example.com"),
+    ).not.toBeInTheDocument();
     // total (200) minus the 5 shown.
     expect(
       screen.getByText("+195 more — keep typing to narrow"),
@@ -308,6 +338,10 @@ describe("AdminFeatureFlagsPage", () => {
     fireEvent.click(await screen.findByText("suggested-2@example.com"));
 
     fireEvent.click(screen.getByText("Apply changes"));
+    expect(mockSetFlag).not.toHaveBeenCalled();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
     await waitFor(() =>
       expect(mockSetFlag).toHaveBeenCalledWith({
         flagKey: "experimental:ai-assistant",
@@ -355,6 +389,10 @@ describe("AdminFeatureFlagsPage", () => {
     // The pick stages an enabled org override; applying must send an
     // org-scoped write, never a global one (regression: NyxID killswitch).
     fireEvent.click(screen.getByText("Apply changes"));
+    expect(mockSetFlag).not.toHaveBeenCalled();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
     await waitFor(() =>
       expect(mockSetFlag).toHaveBeenCalledWith({
         flagKey: "experimental:ai-assistant",
@@ -382,7 +420,7 @@ describe("AdminFeatureFlagsPage", () => {
     expect(screen.getByText("experimental:ai-assistant")).toBeInTheDocument();
   });
 
-  it("saves an edited description and owner as a full replace", async () => {
+  it("PATCHes only the edited description and owner after review", async () => {
     mockUseFlags.mockReturnValue({
       data: { flags: [flagFixture()] },
       isLoading: false,
@@ -411,6 +449,9 @@ describe("AdminFeatureFlagsPage", () => {
       target: { value: " Platform team " },
     });
     fireEvent.click(screen.getByText("Save details"));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
 
     await waitFor(() =>
       expect(mockSetMeta).toHaveBeenCalledWith({
@@ -453,10 +494,13 @@ describe("AdminFeatureFlagsPage", () => {
     // Clearing the description sends null, which restores the code default.
     fireEvent.click(screen.getByText("Use code default"));
     fireEvent.click(screen.getByText("Save details"));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    );
     await waitFor(() =>
       expect(mockSetMeta).toHaveBeenCalledWith({
         flagKey: "experimental:ai-assistant",
-        body: { description: null, owner: "Growth team" },
+        body: { description: null },
       }),
     );
   });
@@ -479,9 +523,7 @@ describe("AdminFeatureFlagsPage", () => {
     });
 
     expect(screen.getByText("experimental:ai-assistant")).toBeInTheDocument();
-    expect(
-      screen.queryByText("experimental:billing"),
-    ).not.toBeInTheDocument();
+    expect(screen.getByText("experimental:billing")).not.toBeVisible();
   });
 
   it("shows operators the flag details read-only", () => {
@@ -548,5 +590,316 @@ describe("AdminFeatureFlagsPage", () => {
       screen.getByLabelText("All users (rollout / killswitch)"),
     ).toBeDisabled();
     expect(screen.queryByText("Apply changes")).not.toBeInTheDocument();
+  });
+});
+
+it.each([false, true])(
+  "hydrates pristine metadata after a refetch (previously opened: %s)",
+  (opened) => {
+    mockUseFlags.mockReturnValue({
+      data: {
+        flags: [
+          flagFixture({
+            owner: "Old owner",
+            custom_description: "Old description",
+          }),
+        ],
+      },
+      isLoading: false,
+      error: null,
+    });
+    const view = render(<AdminFeatureFlagsPage />);
+    if (opened) fireEvent.click(screen.getByText("experimental:ai-assistant"));
+    mockUseFlags.mockReturnValue({
+      data: {
+        flags: [
+          flagFixture({
+            owner: "New owner",
+            custom_description: "New description",
+          }),
+        ],
+      },
+      isLoading: false,
+      error: null,
+    });
+    view.rerender(<AdminFeatureFlagsPage />);
+    if (!opened) fireEvent.click(screen.getByText("experimental:ai-assistant"));
+    expect(screen.getByLabelText("Owner — who to ask about it")).toHaveValue(
+      "New owner",
+    );
+    expect(
+      screen.getByLabelText("Description — what this flag controls"),
+    ).toHaveValue("New description");
+    expect(screen.getByRole("button", { name: "Save details" })).toBeDisabled();
+    expect(
+      screen.queryByText(/Saved values changed while/),
+    ).not.toBeInTheDocument();
+    expect(mockSetMeta).not.toHaveBeenCalled();
+  },
+);
+
+it("retains a dirty metadata draft through a changed refetch while collapsed and filtered", () => {
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [flagFixture({ owner: "Old owner", custom_description: "Saved" })],
+    },
+    isLoading: false,
+    error: null,
+  });
+  const view = render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.change(screen.getByLabelText("Owner — who to ask about it"), {
+    target: { value: "Draft owner" },
+  });
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.change(screen.getByLabelText("Search feature flags"), {
+    target: { value: "hidden" },
+  });
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Remote owner",
+          custom_description: "Remote description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  fireEvent.change(screen.getByLabelText("Search feature flags"), {
+    target: { value: "" },
+  });
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  expect(screen.getByLabelText("Owner — who to ask about it")).toHaveValue(
+    "Draft owner",
+  );
+  expect(
+    screen.getByLabelText("Description — what this flag controls"),
+  ).toHaveValue("Saved");
+  expect(screen.getByRole("button", { name: "Save details" })).toBeDisabled();
+  expect(screen.getByText(/Saved values changed while/)).toBeInTheDocument();
+  expect(mockSetMeta).not.toHaveBeenCalled();
+});
+
+it("hydrates observed remote metadata when a dirty draft is manually reverted to its baseline", () => {
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Original owner",
+          custom_description: "Original description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  const view = render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  const owner = screen.getByLabelText("Owner — who to ask about it");
+  const description = screen.getByLabelText(
+    "Description — what this flag controls",
+  );
+  fireEvent.change(owner, { target: { value: "Draft owner" } });
+  fireEvent.change(description, { target: { value: "Draft description" } });
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Remote owner",
+          custom_description: "Remote description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  expect(owner).toHaveValue("Draft owner");
+  expect(description).toHaveValue("Draft description");
+  fireEvent.change(owner, { target: { value: "Original owner" } });
+  expect(description).toHaveValue("Draft description");
+  fireEvent.change(description, { target: { value: "Original description" } });
+  expect(owner).toHaveValue("Remote owner");
+  expect(description).toHaveValue("Remote description");
+  expect(screen.getByRole("button", { name: "Save details" })).toBeDisabled();
+  expect(
+    screen.queryByText(/Saved values changed while/),
+  ).not.toBeInTheDocument();
+  expect(mockSetMeta).not.toHaveBeenCalled();
+});
+
+it("keeps its own saved values when a deferred refetch still contains the old edited field", async () => {
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Original owner",
+          custom_description: "Original description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  const view = render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.change(
+    screen.getByLabelText("Description — what this flag controls"),
+    { target: { value: "Draft description" } },
+  );
+  // Refetch an unrelated owner edit while this description draft remains dirty.
+  // Keep that fetched snapshot in the mock even after PATCH returns its saved values.
+  mockUseFlags.mockReturnValue({
+    data: {
+      flags: [
+        flagFixture({
+          owner: "Remote owner",
+          custom_description: "Original description",
+        }),
+      ],
+    },
+    isLoading: false,
+    error: null,
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByRole("button", { name: "Save details" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Review changes" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(mockSetMeta).toHaveBeenCalledExactlyOnceWith({
+    flagKey: "experimental:ai-assistant",
+    body: { description: "Draft description" },
+  });
+  expect(
+    screen.getByLabelText("Description — what this flag controls"),
+  ).toHaveValue("Draft description");
+  expect(screen.getByLabelText("Owner — who to ask about it")).toHaveValue(
+    "Remote owner",
+  );
+  expect(screen.getByRole("button", { name: "Save details" })).toBeDisabled();
+  expect(
+    screen.queryByText(/Saved values changed while/),
+  ).not.toBeInTheDocument();
+});
+
+it("retains metadata drafts across cached errors, filtering and collapse, and patches only the edited field", async () => {
+  const data = {
+    flags: [
+      flagFixture({ owner: "Existing owner", custom_description: "Saved" }),
+    ],
+  };
+  mockUseFlags.mockReturnValue({ data, isLoading: false, error: null });
+  const view = render(<AdminFeatureFlagsPage />);
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.change(
+    screen.getByLabelText("Description — what this flag controls"),
+    { target: { value: "Draft" } },
+  );
+  mockUseFlags.mockReturnValue({
+    data,
+    isLoading: false,
+    error: new Error("Offline"),
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  fireEvent.change(screen.getByLabelText("Search feature flags"), {
+    target: { value: "hidden" },
+  });
+  fireEvent.change(screen.getByLabelText("Search feature flags"), {
+    target: { value: "" },
+  });
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  fireEvent.click(screen.getByText("experimental:ai-assistant"));
+  expect(
+    screen.getByLabelText("Description — what this flag controls"),
+  ).toHaveValue("Draft");
+  fireEvent.click(screen.getByText("Save details"));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mockSetMeta).toHaveBeenCalledExactlyOnceWith({
+      flagKey: "experimental:ai-assistant",
+      body: { description: "Draft" },
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "Review changes" }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(
+    screen.queryByText(/Saved values changed while/),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByLabelText("Description — what this flag controls"),
+  ).toHaveValue("Draft");
+});
+
+it("retains failed rollout changes and newer edits while consuming only the reviewed successes", async () => {
+  let finishFirst!: () => void;
+  mockSetFlag.mockImplementation(({ flagKey }) =>
+    flagKey === "experimental:ai-assistant"
+      ? new Promise<void>((resolve) => {
+          finishFirst = resolve;
+        })
+      : Promise.reject(new Error("Write failed")),
+  );
+  const flags = [
+    flagFixture(),
+    { ...flagFixture(), key: "experimental:billing" },
+  ];
+  mockUseFlags.mockReturnValue({
+    data: { flags },
+    isLoading: false,
+    error: null,
+  });
+  const view = render(<AdminFeatureFlagsPage />);
+  for (const flag of flags) fireEvent.click(screen.getByText(flag.key));
+  const globals = screen
+    .getAllByText("All users (rollout / killswitch)")
+    .map((label) => label.parentElement!);
+  // Scope buttons are deliberately exercised during the pending write as well:
+  // a newer draft must survive even when input reaches the page programmatically.
+  async function selectScope(index: number, name: string) {
+    fireEvent.pointerDown(
+      within(globals[index]!).getByRole("combobox", { hidden: true }),
+      { button: 0, ctrlKey: false, pointerType: "mouse" },
+    );
+    fireEvent.click(await screen.findByRole("option", { name, hidden: true }));
+  }
+  await selectScope(0, "Enabled");
+  await selectScope(1, "Enabled");
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+  expect(mockSetFlag).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Confirm changes" }));
+  await waitFor(() => expect(mockSetFlag).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm changes" }));
+  expect(mockSetFlag).toHaveBeenCalledTimes(2);
+  await selectScope(0, "Disabled");
+  flags[0] = flagFixture({ global_override: true });
+  await act(async () => {
+    finishFirst();
+  });
+  view.rerender(<AdminFeatureFlagsPage />);
+  expect(screen.getByText("2 unsaved changes")).toBeInTheDocument();
+  mockSetFlag.mockResolvedValue(undefined);
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm changes" }));
+  await waitFor(() => expect(mockSetFlag).toHaveBeenCalledTimes(4));
+  expect(mockSetFlag.mock.calls[2]?.[0]).toEqual({
+    flagKey: "experimental:ai-assistant",
+    body: { target_kind: "global", target_key: null, enabled: false },
+  });
+  expect(mockSetFlag.mock.calls[3]?.[0]).toEqual({
+    flagKey: "experimental:billing",
+    body: { target_kind: "global", target_key: null, enabled: true },
   });
 });

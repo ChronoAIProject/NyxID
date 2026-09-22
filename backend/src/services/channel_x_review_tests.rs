@@ -20,6 +20,100 @@ async fn route_agent(state: &AppState, server: &MockServer, bot: &ChannelBot) {
 }
 
 #[tokio::test]
+async fn followup_dms_keep_reaching_agent_across_poll_sweeps() {
+    for errors in [
+        None,
+        Some(json!([])),
+        Some(
+            json!([{"resource_type": "user", "resource_id": "30", "type": "https://api.x.com/2/problems/resource-not-found", "detail": "PRIVATE expansion failure"}]),
+        ),
+    ] {
+        let (state, _, server, owner, key) = fixture().await;
+        let bot = insert_bot(&state, &owner, &key).await;
+        route_agent(&state, &server, &bot).await;
+        let next_id = std::sync::atomic::AtomicU64::new(101);
+        Mock::given(method("GET"))
+            .and(path("/2/dm_events"))
+            .respond_with(move |_: &wiremock::Request| {
+                let id = next_id
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    .min(107);
+                let mut body = json!({"data": (100..=id).rev().map(event).collect::<Vec<_>>()});
+                // The first DM succeeds; later polls may have unavailable expansions.
+                if id > 101
+                    && let Some(errors) = &errors
+                {
+                    body["errors"] = errors.clone();
+                }
+                ResponseTemplate::new(200).set_body_json(body)
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/callback"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        // Exceed the five-error threshold, then poll the overlapping batch again.
+        for _ in 0..8 {
+            due(&state, &bot).await;
+            channel_poll_service::sweep_with_adapters(
+                &state,
+                vec![Box::new(XAdapter {
+                    api_base: Some(server.uri()),
+                })],
+            )
+            .await
+            .unwrap();
+        }
+        let current = channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        let callbacks = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path() == "/callback")
+            .map(|r| {
+                r.body_json::<serde_json::Value>().unwrap()["raw_platform_data"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            callbacks,
+            (101..=107).map(|id| id.to_string()).collect::<Vec<_>>(),
+            "every follow-up DM must arrive once; bot status={}, errors={}",
+            current.status,
+            current.poll_error_count
+        );
+        assert_eq!(current.poll_cursor.as_deref(), Some("107"));
+        assert_eq!(current.status, "active");
+        assert_eq!(current.poll_error_count, 0);
+        assert!(current.error.is_none());
+        assert!(current.poll_lease_until.is_none());
+        let messages: Vec<bson::Document> = state
+            .db
+            .collection(crate::models::channel_message::COLLECTION_NAME)
+            .find(doc! {"channel_bot_id": &bot.id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 7);
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.get_str("callback_status") == Ok("delivered"))
+        );
+        assert!(!format!("{messages:?}").contains("PRIVATE expansion failure"));
+    }
+}
+
+#[tokio::test]
 async fn reconnect_relays_dms_received_while_failed_once() {
     let (state, adapter, server, owner, key) = fixture().await;
     let bot = insert_bot(&state, &owner, &key).await;
@@ -58,6 +152,7 @@ async fn reconnect_relays_dms_received_while_failed_once() {
     assert!(server.received_requests().await.unwrap().is_empty());
     channel_bot_service::reconnect_bot(
         &state.db,
+        &state.billing,
         &state.encryption_keys,
         &state.http_client,
         &adapter,
@@ -132,6 +227,7 @@ async fn reconnect_initializes_only_missing_cursors() {
         .await;
     channel_bot_service::reconnect_bot(
         &state.db,
+        &state.billing,
         &state.encryption_keys,
         &state.http_client,
         &adapter,

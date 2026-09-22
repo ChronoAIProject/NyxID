@@ -11,7 +11,6 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
     legacy_http_service_type_filter,
 };
-use crate::models::platform_operation::{PlatformOperation, PlatformOperationConfig};
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::service_endpoint::{
     COLLECTION_NAME as SERVICE_ENDPOINTS, EndpointRisk, OperationResponseContract, ServiceEndpoint,
@@ -29,8 +28,8 @@ use crate::services::content_type::{
 };
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
-    api_docs_service, catalog_spec_sync, connect_link_service, connection_service,
-    node_routing_service, openapi_parser, operation_descriptor, proxy_service,
+    api_docs_service, connect_link_service, connection_service, node_routing_service,
+    openapi_parser, operation_descriptor, proxy_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,6 +39,8 @@ use crate::services::{
 /// How the service was resolved -- carries enough identity for unambiguous execution.
 #[allow(dead_code)]
 pub enum McpToolSource {
+    /// Native account tools dispatched through the service layer.
+    Internal,
     /// Platform service (DownstreamService)
     Platform { downstream_service_id: String },
     /// User-managed service (UserService -- personal or org-shared)
@@ -113,9 +114,22 @@ impl McpBillingRouteContextBuilder {
         node_route: Option<&node_routing_service::NodeRoute>,
         has_server_credential: bool,
     ) -> AppResult<crate::services::billing::BillingRouteContext> {
+        let credential_class = self.credential_class_override.unwrap_or_else(|| {
+            mcp_credential_class(
+                self.is_user_service,
+                node_route.is_some(),
+                has_server_credential,
+                self.credential_source.as_deref(),
+                target,
+            )
+        });
         let billing_owner = billing
             .owner_resolver()
-            .resolve_for_resource(billing_principal_user_id, &self.effective_owner_id)
+            .resolve_for_execution(
+                billing_principal_user_id,
+                &self.effective_owner_id,
+                credential_class,
+            )
             .await?;
         let node_intent = match node_route {
             Some(route) if !route.fallback_node_ids.is_empty() => {
@@ -136,15 +150,7 @@ impl McpBillingRouteContextBuilder {
             Some(target.service.slug.clone()),
             node_intent,
             target.auth_method.clone(),
-            self.credential_class_override.unwrap_or_else(|| {
-                mcp_credential_class(
-                    self.is_user_service,
-                    node_route.is_some(),
-                    has_server_credential,
-                    self.credential_source.as_deref(),
-                    target,
-                )
-            }),
+            credential_class,
             BillingMetric::Requests,
             target.service.billing.as_ref(),
             billing.resale_enabled(),
@@ -194,6 +200,8 @@ pub struct McpToolService {
     /// service: the instance's `UserEndpoint.recommended_skills` when set,
     /// else the catalog template's `DownstreamService.recommended_skills`.
     pub recommended_skills: Vec<String>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: Option<i64>,
     /// Catalog operation policy copied into the immutable execution catalog.
     pub proxy_operation_policy: Option<ProxyOperationPolicy>,
 }
@@ -790,9 +798,10 @@ pub async fn load_operation_catalog(
             .endpoints
             .sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
     }
-    validate_catalog_identities(&visible)?;
-
-    let mut invalid_contract_services = visible
+    // One producer's ambiguous spec must not take every other service offline
+    // for the user: omit only the service whose identities are ambiguous.
+    let mut invalid_contract_services = retain_unambiguous_identities(&mut visible);
+    invalid_contract_services += visible
         .iter()
         .filter(|service| service.invalid_openapi_contract)
         .count();
@@ -892,37 +901,31 @@ fn parameter_descriptor_is_publishable(parameter: &serde_json::Value) -> bool {
             .is_none_or(|schema| schema.is_object() || schema.is_boolean())
 }
 
-fn validate_catalog_identities(services: &[McpToolService]) -> AppResult<()> {
-    let mut service_ids = HashSet::new();
-    for service in services {
-        if service.service_id.trim().is_empty() || !service_ids.insert(service.service_id.as_str())
-        {
+/// Drop services whose identities are missing or ambiguous (empty or repeated
+/// service id, empty or repeated endpoint id) and return how many were dropped.
+/// The first occurrence of a repeated service id is kept. Failing closed per
+/// service keeps a single bad producer from disabling the whole catalog.
+fn retain_unambiguous_identities(services: &mut Vec<McpToolService>) -> usize {
+    let mut service_ids: HashSet<String> = HashSet::new();
+    let before = services.len();
+    services.retain(|service| {
+        let service_ok =
+            !service.service_id.trim().is_empty() && service_ids.insert(service.service_id.clone());
+        let mut endpoint_ids = HashSet::new();
+        let endpoints_ok = service.endpoints.iter().all(|endpoint| {
+            !endpoint.endpoint_id.trim().is_empty()
+                && endpoint_ids.insert(endpoint.endpoint_id.as_str())
+        });
+        if !service_ok || !endpoints_ok {
             tracing::error!(
                 service_id = %service.service_id,
-                "MCP operation catalog contains a missing or duplicate service identity"
+                service_slug = %service.service_slug,
+                "Omitting service with missing or duplicate MCP operation identities"
             );
-            return Err(AppError::Internal(
-                "MCP operation catalog contains ambiguous identities".to_string(),
-            ));
         }
-
-        let mut endpoint_ids = HashSet::new();
-        for endpoint in &service.endpoints {
-            if endpoint.endpoint_id.trim().is_empty()
-                || !endpoint_ids.insert(endpoint.endpoint_id.as_str())
-            {
-                tracing::error!(
-                    service_id = %service.service_id,
-                    endpoint_id = %endpoint.endpoint_id,
-                    "MCP operation catalog contains a missing or duplicate endpoint identity"
-                );
-                return Err(AppError::Internal(
-                    "MCP operation catalog contains ambiguous identities".to_string(),
-                ));
-            }
-        }
-    }
-    Ok(())
+        service_ok && endpoints_ok
+    });
+    before - services.len()
 }
 
 impl<'a> NodeScope<'a> {
@@ -1044,7 +1047,7 @@ async fn load_user_tools_with_grants(
     for svc in &connected_services {
         if svc.service_type != "http"
             || svc.service_category == "provider"
-            || catalog_spec_sync::is_platform_vendor_service(svc)
+            || crate::services::retired_service_service::is_retired(svc)
         {
             continue;
         }
@@ -1285,6 +1288,16 @@ async fn load_user_tools_with_grants(
         })
         .collect();
 
+    let catalog_refs_by_id: HashMap<_, _> = valid_platform_services
+        .iter()
+        .map(|(svc, _)| {
+            (
+                svc.id.as_str(),
+                (svc.recommended_skill_refs.clone(), svc.skills_revision),
+            )
+        })
+        .collect();
+
     // 4a. User-managed services
     for r in &all_user_services {
         let us = &r.service;
@@ -1292,15 +1305,15 @@ async fn load_user_tools_with_grants(
             .catalog_service_id
             .as_deref()
             .and_then(|id| catalog_policy_by_id.get(id).copied());
-        let platform_vendor_catalog =
-            catalog_policy.is_some_and(catalog_spec_sync::is_platform_vendor_service);
+        let retired_catalog =
+            catalog_policy.is_some_and(crate::services::retired_service_service::is_retired);
         let user_endpoint = endpoints_by_id.get(us.endpoint_id.as_str()).copied();
         let endpoint_label = user_endpoint
             .map(|ep| ep.label.as_str())
             .unwrap_or(&us.slug);
 
         let user_spec_url = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref());
-        let (published, is_generic, invalid_openapi_contract) = if platform_vendor_catalog {
+        let (published, is_generic, invalid_openapi_contract) = if retired_catalog {
             (
                 ParsedMcpEndpoints {
                     endpoints: Vec::new(),
@@ -1362,9 +1375,22 @@ async fn load_user_tools_with_grants(
             })
             .unwrap_or_default();
 
+        let (recommended_skill_refs, skills_revision) =
+            if user_endpoint.is_some_and(|ep| ep.recommended_skills.is_some()) {
+                (None, None)
+            } else {
+                us.catalog_service_id
+                    .as_deref()
+                    .and_then(|id| catalog_refs_by_id.get(id))
+                    .map(|(refs, revision)| (refs.clone(), Some(*revision)))
+                    .unwrap_or_default()
+            };
+
         result.push(McpToolService {
             workspace_destinations_pending: catalog_policy
                 .is_some_and(super::destination_routing::workspace_destinations_pending),
+            recommended_skill_refs,
+            skills_revision,
             service_id: us.id.clone(),
             service_name: endpoint_label.to_string(),
             service_slug: us.slug.clone(),
@@ -1405,6 +1431,8 @@ async fn load_user_tools_with_grants(
         result.push(McpToolService {
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(svc),
+            recommended_skill_refs: svc.recommended_skill_refs.clone(),
+            skills_revision: Some(svc.skills_revision),
             service_id: svc.id.clone(),
             service_name: svc.name.clone(),
             service_slug: svc.slug.clone(),
@@ -1495,14 +1523,53 @@ async fn fetch_and_parse_user_spec(
 ) -> AppResult<ParsedMcpEndpoints> {
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, owner_id).await?;
     let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
-    let mut endpoints = Vec::with_capacity(parsed.len());
+    Ok(parsed_endpoints_to_mcp(parsed))
+}
+
+/// Convert parsed operations into MCP endpoints with unique identities.
+///
+/// Producers do publish specs whose `operationId` repeats (api.jina.ai did),
+/// and a repeated identity would otherwise make the whole operation catalog
+/// ambiguous. Operations sharing an `operationId` fall back to their
+/// method/path identity, tool names are disambiguated with a numeric suffix,
+/// and any operation whose identity still collides is dropped.
+fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> ParsedMcpEndpoints {
+    let mut operation_id_counts: HashMap<String, usize> = HashMap::new();
+    for parsed_endpoint in &parsed {
+        if let Some(operation_id) = parsed_endpoint.source_operation_id.as_deref() {
+            *operation_id_counts
+                .entry(operation_id.trim().to_owned())
+                .or_default() += 1;
+        }
+    }
+    let mut endpoints: Vec<McpToolEndpoint> = Vec::with_capacity(parsed.len());
     let mut durable_metadata = HashMap::with_capacity(parsed.len());
-    for parsed_endpoint in parsed {
+    let mut names: HashSet<String> = HashSet::with_capacity(parsed.len());
+    for mut parsed_endpoint in parsed {
+        let source_operation_id = parsed_endpoint
+            .source_operation_id
+            .as_deref()
+            .filter(|operation_id| operation_id_counts.get(operation_id.trim()) == Some(&1));
         let endpoint_id = opaque_operation_id(
-            parsed_endpoint.source_operation_id.as_deref(),
+            source_operation_id,
             &parsed_endpoint.method,
             &parsed_endpoint.path,
         );
+        if durable_metadata.contains_key(&endpoint_id) {
+            tracing::warn!(
+                method = %parsed_endpoint.method,
+                "Dropping OpenAPI operation with a duplicate identity"
+            );
+            continue;
+        }
+        if !names.insert(parsed_endpoint.name.clone()) {
+            let base = parsed_endpoint.name.clone();
+            let mut suffix = 2usize;
+            while !names.insert(format!("{base}_{suffix}")) {
+                suffix += 1;
+            }
+            parsed_endpoint.name = format!("{base}_{suffix}");
+        }
         durable_metadata.insert(
             endpoint_id.clone(),
             McpDurableEndpointMetadata {
@@ -1532,10 +1599,10 @@ async fn fetch_and_parse_user_spec(
             response: parsed_endpoint.response,
         });
     }
-    Ok(ParsedMcpEndpoints {
+    ParsedMcpEndpoints {
         endpoints,
         durable_metadata,
-    })
+    }
 }
 
 /// Fetch and parse a user-mounted OpenAPI spec, returning `Some(endpoints)`
@@ -2059,7 +2126,6 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
 pub fn generate_tool_definitions(
     services: &[McpToolService],
     activated_service_ids: Option<&HashSet<String>>,
-    platform_operations: &[PlatformOperation],
 ) -> Vec<McpToolDefinition> {
     let mut tools = Vec::new();
 
@@ -2388,102 +2454,6 @@ pub fn generate_tool_definitions(
         }),
     });
 
-    // -- First-party platform operations (present only while enabled) --
-    for operation in platform_operations {
-        if !operation.enabled {
-            continue;
-        }
-        let definition = match &operation.config {
-            PlatformOperationConfig::XSearch(config)
-                if operation.op
-                    == crate::models::platform_operation::PlatformOperationName::XSearch =>
-            {
-                McpToolDefinition {
-                    name: "nyx__x_search".to_string(),
-                    description: "Search recent posts on X through NyxID's constrained platform operation."
-                        .to_string(),
-                    input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 512,
-                                "description": "Search query"
-                            },
-                            "max_results": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": config.max_results_cap,
-                                "description": "Maximum results to return"
-                            }
-                        },
-                        "required": ["query"],
-                        "additionalProperties": false
-                    }),
-                }
-            }
-            PlatformOperationConfig::Speak(config)
-                if operation.op
-                    == crate::models::platform_operation::PlatformOperationName::Speak =>
-            {
-                McpToolDefinition {
-                    name: "nyx__speak".to_string(),
-                    description: "Synthesize MP3 speech through NyxID's constrained platform operation."
-                        .to_string(),
-                    input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "text": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": config.max_chars,
-                                "description": "Text to synthesize"
-                            },
-                            "voice_id": {
-                                "type": "string",
-                                "enum": config.allowed_voice_ids,
-                                "description": "Allowlisted ElevenLabs voice ID"
-                            }
-                        },
-                        "required": ["text", "voice_id"],
-                        "additionalProperties": false
-                    }),
-                }
-            }
-            PlatformOperationConfig::CallAndSay(config)
-                if operation.op
-                    == crate::models::platform_operation::PlatformOperationName::CallAndSay =>
-            {
-                McpToolDefinition {
-                    name: "nyx__call_and_say".to_string(),
-                    description: "Place a constrained voice call and speak a message using server-composed TwiML."
-                        .to_string(),
-                    input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "to": {
-                                "type": "string",
-                                "pattern": "^\\+[1-9][0-9]{0,14}$",
-                                "description": "Allowlisted E.164 destination"
-                            },
-                            "message": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": config.max_message_chars,
-                                "description": "Message to speak"
-                            }
-                        },
-                        "required": ["to", "message"],
-                        "additionalProperties": false
-                    }),
-                }
-            }
-            _ => continue,
-        };
-        tools.push(definition);
-    }
-
     // -- Per-service tools (filtered by activated set) --
     for service in services {
         let included = match activated_service_ids {
@@ -2563,6 +2533,8 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
 
         public_services.push(McpToolService {
             workspace_destinations_pending: false,
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: svc.id.clone(),
             service_name: svc.name.clone(),
             service_slug: format!("public__{}", sanitize_tool_segment(&svc.slug)),
@@ -3805,6 +3777,11 @@ pub async fn execute_tool(
     // (not cached loader flags -- credential state may have changed).
     let (target, node_route, has_server_credential, billing_context_builder) = match &service.source
     {
+        McpToolSource::Internal => {
+            return Err(AppError::Forbidden(
+                "Native tools require chat acknowledgement dispatch".into(),
+            ));
+        }
         McpToolSource::UserManaged {
             user_service_id, ..
         } => {
@@ -4172,6 +4149,15 @@ pub async fn execute_tool_resolved(
         is_generic_proxy_endpoint,
     } = prepared;
 
+    proxy_service::validate_ifttt_request(
+        &target,
+        &method,
+        &path,
+        query.as_deref(),
+        body.as_deref(),
+        node_route.is_some(),
+    )?;
+
     // Build identity headers if configured on the service (CR-8)
     let mut identity_headers = Vec::new();
     if target.service.identity_propagation_mode != "none" {
@@ -4264,7 +4250,7 @@ pub async fn execute_tool_resolved(
     // When a node route exists, swallow errors -- the node agent may inject
     // the credential locally, matching proxy.rs:891 behavior.
     let delegated = match &service.source {
-        McpToolSource::UserManaged { .. } => Vec::new(),
+        McpToolSource::UserManaged { .. } | McpToolSource::Internal => Vec::new(),
         McpToolSource::Platform {
             downstream_service_id,
         } => {
@@ -4296,6 +4282,8 @@ pub async fn execute_tool_resolved(
         }
     };
 
+    proxy_service::validate_ifttt_delegation(&target, &delegated)?;
+
     // Content-Type header
     let req_headers = if is_generic_proxy_endpoint {
         let mut h = reqwest::header::HeaderMap::new();
@@ -4320,6 +4308,7 @@ pub async fn execute_tool_resolved(
             has_server_credential,
         )
         .await?;
+    let billing_ctx = billing_ctx.with_request_body(body.as_deref());
     let metered = billing.open(&billing_ctx).await?;
     let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
 
@@ -4426,7 +4415,13 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            mcp_platform_usage(&resp.body, request_len, &target.service),
+                            mcp_platform_usage_for_path(
+                                &resp.body,
+                                request_len,
+                                &target.service,
+                                &path,
+                                resp.status,
+                            ),
                             None,
                             None,
                         )
@@ -4445,7 +4440,13 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            mcp_platform_usage(&body_buf, request_len, &target.service),
+                            mcp_platform_usage_for_path(
+                                &body_buf,
+                                request_len,
+                                &target.service,
+                                &path,
+                                status,
+                            ),
                             None,
                             None,
                         )
@@ -4556,7 +4557,13 @@ pub async fn execute_tool_resolved(
     billing
         .settle(
             &metered,
-            mcp_platform_usage(body_text.as_bytes(), request_len, &target.service),
+            mcp_platform_usage_for_path(
+                body_text.as_bytes(),
+                request_len,
+                &target.service,
+                &path,
+                status,
+            ),
             None,
             None,
         )
@@ -4566,34 +4573,27 @@ pub async fn execute_tool_resolved(
     Ok(McpToolExecutionOutcome::Response((status, body_text)))
 }
 
+#[cfg(test)]
 fn mcp_platform_usage(body: &[u8], request_len: i64, service: &DownstreamService) -> PlatformUsage {
+    mcp_platform_usage_for_path(body, request_len, service, "", 200)
+}
+
+fn mcp_platform_usage_for_path(
+    body: &[u8],
+    request_len: i64,
+    service: &DownstreamService,
+    path: &str,
+    status: u16,
+) -> PlatformUsage {
     use crate::services::llm_usage_service;
-    let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
-    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
-        if let Some(usage) = llm_usage_service::extract_reported_usage(&value) {
-            accumulator.observe_snapshot(usage);
-        }
-    } else {
-        let mut buffer = String::from_utf8_lossy(body).into_owned();
-        while let Some(event) = super::sse_parser::parse_next_event(&mut buffer) {
-            if let Some((usage, mode)) = llm_usage_service::extract_reported_usage_from_sse_event(
-                event.event_type.as_deref(),
-                &event.data,
-            ) {
-                accumulator.observe(usage, mode);
-            }
-        }
-    }
-    let usage = accumulator.finalize();
-    let bytes = request_len.saturating_add(body.len() as i64);
-    if usage.is_none() && !crate::services::billing::metric_resolution::captures_tokens(service) {
-        return PlatformUsage::single_request(bytes);
-    }
-    PlatformUsage::llm_completion(
-        bytes,
-        llm_usage_service::token_quantity_or_estimate(usage.as_ref(), bytes),
+    // Reuse the already-read response and existing MCP transport limits. A
+    // smaller proxy-specific cap would change legacy MCP token accounting.
+    let usage = llm_usage_service::usage_from_body(body, path, (200..300).contains(&status));
+    llm_usage_service::platform_usage(
+        usage.as_ref(),
+        request_len.saturating_add(body.len() as i64),
+        crate::services::billing::metric_resolution::captures_tokens(service),
     )
-    .with_token_breakdown(usage.as_ref().map(|usage| usage.token_breakdown()))
 }
 
 fn direct_transport_failure_is_pre_dispatch(error: &reqwest::Error) -> bool {
@@ -4688,10 +4688,25 @@ pub struct SearchResult {
 /// Search ALL user tools (regardless of activation state) and return matches
 /// plus the service IDs they belong to.
 pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResult {
-    let q_lower = query.to_lowercase();
-    let mut matches = Vec::new();
-    let mut matched_ids: HashSet<String> = HashSet::new();
-
+    // Models phrase queries freely ("skill search", "light state"), so match
+    // each query word independently against the qualified tool name, the
+    // service identity and the description, then rank tools that contain
+    // every word above partial matches. Words are substrings so concatenated
+    // operation names such as `getentitystate` still match "entity state".
+    let tokens: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut candidates: Vec<(
+        usize,
+        usize,
+        &McpToolService,
+        &McpToolEndpoint,
+        String,
+        String,
+    )> = Vec::new();
     for service in services {
         for endpoint in &service.endpoints {
             let name = format!("{}__{}", service.service_slug, endpoint.name);
@@ -4700,29 +4715,34 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name),
             );
-
-            if name.to_lowercase().contains(&q_lower)
-                || description.to_lowercase().contains(&q_lower)
-            {
-                matched_ids.insert(service.service_id.clone());
-                let input_schema = if service.is_generic_proxy {
-                    build_generic_proxy_input_schema()
-                } else {
-                    build_input_schema(endpoint)
-                };
-                matches.push(McpToolDefinition {
-                    name,
-                    description,
-                    input_schema,
-                });
-                if matches.len() >= MAX_SEARCH_RESULTS {
-                    break;
-                }
+            let haystack = format!("{name}\n{description}").to_lowercase();
+            let matched = tokens
+                .iter()
+                .filter(|token| haystack.contains(token.as_str()))
+                .count();
+            if tokens.is_empty() || matched > 0 {
+                let order = candidates.len();
+                candidates.push((matched, order, service, endpoint, name, description));
             }
         }
-        if matches.len() >= MAX_SEARCH_RESULTS {
-            break;
-        }
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    candidates.truncate(MAX_SEARCH_RESULTS);
+
+    let mut matches = Vec::with_capacity(candidates.len());
+    let mut matched_ids: HashSet<String> = HashSet::new();
+    for (_, _, service, endpoint, name, description) in candidates {
+        matched_ids.insert(service.service_id.clone());
+        let input_schema = if service.is_generic_proxy {
+            build_generic_proxy_input_schema()
+        } else {
+            build_input_schema(endpoint)
+        };
+        matches.push(McpToolDefinition {
+            name,
+            description,
+            input_schema,
+        });
     }
 
     SearchResult {
@@ -4759,6 +4779,7 @@ pub fn list_connected_services(
         })
         .map(|service| {
             let source = match &service.source {
+                McpToolSource::Internal => "internal",
                 McpToolSource::Platform { .. } => "platform",
                 McpToolSource::UserManaged { .. } => "user_service",
             };
@@ -4791,14 +4812,29 @@ pub async fn discover_services(
     query: Option<&str>,
     category: Option<&str>,
 ) -> AppResult<serde_json::Value> {
+    discover_services_with_scope(db, user_id, query, category, None).await
+}
+
+/// Restricted API-key discovery hides connection state outside the effective
+/// allowlist. None keeps the behavior for humans, unrestricted keys and SAs.
+pub async fn discover_services_with_scope(
+    db: &mongodb::Database,
+    user_id: &str,
+    query: Option<&str>,
+    category: Option<&str>,
+    api_key_scope: Option<&[String]>,
+) -> AppResult<serde_json::Value> {
     // Load all old-model connections so an inactive row can distinguish an
     // explicit disconnect from an auto-connected service with no row.
-    let connections: Vec<UserServiceConnection> = db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .find(doc! { "user_id": user_id })
-        .await?
-        .try_collect()
-        .await?;
+    let connections: Vec<UserServiceConnection> = if api_key_scope.is_some() {
+        vec![]
+    } else {
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .find(doc! { "user_id": user_id })
+            .await?
+            .try_collect()
+            .await?
+    };
 
     let connected_ids: HashSet<&str> = connections
         .iter()
@@ -4810,13 +4846,24 @@ pub async fn discover_services(
         .map(|connection| connection.service_id.as_str())
         .collect();
 
+    let grants =
+        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     // Load new-model AI Services -- exclude catalog services already provisioned
-    let user_services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! { "user_id": user_id, "is_active": true })
+    let user_services: Vec<UserService> = if let Some(allowed) = api_key_scope {
+        super::catalog_discovery_service::agent_services_with_memberships(
+            db,
+            user_id,
+            Some(allowed),
+            grants.memberships(),
+        )
         .await?
-        .try_collect()
-        .await?;
+    } else {
+        db.collection::<UserService>(USER_SERVICES)
+            .find(doc! { "user_id": user_id, "is_active": true })
+            .await?
+            .try_collect()
+            .await?
+    };
 
     let user_service_catalog_ids: HashSet<&str> = user_services
         .iter()
@@ -4828,6 +4875,7 @@ pub async fn discover_services(
     let mut filter = doc! {
         "is_active": true,
         "service_category": { "$ne": "provider" },
+        "$and": [super::catalog_service::visibility_filter(user_id)],
         "$nor": [
             { "service_category": "internal", "slug": { "$regex": "^platform-" } },
         ],
@@ -4847,7 +4895,7 @@ pub async fn discover_services(
         .try_collect()
         .await?;
 
-    let mut results: Vec<serde_json::Value> = all_services
+    let candidates: Vec<serde_json::Value> = all_services
         .iter()
         .filter(|svc| {
             // Already connected via old model
@@ -4891,10 +4939,9 @@ pub async fn discover_services(
         })
         .collect();
 
-    let grants =
-        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     let providers = crate::services::platform_key_service::load_providers(db).await?;
-    for result in &mut results {
+    let mut results = Vec::with_capacity(candidates.len());
+    for mut result in candidates {
         let Some(service) = all_services
             .iter()
             .find(|s| result["service_id"].as_str() == Some(&s.id))
@@ -4908,6 +4955,12 @@ pub async fn discover_services(
         let available = crate::services::platform_key_service::available_with_grants(
             service, provider, user_id, &grants,
         );
+        // The shared query admits platform-key-enabled candidates before live
+        // grant resolution. Like REST catalog listing, hide another owner's
+        // private template when that platform key is unavailable to the actor.
+        if service.visibility == "private" && service.created_by != user_id && !available {
+            continue;
+        }
         if let Some(inference) = crate::services::inference_service::view(
             service,
             provider.map(|p| p.slug.as_str()),
@@ -4925,6 +4978,7 @@ pub async fn discover_services(
                 .and_then(|b| b.byok_pricing.as_ref())
                 .map(crate::services::inference_service::LanePricingView::from)
         );
+        results.push(result);
     }
     let count = results.len();
     Ok(serde_json::json!({ "services": results, "count": count }))
@@ -5089,6 +5143,29 @@ pub async fn connect_service(
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Separate from the stable operation catalog digest used by existing clients.
+pub fn skills_manifest_digest(services: &[McpToolService]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut entries: Vec<_> = services
+        .iter()
+        .map(|s| {
+            (
+                &s.service_id,
+                &s.recommended_skills,
+                &s.recommended_skill_refs,
+            )
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    format!(
+        "v1:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&("nyxid.mcp-skills-manifest.v1", entries))
+                .expect("skill manifest serializes")
+        ))
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -5126,6 +5203,33 @@ mod tests {
             .unwrap()
             .metric = BillingMetric::Requests;
         assert_eq!(super::mcp_platform_usage(body, 12, &service).tokens, 0);
+        service
+            .billing
+            .as_mut()
+            .unwrap()
+            .platform_key_pricing
+            .as_mut()
+            .unwrap()
+            .components = vec![
+            serde_json::from_value(
+                serde_json::json!({"metric":"input_tokens", "credits_per_unit":"0.000000250001"}),
+            )
+            .unwrap(),
+        ];
+        assert!(super::mcp_platform_usage(body, 12, &service).tokens > 0);
+        let images = super::mcp_platform_usage_for_path(
+            br#"{"data":[{"url":"image"}],"usage":{"input_tokens":120,"output_tokens":20,"input_tokens_details":{"cached_tokens":100}}}"#,
+            12, &service, "/v1/images/generations", 200,
+        );
+        assert_eq!(
+            (
+                images.input_tokens,
+                images.output_tokens,
+                images.cache_read_tokens,
+                images.images
+            ),
+            (20, 20, 100, 1)
+        );
     }
 
     use super::*;
@@ -5732,6 +5836,8 @@ mod tests {
             .collect();
         McpToolService {
             workspace_destinations_pending: false,
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: id.to_string(),
             service_name: name.to_string(),
             service_slug: slug.to_string(),
@@ -5747,6 +5853,138 @@ mod tests {
             is_generic_proxy: false,
             invalid_openapi_contract: false,
             proxy_operation_policy: None,
+        }
+    }
+
+    #[test]
+    fn curation_refs_change_only_separate_digest_while_names_keep_legacy_digest() {
+        let mut service = make_service(
+            "svc",
+            "Service",
+            "service",
+            vec![make_endpoint("list", "List")],
+        );
+        service.recommended_skills = vec!["manual".into()];
+        let original = operation_catalog_digest(std::slice::from_ref(&service));
+        service.recommended_skill_refs = Some(vec![
+            crate::models::catalog_skill_revision::SkillReference {
+                source: "ornn".into(),
+                skill_id: "immutable-id".into(),
+                name: "manual".into(),
+                version: "1.0".into(),
+                sha256: "a".repeat(64),
+                dependencies: vec![],
+            },
+        ]);
+        service.skills_revision = Some(3);
+        assert_eq!(
+            operation_catalog_digest(std::slice::from_ref(&service)),
+            original
+        );
+        let manifest = skills_manifest_digest(std::slice::from_ref(&service));
+        service.recommended_skill_refs.as_mut().unwrap()[0].version = "1.1".into();
+        service.skills_revision = Some(4);
+        assert_eq!(
+            operation_catalog_digest(std::slice::from_ref(&service)),
+            original
+        );
+        assert_ne!(
+            skills_manifest_digest(std::slice::from_ref(&service)),
+            manifest
+        );
+        service.recommended_skills = vec!["replacement".into()];
+        assert_ne!(operation_catalog_digest(&[service]), original);
+    }
+
+    #[tokio::test]
+    async fn curation_instance_name_override_suppresses_inherited_refs() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("curation_mcp_override").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let mut catalog = dummy_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = "pinned-service".into();
+        catalog.recommended_skills = Some(vec!["manual".into()]);
+        catalog.skills_revision = 4;
+        catalog.recommended_skill_refs = Some(vec![
+            crate::models::catalog_skill_revision::SkillReference {
+                source: "ornn".into(),
+                skill_id: "immutable".into(),
+                name: "manual".into(),
+                version: "1.0".into(),
+                sha256: "b".repeat(64),
+                dependencies: vec![],
+            },
+        ]);
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: owner.clone(),
+                service_id: catalog.id.clone(),
+                credential_encrypted: None,
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: true,
+                state_version: 0,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let endpoint = test_user_endpoint(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            "Instance",
+            "https://instance.test",
+            None,
+            Some(&catalog.id),
+        );
+        let instance = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &owner,
+            &catalog.slug,
+            &endpoint.id,
+            Some(&catalog.id),
+            None,
+        );
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(&endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&instance)
+            .await
+            .unwrap();
+        let manager = NodeWsManager::new(30, 100);
+        let load = || load_user_tools_all_scoped(&db, &manager, &owner, NodeScope::Unrestricted);
+        let inherited = load().await.unwrap();
+        let inherited = inherited
+            .iter()
+            .find(|s| s.service_id == instance.id)
+            .unwrap();
+        assert_eq!(
+            inherited.recommended_skill_refs,
+            catalog.recommended_skill_refs
+        );
+        assert_eq!(inherited.skills_revision, Some(4));
+        for names in [vec!["local"], vec![]] {
+            db.collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+                .update_one(
+                    doc! {"_id":&endpoint.id},
+                    doc! {"$set":{"recommended_skills":&names}},
+                )
+                .await
+                .unwrap();
+            let loaded = load().await.unwrap();
+            let actual = loaded.iter().find(|s| s.service_id == instance.id).unwrap();
+            assert_eq!(actual.recommended_skills, names);
+            assert!(actual.recommended_skill_refs.is_none());
+            assert!(actual.skills_revision.is_none());
         }
     }
 
@@ -6182,25 +6420,23 @@ mod tests {
     }
 
     #[test]
-    fn catalog_identity_validation_fails_closed_on_missing_or_duplicate_ids() {
-        let mut missing_service = make_service(
+    fn catalog_identity_validation_omits_only_ambiguous_services() {
+        let missing_service = make_service(
             "",
             "Missing",
             "missing",
             vec![make_endpoint("read", "Read")],
         );
-        assert!(validate_catalog_identities(&[missing_service]).is_err());
-
-        let duplicate_endpoint = make_endpoint("read", "Read");
-        let service = make_service(
-            "service-1",
+        let duplicate_endpoints = make_service(
+            "service-dup-endpoints",
             "Duplicate",
             "duplicate",
-            vec![duplicate_endpoint, make_endpoint("read", "Read again")],
+            vec![
+                make_endpoint("read", "Read"),
+                make_endpoint("read", "Read again"),
+            ],
         );
-        assert!(validate_catalog_identities(&[service]).is_err());
-
-        missing_service = make_service(
+        let first = make_service(
             "service-1",
             "First",
             "first",
@@ -6212,7 +6448,93 @@ mod tests {
             "second",
             vec![make_endpoint("two", "Two")],
         );
-        assert!(validate_catalog_identities(&[missing_service, duplicate_service]).is_err());
+        let healthy = make_service(
+            "service-2",
+            "Healthy",
+            "healthy",
+            vec![make_endpoint("a", "A"), make_endpoint("b", "B")],
+        );
+        let mut services = vec![
+            missing_service,
+            duplicate_endpoints,
+            first,
+            duplicate_service,
+            healthy,
+        ];
+        assert_eq!(retain_unambiguous_identities(&mut services), 3);
+        let kept: Vec<_> = services
+            .iter()
+            .map(|service| service.service_slug.as_str())
+            .collect();
+        assert_eq!(kept, ["first", "healthy"]);
+        assert_eq!(retain_unambiguous_identities(&mut services), 0);
+    }
+
+    #[test]
+    fn duplicate_operation_ids_in_a_producer_spec_keep_every_operation_distinct() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": {"title": "Producer", "version": "1"},
+            "paths": {
+                "/v1/classifiers": {
+                    "get": {"operationId": "list_classifiers", "responses": {"200": {"description": "ok"}}},
+                    "post": {"operationId": "create_classifier", "responses": {"200": {"description": "ok"}}}
+                },
+                "/v1/classifiers/all": {
+                    "get": {"operationId": "list_classifiers", "responses": {"200": {"description": "ok"}}}
+                },
+                "/v1/classifiers/legacy": {
+                    "get": {"operationId": "list_classifiers", "responses": {"200": {"description": "ok"}}}
+                }
+            }
+        });
+        let parsed = openapi_parser::parse_openapi_spec_value(&spec).unwrap();
+        assert_eq!(parsed.len(), 4);
+        let converted = parsed_endpoints_to_mcp(parsed);
+        assert_eq!(converted.endpoints.len(), 4);
+        let ids: HashSet<_> = converted
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.endpoint_id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 4, "every operation keeps a distinct identity");
+        assert_eq!(converted.durable_metadata.len(), 4);
+        let names: Vec<_> = converted
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.name.as_str())
+            .collect();
+        let unique: HashSet<_> = names.iter().copied().collect();
+        assert_eq!(unique.len(), 4, "tool names stay callable: {names:?}");
+        assert!(names.contains(&"list_classifiers"));
+        assert!(names.contains(&"list_classifiers_2"));
+        assert!(names.contains(&"list_classifiers_3"));
+        // Repeated operationIds use the method/path identity, which is stable
+        // and does not depend on the position of the operation in the spec.
+        let legacy = converted
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.path == "/v1/classifiers/legacy")
+            .unwrap();
+        assert_eq!(
+            legacy.endpoint_id,
+            opaque_operation_id(None, "GET", "/v1/classifiers/legacy")
+        );
+        // A unique operationId keeps its operationId-derived identity.
+        let create = converted
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.method.eq_ignore_ascii_case("post"))
+            .unwrap();
+        assert_eq!(
+            create.endpoint_id,
+            opaque_operation_id(Some("create_classifier"), "POST", "/v1/classifiers")
+        );
+        let mut services = vec![McpToolService {
+            endpoints: converted.endpoints,
+            ..make_service("service-1", "Producer", "producer", Vec::new())
+        }];
+        assert_eq!(retain_unambiguous_identities(&mut services), 0);
     }
 
     #[test]
@@ -6248,7 +6570,9 @@ mod tests {
             McpToolSource::UserManaged {
                 user_service_id, ..
             } => assert_eq!(user_service.service_id, *user_service_id),
-            McpToolSource::Platform { .. } => panic!("expected user-managed source"),
+            McpToolSource::Platform { .. } | McpToolSource::Internal => {
+                panic!("expected user-managed source")
+            }
         }
     }
 
@@ -6398,6 +6722,64 @@ mod tests {
         assert_eq!(result.matched_service_ids.len(), 2);
         assert!(result.matched_service_ids.contains(&"svc-1".to_string()));
         assert!(result.matched_service_ids.contains(&"svc-2".to_string()));
+    }
+
+    #[test]
+    fn search_all_tools_matches_words_in_any_order_and_ranks_full_matches_first() {
+        let services = vec![
+            make_service(
+                "ornn",
+                "Ornn",
+                "ornn-api",
+                vec![
+                    make_endpoint("searchskills", "Search published skills"),
+                    make_endpoint("getformatrules", "Skill format rules"),
+                ],
+            ),
+            make_service(
+                "ha",
+                "Home Assistant at office",
+                "home-assistant",
+                vec![
+                    make_endpoint("getentitystate", "Read an entity"),
+                    make_endpoint("lightturnon", "Turn a light on"),
+                    make_endpoint("switchturnoff", "Turn a switch off"),
+                ],
+            ),
+        ];
+        // Word order does not matter and every word need not be adjacent.
+        for query in ["skill search", "search skills", "SKILL-SEARCH"] {
+            let result = search_all_tools(&services, query);
+            assert_eq!(result.matches[0].name, "ornn-api__searchskills", "{query}");
+        }
+        // Concatenated operation names match by substring; tools that contain
+        // every word rank above partial matches, which are still returned.
+        let result = search_all_tools(&services, "entity state");
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].name, "home-assistant__getentitystate");
+        let result = search_all_tools(&services, "state entity light");
+        let names: Vec<_> = result.matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "home-assistant__getentitystate",
+                "home-assistant__lightturnon"
+            ]
+        );
+        let result = search_all_tools(&services, "light state");
+        assert_eq!(result.matches.len(), 2);
+        let names: Vec<_> = result.matches.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "home-assistant__getentitystate",
+                "home-assistant__lightturnon"
+            ]
+        );
+        // The service name is searchable too.
+        let result = search_all_tools(&services, "home assistant office");
+        assert_eq!(result.matches.len(), 3);
+        assert_eq!(result.matched_service_ids, vec!["ha".to_string()]);
     }
 
     #[test]
@@ -7369,6 +7751,187 @@ mod tests {
         assert!(!discovered_ids.contains(&user_service_id.as_str()));
     }
 
+    #[tokio::test]
+    async fn discover_services_shares_rest_visibility_for_all_callers() {
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::test_utils::{test_app_state, test_user};
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        async fn assert_visibility(
+            state: &crate::AppState,
+            owner: &str,
+            key: &str,
+            expected: &[&str],
+        ) {
+            let direct = discover_services(&state.db, owner, None, None)
+                .await
+                .unwrap();
+            let (_, private) = crate::routes::build_router_with_state(state.clone());
+            let response = private
+                .with_state(state.clone())
+                .oneshot(
+                    Request::post("/mcp")
+                        .header("x-api-key", key)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": "nyx__discover_services", "arguments": {}}
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let via_key: serde_json::Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(via_key, direct);
+            // With no connected instances, a restricted key has the same
+            // template visibility as the owner and an unrestricted key.
+            let restricted = discover_services_with_scope(&state.db, owner, None, None, Some(&[]))
+                .await
+                .unwrap();
+            assert_eq!(restricted, direct);
+            let mut slugs: Vec<&str> = direct["services"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["slug"].as_str().unwrap())
+                .collect();
+            slugs.sort_unstable();
+            assert_eq!(slugs, expected);
+            // include_all also accepts legacy rows without service_type.
+            let mut rest: Vec<String> = crate::services::catalog_service::list_catalog_all(
+                &state.db,
+                &state.encryption_keys,
+                owner,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.slug)
+            .collect();
+            rest.sort_unstable();
+            assert_eq!(rest, expected);
+        }
+
+        let Some(db) = connect_test_database("mcp_discovery_visibility").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        for slug in ["public", "legacy", "private-template"] {
+            let mut catalog = dummy_service();
+            catalog.id = uuid::Uuid::new_v4().to_string();
+            catalog.slug = slug.to_string();
+            catalog.created_by = other.clone();
+            catalog.requires_user_credential = true;
+            if slug == "private-template" {
+                catalog.visibility = "private".to_string();
+            }
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(catalog)
+                .await
+                .unwrap();
+        }
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "legacy"},
+                doc! {"$unset": {"visibility": "", "service_type": ""}},
+            )
+            .await
+            .unwrap();
+        // The legacy HTTP-type $or must not overwrite the visibility predicate.
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "private-template"},
+                doc! {"$unset": {"service_type": ""}},
+            )
+            .await
+            .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &db,
+            &owner,
+            "Discovery",
+            "proxy",
+            /* expires_at */ None,
+            /* description */ None,
+            /* allowed_service_ids */ None,
+            /* allowed_node_ids */ None,
+            /* allow_all_services */ Some(true),
+            /* allow_auto_connected_services */ Some(false),
+            /* allow_all_nodes */ Some(true),
+            /* rate_limit_per_second */ None,
+            /* rate_limit_burst */ None,
+            /* platform */ None,
+            /* callback_url */ None,
+        )
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+        assert_visibility(&state, &owner, &key.full_key, &["legacy", "public"]).await;
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "private-template"},
+                doc! {"$set": {"created_by": &owner}},
+            )
+            .await
+            .unwrap();
+        assert_visibility(
+            &state,
+            &owner,
+            &key.full_key,
+            &["legacy", "private-template", "public"],
+        )
+        .await;
+
+        // Enabled alone is only a query candidate, not a live platform grant.
+        // Match REST before granting access, after granting it, and on revocation.
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES).update_one(
+            doc! {"slug": "private-template"}, doc! {"$set": {
+                "created_by": &other, "credential_encrypted": vec![1_i32],
+                "platform_key": {"enabled": true, "audience": "restricted", "allowed_owner_ids": []},
+            }},
+        ).await.unwrap();
+        assert_visibility(&state, &owner, &key.full_key, &["legacy", "public"]).await;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "private-template"},
+                doc! {"$set": {"platform_key.allowed_owner_ids": [&owner]}},
+            )
+            .await
+            .unwrap();
+        assert_visibility(
+            &state,
+            &owner,
+            &key.full_key,
+            &["legacy", "private-template", "public"],
+        )
+        .await;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! {"slug": "private-template"},
+                doc! {"$set": {"platform_key.allowed_owner_ids": []}},
+            )
+            .await
+            .unwrap();
+        assert_visibility(&state, &owner, &key.full_key, &["legacy", "public"]).await;
+    }
+
     // -- generate_tool_definitions tests --
 
     #[test]
@@ -7381,7 +7944,7 @@ mod tests {
         )];
 
         let empty_set = HashSet::new();
-        let tools = generate_tool_definitions(&services, Some(&empty_set), &[]);
+        let tools = generate_tool_definitions(&services, Some(&empty_set));
 
         // Should only have the 14 meta-tools (6 core + 2 SSH + 6 oracle)
         assert_eq!(tools.len(), 14);
@@ -7407,7 +7970,7 @@ mod tests {
 
         let mut activated = HashSet::new();
         activated.insert("svc-1".to_string());
-        let tools = generate_tool_definitions(&services, Some(&activated), &[]);
+        let tools = generate_tool_definitions(&services, Some(&activated));
 
         // 14 meta-tools + 1 weather tool (news excluded)
         assert_eq!(tools.len(), 15);
@@ -7432,7 +7995,7 @@ mod tests {
             ),
         ];
 
-        let tools = generate_tool_definitions(&services, None, &[]);
+        let tools = generate_tool_definitions(&services, None);
 
         // 14 meta-tools + 2 service tools
         assert_eq!(tools.len(), 16);
@@ -7442,7 +8005,7 @@ mod tests {
 
     #[test]
     fn generate_tool_definitions_includes_oracle_meta_tools() {
-        let tools = generate_tool_definitions(&[], None, &[]);
+        let tools = generate_tool_definitions(&[], None);
 
         let required_for = |name: &str| -> Vec<String> {
             tools
@@ -7472,7 +8035,7 @@ mod tests {
 
     #[test]
     fn generate_tool_definitions_includes_connected_services_meta_tool() {
-        let tools = generate_tool_definitions(&[], None, &[]);
+        let tools = generate_tool_definitions(&[], None);
         let tool = tools
             .iter()
             .find(|tool| tool.name == "nyx__list_connected_services")
@@ -7482,51 +8045,269 @@ mod tests {
         assert!(tool.input_schema["properties"]["query"].is_object());
     }
 
-    #[test]
-    fn generate_tool_definitions_publishes_only_enabled_platform_operation_rows() {
-        let enabled_operation = PlatformOperation {
-            id: "platform-speak".to_string(),
-            op: crate::models::platform_operation::PlatformOperationName::Speak,
-            enabled: true,
-            vendor_service_slug: "platform-elevenlabs".to_string(),
-            config: PlatformOperationConfig::Speak(
-                crate::models::platform_operation::SpeakConfig {
-                    allowed_voice_ids: vec!["voice-a".to_string(), "voice-b".to_string()],
-                    max_chars: 321,
-                    model_id: "eleven_multilingual_v2".to_string(),
-                },
-            ),
-            updated_at: chrono::Utc::now(),
-            updated_by: "admin-user".to_string(),
-        };
-        let disabled_operation = PlatformOperation {
-            id: "platform-x-search".to_string(),
-            op: crate::models::platform_operation::PlatformOperationName::XSearch,
-            enabled: false,
-            vendor_service_slug: "platform-x".to_string(),
-            config: PlatformOperationConfig::XSearch(
-                crate::models::platform_operation::XSearchConfig {
-                    max_results_cap: 10,
-                },
-            ),
-            updated_at: chrono::Utc::now(),
-            updated_by: "admin-user".to_string(),
-        };
-
-        let tools = generate_tool_definitions(&[], None, &[enabled_operation, disabled_operation]);
-        let speak = tools
-            .iter()
-            .find(|tool| tool.name == "nyx__speak")
-            .expect("enabled speak tool");
-
-        assert!(!tools.iter().any(|tool| tool.name == "nyx__x_search"));
-        assert!(!tools.iter().any(|tool| tool.name == "nyx__call_and_say"));
-        assert_eq!(speak.input_schema["properties"]["text"]["maxLength"], 321);
-        assert_eq!(
-            speak.input_schema["properties"]["voice_id"]["enum"],
-            serde_json::json!(["voice-a", "voice-b"])
+    #[tokio::test]
+    async fn ifttt_catalog_connection_and_mcp_calls_reach_local_tls_egress() {
+        use crate::models::downstream_service::{COLLECTION_NAME as CATALOG, DownstreamService};
+        use crate::models::user_api_key::{COLLECTION_NAME as KEYS, UserApiKey};
+        use crate::services::{catalog_spec_sync, provider_service, unified_key_service};
+        use nyxid_service_adapters::{ifttt, test_support};
+        let db = connect_test_database("ifttt_catalog_mcp")
+            .await
+            .expect("MongoDB required");
+        let encryption = test_encryption_keys();
+        provider_service::seed_default_providers(&db, &encryption)
+            .await
+            .unwrap();
+        provider_service::seed_default_services(&db, &encryption)
+            .await
+            .unwrap();
+        catalog_spec_sync::sync_seeded_service_endpoints(&db)
+            .await
+            .unwrap();
+        let catalog = db
+            .collection::<DownstreamService>(CATALOG)
+            .find_one(doc! {"slug":"api-ifttt"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(catalog.auth_method, ifttt::AUTH_METHOD);
+        assert_eq!(catalog.service_category, "connection");
+        assert!(catalog.requires_user_credential);
+        assert!(
+            catalog
+                .openapi_spec_url
+                .as_deref()
+                .unwrap()
+                .ends_with("/catalog-specs/ifttt/openapi.json")
         );
-        assert_eq!(speak.input_schema["additionalProperties"], false);
+        let key = "IFTTT_test_key-NOT_REAL";
+        let owner = uuid::Uuid::new_v4().to_string();
+        let entry = crate::services::catalog_service::get_catalog_entry(
+            &db,
+            &encryption,
+            &owner,
+            "api-ifttt",
+        )
+        .await
+        .unwrap();
+        assert_eq!(entry.auth_method, ifttt::AUTH_METHOD);
+        assert_eq!(entry.auth_key_name, "key");
+        let connected = unified_key_service::create_key(
+            &db,
+            &encryption,
+            &owner,
+            &owner,
+            Some("api-ifttt"),
+            None,
+            key,
+            "My IFTTT",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            unified_key_service::OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+            unified_key_service::OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(connected.service.auth_method, ifttt::AUTH_METHOD);
+        assert_eq!(connected.service.auth_key_name, entry.auth_key_name);
+        let stored = db
+            .collection::<UserApiKey>(KEYS)
+            .find_one(doc! {"_id": connected.service.api_key_id.as_ref().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        let encrypted = stored.credential_encrypted.as_ref().unwrap();
+        assert!(!encrypted.windows(key.len()).any(|b| b == key.as_bytes()));
+        assert_eq!(
+            encryption.decrypt(encrypted).await.unwrap().as_slice(),
+            key.as_bytes()
+        );
+        for invalid in [
+            "https://maker.ifttt.com/trigger/e/with/key/secret",
+            "bad/key",
+            "",
+        ] {
+            let error = unified_key_service::ensure_user_api_key_for_update(
+                &db,
+                &encryption,
+                &owner,
+                &connected.service.id,
+                None,
+                Some(invalid),
+                None,
+                "My IFTTT",
+                unified_key_service::OauthClientCredentialsInput::None,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, AppError::ValidationError(_)));
+            let after = db
+                .collection::<UserApiKey>(KEYS)
+                .find_one(doc! { "_id": &stored.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.credential_encrypted, stored.credential_encrypted);
+            assert_eq!(after.credential_epoch, stored.credential_epoch);
+        }
+        let invalid_destination = crate::services::user_service_service::validate_update_inputs(
+            &db,
+            &owner,
+            &connected.service,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("https://other.invalid"),
+            None,
+        )
+        .await;
+        assert!(invalid_destination.is_err());
+        let key_count = db
+            .collection::<UserApiKey>(KEYS)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        let invalid_custom = unified_key_service::create_key(
+            &db,
+            &encryption,
+            &owner,
+            &owner,
+            None,
+            Some("https://other.invalid"),
+            key,
+            "Invalid IFTTT",
+            None,
+            Some(ifttt::AUTH_METHOD),
+            Some("key"),
+            None,
+            None,
+            None,
+            unified_key_service::OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+            unified_key_service::OauthClientCredentialsInput::None,
+            false,
+        )
+        .await;
+        assert!(invalid_custom.is_err());
+        assert_eq!(
+            db.collection::<UserApiKey>(KEYS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            key_count
+        );
+        let rows: Vec<ServiceEndpoint> = db
+            .collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+            .find(doc! {"service_id": &catalog.id, "is_active": true})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.operation_generation > 0
+            && row.risk.is_some()
+            && !row.supports_idempotency_key));
+        let tools = service_endpoints_to_mcp(&rows.iter().collect::<Vec<_>>());
+        for (name, args, payload) in [
+            (
+                "trigger_event",
+                serde_json::json!({"event":"no_values"}),
+                serde_json::json!({}),
+            ),
+            (
+                "trigger_event",
+                serde_json::json!({"event":"values", "body":{"value1":"one","value2":"two","value3":"three"}}),
+                serde_json::json!({"value1":"one","value2":"two","value3":"three"}),
+            ),
+            (
+                "trigger_json_event",
+                serde_json::json!({"event":"json_event", "body":{"event":"inside","body":{"hello":[1,true]},"authorization":"payload"}}),
+                serde_json::json!({"event":"inside","body":{"hello":[1,true]},"authorization":"payload"}),
+            ),
+            (
+                "trigger_json_event",
+                serde_json::json!({"event":"array", "body":[1,true,null]}),
+                serde_json::json!([1, true, null]),
+            ),
+            (
+                "trigger_json_event",
+                serde_json::json!({"event":"null_payload", "body":null}),
+                serde_json::Value::Null,
+            ),
+            (
+                "trigger_json_event",
+                serde_json::json!({"event":"scalar", "body":"payload"}),
+                serde_json::json!("payload"),
+            ),
+        ] {
+            let endpoint = tools.iter().find(|tool| tool.name == name).unwrap();
+            let schema = build_input_schema(endpoint);
+            assert!(schema["properties"].get("body").is_some());
+            assert!(schema["properties"].get("key").is_none());
+            let (method, path, query, _headers, body) = build_proxy_args(endpoint, &args).unwrap();
+            let mut server = test_support::fixture(
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+            let response = server
+                .client
+                .forward(
+                    ifttt::BASE_URL,
+                    &method,
+                    &path,
+                    query.as_deref(),
+                    key,
+                    body.as_deref(),
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let request = server.requests.recv().await.unwrap();
+            let split = request.windows(4).position(|b| b == b"\r\n\r\n").unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..split])
+                    .starts_with(&format!("POST /{path}/with/key/{key} HTTP/1.1"))
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request[split + 4..]).unwrap(),
+                payload
+            );
+        }
+        let endpoint = tools
+            .iter()
+            .find(|tool| tool.name == "trigger_json_event")
+            .unwrap();
+        assert!(
+            build_proxy_args(endpoint, &serde_json::json!({"event":"missing_payload"})).is_err()
+        );
+        for event in ["../escape", "e/with/key/other", "e%2f", "a-b"] {
+            let (method, path, query, _, body) =
+                build_proxy_args(endpoint, &serde_json::json!({"event":event,"body":{}})).unwrap();
+            assert!(
+                ifttt::validate_request(
+                    ifttt::BASE_URL,
+                    &method,
+                    &path,
+                    query.as_deref(),
+                    body.as_deref()
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -9625,6 +10406,42 @@ mod tests {
         assert_eq!(billing_ctx.actor_user_id, actor_user_id);
         assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
         assert_eq!(billing_ctx.user_service_id.as_deref(), Some("user-service"));
+
+        // The same org connection can supply the master key or an agent's
+        // override. Payer selection must use that final credential class.
+        let mut master_resolution = resolution;
+        master_resolution.master_credential = true;
+        for (override_class, expected_owner, expected_class) in [
+            (None, &actor_user_id, CredentialClass::NyxidManagedMaster),
+            (
+                Some(CredentialClass::AgentOverrideUserOwned),
+                &org_user_id,
+                CredentialClass::AgentOverrideUserOwned,
+            ),
+        ] {
+            let mut builder = McpBillingRouteContextBuilder::from_user_service_resolution(
+                &actor_user_id,
+                &master_resolution,
+            );
+            if let Some(class) = override_class {
+                builder.credential_class_override = Some(class);
+            }
+            let ctx = builder
+                .build(
+                    &billing,
+                    &actor_user_id,
+                    &actor_user_id,
+                    None,
+                    &master_resolution.target,
+                    None,
+                    true,
+                )
+                .await
+                .expect("final credential MCP billing context");
+            assert_eq!(&ctx.billing_owner_id, expected_owner);
+            assert_eq!(ctx.actor_user_id, actor_user_id);
+            assert_eq!(ctx.credential_class, expected_class);
+        }
     }
 
     #[tokio::test]
@@ -9799,6 +10616,8 @@ mod tests {
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
                 destination_targets: Default::default(),
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 name: format!("Service {slug}"),
                 slug: slug.to_string(),

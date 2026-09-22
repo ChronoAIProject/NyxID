@@ -386,7 +386,7 @@ path and record the stable target ID and sanitized origin as metadata.
 
 The hosted spec always publishes 38 operations. A temporary, off-by-default writer gate orders
 readers before activation writes while keeping spec composition independent of database access.
-Before activation, editor calls return actionable HTTP 503/code 12100,
+Before activation, editor calls return actionable HTTP 503/code 12300,
 `workspace_destinations_not_activated`; this rollout state is excluded from proxy-fault telemetry.
 Activation uses a known-default compare-and-set so administrator changes are preserved. A skipped
 activation with an empty map logs the first failed precondition at warning level; skipped metadata
@@ -398,7 +398,7 @@ redirect-hop reauthorization are outside its scope.
 
 ### Activation order and approval window
 
-1. Deploy the new backend readers everywhere with `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=false` (the default). No editor endpoints activate just by deploying. The hosted spec is already 38 operations; editor calls return actionable HTTP 503/code 12100, `workspace_destinations_not_activated`, during this short operator-controlled window.
+1. Deploy the new backend readers everywhere with `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=false` (the default). No editor endpoints activate just by deploying. The hosted spec is already 38 operations; editor calls return actionable HTTP 503/code 12300, `workspace_destinations_not_activated`, during this short operator-controlled window.
 2. Upgrade every node used by Workspace, including failover candidates, and verify it advertises HTTP signature v2. Old nodes continue handling non-target operations.
 3. Set `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=true` and restart a backend writer. Startup compare-and-sets only the known default Workspace policy plus absent/empty map, then additively inserts the 13 endpoint rows. Check the materialized catalog has 38 endpoints and the three targets. An admin-edited policy/map requires an explicit administrator decision; startup never overwrites it. When activation is skipped with an empty map, startup warns with the first failed precondition name; skipped description/limitation updates are logged at debug level.
 4. Leave the gate enabled. It is idempotent and safe on subsequent restarts; disabling it does not reverse persisted activation. Remove this temporary gate once all environments have activated.

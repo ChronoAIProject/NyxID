@@ -1286,11 +1286,7 @@ fn extract_client_ip(request: &Request<Body>, trusted_proxies: &[TrustedProxyRan
         .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }
 
-/// Axum middleware that enforces per-IP rate limiting with global fallback.
-///
-/// Expects both `SharedPerIpRateLimiter` and `SharedRateLimiter` as layer Extensions.
-/// Returns 429 Too Many Requests when the limit is exceeded.
-/// Paths exempt from rate limiting (authenticated via other means).
+/// Paths exempt from the general budgets (protected by their own controls).
 const RATE_LIMIT_EXEMPT_PATHS: &[&str] = &["/mcp", "/.well-known/", "/health"];
 const ASSISTANT_ACTIONS_EXEMPT_PATH: &str = "/api/v1/assistant/actions";
 
@@ -1301,17 +1297,74 @@ fn is_rate_limit_exempt(path: &str) -> bool {
             .any(|prefix| path.starts_with(prefix))
 }
 
+/// Separate extension type so exemption ranges never replace proxy-hop trust.
+#[derive(Clone, Default)]
+pub struct RateLimitExemptIps(pub Arc<Vec<TrustedProxyRange>>);
+
+fn is_client_ip_exempt(
+    request: &Request<Body>,
+    trusted_proxies: &[TrustedProxyRange],
+    exempt_ips: &[TrustedProxyRange],
+) -> bool {
+    if exempt_ips.is_empty() {
+        return false;
+    }
+    let Some(ConnectInfo(peer)) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+        // No synthetic loopback fallback: missing transport evidence never exempts.
+        return false;
+    };
+    let peer_ip = normalize_ip_address(peer.ip());
+    let client_ip = if is_trusted_proxy(peer_ip, trusted_proxies) {
+        // A trusted proxy with no usable client headers cannot exempt all its
+        // traffic by falling back to the proxy's own allowlisted address.
+        header_ip(request.headers(), "cf-connecting-ip")
+            .or_else(|| strict_rightmost_untrusted_xff(request.headers(), trusted_proxies))
+            .or_else(|| header_ip(request.headers(), "x-real-ip"))
+    } else {
+        // Includes empty TRUSTED_PROXY_IPS: never use the legacy header fallback
+        // for an exemption, even when it still supplies the ordinary bucket key.
+        Some(peer_ip)
+    };
+    client_ip.is_some_and(|ip| exempt_ips.iter().any(|range| range.contains(ip)))
+}
+
+fn strict_rightmost_untrusted_xff(
+    headers: &HeaderMap,
+    trusted_proxies: &[TrustedProxyRange],
+) -> Option<IpAddr> {
+    // A malformed intervening hop is a trust boundary. Never skip it and
+    // continue into a potentially forged prefix when granting an exemption.
+    for value in headers
+        .get("x-forwarded-for")?
+        .to_str()
+        .ok()?
+        .split(',')
+        .rev()
+    {
+        let ip = normalize_ip_address(value.trim().parse::<IpAddr>().ok()?);
+        if !is_trusted_proxy(ip, trusted_proxies) {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+/// Enforce general per-IP and global budgets, with independently configured
+/// client exemptions. Dedicated route/principal limiters still run in `next`.
+/// Expects both shared limiters, proxy ranges, and `RateLimitExemptIps` extensions.
 pub async fn rate_limit_middleware(
     Extension(per_ip_limiter): Extension<SharedPerIpRateLimiter>,
     Extension(global_limiter): Extension<SharedRateLimiter>,
     Extension(trusted_proxies): Extension<Arc<Vec<TrustedProxyRange>>>,
+    Extension(exempt_ips): Extension<RateLimitExemptIps>,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, AppError> {
     let path = request.uri().path();
 
     // Skip rate limiting for exempt paths (MCP has its own auth + session management)
-    if is_rate_limit_exempt(path) {
+    if is_rate_limit_exempt(path) || is_client_ip_exempt(&request, &trusted_proxies, &exempt_ips.0)
+    {
         return Ok(next.run(request).await);
     }
 
@@ -1440,6 +1493,289 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    fn exemption_router(
+        per_ip: SharedPerIpRateLimiter,
+        global: SharedRateLimiter,
+        trusted_proxies: Vec<TrustedProxyRange>,
+        exempt_ips: Vec<TrustedProxyRange>,
+    ) -> Router {
+        Router::new()
+            .route("/limited", post(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn(rate_limit_middleware))
+            .layer(Extension(per_ip))
+            .layer(Extension(global))
+            .layer(Extension(Arc::new(trusted_proxies)))
+            .layer(Extension(RateLimitExemptIps(Arc::new(exempt_ips))))
+    }
+
+    fn exemption_request(peer: Option<&str>, headers: &[(&str, &str)]) -> Request<Body> {
+        let mut request = Request::builder().method("POST").uri("/limited");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let mut request = request.body(Body::empty()).unwrap();
+        if let Some(peer) = peer {
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+        }
+        request
+    }
+
+    #[tokio::test]
+    async fn exempt_clients_consume_neither_bucket_and_bypass_exhausted_global() {
+        let per_ip = Arc::new(PerIpRateLimiter::new(1, 60));
+        let global = Arc::new(GlobalRateLimiter::new_local(0, 1));
+        let app = exemption_router(
+            per_ip.clone(),
+            global.clone(),
+            vec![],
+            vec![trusted("192.0.2.0/24")],
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                app.clone()
+                    .oneshot(exemption_request(Some("192.0.2.7:80"), &[]))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        assert!(
+            per_ip.state.lock().unwrap().is_empty(),
+            "exempt requests must never touch per-IP state"
+        );
+        assert!(
+            global.check_shared().await.unwrap(),
+            "exempt requests must leave the global token untouched"
+        );
+        assert!(!global.check_shared().await.unwrap());
+        assert_eq!(
+            app.clone()
+                .oneshot(exemption_request(Some("192.0.2.7:80"), &[]))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.oneshot(exemption_request(Some("198.51.100.7:80"), &[]))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn exempt_clients_do_not_write_shared_rate_buckets() {
+        use crate::models::coordination::{
+            RATE_WINDOW_COLLECTION_NAME, TOKEN_BUCKET_COLLECTION_NAME,
+        };
+        let db = crate::test_utils::connect_test_database("exempt_ip_budget")
+            .await
+            .expect("MongoDB required for shared budget regression");
+        let per_ip = create_per_ip_rate_limiter(db.clone(), "general_ip", 1, 60);
+        let global = create_rate_limiter(db.clone(), 1, 1);
+        let app = exemption_router(
+            per_ip,
+            global.clone(),
+            vec![trusted("10.0.0.1")],
+            vec![trusted("192.0.2.7")],
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                app.clone()
+                    .oneshot(exemption_request(
+                        Some("10.0.0.1:80"),
+                        &[("x-forwarded-for", "192.0.2.7")]
+                    ))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        for collection in [RATE_WINDOW_COLLECTION_NAME, TOKEN_BUCKET_COLLECTION_NAME] {
+            assert_eq!(
+                db.collection::<mongodb::bson::Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "exempt requests must not write {collection}"
+            );
+        }
+        assert!(
+            global.check_shared().await.unwrap(),
+            "the first nonexempt request retains its global token"
+        );
+    }
+
+    #[tokio::test]
+    async fn exempt_client_still_hits_dedicated_device_code_limit() {
+        let device_limits = DeviceCodeRateLimiters {
+            per_ip: Arc::new(PerIpRateLimiter::new(0, 60)),
+            per_pubkey: Arc::new(PerPubkeyRateLimiter::new()),
+            db: None,
+            trusted_proxies: Arc::new(vec![]),
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/devices/code/request",
+                post(|| async { StatusCode::OK }),
+            )
+            .layer(middleware::from_fn_with_state(
+                device_limits,
+                device_code_rate_limit_middleware,
+            ))
+            .layer(middleware::from_fn(rate_limit_middleware))
+            .layer(Extension(Arc::new(PerIpRateLimiter::new(0, 60))))
+            .layer(Extension(Arc::new(GlobalRateLimiter::new_local(0, 0))))
+            .layer(Extension(Arc::new(Vec::<TrustedProxyRange>::new())))
+            .layer(Extension(RateLimitExemptIps(Arc::new(vec![trusted(
+                "192.0.2.7",
+            )]))));
+        let mut request = exemption_request(Some("192.0.2.7:80"), &[]);
+        *request.uri_mut() = "/api/v1/devices/code/request".parse().unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["error_code"], 9506,
+            "the dedicated protocol limiter must still run"
+        );
+    }
+
+    #[tokio::test]
+    async fn exemption_uses_strict_client_attribution_even_with_legacy_bucket_key() {
+        let proxy = vec![trusted("10.0.0.1")];
+        let exempt = vec![
+            trusted("192.0.2.0/24"),
+            trusted("10.0.0.1"),
+            trusted("127.0.0.1"),
+            trusted("2001:db8:1234::/48"),
+        ];
+        let cases = [
+            (
+                vec![],
+                Some("198.51.100.7:80"),
+                vec![
+                    ("x-forwarded-for", "192.0.2.7"),
+                    ("x-real-ip", "192.0.2.7"),
+                    ("cf-connecting-ip", "192.0.2.7"),
+                ],
+                false,
+            ),
+            (
+                proxy.clone(),
+                Some("198.51.100.7:80"),
+                vec![
+                    ("x-forwarded-for", "192.0.2.7"),
+                    ("x-real-ip", "192.0.2.7"),
+                    ("cf-connecting-ip", "192.0.2.7"),
+                ],
+                false,
+            ),
+            (vec![], None, vec![("x-forwarded-for", "127.0.0.1")], false),
+            (proxy.clone(), Some("10.0.0.1:80"), vec![], false),
+            (
+                proxy.clone(),
+                Some("10.0.0.1:80"),
+                vec![("x-forwarded-for", "192.0.2.7, invalid")],
+                false,
+            ),
+            (
+                proxy.clone(),
+                Some("10.0.0.1:80"),
+                vec![("x-forwarded-for", "192.0.2.7, 198.51.100.7, 10.0.0.1")],
+                false,
+            ),
+            (
+                proxy.clone(),
+                Some("10.0.0.1:80"),
+                vec![("x-forwarded-for", "192.0.2.7, 10.0.0.1")],
+                true,
+            ),
+            (
+                proxy.clone(),
+                Some("10.0.0.1:80"),
+                vec![
+                    ("cf-connecting-ip", "192.0.2.7"),
+                    ("x-forwarded-for", "198.51.100.7"),
+                ],
+                true,
+            ),
+            (
+                proxy,
+                Some("10.0.0.1:80"),
+                vec![("x-real-ip", "192.0.2.7")],
+                true,
+            ),
+            (vec![], Some("[::ffff:192.0.2.7]:80"), vec![], true),
+            (vec![], Some("[2001:db8:1234::7]:80"), vec![], true),
+            (vec![], Some("[2001:db8:5678::7]:80"), vec![], false),
+        ];
+        for (proxies, peer, headers, allowed) in cases {
+            let app = exemption_router(
+                Arc::new(PerIpRateLimiter::new(0, 60)),
+                Arc::new(GlobalRateLimiter::new_local(0, 0)),
+                proxies,
+                exempt.clone(),
+            );
+            let status = app
+                .oneshot(exemption_request(peer, &headers))
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(
+                status,
+                if allowed {
+                    StatusCode::OK
+                } else {
+                    StatusCode::TOO_MANY_REQUESTS
+                },
+                "peer={peer:?}, headers={headers:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exempt_client_still_hits_dedicated_agent_limit() {
+        let agent = Arc::new(PerAgentRateLimiter::new());
+        let app = Router::new()
+            .route(
+                "/limited",
+                post(move || {
+                    let agent = agent.clone();
+                    async move {
+                        check_agent_rate_limit_raw(&agent, Some("agent-1"), Some(0), Some(1))
+                            .await?;
+                        Ok::<_, AppError>(StatusCode::OK)
+                    }
+                }),
+            )
+            .layer(middleware::from_fn(rate_limit_middleware))
+            .layer(Extension(Arc::new(PerIpRateLimiter::new(0, 60))))
+            .layer(Extension(Arc::new(GlobalRateLimiter::new_local(0, 0))))
+            .layer(Extension(Arc::new(Vec::<TrustedProxyRange>::new())))
+            .layer(Extension(RateLimitExemptIps(Arc::new(vec![trusted(
+                "192.0.2.7",
+            )]))));
+        for expected in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(exemption_request(Some("192.0.2.7:80"), &[]))
+                    .await
+                    .unwrap()
+                    .status(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn per_ip_allows_under_limit() {

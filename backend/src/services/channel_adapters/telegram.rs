@@ -10,7 +10,12 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "bot was blocked by the user",
     "bot was kicked",
     "user is deactivated",
+    "message to edit not found",
+    "message can't be edited",
 ];
+
+use crate::services::channel_media_service as media;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
 
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -18,7 +23,7 @@ use subtle::ConstantTimeEq;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
-    BotIdentity, InboundAttachment, InboundMessage, OutboundReply, PlatformAdapter,
+    BotIdentity, InboundAttachment, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
 };
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org/bot";
@@ -30,11 +35,19 @@ const SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
 ///
 /// Stateless -- all state lives in the [`ChannelBot`] document and the Telegram
 /// API itself.
-pub struct TelegramAdapter;
+/// Edits use Markdown and are subject to Telegram's 48-hour edit window for
+/// ordinary bot messages.
+pub struct TelegramAdapter {
+    base_url: String,
+    file_base_url: String,
+}
 
 impl TelegramAdapter {
     pub fn new() -> Self {
-        Self
+        Self {
+            base_url: TELEGRAM_API_BASE.to_string(),
+            file_base_url: "https://api.telegram.org/file/bot".into(),
+        }
     }
 }
 
@@ -66,7 +79,10 @@ fn detect_content_type(msg: &serde_json::Value) -> &'static str {
         "file"
     } else if msg.get("audio").is_some() {
         "audio"
-    } else if msg.get("video").is_some() {
+    } else if msg.get("video").is_some()
+        || msg.get("video_note").is_some()
+        || msg.get("animation").is_some()
+    {
         "video"
     } else if msg.get("voice").is_some() {
         "audio"
@@ -198,6 +214,26 @@ fn extract_attachments(msg: &serde_json::Value) -> Vec<InboundAttachment> {
         });
     }
 
+    for (field, kind) in [
+        ("sticker", "image"),
+        ("video_note", "video"),
+        ("animation", "video"),
+    ] {
+        if let Some(media) = msg.get(field)
+            && let Some(file_id) = media["file_id"].as_str()
+        {
+            attachments.push(InboundAttachment {
+                content_type: kind.into(),
+                url: file_id.into(),
+                platform_message_id: None,
+                file_key: None,
+                image_key: None,
+                filename: media["file_name"].as_str().map(str::to_string),
+                mime_type: media["mime_type"].as_str().map(str::to_string),
+                size_bytes: media["file_size"].as_u64(),
+            });
+        }
+    }
     attachments
 }
 
@@ -312,15 +348,47 @@ fn build_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_jso
     body
 }
 
+fn build_edit_message_body(
+    conversation_id: &str,
+    platform_message_id: &str,
+    edit: &OutboundEdit,
+) -> AppResult<serde_json::Value> {
+    let message_id = platform_message_id
+        .parse::<i64>()
+        .map_err(|_| AppError::ValidationError("Telegram message_id must be an i64".to_string()))?;
+    Ok(serde_json::json!({
+        "chat_id": conversation_id,
+        "message_id": message_id,
+        "text": edit.text.as_deref().unwrap_or(""),
+        "parse_mode": "Markdown",
+    }))
+}
+
+#[cfg(test)]
+impl TelegramAdapter {
+    pub(crate) fn media_test_adapter(base: &str) -> Self {
+        Self {
+            base_url: format!("{base}/bot"),
+            file_base_url: format!("{base}/file/bot"),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for TelegramAdapter {
+    fn display_name(&self) -> &str {
+        "Telegram bot token"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::ALL
+    }
     /// Thread metadata: message_thread_id.
     fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
         crate::services::channel_platform::OutboundCapabilities {
             initiated_send: true,
             reply_to: true,
             thread: true,
-            edit: false,
+            edit: true,
         }
     }
 
@@ -330,6 +398,11 @@ impl PlatformAdapter for TelegramAdapter {
 
     fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
         super::super::channel_platform::RegistrationDescriptor {
+            documentation_url: Some("https://core.telegram.org/bots/api#setwebhook"),
+            fields: &[super::super::channel_registration::RegistrationField {
+                hint: Some("Connect an existing Telegram bot using its BotFather token."),
+                ..super::super::channel_registration::BOT_TOKEN_FIELD
+            }],
             automatic_webhook: true,
             empty_ack_is_text: false,
             webhook_secret_label: None,
@@ -404,6 +477,50 @@ impl PlatformAdapter for TelegramAdapter {
         }
     }
 
+    async fn fetch_attachment(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        attachment: &InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        // Telegram's provider reference is an opaque file_id, never a URL.
+        if attachment.url.contains("://") {
+            return Err(media::fetch_failed());
+        }
+        let response = media::response_json(
+            http.get(format!("{}{}/getFile", self.base_url, credentials.token))
+                .query(&[("file_id", &attachment.url)]),
+        )
+        .await
+        .map_err(|_| media::fetch_failed())?;
+        if response["ok"] != true {
+            return Err(media::fetch_failed());
+        }
+        if response["result"]["file_size"]
+            .as_u64()
+            .is_some_and(|s| s > max_bytes)
+        {
+            return Err(AppError::ChannelMediaTooLarge);
+        }
+        let path = response["result"]["file_path"]
+            .as_str()
+            .ok_or_else(media::fetch_failed)?;
+        if path.starts_with('/') || path.contains("..") || path.contains(['?', '#', '\\']) {
+            return Err(media::fetch_failed());
+        }
+        let target = format!("{}{}/{}", self.file_base_url, credentials.token, path);
+        media::download(
+            &target,
+            &["api.telegram.org"],
+            Some(&self.file_base_url),
+            None,
+            attachment,
+            max_bytes,
+        )
+        .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,
@@ -411,10 +528,54 @@ impl PlatformAdapter for TelegramAdapter {
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        if !reply.attachments.is_empty() {
+            if reply.text.as_deref().is_some_and(|s| !s.is_empty()) {
+                let mut text = reply.clone();
+                text.attachments.clear();
+                self.send_reply(http, credentials, conversation_id, &text)
+                    .await?;
+            }
+            let context = build_message_body(conversation_id, reply);
+            let mut last = None;
+            for attachment in &reply.attachments {
+                let (method, field) = match attachment.kind {
+                    MediaKind::Image => ("sendPhoto", "photo"),
+                    MediaKind::File => ("sendDocument", "document"),
+                    MediaKind::Audio => ("sendAudio", "audio"),
+                    MediaKind::Video => ("sendVideo", "video"),
+                };
+                let mut form = reqwest::multipart::Form::new()
+                    .text("chat_id", conversation_id.to_string())
+                    .part(field, media::multipart_part(attachment)?);
+                if let Some(caption) = &attachment.caption {
+                    form = form.text("caption", caption.clone());
+                }
+                for key in ["reply_to_message_id", "message_thread_id"] {
+                    if let Some(value) = context.get(key) {
+                        form = form.text(key, value.to_string());
+                    }
+                }
+                let response = media::response_json(
+                    http.post(format!("{}{}/{}", self.base_url, credentials.token, method))
+                        .multipart(form),
+                )
+                .await?;
+                if response["ok"] != true {
+                    return Err(media::upload_failed());
+                }
+                last = Some(
+                    response["result"]["message_id"]
+                        .as_i64()
+                        .ok_or_else(media::upload_failed)?
+                        .to_string(),
+                );
+            }
+            return Ok(last);
+        }
         let bot_token = credentials.token;
         let body = build_message_body(conversation_id, reply);
 
-        let url = format!("{TELEGRAM_API_BASE}{bot_token}/sendMessage");
+        let url = format!("{}{bot_token}/sendMessage", self.base_url);
         let resp: serde_json::Value = http
             .post(&url)
             .json(&body)
@@ -458,6 +619,71 @@ impl PlatformAdapter for TelegramAdapter {
         Ok(message_id)
     }
 
+    async fn edit_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+        platform_message_id: &str,
+        edit: &OutboundEdit,
+    ) -> AppResult<()> {
+        let mut body = build_edit_message_body(conversation_id, platform_message_id, edit)?;
+        let mut method = "editMessageText";
+        loop {
+            let url = format!("{}{}/{method}", self.base_url, credentials.token);
+            let resp: serde_json::Value = http
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    AppError::ChannelPlatformError(format!(
+                        "Telegram {method} request failed: {}",
+                        e.without_url()
+                    ))
+                })?
+                .json()
+                .await
+                .map_err(|e| {
+                    AppError::ChannelPlatformError(format!(
+                        "Telegram {method} response parse failed: {}",
+                        e.without_url()
+                    ))
+                })?;
+            if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                return Ok(());
+            }
+            let description = resp
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            // A media send returns its media message ID, whose editable text is its caption.
+            if method == "editMessageText"
+                && description == "Bad Request: there is no text in the message to edit"
+            {
+                method = "editMessageCaption";
+                body = serde_json::json!({
+                    "chat_id": conversation_id,
+                    "message_id": body["message_id"],
+                    "caption": body["text"],
+                    "parse_mode": "Markdown",
+                });
+                continue;
+            }
+            // Telegram rejects identical edits, while the relay's edit is idempotent.
+            if description.starts_with("Bad Request: message is not modified") {
+                return Ok(());
+            }
+            return Err(
+                crate::services::channel_platform::classify_upstream_refusal(
+                    "Telegram",
+                    description,
+                    UNREACHABLE_TARGET_MARKERS,
+                ),
+            );
+        }
+    }
+
     async fn register_webhook(
         &self,
         http: &reqwest::Client,
@@ -471,7 +697,7 @@ impl PlatformAdapter for TelegramAdapter {
             "allowed_updates": ["message", "edited_message", "channel_post"],
         });
 
-        let url = format!("{TELEGRAM_API_BASE}{bot_token}/setWebhook");
+        let url = format!("{}{bot_token}/setWebhook", self.base_url);
         let resp: serde_json::Value = http
             .post(&url)
             .json(&body)
@@ -511,7 +737,7 @@ impl PlatformAdapter for TelegramAdapter {
         credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
         let bot_token = credentials.token;
-        let url = format!("{TELEGRAM_API_BASE}{bot_token}/getMe");
+        let url = format!("{}{bot_token}/getMe", self.base_url);
         let resp: serde_json::Value = http
             .get(&url)
             .send()
@@ -825,6 +1051,139 @@ mod tests {
         assert!(adapter.handle_challenge(b"").is_none());
     }
 
+    #[test]
+    fn edit_message_body_uses_numeric_id_and_markdown() {
+        let edit = OutboundEdit {
+            text: Some("*updated*".into()),
+            metadata: Some(serde_json::json!({"message_thread_id": 99, "reply_markup": {}})),
+        };
+        assert_eq!(
+            build_edit_message_body("-100123", "42", &edit).unwrap(),
+            serde_json::json!({
+                "chat_id": "-100123", "message_id": 42, "text": "*updated*", "parse_mode": "Markdown"
+            })
+        );
+        for id in ["invalid", "9223372036854775808"] {
+            assert!(matches!(
+                build_edit_message_body("chat", id, &edit),
+                Err(AppError::ValidationError(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_edit_success_noop_and_classified_refusals() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        let mut responses = vec![
+            (
+                200,
+                serde_json::json!({"ok": true, "result": {"message_id": 42}}),
+                None,
+            ),
+            (
+                400,
+                serde_json::json!({"ok": false, "description": "Bad Request: message is not modified: specified new message content and reply markup are exactly the same"}),
+                None,
+            ),
+        ];
+        for marker in UNREACHABLE_TARGET_MARKERS {
+            responses.push((400, serde_json::json!({"ok": false, "description": format!("Bad Request: {marker}: private content")}), Some(*marker)));
+        }
+        for (status, response, refusal) in responses {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/bottest-token/editMessageText"))
+                .and(body_json(serde_json::json!({"chat_id": "-100123", "message_id": 42, "text": "updated", "parse_mode": "Markdown"})))
+                .respond_with(ResponseTemplate::new(status).set_body_json(response))
+                .expect(1).mount(&server).await;
+            let adapter = TelegramAdapter {
+                base_url: format!("{}/bot", server.uri()),
+                file_base_url: format!("{}/file/bot", server.uri()),
+            };
+            let result = adapter
+                .edit_reply(
+                    &reqwest::Client::new(),
+                    &"test-token".into(),
+                    "-100123",
+                    "42",
+                    &OutboundEdit {
+                        text: Some("updated".into()),
+                        metadata: None,
+                    },
+                )
+                .await;
+            if let Some(marker) = refusal {
+                assert!(
+                    matches!(result, Err(AppError::ChannelConversationNotReachable(reason)) if reason == format!("Telegram: {marker}"))
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_edit_media_caption_fallback_preserves_noop_and_refusal_classification() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        for (status, response, refused) in [
+            (200, serde_json::json!({"ok": true}), false),
+            (
+                400,
+                serde_json::json!({"ok": false, "description": "Bad Request: message is not modified"}),
+                false,
+            ),
+            (
+                400,
+                serde_json::json!({"ok": false, "description": "Bad Request: message can't be edited"}),
+                true,
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/bottest-token/editMessageText"))
+                .and(body_json(serde_json::json!({"chat_id": "-100123", "message_id": 42, "text": "*updated*", "parse_mode": "Markdown"})))
+                .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "ok": false, "description": "Bad Request: there is no text in the message to edit"
+                })))
+                .expect(1).mount(&server).await;
+            Mock::given(method("POST"))
+                .and(path("/bottest-token/editMessageCaption"))
+                .and(body_json(serde_json::json!({"chat_id": "-100123", "message_id": 42, "caption": "*updated*", "parse_mode": "Markdown"})))
+                .respond_with(ResponseTemplate::new(status).set_body_json(response))
+                .expect(1).mount(&server).await;
+            let adapter = TelegramAdapter {
+                base_url: format!("{}/bot", server.uri()),
+                file_base_url: format!("{}/file/bot", server.uri()),
+            };
+            let result = adapter
+                .edit_reply(
+                    &reqwest::Client::new(),
+                    &"test-token".into(),
+                    "-100123",
+                    "42",
+                    &OutboundEdit {
+                        text: Some("*updated*".into()),
+                        metadata: None,
+                    },
+                )
+                .await;
+            if refused {
+                assert!(matches!(
+                    result,
+                    Err(AppError::ChannelConversationNotReachable(_))
+                ));
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
     // -- platform_id ---------------------------------------------------------
 
     #[test]
@@ -876,6 +1235,7 @@ mod tests {
 
     fn make_test_bot(webhook_secret_hash: &str) -> ChannelBot {
         ChannelBot {
+            last_verification: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),
@@ -992,6 +1352,7 @@ mod tests {
     #[test]
     fn initiated_request_and_declared_reply_thread_capabilities() {
         let mut reply = OutboundReply {
+            attachments: vec![],
             text: Some("hello".into()),
             reply_to_platform_message_id: None,
             metadata: None,

@@ -1,3 +1,9 @@
+import {
+  allowanceBundleFormSchema,
+  allowanceBundleResponseSchema,
+  type AllowanceBundleForm,
+} from "@/schemas/billing-credits";
+import { normalizedBillingTargets } from "@/lib/billing-targets";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
@@ -47,8 +53,7 @@ export function useIssueCreditGrant() {
       return issueGrantResponseSchema.parse(
         await api.post<unknown>("/admin/credits/grants", {
           ...value,
-          target_user_ids:
-            value.target_kind === "all_users" ? [] : value.target_user_ids,
+          ...normalizedBillingTargets(value),
           service_refs: value.all_services ? [] : value.service_refs,
           expires_at: value.expires_at
             ? new Date(value.expires_at).toISOString()
@@ -94,8 +99,7 @@ export function useCreateCreditSchedule() {
       return creditScheduleSchema.parse(
         await api.post<unknown>("/admin/credits/schedules", {
           ...value,
-          target_user_ids:
-            value.target_kind === "all_users" ? [] : value.target_user_ids,
+          ...normalizedBillingTargets(value),
           service_refs: value.all_services ? [] : value.service_refs,
           reason: value.reason || null,
         }),
@@ -149,8 +153,7 @@ export function useCreateAllowance() {
       return usageAllowanceSchema.parse(
         await api.post<unknown>("/admin/credits/allowances", {
           ...value,
-          target_user_ids:
-            value.target_kind === "all_users" ? [] : value.target_user_ids,
+          ...normalizedBillingTargets(value),
         }),
       );
     },
@@ -199,5 +202,66 @@ export function useCurrentAllowances(ownerId?: string) {
         await api.get<unknown>(benefitPath("allowances", ownerId)),
       ),
     retry: false,
+  });
+}
+
+export function useCreateAllowanceBundle() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (form: AllowanceBundleForm) =>
+      allowanceBundleResponseSchema.parse(
+        await api.post<unknown>(
+          "/admin/credits/allowances",
+          allowanceBundleFormSchema.parse({
+            ...form,
+            ...normalizedBillingTargets(form),
+          }),
+        ),
+      ),
+    onSuccess: () =>
+      void client.invalidateQueries({ queryKey: ADMIN_CREDITS_KEY }),
+  });
+}
+export function useReplaceAllowanceBundle() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      body,
+    }: {
+      id: string;
+      body: AllowanceBundleForm;
+    }) =>
+      allowanceBundleResponseSchema.parse(
+        await api.put<unknown>(
+          `/admin/credits/allowances/bundles/${encodeURIComponent(id)}`,
+          allowanceBundleFormSchema.parse({
+            ...body,
+            ...normalizedBillingTargets(body),
+          }),
+        ),
+      ),
+    onSuccess: () =>
+      void client.invalidateQueries({ queryKey: ADMIN_CREDITS_KEY }),
+  });
+}
+export function useSetAllowanceBundleActive() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      body,
+    }: {
+      id: string;
+      body: { is_active: boolean };
+    }) =>
+      allowanceBundleResponseSchema.parse(
+        await api.patch<unknown>(
+          `/admin/credits/allowances/bundles/${encodeURIComponent(id)}`,
+          body,
+        ),
+      ),
+    onSuccess: () =>
+      void client.invalidateQueries({ queryKey: ADMIN_CREDITS_KEY }),
   });
 }

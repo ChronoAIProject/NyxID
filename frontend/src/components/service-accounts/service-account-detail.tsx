@@ -1,3 +1,11 @@
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+  normalizedSet,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
+import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
 import { useState, useEffect } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -51,6 +59,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { CurationGrantSection } from "./curation-grant-section";
 
 type ConfirmAction = "delete" | "revoke-tokens" | null;
 
@@ -60,14 +69,18 @@ interface ServiceAccountDetailProps {
   readonly showProviderSections?: boolean;
 }
 
-export function ServiceAccountDetail({
+export function ServiceAccountDetail(props: ServiceAccountDetailProps) {
+  return <ServiceAccountDetailEditor key={props.saId} {...props} />;
+}
+
+function ServiceAccountDetailEditor({
   saId,
   backTo,
   showProviderSections = true,
 }: ServiceAccountDetailProps) {
   const navigate = useNavigate();
 
-  const { data: sa, isLoading, error } = useServiceAccount(saId);
+  const { data: sa, isLoading } = useServiceAccount(saId);
 
   const updateMutation = useUpdateServiceAccount();
   const deleteMutation = useDeleteServiceAccount();
@@ -110,9 +123,17 @@ export function ServiceAccountDetail({
     },
   });
 
-  function openEditDialog() {
-    if (!sa) return;
-    form.reset({
+  const normalize = (value: UpdateServiceAccountFormData) => ({
+    ...value,
+    description: value.description ?? "",
+    role_ids: normalizedSet((value.role_ids ?? "").split(",")),
+    rate_limit_override: value.rate_limit_override
+      ? Number(value.rate_limit_override)
+      : null,
+  });
+  function editValues(): UpdateServiceAccountFormData {
+    if (!sa) return form.getValues();
+    return {
       name: sa.name,
       description: sa.description ?? "",
       allowed_scopes: sa.allowed_scopes,
@@ -121,60 +142,40 @@ export function ServiceAccountDetail({
         ? String(sa.rate_limit_override)
         : "",
       is_active: sa.is_active,
-    });
+    };
+  }
+
+  function openEditDialog() {
+    if (!sa) return;
+    form.reset(editValues());
+    editReview.cancel();
     setEditOpen(true);
   }
 
-  async function handleEdit(formData: UpdateServiceAccountFormData) {
-    if (!sa) return;
-
-    const newRoleIds = formData.role_ids
-      ? formData.role_ids
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [];
-    const roleIdsChanged =
-      JSON.stringify([...sa.role_ids].sort()) !==
-      JSON.stringify([...newRoleIds].sort());
-
-    const newRate = formData.rate_limit_override
-      ? Number(formData.rate_limit_override)
-      : null;
-
-    const payload = {
-      ...(formData.name !== sa.name ? { name: formData.name } : {}),
-      ...((formData.description ?? "") !== (sa.description ?? "")
-        ? { description: formData.description || undefined }
-        : {}),
-      ...(formData.allowed_scopes !== sa.allowed_scopes
-        ? { allowed_scopes: formData.allowed_scopes }
-        : {}),
-      ...(roleIdsChanged ? { role_ids: newRoleIds } : {}),
-      ...(newRate !== sa.rate_limit_override
-        ? { rate_limit_override: newRate }
-        : {}),
-      ...(formData.is_active !== sa.is_active
-        ? { is_active: formData.is_active }
-        : {}),
-    };
-
-    if (Object.keys(payload).length === 0) {
-      setEditOpen(false);
-      return;
-    }
-
-    try {
-      await updateMutation.mutateAsync({ saId, data: payload });
+  const editReview = useChangeReview<
+    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...variables }) => {
+      void _before;
+      await updateMutation.mutateAsync(variables);
       toast.success("Service account updated");
       setEditOpen(false);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        form.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to update service account");
-      }
-    }
+    },
+    (pending) =>
+      !sa ||
+      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+    saId,
+  );
+
+  function handleEdit(formData: UpdateServiceAccountFormData) {
+    const before = normalize(
+      form.formState.defaultValues as UpdateServiceAccountFormData,
+    );
+    const patch = changedFields(before, normalize(formData));
+    editReview.review(
+      { saId, data: patch, before },
+      describeChanges(before, patch),
+    );
   }
 
   async function handleRotateSecret() {
@@ -222,7 +223,7 @@ export function ServiceAccountDetail({
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !sa) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -232,7 +233,7 @@ export function ServiceAccountDetail({
     );
   }
 
-  if (error || !sa) {
+  if (!sa) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
@@ -261,14 +262,18 @@ export function ServiceAccountDetail({
         actions={
           <>
             <Button variant="outline" onClick={openEditDialog}>
-              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+              <ButtonIcon>
+                <Pencil className="h-3 w-3" />
+              </ButtonIcon>
               Edit
             </Button>
             <Button
               variant="destructive"
               onClick={() => setConfirmAction("delete")}
             >
-              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+              <ButtonIcon variant="destructive">
+                <Trash2 className="h-3 w-3 text-destructive" />
+              </ButtonIcon>
               Delete
             </Button>
           </>
@@ -278,10 +283,7 @@ export function ServiceAccountDetail({
       <DetailSection title="Service Account Information">
         <DetailRow label="ID" value={sa.id} copyable />
         <DetailRow label="Client ID" value={sa.client_id} copyable />
-        <DetailRow
-          label="Secret Prefix"
-          value={`${sa.secret_prefix}...`}
-        />
+        <DetailRow label="Secret Prefix" value={`${sa.secret_prefix}...`} />
         <DetailRow
           label="Status"
           value={sa.is_active ? "Active" : "Inactive"}
@@ -312,6 +314,8 @@ export function ServiceAccountDetail({
 
       <Separator />
 
+      {showProviderSections && <CurationGrantSection account={sa} />}
+
       {showProviderSections ? (
         <SaConnectedServices saId={saId} />
       ) : (
@@ -332,20 +336,25 @@ export function ServiceAccountDetail({
       <DetailSection title="Actions">
         <div className="flex flex-wrap gap-2 px-4 py-3">
           <Button variant="outline" onClick={openRotateDialog}>
-            <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <RefreshCw className="h-3 w-3" />
+            </ButtonIcon>
             Rotate Secret
           </Button>
           <Button
             variant="outline"
             onClick={() => setConfirmAction("revoke-tokens")}
           >
-            <ButtonIcon><Ban className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <Ban className="h-3 w-3" />
+            </ButtonIcon>
             Revoke Tokens
           </Button>
         </div>
       </DetailSection>
 
       {/* Edit Dialog */}
+      {editReview.dialog}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -397,8 +406,9 @@ export function ServiceAccountDetail({
                   <FormItem>
                     <FormLabel>Allowed Scopes</FormLabel>
                     <FormControl>
-                      <Input
-                        placeholder="e.g. openid proxy:* llm:proxy"
+                      <ServiceAccountScopePicker
+                        ownerId={sa.owner_id ?? sa.created_by}
+                        serviceAccountId={sa.id}
                         {...field}
                       />
                     </FormControl>
@@ -466,7 +476,12 @@ export function ServiceAccountDetail({
                 >
                   Cancel
                 </Button>
-                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty || updateMutation.isPending}>
+                <Button
+                  variant="primary"
+                  type="submit"
+                  isLoading={updateMutation.isPending}
+                  disabled={!form.formState.isDirty || updateMutation.isPending}
+                >
                   Save Changes
                 </Button>
               </DialogFooter>

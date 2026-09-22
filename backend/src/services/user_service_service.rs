@@ -9,6 +9,7 @@ use mongodb::{
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::COLLECTION_NAME as DOWNSTREAM_SERVICES;
 use crate::models::org_membership::OrgRole;
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -53,6 +54,7 @@ const VALID_AUTH_METHODS: &[&str] = &[
     // `nyxid_cloud_auth::aws_sigv4::AwsCredentials`); signing happens
     // at the proxy boundary. `auth_key_name` is unused. NyxID#716.
     "aws_sigv4",
+    "ifttt_webhook",
     "none",
 ];
 
@@ -206,6 +208,49 @@ impl IdentityConfig {
             delegation_token_scope: "llm:proxy".to_string(),
         }
     }
+}
+
+pub(crate) fn validate_ifttt_identity(
+    auth_method: &str,
+    mode: &str,
+    forward_access_token: bool,
+    inject_delegation_token: bool,
+) -> AppResult<()> {
+    if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
+        && (mode != "none" || forward_access_token || inject_delegation_token)
+    {
+        return Err(AppError::ValidationError("IFTTT Webhooks does not support identity, access-token, or delegation-token forwarding".into()));
+    }
+    Ok(())
+}
+
+async fn validate_ifttt_endpoint(
+    db: &Database,
+    auth_method: &str,
+    endpoint_id: &str,
+    replacement_url: Option<&str>,
+    node_id: Option<&str>,
+) -> AppResult<()> {
+    if auth_method != nyxid_service_adapters::ifttt::AUTH_METHOD {
+        return Ok(());
+    }
+    let existing;
+    let url = match replacement_url {
+        Some(url) => url,
+        None => {
+            existing = db
+                .collection::<crate::models::user_endpoint::UserEndpoint>(USER_ENDPOINTS)
+                .find_one(doc! { "_id": endpoint_id })
+                .await?
+                .ok_or_else(|| AppError::NotFound("Endpoint not found".into()))?;
+            &existing.url
+        }
+    };
+    if url.is_empty() && node_id.is_some_and(|id| !id.is_empty()) {
+        return Ok(());
+    }
+    nyxid_service_adapters::ifttt::validate_destination(url)
+        .map_err(|error| AppError::ValidationError(error.to_string()))
 }
 
 fn validate_identity_config(config: &IdentityConfig) -> AppResult<()> {
@@ -409,13 +454,40 @@ async fn list_user_services_inner(
     if !include_disabled {
         filter.insert("is_active", true);
     }
-    let services: Vec<UserService> = db
+    let mut services: Vec<UserService> = db
         .collection::<UserService>(COLLECTION_NAME)
         .find(filter)
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
         .await?;
+    let catalog_ids: Vec<_> = services
+        .iter()
+        .filter_map(|s| s.catalog_service_id.as_deref())
+        .collect();
+    if !catalog_ids.is_empty() {
+        let retired: Vec<mongodb::bson::Document> = db
+            .collection::<mongodb::bson::Document>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find(doc! { "_id": { "$in": catalog_ids }, "$or": [
+                { "service_category": super::retired_service_service::RETIRED_CATEGORY },
+                { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+            ] })
+            .projection(doc! { "_id": 1 })
+            .await?
+            .try_collect()
+            .await?;
+        let retired_ids: std::collections::HashSet<_> = retired
+            .iter()
+            .filter_map(|row| row.get_str("_id").ok())
+            .collect();
+        services.retain(|s| {
+            s.catalog_service_id
+                .as_deref()
+                .is_none_or(|id| !retired_ids.contains(id))
+        });
+    }
     Ok(services)
 }
 
@@ -439,6 +511,18 @@ pub enum CredentialSource {
         role: OrgRole,
         allowed: bool,
     },
+}
+
+impl CredentialSource {
+    pub fn is_viewer_org(&self) -> bool {
+        matches!(
+            self,
+            Self::Org {
+                role: OrgRole::Viewer,
+                ..
+            }
+        )
+    }
 }
 
 /// A user service paired with the provenance of its credentials.
@@ -510,7 +594,7 @@ async fn list_user_services_with_sources_impl(
     .await
 }
 
-async fn list_user_services_with_sources_and_memberships(
+pub(crate) async fn list_user_services_with_sources_and_memberships(
     db: &mongodb::Database,
     user_id: &str,
     include_scope_denied: bool,
@@ -694,6 +778,47 @@ pub async fn find_by_catalog_service_id(
         .await?)
 }
 
+/// Translate a service allowlist into owner-bound endpoint and credential IDs
+/// in one query. Disabled services remain valid inventory references.
+#[derive(serde::Deserialize)]
+struct InventoryReference {
+    endpoint_id: String,
+    api_key_id: Option<String>,
+}
+
+pub struct InventoryReferences {
+    pub endpoint_ids: std::collections::HashSet<String>,
+    pub api_key_ids: std::collections::HashSet<String>,
+}
+
+pub async fn inventory_references_for_services(
+    db: &mongodb::Database,
+    owner_id: &str,
+    service_ids: &[String],
+) -> AppResult<InventoryReferences> {
+    let mut references = InventoryReferences {
+        endpoint_ids: Default::default(),
+        api_key_ids: Default::default(),
+    };
+    if service_ids.is_empty() {
+        return Ok(references);
+    }
+    let rows: Vec<InventoryReference> = db
+        .collection::<InventoryReference>(COLLECTION_NAME)
+        .find(doc! { "user_id": owner_id, "_id": { "$in": service_ids } })
+        .projection(doc! { "_id": 0, "endpoint_id": 1, "api_key_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    for row in rows {
+        references.endpoint_ids.insert(row.endpoint_id);
+        if let Some(id) = row.api_key_id {
+            references.api_key_ids.insert(id);
+        }
+    }
+    Ok(references)
+}
+
 /// Return the IDs of every active `UserService` for `user_id` that
 /// references the given endpoint. Used by org-scope checks: an
 /// `OrgMembership.allowed_service_ids` is a set of `UserService` ids,
@@ -832,7 +957,21 @@ pub async fn create_user_service_with_id(
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
     let identity = normalize_identity_config(identity)?;
+    validate_ifttt_identity(
+        auth_method,
+        &identity.identity_propagation_mode,
+        identity.forward_access_token,
+        identity.inject_delegation_token,
+    )?;
+    if auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD
+        && ws_frame_injections.is_some_and(|rules| !rules.is_empty())
+    {
+        return Err(AppError::ValidationError(
+            "IFTTT Webhooks does not support WebSocket frame injection".into(),
+        ));
+    }
     let node_id = node_id.filter(|nid| !nid.is_empty());
+    validate_ifttt_endpoint(db, auth_method, endpoint_id, None, node_id).await?;
     if let Some(rules) = ws_frame_injections {
         ws_frame_injector::validate_rules(rules)?;
     }
@@ -1093,6 +1232,25 @@ pub async fn update_user_service(
             .ok_or_else(|| AppError::NotFound("Service is no longer available".into()))?;
         crate::services::platform_key_service::require(db, &catalog, user_id).await?;
     }
+    validate_ifttt_identity(
+        auth_method.unwrap_or(&current.auth_method),
+        identity.map_or(current.identity_propagation_mode.as_str(), |cfg| {
+            cfg.identity_propagation_mode.as_str()
+        }),
+        identity.map_or(current.forward_access_token, |cfg| cfg.forward_access_token),
+        identity.map_or(current.inject_delegation_token, |cfg| {
+            cfg.inject_delegation_token
+        }),
+    )?;
+    if auth_method.unwrap_or(&current.auth_method) == nyxid_service_adapters::ifttt::AUTH_METHOD
+        && !ws_frame_injections
+            .unwrap_or(&current.ws_frame_injections)
+            .is_empty()
+    {
+        return Err(AppError::ValidationError(
+            "IFTTT Webhooks does not support WebSocket frame injection".into(),
+        ));
+    }
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
@@ -1124,6 +1282,14 @@ pub async fn update_user_service(
     // Cross-field validation for credential injection methods. We check the
     // effective post-update state: incoming values override current values.
     let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
+    validate_ifttt_endpoint(
+        db,
+        effective_auth_method,
+        &current.endpoint_id,
+        None,
+        node_id.or(current.node_id.as_deref()),
+    )
+    .await?;
     if auth_method_requires_key_name(effective_auth_method) {
         let effective_auth_key_name = auth_key_name.unwrap_or(&current.auth_key_name);
         if effective_auth_key_name.trim().is_empty() {
@@ -1378,6 +1544,30 @@ pub async fn validate_update_inputs(
     }
 
     let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
+    if effective_auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+        if let Some(key) = credential {
+            nyxid_service_adapters::ifttt::validate_credential(key)
+                .map_err(|error| AppError::ValidationError(error.to_string()))?;
+        }
+        validate_ifttt_endpoint(
+            db,
+            effective_auth_method,
+            &current.endpoint_id,
+            new_endpoint_url,
+            node_id.or(current.node_id.as_deref()),
+        )
+        .await?;
+        validate_ifttt_identity(
+            effective_auth_method,
+            identity.map_or(current.identity_propagation_mode.as_str(), |cfg| {
+                cfg.identity_propagation_mode.as_str()
+            }),
+            identity.map_or(current.forward_access_token, |cfg| cfg.forward_access_token),
+            identity.map_or(current.inject_delegation_token, |cfg| {
+                cfg.inject_delegation_token
+            }),
+        )?;
+    }
     let effective_auth_key_name = auth_key_name.unwrap_or(&current.auth_key_name);
     // Treat legacy `current.node_id == Some("")` as unset. Some rows
     // in the wild still carry the empty string instead of `None`; every
@@ -1453,13 +1643,13 @@ pub async fn validate_update_inputs(
 
         // If the caller is supplying a credential in the same PUT, run
         // the same JSON-object shape check `create_key` performs via
-        // `validate_token_exchange_catalog_credential`. An empty/omitted
+        // `validate_catalog_credential`. An empty/omitted
         // credential is fine — it just means the caller isn't rotating
         // the existing stored value.
         if let Some(cred) = credential
             && !cred.is_empty()
         {
-            crate::services::unified_key_service::validate_token_exchange_catalog_credential(
+            crate::services::unified_key_service::validate_catalog_credential(
                 &catalog_entry,
                 cred,
             )?;
@@ -2121,16 +2311,152 @@ pub async fn backfill_stale_catalog_auth_snapshots(db: &mongodb::Database) -> Ap
     Ok(())
 }
 
+/// Remove the org-owned automatic rows that could be created by the pre-0.26.1
+/// public-platform provisioning bug. Public platform keys are personal
+/// auto-connections; restricted audience rows remain eligible for org owners.
+///
+/// This sweep is deliberately idempotent and only matches the automatic source
+/// marker plus an org owner and a public platform catalog row. It does not touch
+/// personal rows, explicit org platform bindings, or restricted-audience rows.
+/// Endpoint and (defensive) credential cleanup is limited to resources no longer
+/// referenced by any remaining user service (or agent credential binding).
+/// Delete orphan resources before their service row so interrupted runs retain
+/// references for retry, including on standalone MongoDB. API-key allowlists and
+/// agent bindings follow the existing stale-row cleanup behavior and are left intact.
+pub async fn cleanup_public_org_auto_provisions(db: &mongodb::Database) -> AppResult<()> {
+    let org_user_ids = db
+        .collection::<Document>(USERS)
+        .distinct("_id", doc! { "user_type": "org" })
+        .await?;
+    if org_user_ids.is_empty() {
+        return Ok(());
+    }
+
+    let public_catalog_ids = db
+        .collection::<Document>(DOWNSTREAM_SERVICES)
+        .distinct("_id", doc! { "platform_key.audience": "public" })
+        .await?;
+    if public_catalog_ids.is_empty() {
+        return Ok(());
+    }
+
+    let wrong_rows: Vec<UserService> = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .find(doc! {
+            "source": AUTO_PROVISION_SOURCE,
+            "user_id": { "$in": &org_user_ids },
+            "catalog_service_id": { "$in": &public_catalog_ids },
+        })
+        .await?
+        .try_collect()
+        .await?;
+    if wrong_rows.is_empty() {
+        return Ok(());
+    }
+
+    let (mut deleted_services, mut deleted_endpoints, mut deleted_credentials) = (0, 0, 0);
+    for row in wrong_rows {
+        // Keep the row until orphan cleanup finishes so a crash leaves the
+        // references available for retry. This also works on standalone MongoDB.
+        let result: mongodb::error::Result<()> = async {
+            let rows = db.collection::<UserService>(COLLECTION_NAME);
+            let owner_is_org = db
+                .collection::<Document>(USERS)
+                .find_one(doc! { "_id": &row.user_id, "user_type": "org" })
+                .await?
+                .is_some();
+            let catalog_is_public = db
+                .collection::<Document>(DOWNSTREAM_SERVICES)
+                .find_one(
+                    doc! { "_id": &row.catalog_service_id, "platform_key.audience": "public" },
+                )
+                .await?
+                .is_some();
+            if !owner_is_org || !catalog_is_public {
+                return Ok(());
+            }
+
+            // Automatic provisioning never creates a UserApiKey. Defensively
+            // handle malformed legacy references, preserving shared credentials.
+            if let Some(key_id) = &row.api_key_id {
+                let service_reference = rows
+                    .find_one(doc! { "_id": { "$ne": &row.id }, "api_key_id": key_id })
+                    .await?
+                    .is_some();
+                let binding_reference = db
+                    .collection::<Document>(crate::models::agent_service_binding::COLLECTION_NAME)
+                    .find_one(doc! { "user_api_key_id": key_id })
+                    .await?
+                    .is_some();
+                if !service_reference && !binding_reference {
+                    deleted_credentials += db
+                        .collection::<Document>(USER_API_KEYS)
+                        .delete_one(doc! { "_id": key_id, "user_id": &row.user_id })
+                        .await?
+                        .deleted_count;
+                }
+            }
+            let endpoint_referenced = rows
+                .find_one(doc! { "_id": { "$ne": &row.id }, "endpoint_id": &row.endpoint_id })
+                .await?
+                .is_some();
+            if !endpoint_referenced {
+                deleted_endpoints += db
+                    .collection::<Document>(USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &row.endpoint_id, "user_id": &row.user_id })
+                    .await?
+                    .deleted_count;
+            }
+            if rows
+                .find_one_and_delete(doc! {
+                    "_id": &row.id,
+                    "user_id": &row.user_id,
+                    "source": AUTO_PROVISION_SOURCE,
+                    "catalog_service_id": &row.catalog_service_id,
+                })
+                .await?
+                .is_some()
+            {
+                deleted_services += 1;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(
+                deleted_services,
+                deleted_endpoints,
+                deleted_credentials,
+                "Public platform org cleanup stopped after partial progress"
+            );
+            return Err(error.into());
+        }
+    }
+
+    tracing::info!(
+        deleted_services,
+        deleted_endpoints,
+        deleted_credentials,
+        "Removed stale public platform org auto-provisions"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::downstream_service::{
-        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, SshServiceConfig,
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, PlatformKeyAudience,
+        PlatformKeyConfig, SshServiceConfig,
     };
+    use crate::models::user::UserType;
+    use crate::models::user_endpoint::UserEndpoint;
     use crate::models::ws_frame_injection::{
         WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
     };
-    use crate::test_utils::{connect_test_database, test_user_service};
+    use crate::test_utils::{
+        connect_test_database, test_user, test_user_endpoint, test_user_service,
+    };
     use mongodb::bson::doc;
 
     fn sample_identity_config() -> IdentityConfig {
@@ -2265,6 +2591,8 @@ mod tests {
         let now = Utc::now();
         DownstreamService {
             destination_targets: Default::default(),
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: service_id.to_string(),
             name: slug.to_string(),
             slug: slug.to_string(),
@@ -3082,6 +3410,7 @@ mod tests {
             "basic",
             "token_exchange",
             "aws_sigv4",
+            "ifttt_webhook",
             "none",
         ];
         for method in expected_true {
@@ -3515,5 +3844,303 @@ mod tests {
                 .await
                 .unwrap_err();
         assert_rebind_not_found(revoked);
+    }
+
+    #[tokio::test]
+    async fn startup_cleanup_finishes_after_endpoint_was_already_deleted() {
+        let db = connect_test_database("user_svc_public_org_cleanup_retry")
+            .await
+            .expect("MongoDB is required");
+        let org_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .unwrap();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.platform_key = Some(PlatformKeyConfig {
+            enabled: true,
+            audience: PlatformKeyAudience::Public,
+            allowed_owner_ids: vec![],
+        });
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &org_id,
+                "Interrupted cleanup",
+                &catalog.base_url,
+                None,
+                Some(&catalog.id),
+            ))
+            .await
+            .unwrap();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut row = test_user_service(
+            &service_id,
+            &org_id,
+            &catalog.slug,
+            &endpoint_id,
+            Some(&catalog.id),
+            None,
+        );
+        row.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        row.source_id = Some(format!("{org_id}:{}", catalog.id));
+        row.credential_binding = Some("platform".to_string());
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(row)
+            .await
+            .unwrap();
+        // Simulate a crash after deleting the endpoint but before its service.
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .delete_one(doc! { "_id": &endpoint_id })
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            cleanup_public_org_auto_provisions(&db).await.unwrap();
+            assert_eq!(
+                db.collection::<UserService>(COLLECTION_NAME)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+            );
+            assert_eq!(
+                db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_cleanup_removes_only_public_platform_org_auto_rows() {
+        let db = connect_test_database("user_svc_public_org_cleanup")
+            .await
+            .expect("MongoDB is required");
+        let person_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many(vec![
+                test_user(&person_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+
+        let mut public_catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        public_catalog.id = uuid::Uuid::new_v4().to_string();
+        public_catalog.slug = "cleanup-public".to_string();
+        public_catalog.platform_key = Some(PlatformKeyConfig {
+            enabled: true,
+            audience: PlatformKeyAudience::Public,
+            allowed_owner_ids: vec![],
+        });
+        public_catalog.credential_encrypted = vec![1];
+        public_catalog.auth_method = "bearer".to_string();
+        public_catalog.auth_key_name = "Authorization".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&public_catalog)
+            .await
+            .unwrap();
+
+        let mut restricted_catalog = public_catalog.clone();
+        restricted_catalog.id = uuid::Uuid::new_v4().to_string();
+        restricted_catalog.slug = "cleanup-restricted".to_string();
+        restricted_catalog.platform_key = Some(PlatformKeyConfig {
+            enabled: true,
+            audience: PlatformKeyAudience::Restricted,
+            allowed_owner_ids: vec![org_id.clone()],
+        });
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&restricted_catalog)
+            .await
+            .unwrap();
+
+        let wrong_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let wrong_service_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &wrong_endpoint_id,
+                &org_id,
+                "Wrong public row",
+                "https://public.example.com",
+                None,
+                Some(&public_catalog.id),
+            ))
+            .await
+            .unwrap();
+        let mut wrong = test_user_service(
+            &wrong_service_id,
+            &org_id,
+            "cleanup-public",
+            &wrong_endpoint_id,
+            Some(&public_catalog.id),
+            None,
+        );
+        wrong.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        wrong.source_id = Some(format!("{org_id}:{}", public_catalog.id));
+        wrong.credential_binding = Some("platform".to_string());
+        wrong.auth_method = "bearer".to_string();
+        wrong.auth_key_name = "Authorization".to_string();
+        // Normal automatic rows carry no key. Also clean a malformed legacy
+        // credential reference without needing to load its encrypted material.
+        let wrong_key_id = uuid::Uuid::new_v4().to_string();
+        wrong.api_key_id = Some(wrong_key_id.clone());
+        db.collection::<Document>(USER_API_KEYS)
+            .insert_one(doc! { "_id": &wrong_key_id, "user_id": &org_id })
+            .await
+            .unwrap();
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(wrong)
+            .await
+            .unwrap();
+
+        let personal_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let personal_service_id = uuid::Uuid::new_v4().to_string();
+        let mut personal = test_user_service(
+            &personal_service_id,
+            &person_id,
+            "cleanup-public",
+            &personal_endpoint_id,
+            Some(&public_catalog.id),
+            None,
+        );
+        personal.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        personal.source_id = Some(format!("{person_id}:{}", public_catalog.id));
+        personal.credential_binding = Some("platform".to_string());
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &personal_endpoint_id,
+                &person_id,
+                "Personal public row",
+                "https://public.example.com",
+                None,
+                Some(&public_catalog.id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&personal)
+            .await
+            .unwrap();
+
+        let restricted_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let restricted_service_id = uuid::Uuid::new_v4().to_string();
+        let mut restricted = test_user_service(
+            &restricted_service_id,
+            &org_id,
+            "cleanup-restricted",
+            &restricted_endpoint_id,
+            Some(&restricted_catalog.id),
+            None,
+        );
+        restricted.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        restricted.source_id = Some(format!("{org_id}:{}", restricted_catalog.id));
+        restricted.credential_binding = Some("platform".to_string());
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &restricted_endpoint_id,
+                &org_id,
+                "Restricted org row",
+                "https://restricted.example.com",
+                None,
+                Some(&restricted_catalog.id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&restricted)
+            .await
+            .unwrap();
+
+        let explicit_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let explicit_service_id = uuid::Uuid::new_v4().to_string();
+        let mut explicit = test_user_service(
+            &explicit_service_id,
+            &org_id,
+            "explicit-public",
+            &explicit_endpoint_id,
+            Some(&public_catalog.id),
+            None,
+        );
+        explicit.source = None;
+        explicit.source_id = None;
+        explicit.credential_binding = Some("platform".to_string());
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &explicit_endpoint_id,
+                &org_id,
+                "Explicit org binding",
+                "https://public.example.com",
+                None,
+                Some(&public_catalog.id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&explicit)
+            .await
+            .unwrap();
+
+        cleanup_public_org_auto_provisions(&db).await.unwrap();
+        cleanup_public_org_auto_provisions(&db)
+            .await
+            .expect("the second startup sweep is a no-op");
+
+        assert!(
+            db.collection::<UserService>(COLLECTION_NAME)
+                .find_one(doc! { "_id": &wrong_service_id })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .find_one(doc! { "_id": &wrong_endpoint_id })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.collection::<Document>(USER_API_KEYS)
+                .find_one(doc! { "_id": &wrong_key_id })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for id in [
+            &personal_service_id,
+            &restricted_service_id,
+            &explicit_service_id,
+        ] {
+            assert!(
+                db.collection::<UserService>(COLLECTION_NAME)
+                    .find_one(doc! { "_id": id })
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        for id in [
+            &personal_endpoint_id,
+            &restricted_endpoint_id,
+            &explicit_endpoint_id,
+        ] {
+            assert!(
+                db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                    .find_one(doc! { "_id": id })
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
     }
 }

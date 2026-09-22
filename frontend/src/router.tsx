@@ -1,3 +1,4 @@
+import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
@@ -71,10 +72,10 @@ import {
   NodeDetailPage,
   AdminNodesPage,
   AdminAuditLogPage,
+  AdminUsagePage,
   AdminFeatureFlagsPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
-  AdminPlatformOpsPage,
   AdminCreditsPage,
   AdminInviteCodesPage,
   CliAuthPage,
@@ -882,22 +883,17 @@ const adminAuditLogRoute = createRoute({
   validateSearch: normalizeAdminAuditLogSearch,
 });
 
+const adminUsageRoute = createRoute({
+  path: "usage",
+  getParentRoute: () => adminLayout,
+  component: AdminUsagePage,
+  validateSearch: normalizeAdminUsageSearch,
+});
+
 const adminIntegrityRoute = createRoute({
   path: "integrity",
   getParentRoute: () => adminLayout,
   component: AdminIntegrityPage,
-});
-
-const adminPlatformOpsRoute = createRoute({
-  path: "platform-ops",
-  getParentRoute: () => adminLayout,
-  beforeLoad: () => {
-    const { user, isLoading } = useAuthStore.getState();
-    if (!isLoading && !canAdminWrite(user)) {
-      throw redirect({ to: "/dashboard" });
-    }
-  },
-  component: AdminPlatformOpsPage,
 });
 
 const adminCreditsRoute = createRoute({
@@ -1017,8 +1013,8 @@ const routeTree = rootRoute.addChildren([
       adminOAuthClientsRoute,
       adminNodesRoute,
       adminAuditLogRoute,
+      adminUsageRoute,
       adminIntegrityRoute,
-      adminPlatformOpsRoute,
       adminCreditsRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
