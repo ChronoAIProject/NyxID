@@ -431,6 +431,7 @@ export function cooldownRemaining(until, now = Date.now()) {
 export function classifyChatGptError(text) {
   if (/reached.{0,60}(limit|cap)|usage limit|message cap|too many requests|达到.{0,20}(上限|限制)|已达.{0,20}上限/i.test(text || "")) return "usage_limit_reached";
   if (/model.{0,40}(unavailable|not available)|模型.{0,20}(不可用|无法使用)/i.test(text || "")) return "model_unavailable";
+  if (/message.{0,40}too long|too long.{0,80}shorter|消息.{0,12}(太长|过长)|内容.{0,12}(太长|过长)/i.test(text || "")) return "prompt_too_long";
   if (/something went wrong|network error|error generating|unable to (generate|load)|出错了|发生错误|网络错误/i.test(text || "")) return "chatgpt_error_response";
   return null;
 }
@@ -1348,6 +1349,12 @@ export function modelItemMatches(itemText, targets, exact) {
 
 const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
   Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
+// Selection is bounded by silence, not by the clock: every observed step
+// (menu opened, slider moved, entry clicked, read-back confirmed) restarts the
+// MODEL_SELECT_TIMEOUT_MS window, up to this hard ceiling. A slow page that
+// keeps making progress finishes; a stuck one still dies within one window.
+const MODEL_SELECT_MAX_MS = Math.max(MODEL_SELECT_TIMEOUT_MS, Math.min(180000,
+  Number(process.env.NYXID_MODEL_SELECT_MAX_MS) || 90000));
 const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
 // Clamp a composer bounding rect to the region actually on screen and return
 // the centre of what remains, or null when nothing is visible. Intersect the
@@ -1414,6 +1421,52 @@ export function promptFillTimeout(length) {
   const n = Number(length);
   const scaled = Number.isFinite(n) && n > 0 ? Math.ceil(n / PROMPT_FILL_CHARS_PER_MS) : 0;
   return Math.min(PROMPT_FILL_MAX_MS, Math.max(PRE_SEND_ACTION_MS, scaled));
+}
+
+// ChatGPT refuses an over-long message server-side: the conversation POST
+// returns HTTP 413 (message_length_exceeds_limit) and the page shows "The
+// message you submitted was too long". By then the worker has spent the whole
+// fill allowance typing it and, on an overrun, left the draft behind for the
+// next pickup. Refuse a prompt that cannot be delivered before touching the
+// composer, and name the rejection precisely when ChatGPT refuses one that
+// was typed. The default ceiling is what the fill allowance can type at all
+// (PROMPT_FILL_MAX_MS at PROMPT_FILL_CHARS_PER_MS); a pool that has proven a
+// higher limit can raise NYXID_MAX_PROMPT_CHARS, and 0 disables the check.
+export const PROMPT_MAX_CHARS = (() => {
+  const configured = Number(process.env.NYXID_MAX_PROMPT_CHARS);
+  if (process.env.NYXID_MAX_PROMPT_CHARS !== undefined && Number.isFinite(configured) && configured >= 0) return configured;
+  return PROMPT_FILL_MAX_MS * PROMPT_FILL_CHARS_PER_MS;
+})();
+
+export function promptExceedsLimit(length, max = PROMPT_MAX_CHARS) {
+  const n = Number(length);
+  return Number.isFinite(n) && Number.isFinite(max) && max > 0 && n > max;
+}
+
+// Only the page's own conversation POST from the main frame can classify this
+// send; a background endpoint, another tab or an old response cannot.
+export function classifySubmissionResponse({ method, url, status }) {
+  if (method !== "POST") return null;
+  if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\/backend-api\/(f\/)?conversation(\?|$)/.test(url || "")) return null;
+  if (status === 413) return "prompt_too_long";
+  return null;
+}
+
+function observeSubmissionRejection(page) {
+  const observer = { code: null, stop: () => {} };
+  const onResponse = (response) => {
+    try {
+      const request = response.request();
+      if (request.frame() !== page.mainFrame()) return;
+      const code = classifySubmissionResponse({ method: request.method(), url: request.url(), status: response.status() });
+      if (code && !observer.code) observer.code = code;
+    } catch {
+      // Diagnostics only; never let an observer error touch the task flow.
+    }
+  };
+  page.on("response", onResponse);
+  observer.stop = () => { try { page.off("response", onResponse); } catch {} };
+  return observer;
 }
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
@@ -1586,8 +1639,8 @@ export async function readModelSwitcher(page, budget = interactionBudget(1000)) 
 
 export async function selectModelSwitcher(page, requested) {
   await installDomCore(page);
-  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID() });
-  const timer = setTimeout(() => budget.controller.abort(), MODEL_SELECT_TIMEOUT_MS);
+  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID() }, { cap: MODEL_SELECT_MAX_MS });
+  const stopWatch = watchBudget(budget);
   let result = { verified: false, metadata: 'absent', reason: 'switcher_unverified' };
   try {
     let snapshot = await readModelSwitcher(page, budget);
@@ -1613,6 +1666,7 @@ export async function selectModelSwitcher(page, requested) {
         await budgetPause(budget, 100);
         snapshot = await readModelSwitcher(page, budget);
       } while (!snapshot.open && Date.now() < menuDeadline);
+      if (snapshot.open) budget.progress();
       let index = chooseSwitcherEntry(snapshot.items, requested, snapshot.text);
       if (index < 0) {
         const familyIndex = chooseSwitcherFamilyEntry(snapshot.items, requested);
@@ -1629,7 +1683,7 @@ export async function selectModelSwitcher(page, requested) {
           index = chooseSwitcherEntry(snapshot.items, requested, family);
         }
       }
-      if (index >= 0) await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
+      if (index >= 0) { await clickPickerElement(page, budget, { index, text: snapshot.items[index].text }); budget.progress(); }
       const verifyDeadline = Math.min(budget.deadline, Date.now() + 1000);
       do {
         await budgetPause(budget, 100);
@@ -1643,7 +1697,7 @@ export async function selectModelSwitcher(page, requested) {
     if (stableErrorCode(error) === 'page_crashed') throw error;
   } finally {
     budget.controller.abort();
-    clearTimeout(timer);
+    stopWatch();
     const cleanup = interactionBudget(2000, budget.picker);
     const cleanupTimer = setTimeout(() => cleanup.controller.abort(), 2000);
     try {
@@ -1726,8 +1780,26 @@ export function modelSelectionFailureReason(error, { deadline, aborted }, now) {
   return error?.code === "interaction_deadline" ? "interaction_deadline" : "selection_failed";
 }
 
-function interactionBudget(duration, picker = null) {
-  return { deadline: Date.now() + duration, controller: new AbortController(), picker };
+export function interactionBudget(duration, picker = null, { cap = duration, now = Date.now() } = {}) {
+  const budget = { deadline: now + duration, controller: new AbortController(), picker,
+    window: duration, hardDeadline: now + Math.max(duration, cap) };
+  // Progress restarts the window; the hard deadline never moves.
+  budget.progress = (at = Date.now()) => {
+    if (!budget.controller.signal.aborted) budget.deadline = Math.min(budget.hardDeadline, at + budget.window);
+    return budget.deadline;
+  };
+  return budget;
+}
+
+// Abort a budget as soon as its (possibly extended) deadline passes.
+function watchBudget(budget, onExpire = () => {}) {
+  const timer = setInterval(() => {
+    if (Date.now() >= budget.deadline && !budget.controller.signal.aborted) {
+      budget.controller.abort();
+      onExpire();
+    }
+  }, 100);
+  return () => clearInterval(timer);
 }
 
 function interactionOptions(budget, maximum = 3000) {
@@ -1941,6 +2013,7 @@ async function clickMatchingLevel(page, targets, budget, allowChecked = false) {
   // Hidden hints in textContent cannot invalidate a visible level match.
   budget.picker.expectedEffort = effortMetadata(snapshot.items[index].text);
   await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
+  budget.progress();
   return true;
 }
 
@@ -2057,6 +2130,7 @@ async function selectEffortBySlider(page, targets, budget, result, state) {
     const previous = current.value;
     await control.press(key, interactionOptions(budget));
     current = await waitForEffortSliderValue(page, budget, previous, Math.min(budget.deadline, Date.now() + EFFORT_SLIDER_STEP_MS));
+    if (current && current.value !== previous) budget.progress();
     if (!current || current.value !== previous + direction) {
       // The slider moved unexpectedly or stalled: stop and let the pill decide.
       await closeOpenMenus(page, budget);
@@ -2072,6 +2146,7 @@ async function selectEffortBySlider(page, targets, budget, result, state) {
   if (before.pill) {
     await pickerLocator(page, before.pill).click(interactionOptions(budget));
     const reopened = await waitForEffortSliderValue(page, budget, null, Math.min(budget.deadline, Date.now() + 3000));
+    if (reopened) budget.progress();
     budget.picker.slider.confirmed = reopened?.value ?? null;
     await closeOpenMenus(page, budget);
     if (!reopened || reopened.value !== plan.target) {
@@ -2100,8 +2175,7 @@ export async function selectModel(page, modelLabel) {
   await installDomCore(page);
   const targets = modelLevelTargets(modelLabel);
   const result = { level: targets[0] || null, verified: false, observed: null, reason: "picker_unavailable" };
-  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID(), snapshot: null });
-  let timer;
+  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID(), snapshot: null }, { cap: MODEL_SELECT_MAX_MS });
   let drainTimer;
   const inner = selectModelInner(page, targets, budget, result).catch((error) => {
     if (stableErrorCode(error) === "page_crashed") result.failureCode = "page_crashed";
@@ -2109,12 +2183,10 @@ export async function selectModel(page, modelLabel) {
       deadline: budget.deadline, aborted: budget.controller.signal.aborted,
     }, Date.now());
   });
-  const timeout = new Promise((resolveTimeout) => {
-    timer = setTimeout(() => {
-      budget.controller.abort(); // cancel even a click waiting for actionability
-      resolveTimeout("timeout");
-    }, MODEL_SELECT_TIMEOUT_MS);
-  });
+  // The watchdog aborts on silence (cancelling even a click waiting for
+  // actionability); progress inside selectModelInner keeps extending it.
+  let stopWatch;
+  const timeout = new Promise((resolveTimeout) => { stopWatch = watchBudget(budget, () => resolveTimeout("timeout")); });
   try {
     if (await Promise.race([inner, timeout]) === "timeout") {
       await Promise.race([inner, new Promise((resolveDrain) => { drainTimer = setTimeout(resolveDrain, 3000); })]);
@@ -2122,7 +2194,7 @@ export async function selectModel(page, modelLabel) {
     }
   } finally {
     budget.controller.abort();
-    clearTimeout(timer);
+    stopWatch();
     clearTimeout(drainTimer);
   }
   // Cleanup gets its own small budget after the aborted selection is drained.
@@ -2165,6 +2237,7 @@ async function selectModelInner(page, targets, budget, result) {
   try {
     await page.locator("body").waitForFunction((_, id) => window.__nyx?.modelPickerMenus(id).length > 0,
       budget.picker.id, menuWait);
+    budget.progress();
   } catch (error) {
     interactionOptions(budget);
     if (error?.name !== "TimeoutError") throw error;
@@ -2580,6 +2653,12 @@ async function handlePrompt(runtime, page, task, recovering) {
   const { task_id } = task;
   task.model ||= "chatgpt-6-pro";
   if (task.require_model_match === true && task.model === "unknown") throw new TaskFailure("model_unavailable");
+  // Fail closed before the composer is touched: an undeliverable prompt must
+  // not spend the fill allowance or leave a draft on this tab.
+  if (promptExceedsLimit(task.prompt?.length)) {
+    log(`prompt ${task_id} refused: ${task.prompt.length} chars exceeds NYXID_MAX_PROMPT_CHARS=${PROMPT_MAX_CHARS}`);
+    throw new TaskFailure("prompt_too_long");
+  }
   log(`prompt task ${task_id} (followup=${!!task.is_followup})`);
   await page.bringToFront().catch(() => {});
 
@@ -2794,14 +2873,21 @@ async function handlePrompt(runtime, page, task, recovering) {
       await failModelSelection(runtime, task, header.metadata, observedEffort, 'presend_unverified');
     }
   }
-  updateTaskState(runtime.state, { phase: "send_attempted", baseline_turn_count: baseline });
-  await sendBtn.click({ timeout: PRE_SEND_ACTION_MS });
-  updateTaskState(runtime.state, { phase: "sent" });
-  await ack(runtime, task, "sent");
-  await pinCurrentConversation(runtime, page, task);
-
-  const { text, images, files } = await waitForResponse(runtime, page, task, beforeCount);
-  await submitPromptResult(runtime, page, task, text, images, files);
+  // Watch this page's own conversation POST so a server-side rejection of the
+  // message (HTTP 413) is named as such instead of surfacing as a stalled turn.
+  const rejection = observeSubmissionRejection(page);
+  let answer;
+  try {
+    updateTaskState(runtime.state, { phase: "send_attempted", baseline_turn_count: baseline });
+    await sendBtn.click({ timeout: PRE_SEND_ACTION_MS });
+    updateTaskState(runtime.state, { phase: "sent" });
+    await ack(runtime, task, "sent");
+    await pinCurrentConversation(runtime, page, task);
+    answer = await waitForResponse(runtime, page, task, beforeCount, rejection);
+  } finally {
+    rejection.stop();
+  }
+  await submitPromptResult(runtime, page, task, answer.text, answer.images, answer.files);
 }
 
 function convId(url) {
@@ -2811,7 +2897,7 @@ function convId(url) {
 
 // Returns the latest assistant turn's text plus on-page image and file sources.
 // Artifact-only turns are valid; the stability key spans all three outputs.
-async function waitForResponse(runtime, page, task, beforeCount) {
+async function waitForResponse(runtime, page, task, beforeCount, rejection = null) {
   updateTaskState(runtime.state, { phase: "waiting_response", last_phase: "waiting_response" });
   const start = Date.now();
   let lastHeartbeat = start;
@@ -2819,6 +2905,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
   let stable = 0;
   while (Date.now() - start < MAX_WAIT_MS) {
     await sleep(STABLE_INTERVAL_MS);
+    if (rejection?.code) throw new TaskFailure(rejection.code);
     if (Date.now() - lastHeartbeat >= HEARTBEAT_MS) {
       lastHeartbeat = Date.now();
       updateTaskState(runtime.state, { phase: "waiting_response", conversation_url: page.url() });
@@ -2844,7 +2931,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       window.__nyx?.version === version,
     ], DOM_CORE_VERSION);
     if (!helperReady) continue;
-    if (errorCode) return recoverContentFailure(runtime, page, task, beforeCount, errorCode);
+    if (errorCode) return recoverContentFailure(runtime, page, task, beforeCount, errorCode, rejection);
     const hasText = !!(text && text.length > 0);
     const hasImages = Array.isArray(images) && images.length > 0;
     const hasFiles = Array.isArray(files) && files.length > 0;
@@ -2854,7 +2941,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
     // there's no new answer yet — wedge guard bails if ChatGPT has stopped.
     if (count <= beforeCount && !hasImages && !hasFiles) {
       if (!generating && Date.now() - start >= NO_OUTPUT_IDLE_MS) {
-        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output");
+        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output", rejection);
       }
       continue;
     }
@@ -2866,7 +2953,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       // New turn settled but produced nothing extractable (e.g. an unrenderable
       // tool turn). Don't wedge — fail fast once the idle window elapses.
       if (Date.now() - start >= NO_OUTPUT_IDLE_MS) {
-        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output");
+        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output", rejection);
       }
       stable = 0;
       continue;
@@ -2893,8 +2980,9 @@ async function waitForResponse(runtime, page, task, beforeCount) {
   throw new TaskFailure('response_timeout');
 }
 
-async function recoverContentFailure(runtime, page, task, beforeCount, code) {
-  if (['usage_limit_reached', 'model_unavailable'].includes(code)) throw new TaskFailure(code);
+async function recoverContentFailure(runtime, page, task, beforeCount, code, rejection = null) {
+  // A rejected message was never delivered; a reload cannot make it appear.
+  if (['usage_limit_reached', 'model_unavailable', 'prompt_too_long'].includes(code)) throw new TaskFailure(code);
   if (runtime.state.current_task?.content_reload_attempted) throw new TaskFailure(code);
   updateTaskState(runtime.state, { content_reload_attempted: true });
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -2906,7 +2994,7 @@ async function recoverContentFailure(runtime, page, task, beforeCount, code) {
     baselineTurnCount: runtime.state.current_task?.baseline_turn_count || 0 });
   if (snapshot.errorCode) throw new TaskFailure(snapshot.errorCode);
   if (decision.action === 'complete') return { text: decision.response, images: snapshot.images, files: snapshot.files };
-  if (decision.action === 'wait') return waitForResponse(runtime, page, task, beforeCount);
+  if (decision.action === 'wait') return waitForResponse(runtime, page, task, beforeCount, rejection);
   throw new TaskFailure(code);
 }
 
