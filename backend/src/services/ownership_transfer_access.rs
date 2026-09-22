@@ -136,10 +136,10 @@ pub async fn authorize(
                 .find_one(doc! { "org_user_id": owner, "role": OrgRole::Admin.as_str() })
                 .session(&mut *session)
                 .await?;
-            if let Some(ref row) = role_scope {
-                if for_commit {
-                    fence(db, session, ROLE_SCOPES, &row.id).await?;
-                }
+            if let Some(ref row) = role_scope
+                && for_commit
+            {
+                fence(db, session, ROLE_SCOPES, &row.id).await?;
             }
             role_scope.and_then(|row| row.allowed_service_ids)
         } else {

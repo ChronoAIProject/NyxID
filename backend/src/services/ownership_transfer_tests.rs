@@ -28,8 +28,7 @@ use uuid::Uuid;
 
 async fn owner_transfer(
     f: &Fixture,
-    actor: &str,
-    key: Option<&str>,
+    (actor, key): (&str, Option<&str>),
     kind: ResourceKind,
     id: &str,
     destination: &str,
@@ -92,8 +91,7 @@ async fn owners_transfer_bots_and_catalog_and_replay_after_losing_access() {
         let request = Uuid::new_v4().to_string();
         let moved = owner_transfer(
             &f,
-            &f.owner,
-            None,
+            (&f.owner, None),
             kind,
             id,
             &f.destination,
@@ -105,8 +103,7 @@ async fn owners_transfer_bots_and_catalog_and_replay_after_losing_access() {
         assert_eq!(moved.previous_owner_user_id, f.owner);
         let replay = owner_transfer(
             &f,
-            &f.owner,
-            None,
+            (&f.owner, None),
             kind,
             id,
             &f.destination,
@@ -164,8 +161,7 @@ async fn org_transfer_rechecks_membership_and_denies_members_viewers_and_restric
         assert!(matches!(
             owner_transfer(
                 &f,
-                &f.owner,
-                None,
+                (&f.owner, None),
                 ResourceKind::ChannelBot,
                 &bot.id,
                 &f.owner,
@@ -185,8 +181,7 @@ async fn org_transfer_rechecks_membership_and_denies_members_viewers_and_restric
         .unwrap();
     let moved = owner_transfer(
         &f,
-        &f.owner,
-        None,
+        (&f.owner, None),
         ResourceKind::ChannelBot,
         &bot.id,
         &f.owner,
@@ -231,8 +226,7 @@ async fn agent_transfer_checks_live_management_scope_and_binds_receipt_to_key() 
         assert!(matches!(
             owner_transfer(
                 &f,
-                &f.owner,
-                Some(&key.id),
+                (&f.owner, Some(&key.id)),
                 ResourceKind::ChannelBot,
                 &bot.id,
                 &f.destination,
@@ -250,8 +244,7 @@ async fn agent_transfer_checks_live_management_scope_and_binds_receipt_to_key() 
     let request = Uuid::new_v4().to_string();
     let moved = owner_transfer(
         &f,
-        &f.owner,
-        Some(&key.id),
+        (&f.owner, Some(&key.id)),
         ResourceKind::ChannelBot,
         &bot.id,
         &f.destination,
@@ -263,8 +256,7 @@ async fn agent_transfer_checks_live_management_scope_and_binds_receipt_to_key() 
     assert_eq!(moved.actor_api_key_id.as_deref(), Some(key.id.as_str()));
     owner_transfer(
         &f,
-        &f.owner,
-        Some(&key.id),
+        (&f.owner, Some(&key.id)),
         ResourceKind::ChannelBot,
         &bot.id,
         &f.destination,
@@ -276,8 +268,7 @@ async fn agent_transfer_checks_live_management_scope_and_binds_receipt_to_key() 
     assert!(
         owner_transfer(
             &f,
-            &f.owner,
-            Some(&other_key.id),
+            (&f.owner, Some(&other_key.id)),
             ResourceKind::ChannelBot,
             &bot.id,
             &f.destination,
@@ -315,8 +306,7 @@ async fn agent_transfer_checks_live_management_scope_and_binds_receipt_to_key() 
     .unwrap();
     let returned = owner_transfer(
         &f,
-        &f.destination,
-        Some(&org_key.id),
+        (&f.destination, Some(&org_key.id)),
         ResourceKind::ChannelBot,
         &bot.id,
         &f.owner,

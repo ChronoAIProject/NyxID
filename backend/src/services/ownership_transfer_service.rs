@@ -697,14 +697,14 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
                         "Transfer request ID was already used for another operation".into(),
                     ));
                 }
-                access::authorize(&db, &mut **transaction, &actor, api_key_id.as_deref(), &receipt.previous_owner_user_id, false).await?;
+                access::authorize(&db, transaction, &actor, api_key_id.as_deref(), &receipt.previous_owner_user_id, false).await?;
                 return Ok(receipt);
             }
-            let owner = access::resource_owner(&db, &mut **transaction, kind, &resource_id).await?;
-            access::authorize(&db, &mut **transaction, &actor, api_key_id.as_deref(), &owner, true).await?;
+            let owner = access::resource_owner(&db, transaction, kind, &resource_id).await?;
+            access::authorize(&db, transaction, &actor, api_key_id.as_deref(), &owner, true).await?;
             let reviewed = inspect(
                 &db,
-                &mut **transaction,
+                transaction,
                 kind,
                 &resource_id,
                 &destination,
