@@ -12,6 +12,7 @@ async fn workspace_mcp_protocol_typed_and_universal_calls_resolve_the_same_googl
     let owner = uuid::Uuid::new_v4().to_string();
     connect(&db, &owner, "api-google-workspace").await;
     connect(&db, &owner, "api-google-docs").await;
+    connect(&db, &owner, "api-google-drive").await;
     let echo = Echo::start().await;
     let mut state = test_app_state(db.clone());
     state.http_client = echo.client.clone();
@@ -19,7 +20,7 @@ async fn workspace_mcp_protocol_typed_and_universal_calls_resolve_the_same_googl
     crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(),async {
         for active in [false,true] {
             if active { seed(&db,true).await; }
-            for slug in ["api-google-workspace","api-google-docs"] {
+            for slug in ["api-google-workspace","api-google-drive","api-google-docs"] {
                 for universal in [false,true] {
                     let tool = format!("{slug}__docs_batch_update_document");
                     let args = serde_json::json!({"documentId":"protocol-doc","body":{"requests":[]}});
@@ -29,7 +30,7 @@ async fn workspace_mcp_protocol_typed_and_universal_calls_resolve_the_same_googl
                     assert_eq!(response.status(),200);
                     let bytes = axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
                     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                    if !active && slug == "api-google-workspace" {
+                    if !active && slug != "api-google-docs" {
                         assert_eq!(value["result"]["isError"],true,"{value}");
                         assert!(value.to_string().contains("workspace_destinations_not_activated"),"{value}");
                     } else {
@@ -40,5 +41,5 @@ async fn workspace_mcp_protocol_typed_and_universal_calls_resolve_the_same_googl
             }
         }
     }).await;
-    assert_eq!(echo.calls.lock().unwrap().len(), 6);
+    assert_eq!(echo.calls.lock().unwrap().len(), 8);
 }

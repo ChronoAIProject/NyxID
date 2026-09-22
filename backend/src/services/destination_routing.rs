@@ -469,14 +469,17 @@ impl Drop for DestinationAudit {
 /// Temporary upgrade state, derived from the exact pre-B default rather than
 /// process configuration. All replicas agree once the shared catalog activates.
 pub fn workspace_destinations_pending(service: &DownstreamService) -> bool {
-    if service.slug != "api-google-workspace" || !service.destination_targets.is_empty() {
-        return false;
-    }
-    let Ok(mut policy) = super::google_workspace::GoogleProduct::Workspace.operation_policy()
+    let Some(product) = super::google_workspace::GoogleProduct::from_slug(&service.slug)
+        .filter(|product| product.has_editor_destinations())
     else {
         return false;
     };
-    policy.rules.retain(|rule| rule.target_id.is_none());
+    if !service.destination_targets.is_empty() {
+        return false;
+    }
+    let Ok(policy) = product.legacy_operation_policy() else {
+        return false;
+    };
     service.proxy_operation_policy.as_ref() == Some(&policy)
 }
 

@@ -206,12 +206,13 @@ async fn workspace_old_shape_drive_approval_and_new_docs_approval_redeem() {
         .await
         .unwrap();
     seed(&db, true).await;
-    let owner = uuid::Uuid::new_v4().to_string();
-    let service = connect(&db, &owner, "api-google-workspace").await;
-    let echo = Echo::start().await;
-    let mut state = test_app_state(db.clone());
-    state.http_client = echo.client.clone();
-    crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(),async {
+    for slug in ["api-google-workspace", "api-google-drive"] {
+        let owner = uuid::Uuid::new_v4().to_string();
+        let service = connect(&db, &owner, slug).await;
+        let echo = Echo::start().await;
+        let mut state = test_app_state(db.clone());
+        state.http_client = echo.client.clone();
+        crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(),async {
         for operation in ["drive_list_files","docs_batch_update_document"] {
             let (caller,pending) = setup_approval(&state,&owner,&service,operation).await;
             if operation == "drive_list_files" {
@@ -232,8 +233,9 @@ async fn workspace_old_shape_drive_approval_and_new_docs_approval_redeem() {
             assert_eq!(result.state,ExactServiceApprovalState::Redeemed,"{result:?}");
         }
     }).await;
-    let calls = echo.calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0]["host"], "www.googleapis.com");
-    assert_eq!(calls[1]["host"], "docs.googleapis.com");
+        let calls = echo.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["host"], "www.googleapis.com");
+        assert_eq!(calls[1]["host"], "docs.googleapis.com");
+    }
 }

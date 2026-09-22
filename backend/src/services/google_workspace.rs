@@ -133,6 +133,17 @@ impl GoogleProduct {
         }
     }
 
+    pub fn has_editor_destinations(self) -> bool {
+        matches!(self, Self::Workspace | Self::Drive)
+    }
+
+    /// The original single-origin policy is the activation migration's CAS pin.
+    pub fn legacy_operation_policy(self) -> AppResult<ProxyOperationPolicy> {
+        let mut policy = self.operation_policy()?;
+        policy.rules.retain(|rule| rule.target_id.is_none());
+        Ok(policy)
+    }
+
     /// The operation catalog also defines the proxy boundary, including for
     /// tokens whose Google grant contains permissions from another product.
     pub fn operation_policy(self) -> AppResult<ProxyOperationPolicy> {
@@ -153,7 +164,7 @@ impl GoogleProduct {
                             path,
                             item[method].get("parameters"),
                         )?;
-                        if self == Self::Workspace
+                        if self.has_editor_destinations()
                             && let Some(origin) = item
                                 .get("servers")
                                 .and_then(|servers| servers[0]["url"].as_str())
@@ -165,7 +176,7 @@ impl GoogleProduct {
                                     .map(|(id, _)| id)
                                     .ok_or_else(|| {
                                         AppError::Internal(
-                                            "Workspace overlay origin is not an allowed recipient"
+                                            "Google overlay origin is not an allowed recipient"
                                                 .into(),
                                         )
                                     })?,
@@ -337,6 +348,30 @@ mod tests {
                     "POST",
                     "/gmail/v1/users/me/messages/send",
                     matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail),
+                ),
+                (
+                    "POST",
+                    "/v1/documents/doc:batchUpdate",
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace | GoogleProduct::Drive | GoogleProduct::Docs
+                    ),
+                ),
+                (
+                    "PUT",
+                    "/v4/spreadsheets/sheet/values/A1:B2",
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace | GoogleProduct::Drive | GoogleProduct::Sheets
+                    ),
+                ),
+                (
+                    "POST",
+                    "/v1/presentations/slides:batchUpdate",
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace | GoogleProduct::Drive | GoogleProduct::Slides
+                    ),
                 ),
                 ("DELETE", "/gmail/v1/users/me/messages/message1", false),
                 ("POST", "/gmail/v1/users/me/messages/message1/trash", false),

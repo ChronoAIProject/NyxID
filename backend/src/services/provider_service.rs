@@ -4744,16 +4744,13 @@ async fn reconcile_google_workspace_seed(
             .await?;
     }
 
-    let mut old_rules = GoogleProduct::Drive.operation_policy()?.rules;
+    let mut old_rules = GoogleProduct::Drive.legacy_operation_policy()?.rules;
     old_rules.extend(GoogleProduct::Calendar.operation_policy()?.rules);
     let old_policy =
         super::proxy_authorization::normalize_policy(ProxyOperationPolicy { rules: old_rules })?;
     let old_policy = bson::to_bson(&old_policy)
         .map_err(|e| AppError::Internal(format!("Failed to serialize Workspace policy: {e}")))?;
-    let mut legacy_workspace = GoogleProduct::Workspace.operation_policy()?;
-    legacy_workspace
-        .rules
-        .retain(|rule| rule.target_id.is_none());
+    let legacy_workspace = GoogleProduct::Workspace.legacy_operation_policy()?;
     let new_policy = bson::to_bson(&legacy_workspace)
         .map_err(|e| AppError::Internal(format!("Failed to serialize Workspace policy: {e}")))?;
     services.update_one(
@@ -4814,7 +4811,7 @@ async fn reconcile_google_mail_send_seed(
     Ok(())
 }
 
-/// Compare-and-set only the exact known Workspace policy and an absent map.
+/// Compare-and-set only the exact known Workspace and Drive policies and absent maps.
 /// An operator's policy or destination map is never overwritten by startup.
 /// The temporary GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED gate orders upgraded
 /// readers before this writer. Activation installs map/policy here and adds the
@@ -4824,32 +4821,46 @@ async fn reconcile_workspace_destinations(
     db: &mongodb::Database,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<()> {
+    use super::google_workspace::GoogleProduct;
     let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
-    let Some(service) = services
-        .find_one(doc! {"slug": "api-google-workspace", "created_by": "system"})
-        .await?
-    else {
-        return Ok(());
-    };
-    if !super::destination_routing::effective_catalog_auth(db, &service)
-        .await
-        .is_ok_and(|auth| auth == "bearer")
-    {
-        tracing::warn!(service_id = %service.id, "Workspace destinations were not activated: effective bearer provider requirement is unavailable");
-        return Ok(());
-    }
-    let new_policy = super::google_workspace::GoogleProduct::Workspace.operation_policy()?;
-    let mut old_policy = new_policy.clone();
-    old_policy.rules.retain(|rule| rule.target_id.is_none());
-    let targets = super::destination_routing::normalize_targets(
-        "api-google-workspace",
-        "bearer",
-        "http",
-        super::destination_routing::workspace_targets(),
-        Some(&new_policy),
-    )?;
-    let activation = services.update_one(
-        doc! { "slug": "api-google-workspace", "created_by": "system", "auth_method": "none", "service_type": "http",
+    for (slug, product, description, limitations) in [
+        (
+            "api-google-workspace",
+            GoogleProduct::Workspace,
+            "Google Drive files and folders, calendars, events, availability, Gmail read/send access, and Docs, Sheets, and Slides editing.",
+            "Workspace bundles Drive, Calendar, Gmail read/send, Docs, Sheets, and Slides through the published HTTP operations. Gmail deletion, trash, mailbox changes, draft management, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
+        ),
+        (
+            "api-google-drive",
+            GoogleProduct::Drive,
+            "Read, upload, create, edit, export, and delete Google Drive files and folders; create, read, and edit Docs, Sheets, and Slides.",
+            "Drive includes Docs, Sheets, and Slides through the published HTTP operations. Full Drive scope covers existing files subject to file permissions; drive.file is limited to app-authorized files and drive.readonly does not grant write access. Calendar, Gmail, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
+        ),
+    ] {
+        let Some(service) = services
+            .find_one(doc! {"slug": slug, "created_by": "system"})
+            .await?
+        else {
+            continue;
+        };
+        if !super::destination_routing::effective_catalog_auth(db, &service)
+            .await
+            .is_ok_and(|auth| auth == "bearer")
+        {
+            tracing::warn!(slug, service_id = %service.id, "Google editor destinations were not activated: effective bearer provider requirement is unavailable");
+            continue;
+        }
+        let new_policy = product.operation_policy()?;
+        let old_policy = product.legacy_operation_policy()?;
+        let targets = super::destination_routing::normalize_targets(
+            slug,
+            "bearer",
+            "http",
+            super::destination_routing::workspace_targets(),
+            Some(&new_policy),
+        )?;
+        let activation = services.update_one(
+        doc! { "slug": slug, "created_by": "system", "auth_method": "none", "service_type": "http",
             "proxy_operation_policy": bson::to_bson(&old_policy).map_err(|error| AppError::Internal(error.to_string()))?,
             "$or": [{"destination_targets": {"$exists": false}}, {"destination_targets": {} }],
         },
@@ -4859,61 +4870,57 @@ async fn reconcile_workspace_destinations(
             "updated_at": bson::DateTime::from_chrono(now),
         } },
     ).await?;
-    if activation.matched_count == 0 {
-        let live = services.find_one(doc! {"_id": &service.id}).await?;
-        if live
-            .as_ref()
-            .is_none_or(|row| row.destination_targets.is_empty())
-        {
-            let failed_precondition = match live.as_ref() {
-                None => "service_exists",
-                Some(row) if row.slug != "api-google-workspace" => "slug",
-                Some(row) if row.created_by != "system" => "created_by",
-                Some(row) if row.auth_method != "none" => "auth_method",
-                Some(row) if row.service_type != "http" => "service_type",
-                Some(row) if row.proxy_operation_policy.as_ref() != Some(&old_policy) => {
-                    "proxy_operation_policy"
-                }
-                _ => "concurrent_update",
-            };
-            tracing::warn!(service_id = %service.id, failed_precondition,
-                "Workspace destinations were not activated: compare-and-set precondition failed");
-        }
-    }
-    let seed = DEFAULT_SERVICE_SEEDS
-        .iter()
-        .find(|seed| seed.service_slug == "api-google-workspace")
-        .expect("Workspace seed");
-    // Metadata follows persisted activation and uses its own known-default CAS
-    // so an administrator's descriptions are preserved independently.
-    for (field, old, new) in [
-        (
-            "description",
-            seed.description,
-            "Google Drive files and folders, calendars, events, availability, Gmail read/send access, and Docs, Sheets, and Slides editing.",
-        ),
-        (
-            "known_limitations",
-            seed.known_limitations,
-            "Workspace bundles Drive, Calendar, Gmail read/send, Docs, Sheets, and Slides through the published HTTP operations. Gmail deletion, trash, mailbox changes, draft management, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
-        ),
-    ] {
-        let metadata = services.update_one(doc! {"_id": &service.id, "destination_targets": bson::to_bson(&targets).map_err(|error| AppError::Internal(error.to_string()))?, field: old},doc! {"$set":{field:new,"updated_at":bson::DateTime::from_chrono(now)}}).await?;
-        if metadata.matched_count == 0 {
+        if activation.matched_count == 0 {
             let live = services.find_one(doc! {"_id": &service.id}).await?;
-            let failed_precondition = match live.as_ref() {
-                None => "service_exists",
-                Some(row) if row.destination_targets != targets => "destination_targets",
-                Some(row) if field == "description" && row.description.as_deref() != old => field,
-                Some(row)
-                    if field == "known_limitations" && row.known_limitations.as_deref() != old =>
-                {
-                    field
-                }
-                _ => "concurrent_update",
-            };
-            tracing::debug!(service_id = %service.id, metadata_field = field, failed_precondition,
-                "Workspace metadata compare-and-set skipped");
+            if live
+                .as_ref()
+                .is_none_or(|row| row.destination_targets.is_empty())
+            {
+                let failed_precondition = match live.as_ref() {
+                    None => "service_exists",
+                    Some(row) if row.slug != slug => "slug",
+                    Some(row) if row.created_by != "system" => "created_by",
+                    Some(row) if row.auth_method != "none" => "auth_method",
+                    Some(row) if row.service_type != "http" => "service_type",
+                    Some(row) if row.proxy_operation_policy.as_ref() != Some(&old_policy) => {
+                        "proxy_operation_policy"
+                    }
+                    _ => "concurrent_update",
+                };
+                tracing::warn!(slug, service_id = %service.id, failed_precondition,
+                "Google editor destinations were not activated: compare-and-set precondition failed");
+            }
+        }
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == slug)
+            .expect("Google product seed");
+        // Metadata follows persisted activation and uses its own known-default CAS
+        // so an administrator's descriptions are preserved independently.
+        for (field, old, new) in [
+            ("description", seed.description, description),
+            ("known_limitations", seed.known_limitations, limitations),
+        ] {
+            let metadata = services.update_one(doc! {"_id": &service.id, "destination_targets": bson::to_bson(&targets).map_err(|error| AppError::Internal(error.to_string()))?, field: old},doc! {"$set":{field:new,"updated_at":bson::DateTime::from_chrono(now)}}).await?;
+            if metadata.matched_count == 0 {
+                let live = services.find_one(doc! {"_id": &service.id}).await?;
+                let failed_precondition = match live.as_ref() {
+                    None => "service_exists",
+                    Some(row) if row.destination_targets != targets => "destination_targets",
+                    Some(row) if field == "description" && row.description.as_deref() != old => {
+                        field
+                    }
+                    Some(row)
+                        if field == "known_limitations"
+                            && row.known_limitations.as_deref() != old =>
+                    {
+                        field
+                    }
+                    _ => "concurrent_update",
+                };
+                tracing::debug!(slug, service_id = %service.id, metadata_field = field, failed_precondition,
+                "Google editor metadata compare-and-set skipped");
+            }
         }
     }
     Ok(())
@@ -5116,7 +5123,8 @@ pub async fn seed_default_services_with_destinations(
 
         let service = DownstreamService {
             destination_targets: if enable_workspace_destinations
-                && seed.service_slug == "api-google-workspace"
+                && super::google_workspace::GoogleProduct::from_slug(seed.service_slug)
+                    .is_some_and(|product| product.has_editor_destinations())
             {
                 super::destination_routing::workspace_targets()
             } else {
@@ -5183,9 +5191,7 @@ pub async fn seed_default_services_with_destinations(
             )
             .map(|product| {
                 let mut policy = product.operation_policy()?;
-                if !enable_workspace_destinations
-                    && product == super::google_workspace::GoogleProduct::Workspace
-                {
+                if !enable_workspace_destinations && product.has_editor_destinations() {
                     policy.rules.retain(|rule| rule.target_id.is_none());
                 }
                 Ok::<_, AppError>(policy)
@@ -10171,60 +10177,70 @@ mod tests {
             .await
             .unwrap();
         let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
-        let mut service = services
-            .find_one(doc! {"slug": "api-google-workspace"})
-            .await
-            .unwrap()
-            .unwrap();
-        service.proxy_operation_policy.as_mut().unwrap().rules.pop();
-        services.update_one(doc! {"_id": &service.id}, doc! {"$set": {
+        for slug in ["api-google-workspace", "api-google-drive"] {
+            let mut service = services
+                .find_one(doc! {"slug": slug})
+                .await
+                .unwrap()
+                .unwrap();
+            service.proxy_operation_policy = Some(
+                super::super::google_workspace::GoogleProduct::from_slug(slug)
+                    .unwrap()
+                    .legacy_operation_policy()
+                    .unwrap(),
+            );
+            service.proxy_operation_policy.as_mut().unwrap().rules.pop();
+            services.update_one(doc! {"_id": &service.id}, doc! {"$set": {
             "proxy_operation_policy": bson::to_bson(&service.proxy_operation_policy).unwrap(),
-        }}).await.unwrap();
-        let before = db
-            .collection::<bson::Document>(DOWNSTREAM_SERVICES)
-            .find_one(doc! {"_id": &service.id})
-            .await
-            .unwrap()
-            .unwrap();
+        }, "$unset": {"destination_targets": ""}}).await.unwrap();
+            let before = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id": &service.id})
+                .await
+                .unwrap()
+                .unwrap();
 
-        let capture = tempfile::NamedTempFile::new().unwrap();
-        let writer = capture.reopen().unwrap();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(move || writer.try_clone().unwrap())
-            .finish();
-        super::reconcile_workspace_destinations(&db, chrono::Utc::now())
-            .with_subscriber(subscriber)
-            .await
-            .unwrap();
+            let capture = tempfile::NamedTempFile::new().unwrap();
+            let writer = capture.reopen().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish();
+            super::reconcile_workspace_destinations(&db, chrono::Utc::now())
+                .with_subscriber(subscriber)
+                .await
+                .unwrap();
 
-        let after = db
-            .collection::<bson::Document>(DOWNSTREAM_SERVICES)
-            .find_one(doc! {"_id": &service.id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(after, before);
-        let logs = std::fs::read_to_string(capture.path()).unwrap();
-        let warnings: Vec<_> = logs
-            .lines()
-            .filter(|line| {
-                line.contains("WARN") && line.contains("Workspace destinations were not activated")
-            })
-            .collect();
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("failed_precondition=\"proxy_operation_policy\""));
-        assert!(warnings[0].contains(&service.id));
-        assert!(!warnings[0].contains("path_template"));
-        for field in ["description", "known_limitations"] {
-            assert!(logs.lines().any(|line| {
-                line.contains("DEBUG")
-                    && line.contains("Workspace metadata compare-and-set skipped")
-                    && line.contains(field)
-                    && line.contains("failed_precondition=\"destination_targets\"")
-            }));
+            let after = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id": &service.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after, before);
+            let logs = std::fs::read_to_string(capture.path()).unwrap();
+            let warnings: Vec<_> = logs
+                .lines()
+                .filter(|line| {
+                    line.contains("WARN")
+                        && line.contains("Google editor destinations were not activated")
+                        && line.contains(&service.id)
+                })
+                .collect();
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].contains("failed_precondition=\"proxy_operation_policy\""));
+            assert!(warnings[0].contains(&service.id));
+            assert!(!warnings[0].contains("path_template"));
+            for field in ["description", "known_limitations"] {
+                assert!(logs.lines().any(|line| {
+                    line.contains("DEBUG")
+                        && line.contains("Google editor metadata compare-and-set skipped")
+                        && line.contains(field)
+                        && line.contains("failed_precondition=\"destination_targets\"")
+                }));
+            }
         }
     }
 
@@ -10253,7 +10269,7 @@ mod tests {
         let old_policy = ProxyOperationPolicy {
             rules: [GoogleProduct::Drive, GoogleProduct::Calendar]
                 .into_iter()
-                .flat_map(|product| product.operation_policy().unwrap().rules)
+                .flat_map(|product| product.legacy_operation_policy().unwrap().rules)
                 .collect(),
         };
         let legacy_workspace_policy = ProxyOperationPolicy {
@@ -10263,7 +10279,7 @@ mod tests {
                 GoogleProduct::Gmail,
             ]
             .into_iter()
-            .flat_map(|product| product.operation_policy().unwrap().rules)
+            .flat_map(|product| product.legacy_operation_policy().unwrap().rules)
             .collect(),
         };
         let old_scopes = vec!["openid", "email", "profile", DRIVE, CALENDAR];
