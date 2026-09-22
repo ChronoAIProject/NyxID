@@ -12,6 +12,8 @@ export interface ChannelBotConnectProps {
   readonly label: string;
   readonly orgId: string | null;
   readonly form: UseFormReturn<CreateChannelBotFormData>;
+  readonly fullPage?: boolean;
+  readonly preferManual?: boolean;
   readonly onConnected: (id: string, replace?: boolean) => void;
   readonly renderFields: (state: {
     disabled: boolean;
@@ -38,6 +40,8 @@ function ManagedBotConnect({
   onConnected,
   renderFields,
   children,
+  preferManual = false,
+  fullPage = false,
 }: ChannelBotConnectProps) {
   const { getPlatform } = useChannelPlatformViews();
   const descriptor = getPlatform(platform);
@@ -45,7 +49,7 @@ function ManagedBotConnect({
     platform,
     Boolean(descriptor.managedFlow),
   );
-  const [advanced, setAdvanced] = useState(false);
+  const [advanced, setAdvanced] = useState(preferManual);
   const available = Boolean(descriptor.managedFlow && managed.data?.available);
   const Connect = descriptor.managedFlow
     ? MANAGED_FLOW_COMPONENTS[descriptor.managedFlow].Connect
@@ -70,6 +74,7 @@ function ManagedBotConnect({
             bootstrap={managed.data}
             label={label}
             orgId={orgId}
+            fullPage={fullPage}
             onConnected={(bot) => onConnected(bot.id)}
           />
           {!descriptor.managedOnly && (

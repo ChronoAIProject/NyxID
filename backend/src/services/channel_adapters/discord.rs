@@ -392,6 +392,10 @@ impl PlatformAdapter for DiscordAdapter {
                 "https://discord.com/developers/docs/interactions/receiving-and-responding",
             ),
             required_suffix: " for Discord",
+            setup_instructions: &[
+                "In Discord Developer Portal > General Information, set Interactions Endpoint URL to the Callback URL shown here and save. Discord verifies the endpoint with a PING challenge.",
+                "Install the app in the intended server with the permissions required for its interactions. Assign an agent in NyxID, then invoke an interaction to test delivery.",
+            ],
             fields: &[
                 BOT_TOKEN_FIELD,
                 RegistrationField {

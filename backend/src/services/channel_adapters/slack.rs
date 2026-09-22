@@ -368,6 +368,11 @@ impl PlatformAdapter for SlackAdapter {
         RegistrationDescriptor {
             documentation_url: Some("https://api.slack.com/apis/events-api"),
             required_suffix: " for Slack",
+            setup_instructions: &[
+                "In Slack app settings > Event Subscriptions, enable Events and set Request URL to the Callback URL shown here. Slack verifies the URL automatically.",
+                "Subscribe to the bot message events for the conversations you want to receive, grant the matching OAuth scopes and permission to send replies, then save and reinstall the app if Slack requests it.",
+                "Invite the bot to the channels it should handle. Assign an agent in NyxID and send a test message.",
+            ],
             unsupported_patch_message: Some(
                 "verification_token, encrypt_key, and app_id are only supported for Lark/Feishu bots",
             ),

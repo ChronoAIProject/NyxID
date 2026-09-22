@@ -46,11 +46,13 @@ export function ManagedWhatsApp({
   label,
   orgId,
   onConnected,
+  fullPage = false,
 }: {
   readonly bootstrap: ManagedBootstrap;
   readonly label: string;
   readonly orgId: string | null;
   readonly onConnected: (bot: CreateChannelBotResponse) => void;
+  readonly fullPage?: boolean;
 }) {
   const [sdk, setSdk] = useState<FacebookSdk | null>(null);
   const [sdkAttempt, setSdkAttempt] = useState(0);
@@ -311,6 +313,7 @@ export function ManagedWhatsApp({
       <Button
         type="button"
         variant="primary"
+        className={fullPage ? "w-full" : undefined}
         disabled={
           !sdk ||
           !runtimeConfig ||
@@ -323,7 +326,7 @@ export function ManagedWhatsApp({
         <ExternalLink className="size-3" />
         {!sdk && !error ? "Loading Meta..." : "Connect with Meta"}
       </Button>
-      {stage === "popup" && (
+      {stage === "popup" && !fullPage && (
         <Button
           type="button"
           variant="ghost"
