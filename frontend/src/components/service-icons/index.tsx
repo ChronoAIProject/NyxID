@@ -55,6 +55,7 @@ import ApiLarkBotIcon from "./api-lark-bot";
 import ApiFeishuIcon from "./api-feishu";
 import ApiFeishuBotIcon from "./api-feishu-bot";
 import ApiTelegramBotIcon from "./api-telegram-bot";
+import ApiSupabaseIcon from "./api-supabase";
 import ApiElevenLabsIcon from "./api-elevenlabs";
 import ApiTelnyxIcon from "./api-telnyx";
 import ApiTwilioIcon from "./api-twilio";
@@ -110,6 +111,7 @@ export const SPEC_CATALOG_SLUGS = [
   "api-feishu",
   "api-feishu-bot",
   "api-telegram-bot",
+  "api-supabase",
   "api-elevenlabs",
   "api-telnyx",
   "api-twilio",
@@ -162,6 +164,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-feishu": ApiFeishuIcon,
   "api-feishu-bot": ApiFeishuBotIcon,
   "api-telegram-bot": ApiTelegramBotIcon,
+  "api-supabase": ApiSupabaseIcon,
   "api-elevenlabs": ApiElevenLabsIcon,
   "api-telnyx": ApiTelnyxIcon,
   telnyx: ApiTelnyxIcon,
