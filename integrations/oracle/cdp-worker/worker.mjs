@@ -40,7 +40,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
-  writeFileSync, realpathSync, existsSync } from "node:fs";
+  writeFileSync, realpathSync, existsSync, readdirSync, unlinkSync } from "node:fs";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -632,7 +632,7 @@ async function assertPublicTarget(rawUrl) {
 // Ported from the proven userscript extractors: KaTeX/MathJax → LaTeX, the
 // Pro-reasoning "still generating" probe, latest-answer + full-transcript
 // extraction. Installed on window.__nyx and re-installed after navigation.
-const DOM_CORE_VERSION = 4;
+const DOM_CORE_VERSION = 5;
 const DOM_CORE = `
 window.__nyx = (function () {
   const artifactFileId = ${artifactFileId.toString()};
@@ -746,6 +746,37 @@ window.__nyx = (function () {
 
   function assistantCount() {
     return document.querySelectorAll("[data-message-author-role='assistant']").length;
+  }
+
+  // Structure only, never content: what the page looked like when a task
+  // failed. Lengths and roles stand in for text; test ids and ARIA state
+  // stand in for labels. The composer draft is reported by length alone.
+  function diagnosticSummary() {
+    const { input, send } = discoverControls();
+    const visible = (el) => pickerElementVisible(el);
+    const describe = (el) => ({ tag: el.tagName, testid: el.getAttribute('data-testid'), role: el.getAttribute('role'),
+      aria_label_length: (el.getAttribute('aria-label') || '').length, text_length: (el.innerText || '').trim().length });
+    const pill = document.querySelector('button.__composer-pill');
+    const draft = input ? String(input.value ?? input.innerText ?? '') : '';
+    const latest = latestAssistantTurn();
+    return {
+      viewport: { width: innerWidth, height: innerHeight, visibility: document.visibilityState, ready: document.readyState },
+      body_pointer_events: getComputedStyle(document.body).pointerEvents,
+      composer: input ? { ...describe(input), editable: !!input.isContentEditable || input.tagName === 'TEXTAREA', draft_length: draft.length,
+        rect: (() => { const r = input.getBoundingClientRect(); return { top: Math.round(r.top), height: Math.round(r.height) }; })() } : null,
+      send: send ? { ...describe(send), disabled: !!send.disabled } : null,
+      pill: pill ? { text_length: (pill.innerText || '').trim().length, expanded: pill.getAttribute('aria-expanded'), state: pill.getAttribute('data-state') } : null,
+      dialogs: [...document.querySelectorAll('dialog[open], [role="dialog"]')].filter(visible).map((el) => ({
+        ...describe(el), modal_testid: el.querySelector('[data-testid]')?.getAttribute('data-testid') || null,
+        buttons: [...el.querySelectorAll('button')].filter(visible).length })),
+      menus: [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(visible).length,
+      alerts: [...document.querySelectorAll('[role="alert"], [role="status"]')].filter(visible).map((el) => ({ ...describe(el), code: classifyChatGptError(el.innerText) })),
+      error_code: errorCode(),
+      generating: isStillGenerating(),
+      turns: { total: document.querySelectorAll('[data-message-author-role]').length, assistant: assistantCount(),
+        latest_role: latest ? 'assistant' : 'none', latest_length: latest ? (latest.innerText || '').length : 0 },
+      url: { host: location.hostname, path: location.pathname, temporary: new URLSearchParams(location.search).get('temporary-chat') === 'true' },
+    };
   }
 
   function latestAssistantTurn() {
@@ -928,10 +959,53 @@ window.__nyx = (function () {
     return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
   }
 
-  return { version: ${DOM_CORE_VERSION}, discoverControls, structuralProbe, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+  return { version: ${DOM_CORE_VERSION}, discoverControls, structuralProbe, diagnosticSummary, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
     beginModelPicker, finishNestedModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem, compactModelLabel };
 })();
 `;
+
+// Wait for the page to go quiet instead of sleeping a fixed interval: resolve
+// once no DOM mutation has landed for `quietMs`, or after `maxMs` regardless.
+// A fixed sleep is either too short on a loaded page or wasted on a fast one;
+// this returns as soon as React's last batch settles. Falls back to a short
+// sleep when the page cannot be evaluated (navigating, crashed).
+export async function settleDom(page, { quietMs = 150, maxMs = 2500 } = {}) {
+  const started = Date.now();
+  try {
+    const waited = await Promise.race([
+      page.evaluate(({ quiet, max }) => new Promise((resolveSettle) => {
+        let timer = null;
+        const done = () => { observer.disconnect(); clearTimeout(timer); clearTimeout(cap); resolveSettle(true); };
+        const bump = () => { clearTimeout(timer); timer = setTimeout(done, quiet); };
+        const observer = new MutationObserver(bump);
+        observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true });
+        const cap = setTimeout(done, max);
+        bump();
+      }), { quiet: quietMs, max: maxMs }),
+      sleep(maxMs + 1000).then(() => false),
+    ]);
+    return { settled: waited === true, ms: Date.now() - started };
+  } catch (error) {
+    if (["page_crashed", "cdp_disconnected"].includes(stableErrorCode(error))) throw error;
+    await sleep(Math.min(maxMs, 500));
+    return { settled: false, ms: Date.now() - started };
+  }
+}
+
+// Poll for the composer to hydrate, bounded; a missing composer is reported
+// by the caller's own composer_not_found path, never here.
+async function waitForComposer(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (await page.evaluate(() => !!window.__nyx?.discoverControls().input)) return true;
+    } catch (error) {
+      if (["page_crashed", "cdp_disconnected"].includes(stableErrorCode(error))) throw error;
+    }
+    await sleep(100);
+  }
+  return false;
+}
 
 const initializedPages = new WeakSet();
 export async function installDomCore(page) {
@@ -950,6 +1024,72 @@ export async function installDomCore(page) {
     await sleep(100);
   }
   throw Object.assign(new Error('dom_core_unavailable'), { code: 'dom_core_unavailable' });
+}
+
+// ── Failure diagnostics ──────────────────────────────────────────────────
+// On every task failure the worker writes a structural snapshot of the page
+// next to its state file, so a failure can be explained after the fact
+// without sudo on the host or a repro. JSON always; a PNG only when
+// NYXID_ORACLE_DIAGNOSTIC_SCREENSHOTS=1, because a screenshot shows content.
+// The newest NYXID_ORACLE_DIAGNOSTICS_KEEP snapshots are retained.
+const DIAGNOSTICS_DIR = process.env.NYXID_ORACLE_DIAGNOSTICS_DIR || resolve(dirname(STATE_FILE), "diagnostics");
+const DIAGNOSTICS_KEEP = Math.max(0, Math.min(500, Number(process.env.NYXID_ORACLE_DIAGNOSTICS_KEEP) || 20));
+const DIAGNOSTIC_SCREENSHOTS = process.env.NYXID_ORACLE_DIAGNOSTIC_SCREENSHOTS === "1";
+const DIAGNOSTIC_CAPTURE_MS = 5000;
+
+export function diagnosticFileName(now, taskId, code) {
+  const stamp = new Date(now).toISOString().replace(/[:.]/g, "-").replace(/Z$/, "Z");
+  const task = String(taskId || "task").replace(/[^a-z0-9]/gi, "").slice(0, 8) || "task";
+  const safeCode = /^[a-z0-9_]{1,64}$/.test(code || "") ? code : "worker_error";
+  return `${stamp}-${task}-${safeCode}`;
+}
+
+// Snapshot base names sort chronologically; return the ones beyond `keep`.
+export function diagnosticsToPrune(names, keep) {
+  const bases = [...new Set((names || []).map((name) => String(name).replace(/\.(json|png)$/, "")))]
+    .filter((base) => /^\d{4}-\d{2}-\d{2}T/.test(base)).sort();
+  const stale = bases.slice(0, Math.max(0, bases.length - keep));
+  return (names || []).filter((name) => stale.includes(String(name).replace(/\.(json|png)$/, "")));
+}
+
+export async function writeDiagnosticSnapshot(runtime, task, code, detail) {
+  const page = runtime?.page;
+  const base = diagnosticFileName(Date.now(), task?.task_id, code);
+  try {
+    mkdirSync(DIAGNOSTICS_DIR, { recursive: true, mode: 0o700 });
+    const capture = async (read) => Promise.race([
+      read().catch((error) => ({ unavailable: stableErrorCode(error) })),
+      new Promise((resolveTimeout) => setTimeout(() => resolveTimeout({ unavailable: "capture_timeout" }), DIAGNOSTIC_CAPTURE_MS)),
+    ]);
+    const live = page && !page.isClosed();
+    const snapshot = {
+      at: new Date().toISOString(), worker: LABEL, script_version: SCRIPT_VERSION,
+      task_id: task?.task_id || null, kind: task?.kind || null, code, detail,
+      phase: runtime?.state?.current_task?.phase || null, last_phase: runtime?.state?.current_task?.last_phase || null,
+      recovery_failures: runtime?.state?.current_task?.recovery_failures || 0,
+      prompt_length: typeof task?.prompt === "string" ? task.prompt.length : null,
+      model: task?.model || null,
+      observed_model_switcher: runtime?.state?.current_task?.observed_model_switcher || null,
+      observed_model_effort: runtime?.state?.current_task?.observed_model_effort || null,
+      url: live ? page.url() : null,
+      chrome_alive: !!runtime?.chromeAlive, logged_in: runtime?.loggedIn ?? null,
+      probe: live ? await capture(() => failureProbe(page)) : { unavailable: "no_page" },
+      summary: live ? await capture(async () => { await installDomCore(page); return page.evaluate(() => window.__nyx?.diagnosticSummary()); }) : { unavailable: "no_page" },
+    };
+    const jsonPath = resolve(DIAGNOSTICS_DIR, `${base}.json`);
+    writeFileSync(jsonPath, JSON.stringify(snapshot, null, 1), { mode: 0o600 });
+    if (DIAGNOSTIC_SCREENSHOTS && live) {
+      await capture(() => page.screenshot({ path: resolve(DIAGNOSTICS_DIR, `${base}.png`), timeout: DIAGNOSTIC_CAPTURE_MS }));
+    }
+    for (const stale of diagnosticsToPrune(readdirSync(DIAGNOSTICS_DIR), DIAGNOSTICS_KEEP)) {
+      try { unlinkSync(resolve(DIAGNOSTICS_DIR, stale)); } catch {}
+    }
+    log(`diagnostic_snapshot file=${base}.json`);
+    return jsonPath;
+  } catch (error) {
+    log(`diagnostic_snapshot failed (${stableErrorCode(error)})`);
+    return null;
+  }
 }
 
 async function failureProbe(page) {
@@ -1447,7 +1587,9 @@ export function promptExceedsLimit(length, max = PROMPT_MAX_CHARS) {
 // send; a background endpoint, another tab or an old response cannot.
 export function classifySubmissionResponse({ method, url, status }) {
   if (method !== "POST") return null;
-  if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\/backend-api\/(f\/)?conversation(\?|$)/.test(url || "")) return null;
+  // Observed 2026-09-22: the page POSTs .../f/conversation/prepare, then
+  // .../f/conversation. Either may refuse the message.
+  if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\/backend-api\/(f\/)?conversation(\/prepare)?(\?|$)/.test(url || "")) return null;
   if (status === 413) return "prompt_too_long";
   return null;
 }
@@ -2684,7 +2826,10 @@ async function handlePrompt(runtime, page, task, recovering) {
     await page.goto(navTarget, { waitUntil: "domcontentloaded" });
     await installDomCore(page);
     await page.bringToFront().catch(() => {});
-    await sleep(2500);
+    // Hydration first, then a quiet DOM: replaces a flat 2.5s sleep that was
+    // both too short on a slow page and wasted on a fast one.
+    await waitForComposer(page, 15000);
+    await settleDom(page, { quietMs: 250, maxMs: 2500 });
     if (temporaryChat) await dismissTemporaryChatOnboarding(page);
   }
 
@@ -2698,7 +2843,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   if (await recoverPreSendLogin(runtime)) throw new TaskRestart();
 
   if (recovering && !["claimed", "page_ready", "ready_to_send"].includes(priorPhase)) {
-    await sleep(1500);
+    await settleDom(page, { quietMs: 250, maxMs: 1500 });
     const snapshot = await transcriptSnapshot(page);
     if (snapshot.errorCode) {
       const answer = await recoverContentFailure(runtime, page, task, snapshot.assistantCount, snapshot.errorCode);
@@ -2750,7 +2895,8 @@ async function handlePrompt(runtime, page, task, recovering) {
     updateTaskState(runtime.state, { pre_send_reload_attempted: true });
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
     await installDomCore(page);
-    await sleep(STABLE_INTERVAL_MS);
+    await waitForComposer(page, 15000);
+    await settleDom(page, { quietMs: 250, maxMs: Math.max(1500, STABLE_INTERVAL_MS) });
     readyError = await page.evaluate(() => window.__nyx?.errorCode());
   }
   if (readyError === 'chatgpt_error_response') {
@@ -2827,7 +2973,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   const baseline = before.baseline;
   updateTaskState(runtime.state, { phase: "ready_to_send", baseline_turn_count: baseline });
   if (await ack(runtime, task, "ready_to_send")) throw new TaskFailure("cancelled");
-  await sleep(300);
+  await settleDom(page, { quietMs: 100, maxMs: 300 });
   // Only attach a PDF on the FIRST turn of a conversation — never re-upload it
   // into an existing chat if the server ever resends pdf_base64 on a follow-up
   // (mirrors the userscript's `!is_followup && pdf_base64` guard).
@@ -2987,7 +3133,8 @@ async function recoverContentFailure(runtime, page, task, beforeCount, code, rej
   updateTaskState(runtime.state, { content_reload_attempted: true });
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await installDomCore(page);
-  await sleep(STABLE_INTERVAL_MS);
+  await waitForComposer(page, 15000);
+  await settleDom(page, { quietMs: 250, maxMs: Math.max(1500, STABLE_INTERVAL_MS) });
   const snapshot = await transcriptSnapshot(page);
   const decision = decidePromptResume({ phase: runtime.state.current_task?.phase, prompt: task.prompt,
     turns: snapshot.turns, generating: snapshot.generating, transcriptReady: snapshot.ready,
@@ -3164,7 +3311,7 @@ async function loadFullTranscript(page) {
     if (renderedCount > 0) break;
     await sleep(700);
   }
-  await sleep(1500);
+  await settleDom(page, { quietMs: 250, maxMs: 1500 });
 
   await expandCollapsibles(page);
 
@@ -3883,6 +4030,7 @@ async function settleTaskFailure(runtime, task, code) {
     saveState(runtime.state);
   }
   log(`task_failure code=${code} detail=${detail} probe=${JSON.stringify(await failureProbe(runtime.page))}`);
+  await writeDiagnosticSnapshot(runtime, task, code, detail);
   await apiPost(
     "/result",
     taskIdentity(runtime, task, {
@@ -3936,6 +4084,7 @@ async function executeTask(runtime, task, recovering) {
       updateTaskState(runtime.state, { recovery_failures: failureCount, failure_detail: detail, shape_failures: shapeFailures });
       runtime.lastError = detail;
       log(`task ${task.task_id} browser failure ${failureCount}/${MAX_TASK_RECOVERY_FAILURES} (${runtime.lastError})`);
+      await writeDiagnosticSnapshot(runtime, task, cause, detail);
       const recovery = taskRecoveryDecision({
         kind: task.kind,
         phase: runtime.state.current_task?.phase,

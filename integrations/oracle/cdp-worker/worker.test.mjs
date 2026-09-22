@@ -22,6 +22,9 @@ import {
   promptExceedsLimit,
   classifySubmissionResponse,
   interactionBudget,
+  diagnosticFileName,
+  diagnosticsToPrune,
+  settleDom,
   PROMPT_FILL_CHARS_PER_MS,
   PROMPT_FILL_MAX_MS,
   composerHasDraft,
@@ -1259,6 +1262,7 @@ test("only the page's own conversation POST returning 413 names a rejected messa
   assert.equal(post("https://chatgpt.com/backend-api/f/conversation", 413), "prompt_too_long");
   assert.equal(post("https://chatgpt.com/backend-api/conversation", 413), "prompt_too_long");
   assert.equal(post("https://chat.openai.com/backend-api/f/conversation?x=1", 413), "prompt_too_long");
+  assert.equal(post("https://chatgpt.com/backend-api/f/conversation/prepare", 413), "prompt_too_long");
   assert.equal(post("https://chatgpt.com/backend-api/f/conversation", 200), null);
   assert.equal(post("https://chatgpt.com/backend-api/f/conversation", 429), null);
   assert.equal(post("https://chatgpt.com/backend-api/conversations", 413), null);
@@ -1286,4 +1290,33 @@ test("selection budgets are bounded by silence up to a hard ceiling", () => {
   // Without a cap the window is also the ceiling.
   const flat = interactionBudget(1000, null, { now: 0 });
   assert.equal(flat.progress(900), 1000);
+});
+
+test("diagnostic snapshots are named chronologically and pruned oldest-first", () => {
+  const name = diagnosticFileName(Date.UTC(2026, 8, 22, 7, 5, 9, 123), "9a6d7697-e911-49aa", "operation_timeout");
+  assert.equal(name, "2026-09-22T07-05-09-123Z-9a6d7697-operation_timeout");
+  assert.equal(diagnosticFileName(0, "", "not a code!"), "1970-01-01T00-00-00-000Z-task-worker_error");
+  const names = [
+    "2026-09-22T07-00-00-000Z-aaaaaaaa-x.json", "2026-09-22T07-00-00-000Z-aaaaaaaa-x.png",
+    "2026-09-22T08-00-00-000Z-bbbbbbbb-x.json",
+    "2026-09-22T09-00-00-000Z-cccccccc-x.json", "notes.txt",
+  ];
+  // Keep the two newest snapshots; the PNG goes with its JSON; foreign files are untouched.
+  assert.deepEqual(diagnosticsToPrune(names, 2), ["2026-09-22T07-00-00-000Z-aaaaaaaa-x.json", "2026-09-22T07-00-00-000Z-aaaaaaaa-x.png"]);
+  assert.deepEqual(diagnosticsToPrune(names, 3), []);
+  assert.deepEqual(diagnosticsToPrune(names, 0).length, 4);
+  assert.deepEqual(diagnosticsToPrune([], 5), []);
+});
+
+test("settleDom resolves on a quiet page and falls back to a short sleep when it cannot evaluate", async () => {
+  const quiet = { evaluate: async () => true };
+  const settled = await settleDom(quiet, { quietMs: 50, maxMs: 500 });
+  assert.equal(settled.settled, true);
+  const broken = { evaluate: async () => { throw new Error("Execution context was destroyed"); } };
+  const started = Date.now();
+  const fallback = await settleDom(broken, { quietMs: 50, maxMs: 200 });
+  assert.equal(fallback.settled, false);
+  assert.ok(Date.now() - started >= 150, "fallback sleeps for min(maxMs, 500)");
+  const crashed = { evaluate: async () => { throw new Error("Target crashed"); } };
+  await assert.rejects(settleDom(crashed, { quietMs: 50, maxMs: 200 }), /Target crashed/);
 });
