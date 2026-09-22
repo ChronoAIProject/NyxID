@@ -108,6 +108,7 @@ fn parse_endpoints_from_spec(
     spec: &serde_json::Value,
     is_openapi3: bool,
 ) -> AppResult<Vec<ParsedEndpoint>> {
+    validate_mcp_marker_locations(spec, spec, ProjectionObject::Document)?;
     let paths = spec
         .get("paths")
         .and_then(|p| p.as_object())
@@ -133,9 +134,9 @@ fn parse_endpoints_from_spec(
                 .map(str::to_string);
             let name = extract_name(operation, method, path);
             let description = extract_description(operation);
-            let parameters = extract_parameters_with_spec(operation, path_obj, spec);
+            let parameters = extract_parameters_with_spec(operation, path_obj, spec)?;
             let request_body = if is_openapi3 {
-                extract_request_body_openapi3_with_spec(operation, spec)
+                extract_request_body_openapi3_with_spec(operation, spec)?
             } else {
                 extract_request_body_swagger2(operation, path_obj, spec)
             };
@@ -385,29 +386,236 @@ fn extract_description(operation: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Validate the declaration before narrowing it, and also validate persisted
+/// parameters at execution time. Only path/query arguments have a runtime guard.
+pub(crate) fn mcp_enum_projection(
+    parameter: &serde_json::Value,
+) -> AppResult<Option<&Vec<serde_json::Value>>> {
+    if let Some(schema) = parameter.get("schema") {
+        validate_mcp_marker_locations(parameter, schema, ProjectionObject::Schema)?;
+    }
+    if parameter.get("x-nyxid-mcp-media").is_some() {
+        return Err(AppError::BadRequest("MCP projection markers must be outside schemas and on their supported parameter/requestBody objects".into()));
+    }
+    let Some(marker) = parameter.get("x-nyxid-mcp-enum") else {
+        return Ok(None);
+    };
+    let invalid = || {
+        AppError::BadRequest(
+        "x-nyxid-mcp-enum requires a named path/query parameter and a nonempty subset of its schema.enum".into()
+    )
+    };
+    if !matches!(parameter["in"].as_str(), Some("path" | "query"))
+        || parameter["name"].as_str().is_none_or(str::is_empty)
+    {
+        return Err(invalid());
+    }
+    let projected = marker
+        .as_array()
+        .filter(|values| !values.is_empty())
+        .ok_or_else(invalid)?;
+    let declared = parameter["schema"]["enum"].as_array().ok_or_else(invalid)?;
+    if projected.iter().any(|value| !declared.contains(value)) {
+        return Err(invalid());
+    }
+    if let Some(default) = parameter["schema"].get("default")
+        && !projected.contains(default)
+    {
+        return Err(AppError::BadRequest(
+            "x-nyxid-mcp-enum excludes the declared schema.default".into(),
+        ));
+    }
+    Ok(Some(projected))
+}
+
+fn contains_mcp_marker(value: &serde_json::Value) -> bool {
+    value.get("x-nyxid-mcp-enum").is_some() || value.get("x-nyxid-mcp-media").is_some()
+}
+
+#[derive(Clone, Copy)]
+enum ProjectionObject {
+    Document,
+    Paths,
+    PathItem,
+    Operation,
+    Components,
+    ParameterMap,
+    ParameterList,
+    Parameter,
+    BodyMap,
+    Body,
+    ContentMap,
+    Media,
+    ResponseMap,
+    Response,
+    HeaderMap,
+    Header,
+    SchemaMap,
+    Schema,
+    Other,
+}
+
+impl ProjectionObject {
+    fn child(self, key: &str) -> Self {
+        use ProjectionObject::*;
+        match (self, key) {
+            (Document, "paths") => Paths,
+            (Document, "components") => Components,
+            (Document, "parameters") | (Components, "parameters") => ParameterMap,
+            (Document, "definitions") | (Components, "schemas") => SchemaMap,
+            (Components, "requestBodies") => BodyMap,
+            (Components, "responses") => ResponseMap,
+            (Components | Response, "headers") => HeaderMap,
+            (HeaderMap, _) => Header,
+            (Paths, _) => PathItem,
+            (
+                PathItem,
+                "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "trace",
+            ) => Operation,
+            (PathItem | Operation, "parameters") => ParameterList,
+            (Operation, "requestBody") => Body,
+            (Operation, "responses") => ResponseMap,
+            (ParameterMap | ParameterList, _) => Parameter,
+            (BodyMap, _) => Body,
+            (ResponseMap, _) => Response,
+            (Parameter | Body | Response, "content") => ContentMap,
+            (ContentMap, _) => Media,
+            (Parameter | Media | Response | Header, "schema") => Schema,
+            (
+                Schema,
+                "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas",
+            ) => SchemaMap,
+            (SchemaMap, _) => Schema,
+            (
+                Schema,
+                "items"
+                | "additionalProperties"
+                | "contains"
+                | "not"
+                | "if"
+                | "then"
+                | "else"
+                | "propertyNames",
+            ) => Schema,
+            (Schema, "allOf" | "anyOf" | "oneOf" | "prefixItems") => Schema,
+            // Elements of a schema-combinator array are schemas too.
+            (Schema, key) if key.parse::<usize>().is_ok() => Schema,
+            _ => Other,
+        }
+    }
+
+    fn is_name_map(self) -> bool {
+        matches!(
+            self,
+            Self::Paths
+                | Self::ParameterMap
+                | Self::BodyMap
+                | Self::ContentMap
+                | Self::ResponseMap
+                | Self::HeaderMap
+                | Self::SchemaMap
+        )
+    }
+}
+
+/// Check raw locations as well as resolved declarations, including parameters
+/// discarded by inclusion/override rules. Name maps contain user-chosen names;
+/// only their values are declarations, even when a name resembles a keyword.
+fn validate_mcp_marker_locations(
+    root: &serde_json::Value,
+    value: &serde_json::Value,
+    context: ProjectionObject,
+) -> AppResult<()> {
+    // Descriptions, security schemes and vendor extensions are opaque metadata.
+    // Walk only structural OpenAPI objects and JSON Schema declarations.
+    if matches!(context, ProjectionObject::Other) {
+        return Ok(());
+    }
+    let parameter_location = matches!(context, ProjectionObject::Parameter);
+    let body_location = matches!(context, ProjectionObject::Body);
+    if !context.is_name_map() {
+        if parameter_location || value.get("x-nyxid-mcp-enum").is_some() {
+            if !parameter_location {
+                return Err(AppError::BadRequest("x-nyxid-mcp-enum is supported only on a path/query parameter object, outside schema".into()));
+            }
+            if let Some(resolved) = resolve_parameter_refs(root, value) {
+                mcp_enum_projection(&resolved)?;
+            } else if contains_mcp_marker(value) {
+                return Err(AppError::BadRequest(
+                    "Cannot resolve parameter carrying x-nyxid-mcp-enum".into(),
+                ));
+            }
+        }
+        if body_location || value.get("x-nyxid-mcp-media").is_some() {
+            if !body_location {
+                return Err(AppError::BadRequest(
+                    "x-nyxid-mcp-media is supported only on a requestBody object, outside schema"
+                        .into(),
+                ));
+            }
+            if let Some(resolved) = resolve_request_body_refs(root, value) {
+                if let Some(marker) = resolved.get("x-nyxid-mcp-media") {
+                    let content = resolved["content"].as_object().ok_or_else(|| {
+                        AppError::BadRequest(
+                            "x-nyxid-mcp-media requires requestBody content".into(),
+                        )
+                    })?;
+                    select_openapi3_media(content, root, Some(marker))?;
+                }
+            } else if contains_mcp_marker(value) {
+                return Err(AppError::BadRequest(
+                    "Cannot resolve requestBody carrying x-nyxid-mcp-media".into(),
+                ));
+            }
+        }
+    }
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if !context.is_name_map()
+                    && matches!(key.as_str(), "example" | "examples" | "default" | "enum")
+                {
+                    continue;
+                }
+                validate_mcp_marker_locations(root, child, context.child(key))?;
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for (index, child) in array.iter().enumerate() {
+                validate_mcp_marker_locations(root, child, context.child(&index.to_string()))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Extract parameters from both operation-level and path-level.
 #[cfg(test)]
 fn extract_parameters(
     operation: &serde_json::Value,
     path_obj: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<serde_json::Value> {
-    extract_parameters_with_spec(operation, path_obj, operation)
+    extract_parameters_with_spec(operation, path_obj, operation).expect("valid test parameters")
 }
 
 fn extract_parameters_with_spec(
     operation: &serde_json::Value,
     path_obj: &serde_json::Map<String, serde_json::Value>,
     spec: &serde_json::Value,
-) -> Option<serde_json::Value> {
+) -> AppResult<Option<serde_json::Value>> {
     let mut all_params = Vec::new();
 
     // Path-level parameters
     if let Some(path_params) = path_obj.get("parameters").and_then(|v| v.as_array()) {
         for p in path_params {
-            if let Some(param) = resolve_parameter_refs(spec, p)
-                && should_include_parameter(&param)
-            {
-                merge_parameter(&mut all_params, param);
+            if let Some(mut param) = resolve_parameter_refs(spec, p) {
+                if let Some(projected) = mcp_enum_projection(&param)? {
+                    param["schema"]["enum"] = serde_json::Value::Array(projected.to_vec());
+                }
+                if should_include_parameter(&param) {
+                    merge_parameter(&mut all_params, param);
+                }
             }
         }
     }
@@ -415,18 +623,21 @@ fn extract_parameters_with_spec(
     // Operation-level parameters (override path-level by name+in)
     if let Some(op_params) = operation.get("parameters").and_then(|v| v.as_array()) {
         for p in op_params {
-            if let Some(param) = resolve_parameter_refs(spec, p)
-                && should_include_parameter(&param)
-            {
-                merge_parameter(&mut all_params, param);
+            if let Some(mut param) = resolve_parameter_refs(spec, p) {
+                if let Some(projected) = mcp_enum_projection(&param)? {
+                    param["schema"]["enum"] = serde_json::Value::Array(projected.to_vec());
+                }
+                if should_include_parameter(&param) {
+                    merge_parameter(&mut all_params, param);
+                }
             }
         }
     }
 
     if all_params.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(serde_json::Value::Array(all_params))
+        Ok(Some(serde_json::Value::Array(all_params)))
     }
 }
 
@@ -452,33 +663,35 @@ fn merge_parameter(params: &mut Vec<serde_json::Value>, param: serde_json::Value
 /// Extract requestBody schema for OpenAPI 3.x.
 #[cfg(test)]
 fn extract_request_body_openapi3(operation: &serde_json::Value) -> ParsedRequestBody {
-    extract_request_body_openapi3_with_spec(operation, operation)
+    extract_request_body_openapi3_with_spec(operation, operation).expect("valid test body")
 }
 
 fn extract_request_body_openapi3_with_spec(
     operation: &serde_json::Value,
     spec: &serde_json::Value,
-) -> ParsedRequestBody {
+) -> AppResult<ParsedRequestBody> {
     let Some(request_body) = operation.get("requestBody") else {
-        return ParsedRequestBody::default();
+        return Ok(ParsedRequestBody::default());
     };
 
     let Some(request_body) = resolve_request_body_refs(spec, request_body) else {
-        return ParsedRequestBody::default();
+        return Ok(ParsedRequestBody::default());
     };
 
     let Some(content) = request_body
         .get("content")
         .and_then(|content| content.as_object())
     else {
-        return ParsedRequestBody::default();
+        return Ok(ParsedRequestBody::default());
     };
 
-    let Some((content_type, media)) = select_openapi3_media(content, spec) else {
-        return ParsedRequestBody::default();
+    let Some((content_type, media)) =
+        select_openapi3_media(content, spec, request_body.get("x-nyxid-mcp-media"))?
+    else {
+        return Ok(ParsedRequestBody::default());
     };
 
-    ParsedRequestBody {
+    Ok(ParsedRequestBody {
         content_type: Some(content_type.to_string()),
         schema: media
             .get("schema")
@@ -487,7 +700,7 @@ fn extract_request_body_openapi3_with_spec(
             .get("required")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-    }
+    })
 }
 
 /// Extract body parameter schema for Swagger 2.0.
@@ -598,41 +811,67 @@ fn extract_request_body_swagger2(
 fn select_openapi3_media<'a>(
     content: &'a serde_json::Map<String, serde_json::Value>,
     spec: &serde_json::Value,
-) -> Option<(&'a str, &'a serde_json::Value)> {
+    marker: Option<&serde_json::Value>,
+) -> AppResult<Option<(&'a str, &'a serde_json::Value)>> {
+    if let Some(marker) = marker {
+        let selected = marker
+            .as_str()
+            .and_then(|key| content.get_key_value(key))
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "x-nyxid-mcp-media must name an existing requestBody content entry".into(),
+                )
+            })?;
+        let content_type = selected.0.as_str();
+        let normalized = normalize_content_type(content_type);
+        if content_type.parse::<mime::Mime>().is_err()
+            || reqwest::header::HeaderValue::from_str(content_type).is_err()
+            || !is_concrete_content_type(content_type)
+            || normalized.starts_with("multipart/")
+            || !selected.1.is_object()
+            || !selected
+                .1
+                .get("schema")
+                .is_some_and(serde_json::Value::is_object)
+        {
+            return Err(AppError::BadRequest("x-nyxid-mcp-media must select a concrete supported media object with a schema; multipart MCP bodies are unsupported".into()));
+        }
+        return Ok(Some((content_type, selected.1)));
+    }
     if let Some((content_type, media)) = content.iter().find(|(content_type, media)| {
         is_concrete_content_type(content_type) && is_upload_media(content_type, media, spec)
     }) {
-        return Some((content_type.as_str(), media));
+        return Ok(Some((content_type.as_str(), media)));
     }
 
     if let Some((content_type, media)) = content
         .iter()
         .find(|(content_type, media)| is_upload_media(content_type, media, spec))
     {
-        return Some((content_type.as_str(), media));
+        return Ok(Some((content_type.as_str(), media)));
     }
 
     if let Some((content_type, media)) = content.get_key_value("application/json") {
-        return Some((content_type.as_str(), media));
+        return Ok(Some((content_type.as_str(), media)));
     }
 
     if let Some((content_type, media)) = content
         .iter()
         .find(|(content_type, _)| is_json_content_type(content_type))
     {
-        return Some((content_type.as_str(), media));
+        return Ok(Some((content_type.as_str(), media)));
     }
 
     if let Some((content_type, media)) = content
         .iter()
         .find(|(content_type, _)| is_concrete_content_type(content_type))
     {
-        return Some((content_type.as_str(), media));
+        return Ok(Some((content_type.as_str(), media)));
     }
 
-    content
+    Ok(content
         .get_key_value("*/*")
-        .map(|(content_type, media)| (content_type.as_str(), media))
+        .map(|(content_type, media)| (content_type.as_str(), media)))
 }
 
 fn extract_swagger2_consumes(
@@ -1229,7 +1468,9 @@ mod tests {
             }))
             .unwrap();
         let operation = &path_obj["get"];
-        let params = extract_parameters_with_spec(operation, &path_obj, &spec).unwrap();
+        let params = extract_parameters_with_spec(operation, &path_obj, &spec)
+            .unwrap()
+            .unwrap();
         let arr = params.as_array().unwrap();
 
         assert_eq!(arr.len(), 1);
@@ -1273,7 +1514,9 @@ mod tests {
             }))
             .unwrap();
         let operation = &path_obj["get"];
-        let params = extract_parameters_with_spec(operation, &path_obj, &spec).unwrap();
+        let params = extract_parameters_with_spec(operation, &path_obj, &spec)
+            .unwrap()
+            .unwrap();
         let arr = params.as_array().unwrap();
 
         assert_eq!(arr.len(), 1);
@@ -1317,7 +1560,9 @@ mod tests {
             }))
             .unwrap();
         let operation = &path_obj["post"];
-        let params = extract_parameters_with_spec(operation, &path_obj, &spec).unwrap();
+        let params = extract_parameters_with_spec(operation, &path_obj, &spec)
+            .unwrap()
+            .unwrap();
         let arr = params.as_array().unwrap();
 
         assert_eq!(arr.len(), 1);
@@ -1390,7 +1635,7 @@ mod tests {
             }
         });
 
-        let body = extract_request_body_openapi3_with_spec(&op, &spec);
+        let body = extract_request_body_openapi3_with_spec(&op, &spec).unwrap();
         assert_eq!(body.content_type.as_deref(), Some("application/zip"));
         assert!(body.required);
         assert_eq!(body.schema.unwrap()["format"], "binary");
@@ -1430,7 +1675,7 @@ mod tests {
             }
         });
 
-        let body = extract_request_body_openapi3_with_spec(&op, &spec);
+        let body = extract_request_body_openapi3_with_spec(&op, &spec).unwrap();
         assert_eq!(body.content_type.as_deref(), Some("application/zip"));
         assert!(body.required);
         assert_eq!(body.schema.unwrap()["format"], "binary");
@@ -1466,7 +1711,7 @@ mod tests {
             }
         });
 
-        let body = extract_request_body_openapi3_with_spec(&op, &spec);
+        let body = extract_request_body_openapi3_with_spec(&op, &spec).unwrap();
         assert_eq!(body.content_type.as_deref(), Some("application/zip"));
         assert_eq!(body.schema.unwrap()["format"], "binary");
     }
@@ -2414,5 +2659,239 @@ mod tests {
         let new_param = serde_json::json!({"name": "offset", "in": "query"});
         merge_parameter(&mut params, new_param);
         assert_eq!(params.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod mcp_projection_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn spec() -> Value {
+        json!({"openapi":"3.1.0", "paths":{"/files/{id}":{"post":{
+            "parameters":[{"name":"uploadType", "in":"query", "schema":{"type":"string", "enum":["media","multipart"]}, "x-nyxid-mcp-enum":["media"]}],
+            "requestBody":{"x-nyxid-mcp-media":"application/octet-stream", "required":true,
+                "content":{"application/json":{"schema":{"type":"object"}}, "application/octet-stream":{"schema":{"type":"string"}}, "multipart/related":{"schema":{"type":"string"}}}}
+        }}}})
+    }
+
+    #[test]
+    fn mcp_projection_preserves_full_http_spec_and_marker_free_behavior() {
+        let full = spec();
+        let copy = full.clone();
+        let projected = parse_openapi_spec_value(&full).unwrap().remove(0);
+        assert_eq!(full, copy);
+        assert_eq!(
+            projected.parameters.as_ref().unwrap()[0]["schema"]["enum"],
+            json!(["media"])
+        );
+        assert_eq!(
+            projected.parameters.unwrap()[0]["x-nyxid-mcp-enum"],
+            json!(["media"])
+        );
+        assert_eq!(
+            projected.request_content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        let mut unmarked = full;
+        let op = &mut unmarked["paths"]["/files/{id}"]["post"];
+        op["parameters"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("x-nyxid-mcp-enum");
+        op["requestBody"]
+            .as_object_mut()
+            .unwrap()
+            .remove("x-nyxid-mcp-media");
+        let parsed = parse_openapi_spec_value(&unmarked).unwrap().remove(0);
+        assert_eq!(
+            parsed.parameters.unwrap()[0]["schema"]["enum"],
+            json!(["media", "multipart"])
+        );
+        assert_eq!(
+            parsed.request_content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn mcp_projection_rejects_invalid_markers_locations_and_defaults() {
+        for marker in [
+            json!([]),
+            json!("media"),
+            Value::Null,
+            json!(["resumable"]),
+            json!([{}]),
+        ] {
+            let mut doc = spec();
+            doc["paths"]["/files/{id}"]["post"]["parameters"][0]["x-nyxid-mcp-enum"] = marker;
+            assert!(parse_openapi_spec_value(&doc).is_err());
+        }
+        for location in ["header", "cookie", "body", "formData", "invalid", ""] {
+            let mut doc = spec();
+            doc["paths"]["/files/{id}"]["post"]["parameters"][0]["in"] = json!(location);
+            assert!(parse_openapi_spec_value(&doc).is_err(), "{location}");
+        }
+        for pointer in [
+            "/paths/~1files~1{id}/post/parameters/0/schema/enum",
+            "/paths/~1files~1{id}/post/parameters/0/name",
+        ] {
+            let mut doc = spec();
+            *doc.pointer_mut(pointer).unwrap() = Value::Null;
+            assert!(parse_openapi_spec_value(&doc).is_err());
+        }
+        for marker in [json!("absent"), Value::Null, json!([])] {
+            let mut doc = spec();
+            doc["paths"]["/files/{id}"]["post"]["requestBody"]["x-nyxid-mcp-media"] = marker;
+            assert!(parse_openapi_spec_value(&doc).is_err());
+        }
+        for (pointer, key, marker) in [
+            (
+                "/paths/~1files~1{id}/post/parameters/0/schema",
+                "x-nyxid-mcp-enum",
+                json!(["media"]),
+            ),
+            (
+                "/paths/~1files~1{id}/post/requestBody/content/application~1octet-stream/schema",
+                "x-nyxid-mcp-media",
+                json!("application/octet-stream"),
+            ),
+            (
+                "/paths/~1files~1{id}/post",
+                "x-nyxid-mcp-enum",
+                json!(["media"]),
+            ),
+        ] {
+            let mut doc = spec();
+            doc.pointer_mut(pointer).unwrap()[key] = marker;
+            assert!(parse_openapi_spec_value(&doc).is_err());
+        }
+        let mut doc = spec();
+        doc["paths"]["/files/{id}"]["post"]["parameters"][0]["schema"]["default"] =
+            json!("multipart");
+        assert!(parse_openapi_spec_value(&doc).is_err());
+        doc["paths"]["/files/{id}"]["post"]["parameters"][0]["schema"]["default"] = json!("media");
+        assert!(parse_openapi_spec_value(&doc).is_ok());
+    }
+
+    #[test]
+    fn mcp_projection_preserves_marker_named_data_fields_but_rejects_schema_markers() {
+        let mut doc = json!({"openapi":"3.1.0","paths":{"/data":{"post":{
+            "requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{
+                "x-nyxid-mcp-enum":{"type":"string"},"x-nyxid-mcp-media":{"type":"string"}
+            }}}}},
+            "responses":{"200":{"description":"ok","content":{"application/json":{"schema":{"type":"object","properties":{
+                "x-nyxid-mcp-enum":{"type":"array","items":{"type":"string"}}
+            }}}}}}
+        }}}});
+        doc["paths"]["/data"]["post"]["responses"]["200"]["headers"] =
+            json!({"x-nyxid-mcp-enum":{"schema":{"type":"string"}}});
+        doc["components"]["securitySchemes"] =
+            json!({"x-nyxid-mcp-media":{"type":"http","scheme":"bearer"}});
+        doc["paths"]["/data"]["post"]["x-vendor-data"] = json!({"x-nyxid-mcp-enum":["opaque"]});
+        doc["paths"]["/data"]["post"]["requestBody"]["content"]["application/json"]["schema"]["x-vendor-data"] =
+            json!({"x-nyxid-mcp-enum":["opaque"]});
+        assert!(parse_openapi_spec_value(&doc).is_ok());
+        for name in ["properties", "schemas", "responses", "default", "enum"] {
+            let mut bad = doc.clone();
+            bad["paths"]["/data"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+                ["properties"][name] = json!({"type":"string", "x-nyxid-mcp-enum":["bad"]});
+            assert!(parse_openapi_spec_value(&bad).is_err(), "nested {name}");
+            let mut bad = doc.clone();
+            bad["components"]["parameters"][name] = json!({"name":"arg", "in":"header", "schema":{"enum":["bad"]}, "x-nyxid-mcp-enum":["bad"]});
+            assert!(parse_openapi_spec_value(&bad).is_err(), "component {name}");
+        }
+        doc["paths"]["/data"]["post"]["requestBody"]["content"]["application/json"]["schema"]["x-nyxid-mcp-enum"] =
+            json!(["bad"]);
+        assert!(parse_openapi_spec_value(&doc).is_err());
+    }
+
+    #[test]
+    fn mcp_projection_rejects_unsupported_selected_media_without_changing_unmarked_specs() {
+        for (content_type, media) in [
+            ("multipart/related", json!({"schema":{"type":"string"}})),
+            ("*/*", json!({"schema":{"type":"string"}})),
+            ("not-a-mime", json!({"schema":{"type":"string"}})),
+            ("text/plain; malformed", json!({"schema":{"type":"string"}})),
+            ("text/plain", json!(null)),
+            ("text/plain", json!({})),
+            ("text/plain", json!({"schema":false})),
+        ] {
+            let mut doc = spec();
+            let body = &mut doc["paths"]["/files/{id}"]["post"]["requestBody"];
+            body["content"][content_type] = media;
+            body["x-nyxid-mcp-media"] = json!(content_type);
+            assert!(parse_openapi_spec_value(&doc).is_err(), "{content_type}");
+            doc["paths"]["/files/{id}"]["post"]["requestBody"]
+                .as_object_mut()
+                .unwrap()
+                .remove("x-nyxid-mcp-media");
+            assert!(parse_openapi_spec_value(&doc).is_ok());
+        }
+    }
+
+    #[test]
+    fn mcp_projection_accepts_declared_media_parameters_and_casing() {
+        for content_type in [
+            "text/plain; charset=utf-8",
+            "Text/Plain; Charset=UTF-8",
+            "Application/Octet-Stream",
+        ] {
+            let mut doc = spec();
+            let body = &mut doc["paths"]["/files/{id}"]["post"]["requestBody"];
+            body["content"][content_type] = json!({"schema":{"type":"string"}});
+            body["x-nyxid-mcp-media"] = json!(content_type);
+            assert_eq!(
+                parse_openapi_spec_value(&doc).unwrap()[0]
+                    .request_content_type
+                    .as_deref(),
+                Some(content_type)
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_projection_resolves_refs_overrides_and_validates_discarded_parameters() {
+        let mut doc = spec();
+        let op = doc["paths"]["/files/{id}"]["post"].clone();
+        doc["components"] = json!({"parameters":{"Upload":op["parameters"][0]}, "requestBodies":{"Upload":op["requestBody"]}});
+        doc["paths"]["/files/{id}"]["parameters"] =
+            json!([{"$ref":"#/components/parameters/Upload"}]);
+        doc["paths"]["/files/{id}"]["post"]["parameters"] =
+            json!([{"$ref":"#/components/parameters/Upload", "description":"override"}]);
+        doc["paths"]["/files/{id}"]["post"]["requestBody"] =
+            json!({"$ref":"#/components/requestBodies/Upload"});
+        let projected = parse_openapi_spec_value(&doc).unwrap().remove(0);
+        let parameters = projected.parameters.unwrap();
+        assert_eq!(parameters.as_array().unwrap().len(), 1);
+        assert_eq!(parameters[0]["description"], "override");
+        assert_eq!(parameters[0]["schema"]["enum"], json!(["media"]));
+        assert_eq!(
+            projected.request_content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        for invalid in [
+            json!({"$ref":"#/components/parameters/Upload", "x-nyxid-mcp-enum":null}),
+            json!({"$ref":"#/components/parameters/Upload", "in":"body"}),
+            json!({"$ref":"#/components/parameters/Upload", "schema":{"enum":["multipart"]}}),
+        ] {
+            let mut bad = doc.clone();
+            bad["paths"]["/files/{id}"]["post"]["parameters"] = json!([invalid]);
+            assert!(parse_openapi_spec_value(&bad).is_err());
+        }
+        let mut bad = doc.clone();
+        bad["paths"]["/files/{id}"]["parameters"][0]["x-nyxid-mcp-enum"] = Value::Null;
+        assert!(
+            parse_openapi_spec_value(&bad).is_err(),
+            "invalid overridden parameter"
+        );
+        for sibling in [
+            json!({"$ref":"#/components/requestBodies/Upload", "x-nyxid-mcp-media":null}),
+            json!({"$ref":"#/components/requestBodies/Upload", "content":{}}),
+        ] {
+            let mut bad = doc.clone();
+            bad["paths"]["/files/{id}"]["post"]["requestBody"] = sibling;
+            assert!(parse_openapi_spec_value(&bad).is_err());
+        }
     }
 }

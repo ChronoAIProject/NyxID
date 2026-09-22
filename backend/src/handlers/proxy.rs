@@ -9396,7 +9396,7 @@ mod proxy_resolution_integration_tests {
         crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new(
             [2u8; 32],
         ));
-        seed(&db, true).await;
+        seed(&db).await;
         let owner = Uuid::new_v4().to_string();
         let service = connect(&db, &owner, "api-google-workspace").await;
         let state = test_app_state(db.clone());

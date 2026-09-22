@@ -32,15 +32,7 @@ use crate::services::{catalog_spec_registry, openapi_parser};
 /// Materialize `ServiceEndpoint` rows for every seeded catalog service
 /// that has a hosted overlay spec. Idempotent; called at startup after
 /// `seed_default_services`.
-#[cfg(test)]
 pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<()> {
-    sync_seeded_service_endpoints_with_destinations(db, true).await
-}
-
-pub async fn sync_seeded_service_endpoints_with_destinations(
-    db: &mongodb::Database,
-    enable_workspace_destinations: bool,
-) -> AppResult<()> {
     let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
 
     for slug in catalog_spec_registry::hydrated_slugs() {
@@ -54,7 +46,7 @@ pub async fn sync_seeded_service_endpoints_with_destinations(
             continue;
         }
 
-        let inputs = match hosted_endpoint_inputs(&service, enable_workspace_destinations) {
+        let inputs = match hosted_endpoint_inputs(&service) {
             Ok(inputs) => inputs,
             Err(error) => {
                 // Embedded specs are validated by unit tests; reaching this
@@ -235,33 +227,12 @@ fn seeded_endpoint_inputs(slug: &str) -> AppResult<Vec<EndpointInput>> {
     {
         service.destination_targets = super::destination_routing::workspace_targets();
     }
-    hosted_endpoint_inputs(&service, true)
+    hosted_endpoint_inputs(&service)
 }
 
-fn hosted_endpoint_inputs(
-    service: &DownstreamService,
-    enable_workspace_destinations: bool,
-) -> AppResult<Vec<EndpointInput>> {
+fn hosted_endpoint_inputs(service: &DownstreamService) -> AppResult<Vec<EndpointInput>> {
     let spec = catalog_spec_registry::spec_for_slug(&service.slug)
         .ok_or_else(|| crate::errors::AppError::Internal("Missing hosted catalog spec".into()))?;
-    let mut spec = (*spec).clone();
-    if !enable_workspace_destinations
-        && super::google_workspace::GoogleProduct::from_slug(&service.slug)
-            .is_some_and(|product| product.has_editor_destinations())
-    {
-        for key in ["google-docs", "google-sheets", "google-slides"] {
-            for path in catalog_spec_registry::spec_for_key(key).expect("editor spec")["paths"]
-                .as_object()
-                .expect("editor paths")
-                .keys()
-            {
-                spec["paths"]
-                    .as_object_mut()
-                    .expect("Google product paths")
-                    .remove(path);
-            }
-        }
-    }
     destination_endpoint_inputs(service, &spec)
 }
 
@@ -299,35 +270,58 @@ fn destination_endpoint_inputs(
             }
         }
     }
-    let mut inputs = endpoint_inputs_from_spec(spec)?;
-    // Routing metadata is honored exclusively for embedded, server-owned overlays.
-    // Even when the map is missing, non-root origins must fail closed.
+    let parsed = openapi_parser::parse_openapi_spec_value(spec)?;
+    let mut inputs = Vec::new();
     let root_origin = spec["servers"][0]["url"]
         .as_str()
         .and_then(|url| url::Url::parse(url).ok())
         .map(|url| url.origin().ascii_serialization());
-    for (input, parsed) in inputs
-        .iter_mut()
-        .zip(openapi_parser::parse_openapi_spec_value(spec)?)
-    {
-        if parsed.origin == root_origin {
-            continue;
-        }
-        let origin = parsed.origin.ok_or_else(|| {
-            crate::errors::AppError::ValidationError("Hosted operation has no exact origin".into())
-        })?;
-        input.target_id = Some(
-            service
+    let product = super::google_workspace::GoogleProduct::from_slug(&service.slug)
+        .filter(|product| product.has_editor_destinations());
+    let recognized = super::destination_routing::workspace_targets();
+    let mut missing_target_ids = std::collections::BTreeSet::new();
+    let mut skipped_operation_count = 0;
+    for (mut input, parsed) in endpoint_inputs_from_spec(spec)?.into_iter().zip(parsed) {
+        if parsed.origin != root_origin {
+            let origin = parsed.origin.ok_or_else(|| {
+                crate::errors::AppError::ValidationError(
+                    "Hosted operation has no exact origin".into(),
+                )
+            })?;
+            input.target_id = service
                 .destination_targets
                 .iter()
                 .find(|(_, allowed)| **allowed == origin)
-                .map(|(id, _)| id.clone())
-                .ok_or_else(|| {
-                    crate::errors::AppError::ValidationError(
-                        "Hosted operation origin is outside the service destination map".into(),
-                    )
-                })?,
-        );
+                .map(|(id, _)| id.clone());
+            if input.target_id.is_none() {
+                if let Some((id, _)) = recognized.iter().find(|(_, allowed)| **allowed == origin)
+                    && product.is_some()
+                {
+                    missing_target_ids.insert(id);
+                    skipped_operation_count += 1;
+                    continue;
+                }
+                return Err(crate::errors::AppError::ValidationError(
+                    "Hosted operation origin is outside the service destination map".into(),
+                ));
+            }
+        }
+        inputs.push(input);
+    }
+    if skipped_operation_count > 0 {
+        let product = product.expect("only recognized Google editors can be skipped");
+        let policy_state = if service.proxy_operation_policy.as_ref()
+            == Some(&product.legacy_operation_policy()?)
+        {
+            "legacy_default"
+        } else if service.proxy_operation_policy.as_ref() == Some(&product.operation_policy()?) {
+            "activated"
+        } else {
+            "custom"
+        };
+        tracing::warn!(slug = %service.slug, service_id = %service.id, skipped_operation_count,
+            ?missing_target_ids, policy_state, reason = "editor_destinations_not_activated",
+            "Google editor destinations were not activated; syncing available operations");
     }
     Ok(inputs)
 }
@@ -502,6 +496,31 @@ mod tests {
                 "{origin}"
             );
         }
+    }
+
+    #[test]
+    fn google_origin_filtering_rejects_missing_malformed_unknown_and_non_google_origins() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.slug = "api-google-drive".into();
+        service.destination_targets.clear();
+        let spec = catalog_spec_registry::spec_for_slug(&service.slug).unwrap();
+        assert_eq!(
+            destination_endpoint_inputs(&service, &spec).unwrap().len(),
+            9
+        );
+        for servers in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!([{}]),
+            serde_json::json!([{"url":"https://docs.googleapis.com"},{"url":"https://sheets.googleapis.com"}]),
+            serde_json::json!([{"url":"https://unknown.googleapis.com"}]),
+        ] {
+            let mut bad = (*spec).clone();
+            bad["paths"]["/v1/documents"]["servers"] = servers;
+            assert!(destination_endpoint_inputs(&service, &bad).is_err());
+        }
+        service.slug = "custom".into();
+        assert!(destination_endpoint_inputs(&service, &spec).is_err());
     }
 
     #[tokio::test]

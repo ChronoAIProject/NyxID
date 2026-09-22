@@ -51,7 +51,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12000-12004 one-time login codes: 12000 `LoginCodeInvalid`, 12001 `LoginCodeExpired`, 12002 `LoginCodeCancelled`, 12003 `LoginCodeRedeemed`, 12004 `LoginCodeRateLimited`
 - 12100 `AssistantTurnActive` (HTTP 409, `turn_active`): a persisted NyxAgent conversation already has an active turn.
 - 12200 `AdminUsageQueryTimeout` (HTTP 503): bounded admin usage aggregation timed out; retry with a narrower window or filters.
-- 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): temporary Drive/Workspace editor activation gate; expected rollout state, excluded from proxy-fault telemetry
+- 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): incomplete automatic Drive/Workspace editor reconciliation; excluded from proxy-fault telemetry
 
 ### 4. Frontend Patterns
 
@@ -491,7 +491,6 @@ INVITE_CODE_REQUIRED=true           # Gate registration behind invite codes (iss
 AUTO_VERIFY_EMAIL=false             # Dev only: skip email verification on registration
 
 # Optional
-GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=false # Temporary readers-before-writer upgrade gate. First true startup CAS-installs each known-default Drive/Workspace destination map/policy and additively syncs 13 editor endpoints per service. Idempotent; safe to leave true. Remove after every environment activates.
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET
 SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_ADDRESS
