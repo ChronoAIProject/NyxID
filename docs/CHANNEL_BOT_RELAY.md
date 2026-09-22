@@ -903,6 +903,37 @@ Response shape (field lists and flow values vary by descriptor):
 
 The frontend queries this inventory for labels, enabled choices, required/secret fields, and managed-flow dispatch. Only React flow components and presentation-specific mappings stay local. Telegram's native browser creation remains its dedicated component and route (`telegram-new` is managed-only, with no generic managed-onboarding descriptor). `nyxid channel-bot platforms [--output json]` exposes the same inventory to CLI integrations; `register --help` points to it.
 
+### Standalone onboarding pages
+
+`/channel-bots/connect` lists shareable setup links from the enabled catalog entries. `/channel-bots/connect/$platform` renders the selected platform outside the dashboard shell after authentication. Both use the same `ChannelBotSetup` form as the **Add Bot** dialog. The user walkthrough, all platform-specific steps, and the prefill field reference are in [Connect a channel bot](site/web/guides/channel-bots.md).
+
+The page resolves the path against the fetched catalog. It does not maintain another platform allowlist. `registration.fields` supplies field order, names, labels, required/optional status, secret masking, and hints. `buildCreateChannelBotSchema` validates the selected enabled descriptor, and `channelBotRegistrationPayload` sends only that descriptor's fields plus `platform`, `label`, and optional `target_org_id`. `registration.extra_fields` covers legacy API inputs; those fields are deliberately not added to the new-user form.
+
+Query prefilling uses the same declared field names. `field1` and `field2` are supported if declared by an adapter, not as positional aliases. `label` and `target_org_id` are shared form values; Telegram also uses a UUID `request_id` to resume its draft. `channelBotSetupRewrite` protects text values from TanStack Router's automatic JSON/number parsing, including long numeric IDs. Keep it on the router when changing navigation. The page removes descriptor-marked secret parameters with replacement navigation after consuming them; values stay in form state only. Before authentication, the original URL is preserved through `return_to`, so shared secret-bearing links can still expose credentials in access logs and the login history entry. The copy-link action emits a credential-free URL.
+
+Manual forms require a valid form and an explicit submit. Managed entry points use the catalog's flow discriminator: `meta_embedded_signup` for Meta, `oauth_connection` for OAuth, plus the dedicated Telegram creation component. Prefilled manual credentials reveal the manual form when managed onboarding is also available. A flow marked `managed_only` never falls back to a manual credential form. The backend still enforces provider configuration, ownership, organization admin access, and credential validity.
+
+The standalone completion screen keeps the user on the page until **Open channel bot** is selected. Callback URLs and returned instructions display independently of one-time secrets. A generated Verify Token is shown only when the create response includes one. Provider authorization windows remain separate steps; "one click" means opening the provider or submitting a completely prefilled credential form, not skipping consent or webhook configuration.
+
+### Add or extend a form
+
+1. Implement and register the backend adapter and its create/validation behavior. Declare its enabled platform ID, display name, registration fields, documentation URL, and clear setup instructions. Keep user-facing field names separate from encrypted storage names.
+2. For a normal credential form, no new frontend route or per-platform field mapping is needed. Check that values fit the existing string-input contract and that the backend accepts the new fields. Field metadata currently describes text/password inputs, not arbitrary checkbox/select/file widgets.
+3. For an existing managed protocol, declare its supported flow discriminator and implement the matching backend bootstrap/start/complete contract. For a new protocol, add a frontend implementation to `MANAGED_FLOW_COMPONENTS` and the `ManagedFlow` mapping/types; arbitrary provider SDKs cannot be generated from field descriptors alone. Telegram's creation protocol remains its own component.
+4. Supply a platform icon when one exists. Missing icons use the shared service-icon fallback and do not prevent the form from loading.
+5. Add catalog and backend contract coverage, then exercise the standalone page: signed-out return, required/optional fields, query prefill, exact numeric IDs, secret cleanup, personal/org ownership, explicit submit, completion instructions, and unknown/disabled states. For managed protocols, test provider success, denial, closed/blocked popups, unavailable configuration, and manual fallback where allowed.
+6. Update the user guide's setup steps and parameter reference. Test the live provider separately from browser fixtures before claiming provider integration success.
+
+Focused frontend checks, run from `frontend/`:
+
+```sh
+npm test -- src/pages/channel-bots.test.tsx src/schemas/channel-bot-setup.test.ts src/schemas/channels.test.ts src/lib/channel-platforms.test.ts src/router.test.ts src/hooks/use-channel-managed.test.ts src/hooks/use-channel-managed-oauth.test.ts
+npx playwright test e2e/channel-setup-pages.spec.ts e2e/channel-x-managed.spec.ts e2e/channel-whatsapp-managed.spec.ts
+npx tsc -b
+```
+
+The standalone browser suite covers every supported credential form, a synthetic catalog platform with unfamiliar field names, Telegram creation, X OAuth, both WhatsApp signup modes, and callback instructions without a generated secret. Provider endpoints are fixtures; these checks validate the browser flow without creating external accounts or bots. The local preview uses the real catalog and authenticated development account; unconfigured managed providers correctly show their configuration requirement or manual fallback.
+
 ## Callback Contract
 
 ### NyxID -> Agent (Webhook POST)

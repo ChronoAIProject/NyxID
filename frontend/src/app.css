@@ -415,6 +415,20 @@ input[type="number"] {
 }
 
 /* ── Animations ── */
+@keyframes channel-connection-sweep {
+  from {
+    transform: translateX(-40px);
+  }
+  to {
+    transform: translateX(80px);
+  }
+}
+
+.channel-connection-sweep {
+  transform: translateX(-40px);
+  animation: channel-connection-sweep 2.8s linear infinite;
+}
+
 @keyframes pulse-subtle {
   0%,
   100% {
@@ -636,6 +650,10 @@ html.theme-dark .assistant-halo--visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .channel-connection-sweep {
+    animation: none;
+  }
+
   /* Parks on frame 0 rather than hiding the halo — the turn is still running
      and the mark is the only signal that it is. */
   .assistant-halo-sprite {

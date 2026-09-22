@@ -3,6 +3,7 @@ import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
+import { channelBotSetupRewrite, parseChannelBotSetupSearch, parseChannelBotSetupPageSearch } from "@/schemas/channel-bot-setup";
 import {
   createRouter,
   createRoute,
@@ -92,6 +93,8 @@ import {
   BillingPage,
   KeyDetailPage,
   ChannelBotsPage,
+  ChannelBotSetupPage,
+  ChannelBotSetupLinksPage,
   ChannelBotDetailPage,
   ChannelConversationDetailPage,
   OrgsPage,
@@ -745,12 +748,32 @@ const channelBotsRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string; request_id?: string; claim_entry?: boolean } => ({
     connect: managedConnectPlatform(search.connect),
     claim_entry: search.claim_entry === true || search.claim_entry === "true" ? true : undefined,
-    label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined,
-    target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined,
-    request_id: typeof search.request_id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.request_id) ? search.request_id : undefined,
+    ...parseChannelBotSetupSearch(search),
   }),
   getParentRoute: () => dashboardLayout,
   component: ChannelBotsPage,
+});
+
+const channelBotSetupLinksRoute = createRoute({
+  path: "/channel-bots/connect",
+  getParentRoute: () => dashboardLayout,
+  component: ChannelBotSetupLinksPage,
+});
+
+export const channelBotSetupRoute = createRoute({
+  path: "/channel-bots/connect/$platform",
+  validateSearch: parseChannelBotSetupPageSearch,
+  getParentRoute: () => rootRoute,
+  beforeLoad: ({ location }) => {
+    const { isAuthenticated, isLoading } = useAuthStore.getState();
+    if (!isAuthenticated && !isLoading) {
+      throw redirect({
+        to: "/login",
+        search: { return_to: `${window.location.origin}${location.pathname}${location.searchStr}` },
+      });
+    }
+  },
+  component: ChannelBotSetupPage,
 });
 
 const channelBotDetailRoute = createRoute({
@@ -956,6 +979,7 @@ const routeTree = rootRoute.addChildren([
   loginDeviceRoute,
   loginCodeRoute,
   loginAgentKeyRoute,
+  channelBotSetupRoute,
   connectLinkRoute,
   connectLinkReturnRoute,
   sshTerminalRoute,
@@ -1001,6 +1025,7 @@ const routeTree = rootRoute.addChildren([
     nodesRoute,
     nodeDetailRoute,
     channelBotsRoute,
+    channelBotSetupLinksRoute,
     channelBotDetailRoute,
     channelConversationDetailRoute,
     orgsRoute,
@@ -1033,6 +1058,7 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({
   routeTree,
+  rewrite: channelBotSetupRewrite,
   defaultPreload: "intent",
   defaultNotFoundComponent: AppNotFound,
   // Without an error component the router's CatchBoundary renders nothing on a
