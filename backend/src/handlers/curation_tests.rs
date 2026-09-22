@@ -370,6 +370,72 @@ async fn curation_openapi_contract_is_grant_scoped_and_read_only() {
 }
 
 #[tokio::test]
+async fn curation_openapi_contract_honors_configuration_and_service_state() {
+    use crate::services::api_docs_service::{SpecCacheTestGuard, cache_test_spec};
+
+    let _cache_guard = SpecCacheTestGuard::acquire();
+    let f = fixture("curation_openapi_configuration", true).await;
+    let bearer = token(&f, None).await;
+    let path = format!(
+        "/api/v1/catalog-curation/services/{}/openapi.json",
+        f.service.id
+    );
+    // Use a public literal IP and a seeded cache entry so validation runs
+    // without depending on DNS or making a network request.
+    let custom_url = "https://8.8.8.8/curation-test-openapi.json";
+    cache_test_spec(custom_url, None, json!({"message": "not a contract"}));
+    for (changes, expected_status) in [
+        (
+            doc! {"openapi_spec_url": custom_url},
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            doc! {"openapi_spec_url": "http://127.0.0.1/openapi.json"},
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            doc! {"openapi_spec_url": "", "slug": "no-embedded-overlay"},
+            StatusCode::NOT_FOUND,
+        ),
+        (doc! {"is_active": false}, StatusCode::NOT_FOUND),
+        (doc! {"service_type": "ssh"}, StatusCode::NOT_FOUND),
+        (doc! {"openapi_spec_url": "  "}, StatusCode::OK),
+        (doc! {}, StatusCode::OK),
+    ] {
+        let mut fields = doc! {
+            "slug": "api-firecrawl",
+            "is_active": true,
+            "service_type": "http",
+            "openapi_spec_url": "http://localhost:3001/api/v1/catalog-specs/lark-bot/openapi.json",
+        };
+        fields.extend(changes.clone());
+        f.state
+            .db
+            .collection::<Document>(SERVICES)
+            .update_one(doc! {"_id": &f.service.id}, doc! {"$set": fields})
+            .await
+            .unwrap();
+        let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+        assert_eq!(status, expected_status, "{changes:?}: {body}");
+        if status == StatusCode::OK {
+            let key = if changes.is_empty() {
+                "lark-bot"
+            } else {
+                "firecrawl"
+            };
+            let expected = crate::services::catalog_spec_registry::spec_for_key(key).unwrap();
+            assert_eq!(&body, expected.as_ref());
+        }
+    }
+
+    let write_only = token(&f, Some("catalog:skills:write")).await;
+    assert_eq!(
+        request(&f.state, "GET", &path, &write_only, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
 async fn curation_actor_persists_and_reads_recommended_skill_refs() {
     let f = fixture("curation_skill_refs", true).await;
     let bearer = token(&f, None).await;
