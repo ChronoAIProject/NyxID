@@ -92,11 +92,51 @@ through both services, forwarded JSON bodies, node routing, and exact approvals.
 [CI on that implementation](https://github.com/ChronoAIProject/NyxID/actions/runs/35694580318)
 passed; PR #1633 also records the final checks for its rollup destination.
 
-Each constituent PR is squash-merged into this rollup. A squash adds a new commit
-containing the combined changes and its source PR reference. It does not rewrite
-the inherited `main` commits. The source PR retains its individual commits and
-review discussion. A later squash merge of this rollup into `main` likewise adds
-a new commit; its message and this document retain the constituent PR details.
+Merge [PR #1637](https://github.com/ChronoAIProject/NyxID/pull/1637) into `main`
+using **Create a merge commit**. This preserves the existing rollup commit SHAs,
+authors, source PR references, and the merge from `main`. Squash merging the
+rollup would combine these commits again; rebase merging would rewrite their
+SHAs. Neither method meets this rollup's history-preservation requirement.
+
+The eight constituent PRs were already squash-merged into the rollup, producing
+one attributed commit per PR. Those squashes did not rewrite inherited `main`
+history. Their 23 original development commits remain available on the source
+PR pages and through `refs/pull/<number>/head`; they are not ancestors of the
+rollup. The final merge preserves the landed squashes and integration commits.
+
+| Source PR | Reviewed source head | Landed squash | Purpose |
+| --- | --- | --- | --- |
+| [#1633](https://github.com/ChronoAIProject/NyxID/pull/1633) | `a1e12d2e1672a5658d30e1cc25f677cb33e31a5b` | `8e83665bf26a6d28daabcb4579fe57df0ef24181` | Expose native Docs, Sheets, and Slides through Drive and Workspace. |
+| [#1632](https://github.com/ChronoAIProject/NyxID/pull/1632) | `95c1c8c05985aa956b7db1444ba988123fb8ef9a` | `6dbe30318f86d0a381ebf86938e1fa429db4091f` | Add Supabase Data API connections with each owner's project URL and API key. |
+| [#1638](https://github.com/ChronoAIProject/NyxID/pull/1638) | `3df3784deffab0bc495c32203b3c0cddb86bde7e` | `e9ba77258a7b4243f857172461c5a38f02c5e644` | Add combined, personal, and organization channel-bot listings. |
+| [#1640](https://github.com/ChronoAIProject/NyxID/pull/1640) | `3a00320badf46055d7c236ea0a670b0e4d171288` | `25d56aec2fe125eba1a1ad45017805d066a4e762` | Receive X mentions and direct replies and send authorized public replies. |
+| [#1639](https://github.com/ChronoAIProject/NyxID/pull/1639) | `9b2b19c38b14a56072a73f2e987bfea9e1307229` | `df2a3863e17d98d3c15626853c4d189ba40e43df` | Allow explicitly scoped and granted service-account connection metadata reads. |
+| [#1642](https://github.com/ChronoAIProject/NyxID/pull/1642) | `374644195214139f2d344d997eeba9a3430ff4b1` | `0804da17575b9c83b24f076e29340714bf303cb1` | Add standalone channel-bot onboarding pages. |
+| [#1641](https://github.com/ChronoAIProject/NyxID/pull/1641) | `99f778be5de3673902f8f05c9488dd8bc8da6cc3` | `06149b45bc6446e729cbe369ede3d1bed77424c8` | Embed ownership transfers in asset settings and support dedicated X OAuth handover. |
+| [#1643](https://github.com/ChronoAIProject/NyxID/pull/1643) | `cd3d194e53f9dafe8d44c9050476cffb522fab80` | `4caf187283fdedf323ab8ce6a475fb7ce2ae9656` | Activate Google routing automatically and correct shared Drive/Workspace contracts. |
+
+The 2026-09-23 attribution audit matched all eight source and squash SHAs against
+GitHub. For each PR, replaying its source onto the actual squash parent reproduces
+the exact landed tree; Fable independently confirmed matching stable patch IDs.
+All 23 source commits and eight squashes resolve to GitHub author `ctkm-aelf`.
+There are no source coauthor trailers omitted by the squashes.
+
+The integration commits have separate purposes:
+
+- `df687e10925f1a0f3282cef213d3c06ca50685f0` merges `main` at `6f633320`
+  into the rollup, preserving both parents and resolving the generated wizard
+  bundle overlap. Its regenerated bundle and source hash passed freshness checks.
+- `730d1c146848914c58575eaadb956386f934308d` is an empty CI refresh commit
+  associated with #1637. Its tree is identical to the #1643 squash; it records
+  recovery from GitHub's stale PR reference without changing code.
+- The documentation correction for #1637 updates this history record and the
+  merge instructions. It changes only this file and preserves all ten preceding
+  rollup commits.
+
+Main's earlier #1634 squash already included the content of #1633, #1632, and
+#1638. Consequently, `git blame` may attribute those existing lines to #1634.
+The final merge preserves the original attributed rollup squashes as ancestors
+of `main`; this table records their provenance without rewriting main's history.
 
 ## Ownership transfer from asset settings
 
