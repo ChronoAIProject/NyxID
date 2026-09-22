@@ -1922,6 +1922,30 @@ export function preferredModelPillIndex(labels) {
   return labels.findIndex((text) => String(text || '').trim().length > 0);
 }
 
+// While its menu is open or animating closed, the composer pill swaps its
+// label for a hint ("Thinking effort") or renders empty, so a snapshot taken
+// in that window shows a structural pill with no usable label. Observed
+// 2026-09-22: five consecutive selections reported picker_unavailable because
+// each one raced the previous menu's close. Such a snapshot must be retried,
+// not trusted.
+const PILL_LABEL_WAIT_MS = Math.max(1000, Math.min(20000, Number(process.env.NYXID_PILL_LABEL_WAIT_MS) || 8000));
+
+// A composer whose pill has not rendered yet looks the same from outside:
+// the form is there, no structural pill is visible, and no labelled control
+// stands in for it. Observed 2026-09-22: the pill stayed hidden for several
+// seconds after the composer was ready, and every selection in that window
+// failed instantly as picker_unavailable.
+export function pillLabelPending(snapshot) {
+  if (!snapshot) return false;
+  if (!snapshot.structural) {
+    return !!snapshot.form && !snapshot.pill &&
+      !(snapshot.candidates || []).some((text) => String(text || "").trim().length > 0);
+  }
+  if (!snapshot.pill) return true;
+  const observed = String(snapshot.observed || "").trim();
+  return !observed || /^(thinking effort|思考强度|推理强度)$/i.test(observed);
+}
+
 export function modelSelectionDiagnostics(snapshot) {
   const source = snapshot?.pill ? (snapshot.pill.structural ? "structural" : "fallback") : "none";
   const observed = snapshot?.observed || "";
@@ -2390,7 +2414,7 @@ export async function selectModel(page, modelLabel) {
     !["timeout", "menu_not_opened", "interaction_deadline", "selection_failed", "level_unavailable"].includes(result.reason) &&
     (!["pro_extended", "pro_standard"].includes(budget.picker.expectedEffort) || effortMetadata(result.observed) === budget.picker.expectedEffort);
   if (result.verified && !["timeout", "already_selected"].includes(result.reason)) result.reason = "selected";
-  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)} ${effortSliderDetail(budget.picker.slider)} family=${budget.picker.family || 'absent'}`);
+  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)} ${effortSliderDetail(budget.picker.slider)} family=${budget.picker.family || 'absent'}${budget.picker.pendingWaits ? ` pill_label_waits=${budget.picker.pendingWaits}` : ''}`);
   if (LOG_PICKER_LABELS && ["level_unavailable", "unverified", "menu_not_opened", "picker_unavailable"].includes(result.reason)) {
     log(formatPickerLabels(budget.picker.snapshot));
   }
@@ -2399,7 +2423,19 @@ export async function selectModel(page, modelLabel) {
 }
 
 async function selectModelInner(page, targets, budget, result) {
-  const before = await pickerSnapshot(page, budget);
+  let before = await pickerSnapshot(page, budget);
+  // A pill with no label is still loading (or its menu is closing); give it
+  // up to PILL_LABEL_WAIT_MS inside the budget before calling the picker
+  // unavailable. No progress is credited while waiting.
+  const labelDeadline = Math.min(budget.deadline, Date.now() + PILL_LABEL_WAIT_MS);
+  let pendingWaits = 0;
+  while (pillLabelPending(before) && Date.now() < labelDeadline) {
+    if (pendingWaits === 0) await closeOpenMenus(page, budget);
+    pendingWaits += 1;
+    await budgetPause(budget, 100);
+    before = await pickerSnapshot(page, budget);
+  }
+  if (pendingWaits) budget.picker.pendingWaits = pendingWaits;
   interactionOptions(budget);
   result.observed = before.observed;
   if (pillShowsLevel(before.observed, targets) && (targets[0] !== "Pro" || effortMetadata(before.observed) !== "pro")) {
