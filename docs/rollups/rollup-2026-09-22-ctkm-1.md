@@ -56,3 +56,40 @@ containing the combined changes and its source PR reference. It does not rewrite
 the inherited `main` commits. The source PR retains its individual commits and
 review discussion. A later squash merge of this rollup into `main` likewise adds
 a new commit; its message and this document retain the constituent PR details.
+
+## Standalone channel bot onboarding
+
+Channel setup previously required finding the Add Bot dialog in the dashboard.
+This change adds shareable, authenticated setup links at
+`/channel-bots/connect` and a dedicated connection page at
+`/channel-bots/connect/{platform}`. Each page identifies NyxID and the selected
+platform, centers the form with an animated dotted connection, and offers one
+primary action. The ownership picker is hidden when personal is the only scope.
+
+The shared form reads fields, validation, secret flags, instructions, and managed
+flow selection from the platform catalog. It supports Telegram tokens, Telegram
+creation, Discord, Lark, Feishu, Slack, WhatsApp, X, and Aurinko. New catalog
+platforms using credential forms or an existing managed protocol do not need a
+new page; a new provider authorization protocol still needs its own frontend
+flow implementation.
+
+Links can prefill the bot name, organization, and catalog-declared credential
+fields. Numeric identifiers and credential strings retain their exact values
+through the sign-in return. Secret parameters are removed from the visible URL
+after consumption, but can still appear in upstream logs, shared messages, and
+login history; broadly shared links should contain only non-secret identifiers.
+Prefill never submits the form automatically. Provider consent and any external
+webhook configuration remain explicit steps.
+
+Completion shows callback URLs and setup instructions even when the platform
+does not issue a one-time secret. Slack and Discord now provide those setup
+instructions. X authorization supports retry after a closed popup while keeping
+the original completion listener active for browsers with COOP isolation.
+
+The [user guide](../site/web/guides/channel-bots.md) documents every current
+platform, query parameters, and setup steps. The
+[channel relay architecture](../CHANNEL_BOT_RELAY.md#standalone-onboarding-pages)
+documents the extension contract and verification workflow. Fable independently
+reviewed the implementation twice and found no remaining blocking issues after
+the fixes; its final focused checks passed 95 unit tests and 29 browser scenarios.
+Provider browser tests use fixtures and do not create real external bots.

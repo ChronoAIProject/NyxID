@@ -127,7 +127,7 @@ async function setup(url = "/channel-bots?connect=telegram-new") {
 beforeEach(() => {
   vi.resetAllMocks();
   authState.isAuthenticated = true;
-  useOrgs.mockReturnValue({ data: [{ id: orgId, your_role: "admin" }], isError: false });
+  useOrgs.mockReturnValue({ data: [{ id: orgId, display_name: "Support team", your_role: "admin" }], isError: false });
   saved = null;
   available = true;
   get.mockImplementation(async (path: string) => {
