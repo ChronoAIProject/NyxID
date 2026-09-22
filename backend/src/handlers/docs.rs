@@ -400,6 +400,28 @@ mod tests {
         assert!(value["components"]["schemas"]["ApiKeyScopePlanRequest"].is_object());
         assert!(value["components"]["schemas"]["EffectiveScopePlan"].is_object());
         assert_eq!(
+            value["paths"]["/api/v1/keys/{key_id}"]["get"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/KeyReadResponse"
+        );
+        for schema in ["KeyReadResponse", "KeyResponse", "KeyMetadataResponse"] {
+            assert!(
+                value["components"]["schemas"][schema].is_object(),
+                "{schema}"
+            );
+        }
+        assert_eq!(
+            value["components"]["schemas"]["KeyMetadataResponse"]["additionalProperties"], false,
+            "The metadata branch must reject the extra fields of an ordinary key response"
+        );
+        assert_eq!(
+            value["components"]["schemas"]["KeyReadResponse"]["oneOf"],
+            serde_json::json!([
+                {"$ref": "#/components/schemas/KeyResponse"},
+                {"$ref": "#/components/schemas/KeyMetadataResponse"}
+            ])
+        );
+        assert_eq!(
             value["components"]["securitySchemes"]["bearer_auth"]["scheme"],
             "bearer"
         );

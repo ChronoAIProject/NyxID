@@ -54,7 +54,10 @@ pub(super) fn verify(
 
 pub(super) fn target(body: &[u8]) -> AppResult<Option<String>> {
     let body: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
-    if body["data"]["event_type"] != "dm.received" {
+    if !matches!(
+        body["data"]["event_type"].as_str(),
+        Some("dm.received" | "post.mention.create" | "post.reply.create")
+    ) {
         return Ok(None);
     }
     Ok(Some(
@@ -71,6 +74,9 @@ pub(super) fn parse(body: &[u8]) -> AppResult<Vec<InboundMessage>> {
         return Ok(vec![]);
     };
     let body: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
+    if body["data"]["event_type"] != "dm.received" {
+        return parse_post(&body, &own_id);
+    }
     let payload = &body["data"]["payload"];
     let events = payload["direct_message_events"]
         .as_array()
@@ -155,6 +161,60 @@ pub(super) fn parse(body: &[u8]) -> AppResult<Vec<InboundMessage>> {
     Ok(messages)
 }
 
+fn parse_post(body: &Value, own_id: &str) -> AppResult<Vec<InboundMessage>> {
+    let data = &body["data"];
+    let post = &data["payload"];
+    let author = post["author_id"]
+        .as_str()
+        .filter(|id| numeric_id(id))
+        .ok_or_else(protocol_error)?;
+    if author == own_id {
+        return Ok(vec![]);
+    }
+    let addressed = match data["event_type"].as_str() {
+        Some("post.mention.create") => post["entities"]["mentions"]
+            .as_array()
+            .is_some_and(|mentions| mentions.iter().any(|mention| mention["id"] == own_id)),
+        Some("post.reply.create") => post["in_reply_to_user_id"] == own_id,
+        _ => false,
+    };
+    if !addressed {
+        return Ok(vec![]);
+    }
+    let id = post["id"]
+        .as_str()
+        .filter(|id| numeric_id(id))
+        .ok_or_else(protocol_error)?;
+    let conversation = post["conversation_id"]
+        .as_str()
+        .filter(|id| numeric_id(id))
+        .ok_or_else(protocol_error)?;
+    let mut normalized = post.clone();
+    normalized["sender_id"] = json!(author);
+    normalized["dm_conversation_id"] = json!(conversation);
+    let mut message =
+        normalize(&normalized, &data["includes"], own_id)?.ok_or_else(protocol_error)?;
+    message.platform_message_id = id.into();
+    message.conversation_id = format!("post:{conversation}");
+    message.conversation_type = "channel".into();
+    message.thread_id = Some(conversation.into());
+    message.reply_to_platform_message_id = post["in_reply_to_tweet_id"]
+        .as_str()
+        .filter(|id| numeric_id(id))
+        .map(String::from)
+        .or_else(|| {
+            post["referenced_tweets"]
+                .as_array()?
+                .iter()
+                .find(|reference| reference["type"] == "replied_to")?["id"]
+                .as_str()
+                .filter(|id| numeric_id(id))
+                .map(String::from)
+        });
+    message.raw_data = body.clone();
+    Ok(vec![message])
+}
+
 fn app_token(credentials: &PlatformVerifySecrets) -> AppResult<&str> {
     credentials
         .get("app_bearer_token")
@@ -230,8 +290,10 @@ pub(super) async fn setup(
     http: &reqwest::Client,
     credentials: &BotCredentials<'_>,
     bot_id: &str,
+    events: &[XChannelEvent],
     webhook_url: &str,
 ) -> AppResult<()> {
+    validate_events("x", events)?;
     let app = app_token(credentials.platform_secrets.ok_or_else(protocol_error)?)?;
     let own_id = credentials
         .platform_bot_id
@@ -287,42 +349,65 @@ pub(super) async fn setup(
     }
     let tag = format!("nyxid:{bot_id}");
     let existing = subscriptions(adapter, http, app).await?;
-    if existing.iter().any(|row| {
-        row["tag"] == tag
-            && row["event_type"] == "dm.received"
-            && row["filter"]["user_id"] == own_id
-            && row["webhook_id"] == webhook_id
-    }) {
-        return Ok(());
-    }
-    // Repoint only this channel's subscription; never alter another app user's events.
-    if let Some(row) = existing.iter().find(|row| {
-        row["tag"] == tag
-            && row["event_type"] == "dm.received"
-            && row["filter"]["user_id"] == own_id
-    }) {
-        let id = row["subscription_id"]
-            .as_str()
-            .filter(|id| numeric_id(id))
-            .ok_or_else(protocol_error)?;
-        let body = response_json(
-            send(
-                http.put(format!("{api}/2/activity/subscriptions/{id}"))
-                    .bearer_auth(credentials.token)
-                    .json(&json!({"webhook_id": webhook_id, "tag": tag})),
-            )
-            .await?,
-        )
-        .await?;
-        let updated = subscription(&body)?;
-        if updated["subscription_id"] != id || updated["webhook_id"] != webhook_id {
-            return Err(protocol_error());
+    // Keep one subscription per selected event; prefer the current callback.
+    let retained: Vec<&Value> = events
+        .iter()
+        .filter_map(|event| {
+            existing
+                .iter()
+                .filter(|row| {
+                    row["tag"] == tag
+                        && row["event_type"] == event_name(*event)
+                        && row["filter"]["user_id"] == own_id
+                })
+                .min_by_key(|row| row["webhook_id"] != webhook_id)
+        })
+        .collect();
+    for row in existing.iter().filter(|row| row["tag"] == tag) {
+        if !retained
+            .iter()
+            .any(|keep| keep["subscription_id"] == row["subscription_id"])
+        {
+            remove_subscription(http, api, app, row).await?;
         }
-        return Ok(());
     }
-    let body = response_json(send(http.post(format!("{api}/2/activity/subscriptions")).bearer_auth(credentials.token)
-        .json(&json!({"event_type": "dm.received", "filter": {"user_id": own_id}, "webhook_id": webhook_id, "tag": tag}))).await?).await?;
-    subscription(&body)?;
+    for event in events {
+        let name = event_name(*event);
+        if existing.iter().any(|row| {
+            row["tag"] == tag
+                && row["event_type"] == name
+                && row["filter"]["user_id"] == own_id
+                && row["webhook_id"] == webhook_id
+        }) {
+            continue;
+        }
+        if let Some(row) = existing.iter().find(|row| {
+            row["tag"] == tag && row["event_type"] == name && row["filter"]["user_id"] == own_id
+        }) {
+            let id = row["subscription_id"]
+                .as_str()
+                .filter(|id| numeric_id(id))
+                .ok_or_else(protocol_error)?;
+            let body = response_json(
+                send(
+                    http.put(format!("{api}/2/activity/subscriptions/{id}"))
+                        .bearer_auth(credentials.token)
+                        .json(&json!({"webhook_id": webhook_id, "tag": tag})),
+                )
+                .await?,
+            )
+            .await?;
+            let updated = subscription(&body)?;
+            if updated["subscription_id"] != id || updated["webhook_id"] != webhook_id {
+                return Err(protocol_error());
+            }
+        } else {
+            let body = response_json(send(http.post(format!("{api}/2/activity/subscriptions"))
+                .bearer_auth(credentials.token)
+                .json(&json!({"event_type": name, "filter": {"user_id": own_id}, "webhook_id": webhook_id, "tag": tag}))).await?).await?;
+            subscription(&body)?;
+        }
+    }
     Ok(())
 }
 
@@ -341,21 +426,31 @@ pub(super) async fn remove(
         .iter()
         .filter(|row| row["tag"] == tag)
     {
-        let id = row["subscription_id"]
-            .as_str()
-            .filter(|id| numeric_id(id))
-            .ok_or_else(protocol_error)?;
-        let response = send(
-            http.delete(format!("{api}/2/activity/subscriptions/{id}"))
-                .bearer_auth(app),
-        )
-        .await?;
-        if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
-            return Err(response_error(
-                response.status(),
-                rate_backoff(response.headers(), response.status()),
-            ));
-        }
+        remove_subscription(http, api, app, row).await?;
+    }
+    Ok(())
+}
+
+async fn remove_subscription(
+    http: &reqwest::Client,
+    api: &str,
+    token: &str,
+    row: &Value,
+) -> AppResult<()> {
+    let id = row["subscription_id"]
+        .as_str()
+        .filter(|id| numeric_id(id))
+        .ok_or_else(protocol_error)?;
+    let response = send(
+        http.delete(format!("{api}/2/activity/subscriptions/{id}"))
+            .bearer_auth(token),
+    )
+    .await?;
+    if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
+        return Err(response_error(
+            response.status(),
+            rate_backoff(response.headers(), response.status()),
+        ));
     }
     Ok(())
 }

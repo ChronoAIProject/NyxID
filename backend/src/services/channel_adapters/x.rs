@@ -23,7 +23,7 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
 
 use crate::errors::{AppError, AppResult};
-use crate::models::channel_bot::ChannelBot;
+use crate::models::channel_bot::{ChannelBot, XChannelEvent};
 use crate::services::channel_managed::{
     ManagedOnboardingDescriptor, PlatformCredentialBacking, PlatformCredentialDescriptor,
     PlatformCredentialField,
@@ -42,6 +42,54 @@ pub const REQUIRED_SCOPES: &[&str] = &[
     "media.write",
     "offline.access",
 ];
+pub const PUBLIC_SCOPES: &[&str] = &[
+    "tweet.read",
+    "tweet.write",
+    "users.read",
+    "dm.read",
+    "dm.write",
+    "media.write",
+    "offline.access",
+];
+
+pub fn selected_events(bot: &ChannelBot) -> &[XChannelEvent] {
+    bot.x_events.as_deref().unwrap_or(&[XChannelEvent::Dm])
+}
+
+pub fn public_events_enabled(bot: &ChannelBot) -> bool {
+    selected_events(bot)
+        .iter()
+        .any(|event| *event != XChannelEvent::Dm)
+}
+
+pub fn event_name(event: XChannelEvent) -> &'static str {
+    match event {
+        XChannelEvent::Dm => "dm.received",
+        XChannelEvent::Mentions => "post.mention.create",
+        XChannelEvent::Replies => "post.reply.create",
+    }
+}
+
+pub fn validate_events(platform: &str, events: &[XChannelEvent]) -> AppResult<()> {
+    if platform != "x"
+        || events.is_empty()
+        || events.len() > 3
+        || events
+            .iter()
+            .enumerate()
+            .any(|(index, event)| events[..index].contains(event))
+    {
+        return Err(AppError::ValidationError(
+            "X events must be a non-empty selection of dm, mentions, and replies on an X channel"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn is_public_conversation(conversation: &str) -> bool {
+    conversation.strip_prefix("post:").is_some_and(numeric_id)
+}
 const TEXT_LIMIT: usize = 10_000;
 const MAX_PAGES: usize = 10;
 
@@ -49,6 +97,44 @@ const MAX_PAGES: usize = 10;
 pub struct XAdapter {
     #[cfg(test)]
     pub(crate) api_base: Option<String>,
+}
+
+impl XAdapter {
+    async fn send_post_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        target: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        if !reply.attachments.is_empty()
+            || reply
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.get("attachments").is_some())
+        {
+            return Err(AppError::ChannelMediaUnsupported);
+        }
+        let text = reply
+            .text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| AppError::ValidationError("A public X reply requires text".into()))?;
+        let request = http
+            .post(format!("{}/2/tweets", base(self, credentials)))
+            .bearer_auth(credentials.token)
+            .json(&json!({"text": text, "reply": {"in_reply_to_tweet_id": target}}));
+        let response = match credentials.billing {
+            Some(billing) => billing.send_post(request).await?,
+            None => send(request).await?,
+        };
+        let result = response_json(response).await?;
+        let id = result["data"]["id"]
+            .as_str()
+            .filter(|id| numeric_id(id))
+            .ok_or_else(protocol_error)?;
+        Ok(Some(id.into()))
+    }
 }
 
 fn base<'a>(adapter: &'a XAdapter, credentials: &'a BotCredentials<'_>) -> &'a str {
@@ -288,6 +374,10 @@ fn reply_bodies(reply: &OutboundReply) -> AppResult<Vec<Value>> {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for XAdapter {
+    fn atomic_inbound_admission(&self) -> bool {
+        true
+    }
+
     fn display_name(&self) -> &str {
         "X (Twitter)"
     }
@@ -588,6 +678,11 @@ impl PlatformAdapter for XAdapter {
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        if is_public_conversation(conversation_id) {
+            return Err(AppError::ValidationError(
+                "Public X replies require an incoming mention or reply".into(),
+            ));
+        }
         if !numeric_id(conversation_id)
             && !conversation_id
                 .split_once('-')
@@ -723,6 +818,44 @@ impl PlatformAdapter for XAdapter {
         "application/json"
     }
 
+    async fn send_bound_reply(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        bot: &ChannelBot,
+        original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        if !is_public_conversation(conversation_id) {
+            if !selected_events(bot).contains(&XChannelEvent::Dm) {
+                return Err(AppError::ValidationError(
+                    "Direct messages are disabled for this X channel".into(),
+                ));
+            }
+            return self
+                .send_reply(http, credentials, conversation_id, reply)
+                .await;
+        }
+        if !public_events_enabled(bot)
+            || original.platform != "x"
+            || original.direction != "inbound"
+            || original.channel_bot_id.as_deref() != Some(bot.id.as_str())
+            || original.platform_conversation_id.as_deref() != Some(conversation_id)
+        {
+            return Err(AppError::Forbidden(
+                "Public X reply is not authorized for this channel message".into(),
+            ));
+        }
+        let target = original
+            .platform_message_id
+            .as_deref()
+            .filter(|id| numeric_id(id))
+            .ok_or_else(|| AppError::ValidationError("Missing incoming X post".into()))?;
+        self.send_post_reply(http, credentials, target, reply).await
+    }
+
     fn webhook_policy(&self, _body: &[u8]) -> crate::services::channel_platform::WebhookPolicy {
         crate::services::channel_platform::WebhookPolicy::Immediate(None)
     }
@@ -752,10 +885,18 @@ impl PlatformAdapter for XAdapter {
         &self,
         http: &reqwest::Client,
         credentials: &BotCredentials<'_>,
-        bot_id: &str,
+        bot: &ChannelBot,
         webhook_url: &str,
     ) -> AppResult<()> {
-        webhooks::setup(self, http, credentials, bot_id, webhook_url).await
+        webhooks::setup(
+            self,
+            http,
+            credentials,
+            &bot.id,
+            selected_events(bot),
+            webhook_url,
+        )
+        .await
     }
 
     async fn remove_connection_webhook(
@@ -794,6 +935,12 @@ impl PlatformAdapter for XAdapter {
         }
         let envelope: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
         if envelope["data"]["tag"].as_str() != Some(format!("nyxid:{}", bot.id).as_str()) {
+            return Err(webhooks::verification_error());
+        }
+        if !selected_events(bot)
+            .iter()
+            .any(|event| envelope["data"]["event_type"] == event_name(*event))
+        {
             return Err(webhooks::verification_error());
         }
         Ok(())

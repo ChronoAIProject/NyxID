@@ -6,6 +6,10 @@ editor-operation follow-up in [PR #1633](https://github.com/ChronoAIProject/NyxI
 The earlier [PR #1572](https://github.com/ChronoAIProject/NyxID/pull/1572)
 is already part of that base.
 
+The rollup was subsequently updated to current `main` commit
+`6f633320c636963e7baa1aad7921814ca1d819cd` on 2026-09-22, preserving its
+existing constituent PRs and rebuilding the combined CLI wizard bundle.
+
 ## Problem and resulting behavior
 
 Google Drive exposed only nine file operations. Even a connection with full
@@ -56,3 +60,76 @@ containing the combined changes and its source PR reference. It does not rewrite
 the inherited `main` commits. The source PR retains its individual commits and
 review discussion. A later squash merge of this rollup into `main` likewise adds
 a new commit; its message and this document retain the constituent PR details.
+
+## Ownership transfer from asset settings
+
+[PR #1641](https://github.com/ChronoAIProject/NyxID/pull/1641), a follow-up to
+#1615 and #1616, makes transfers available in the asset's
+existing management flow. Channel bot detail pages contain an ownership card;
+connected-service detail pages show the catalog ownership card under
+**Advanced**. The cards and retained **Admin → Ownership transfers** inventory
+share one review dialog and searchable destination picker. No separate service
+settings page is introduced.
+
+Asset owners and active organization admins with unrestricted management can
+transfer their assets without mobile approval. General Agent Keys with live
+`write` or `admin` scope and `allow_all_services=true` act under the same owner
+authority; scoped execution keys do not gain asset management rights. Commit
+revalidates and fences the actor, key, and organization membership in its
+transaction. Platform admins retain the administrative inventory and override.
+
+A dedicated X channel-onboarding OAuth credential moves atomically with its
+bot when it belongs to the source owner and has no other consumers. Tokens stay
+on the same encrypted row; the callback handle rotates. Shared, pending,
+mismatched, and in-flight dependencies block transfer. Selected X DM, mention,
+and reply events are preserved, and required OAuth scopes follow those events.
+Old routes are retired, conversation history stays with the source owner, and
+audit records and idempotent receipts retain the actor and both owners.
+
+Service transfers apply to custom catalog definitions. Connected
+`UserService`/endpoint/credential bundles retain their owners. Aurinko, managed
+Telegram, and OIDC client handover remain unsupported. See
+[Ownership transfers](../ADMIN_OWNERSHIP_TRANSFERS.md) for supported adapters,
+authorization rules, effects, and blockers.
+
+Regression coverage includes owner and agent authorization, live revocation,
+destination search boundaries, transaction races, destination OAuth refresh,
+stale callback rejection, X public-event scopes, and desktop/mobile transfers
+from the existing asset pages.
+
+## Standalone channel bot onboarding
+
+Channel setup previously required finding the Add Bot dialog in the dashboard.
+This change adds shareable, authenticated setup links at
+`/channel-bots/connect` and a dedicated connection page at
+`/channel-bots/connect/{platform}`. Each page identifies NyxID and the selected
+platform, centers the form with an animated dotted connection, and offers one
+primary action. The ownership picker is hidden when personal is the only scope.
+
+The shared form reads fields, validation, secret flags, instructions, and managed
+flow selection from the platform catalog. It supports Telegram tokens, Telegram
+creation, Discord, Lark, Feishu, Slack, WhatsApp, X, and Aurinko. New catalog
+platforms using credential forms or an existing managed protocol do not need a
+new page; a new provider authorization protocol still needs its own frontend
+flow implementation.
+
+Links can prefill the bot name, organization, and catalog-declared credential
+fields. Numeric identifiers and credential strings retain their exact values
+through the sign-in return. Secret parameters are removed from the visible URL
+after consumption, but can still appear in upstream logs, shared messages, and
+login history; broadly shared links should contain only non-secret identifiers.
+Prefill never submits the form automatically. Provider consent and any external
+webhook configuration remain explicit steps.
+
+Completion shows callback URLs and setup instructions even when the platform
+does not issue a one-time secret. Slack and Discord now provide those setup
+instructions. X authorization supports retry after a closed popup while keeping
+the original completion listener active for browsers with COOP isolation.
+
+The [user guide](../site/web/guides/channel-bots.md) documents every current
+platform, query parameters, and setup steps. The
+[channel relay architecture](../CHANNEL_BOT_RELAY.md#standalone-onboarding-pages)
+documents the extension contract and verification workflow. Fable independently
+reviewed the implementation twice and found no remaining blocking issues after
+the fixes; its final focused checks passed 95 unit tests and 29 browser scenarios.
+Provider browser tests use fixtures and do not create real external bots.

@@ -1305,10 +1305,11 @@ pub async fn list_keys(
     get,
     path = "/api/v1/keys/{key_id}",
     params(
-        ("key_id" = String, Path, description = "User service ID or slug")
+        ("key_id" = String, Path, description = "User service ID or slug; service accounts require an exact granted UserService UUID")
     ),
     responses(
-        (status = 200, description = "Key details", body = KeyResponse),
+        (status = 200, description = "Key details; service accounts receive nonsecret metadata with user-services:read and an exact key read grant", body = super::service_account_key_reads::KeyReadResponse),
+        (status = 403, description = "Service account lacks a live read scope or key read grant", body = crate::errors::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
         (status = 404, description = "Key not found", body = crate::errors::ErrorResponse)
     ),

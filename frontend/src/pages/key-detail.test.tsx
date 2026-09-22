@@ -6,6 +6,7 @@ import { ApiError } from "@/lib/api-client";
 import type { KeyInfo } from "@/types/keys";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
+import type { OwnershipResource } from "@/types/ownership-transfers";
 
 const {
   hooks,
@@ -23,6 +24,8 @@ const {
       error: null as unknown,
       refetch: vi.fn(),
     },
+    canTransfer: false,
+    transferResource: null as OwnershipResource | null,
     updateKey: vi.fn(),
     deleteKey: vi.fn(),
     updateEndpoint: vi.fn(),
@@ -73,6 +76,21 @@ vi.mock("@/hooks/use-keys", () => ({
     isPending: false,
   }),
   useCatalogEntry: () => ({ data: hooks.catalogEntry }),
+}));
+
+vi.mock("@/hooks/use-ownership-transfers", () => ({
+  useOwnershipTransferAuthorization: () => ({
+    data: { can_transfer: hooks.canTransfer, resource: hooks.transferResource },
+  }),
+}));
+
+vi.mock("@/components/shared/ownership-transfer-dialog", () => ({
+  OwnershipTransferDialog: ({ resource }: { readonly resource: OwnershipResource }) => (
+    <div role="dialog" aria-label="Transfer ownership">
+      <span>{resource.id}</span>
+      <span>{resource.owner_user_id}</span>
+    </div>
+  ),
 }));
 
 vi.mock("@/hooks/use-nodes", () => ({
@@ -190,6 +208,14 @@ function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 }
 
 beforeEach(() => {
+  hooks.canTransfer = false;
+  hooks.transferResource = {
+    id: "cat-1",
+    name: "OpenAI",
+    owner_user_id: "catalog-owner",
+    slug: "openai",
+    platform: null,
+  };
   useAuthStore.setState({ user: { id: "owner-1" } as User });
   routerState.keyId = "key-1";
   vi.clearAllMocks();
@@ -1056,4 +1082,47 @@ it("lets retained UUID history own expected missing details state", () => {
   expect(screen.getByRole("heading", { name: "Service history" })).toBeInTheDocument();
   expect(screen.queryByText("Key does not exist")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+});
+
+it("shows the ownership card in Advanced only when the backend authorizes the catalog owner", async () => {
+  const user = userEvent.setup();
+  const view = render(<KeyDetailPage />);
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+  hooks.canTransfer = true;
+  view.rerender(<KeyDetailPage />);
+  expect(within(screen.getByRole("tabpanel", { name: "Advanced" })).getByText("Ownership transfer")).toBeVisible();
+  hooks.transferResource = null;
+  view.rerender(<KeyDetailPage />);
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+});
+
+it("opens ownership review in Advanced using the catalog resource and owner", async () => {
+  hooks.canTransfer = true;
+  const user = userEvent.setup();
+  render(<KeyDetailPage />);
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  expect(screen.getByText("Transfer the catalog definition for OpenAI to another person or organization.")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Transfer ownership" }));
+  const dialog = screen.getByRole("dialog", { name: "Transfer ownership" });
+  expect(within(dialog).getByText("cat-1")).toBeVisible();
+  expect(within(dialog).getByText("catalog-owner")).toBeVisible();
+  expect(mockNavigate).not.toHaveBeenCalled();
+});
+
+it.each([true, false])("offers Advanced to an authorized catalog owner for a platform connection (auto-connected: %s)", async (autoConnected) => {
+  hooks.key.data = makeKey({ credential_binding: "platform", auto_connected: autoConnected, api_key_id: null });
+  const user = userEvent.setup();
+  const view = render(<KeyDetailPage />);
+  expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
+  hooks.canTransfer = true;
+  view.rerender(<KeyDetailPage />);
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  expect(screen.getByRole("button", { name: "Transfer ownership" })).toBeVisible();
+  hooks.canTransfer = false;
+  view.rerender(<KeyDetailPage />);
+  expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeVisible();
+  expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
 });

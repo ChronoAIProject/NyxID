@@ -237,6 +237,7 @@ export interface DownstreamService {
   readonly ssh_config?: SshServiceConfig | null;
   readonly service_category: string;
   readonly requires_user_credential: boolean;
+  readonly owner_user_id?: string;
   readonly created_by: string;
   readonly created_at: string;
   readonly updated_at: string;

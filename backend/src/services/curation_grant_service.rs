@@ -35,10 +35,13 @@ pub struct IssueCurationGrant {
 pub fn validate_scopes(scopes: &str, ornn_target: Option<&str>) -> AppResult<()> {
     if scopes.split_whitespace().next().is_none()
         || scopes.split_whitespace().any(|s| {
-            s != READ_SCOPE && s != WRITE_SCOPE && !(s == "proxy" && ornn_target.is_some())
+            s != READ_SCOPE
+                && s != WRITE_SCOPE
+                && s != super::service_account_key_read_service::READ_SCOPE
+                && !(s == "proxy" && ornn_target.is_some())
         })
     {
-        return Err(AppError::ValidationError("Curation scopes must be catalog:skills:read, catalog:skills:write, or proxy with an Ornn target".into()));
+        return Err(AppError::ValidationError("Curation scopes must be catalog:skills:read, catalog:skills:write, user-services:read, or proxy with an Ornn target".into()));
     }
     Ok(())
 }

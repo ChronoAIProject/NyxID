@@ -443,6 +443,7 @@ mod tests {
                     "groups",
                     "catalog:skills:read",
                     "catalog:skills:write",
+                    "user-services:read",
                 ]
             };
             let mut req = Request::builder().uri(path);
