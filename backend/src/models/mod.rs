@@ -79,6 +79,7 @@ pub mod refresh_token;
 pub mod reply_token_use;
 pub mod role;
 pub mod service_account;
+pub mod service_account_key_read_grant;
 pub mod service_account_token;
 pub mod service_approval_config;
 pub mod service_billing;
