@@ -579,6 +579,68 @@ describe("AiKeyConfirm — custom-service back reset", () => {
   });
 });
 
+describe("AiKeyConfirm — Supabase catalog service", () => {
+  const supabaseEntry = {
+    slug: "api-supabase",
+    name: "Supabase Data API",
+    description: "Supabase PostgREST connector",
+    base_url: "https://project-ref.supabase.co/rest/v1",
+    auth_method: "header",
+    auth_key_name: "apikey",
+    provider_type: "api_key",
+    provider_config_id: "provider-supabase",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: true,
+    api_key_url: "https://supabase.com/dashboard/project/_/settings/api-keys",
+  };
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockGet.mockResolvedValue(supabaseEntry);
+    mockPost.mockResolvedValue({
+      id: "svc-supabase",
+      slug: "api-supabase",
+      label: "Supabase Data API",
+    });
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("collects the project URL and Supabase API key", async () => {
+    const user = userEvent.setup();
+    render(
+      <AiKeyConfirm {...baseProps} prefill={{ slug: "api-supabase" }} />,
+      { wrapper: createWrapper() },
+    );
+
+    const endpoint = await screen.findByLabelText("Supabase Project URL");
+    expect(endpoint).toHaveAttribute(
+      "placeholder",
+      "https://project-ref.supabase.co",
+    );
+    const credential = screen.getByLabelText("Supabase API key");
+    expect(credential).toHaveAttribute(
+      "placeholder",
+      "sb_secret_... or sb_publishable_...",
+    );
+
+    await user.type(endpoint, "https://demo.supabase.co");
+    await user.type(credential, "sb_secret_test");
+    await user.click(screen.getByRole("button", { name: "Create Service" }));
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith("/keys", {
+        service_slug: "api-supabase",
+        label: "Supabase Data API",
+        credential: "sb_secret_test",
+        endpoint_url: "https://demo.supabase.co",
+      });
+    });
+  });
+});
+
 describe("AiKeyConfirm — catalog services routed via node", () => {
   const catalogEntry = {
     slug: "llm-openai",
