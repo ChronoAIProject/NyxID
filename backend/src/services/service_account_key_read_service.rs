@@ -24,6 +24,9 @@ use crate::{
 pub const READ_SCOPE: &str = "user-services:read";
 
 pub fn is_key_metadata_path(path: &str) -> bool {
+    if path == "/api/v1/keys" {
+        return true;
+    }
     path.strip_prefix("/api/v1/keys/")
         .is_some_and(|id| id.len() == 36 && Uuid::parse_str(id).is_ok())
 }
@@ -191,6 +194,20 @@ fn authorize_scope(sa: &ServiceAccount, token_scope: &str) -> AppResult<()> {
     Ok(())
 }
 
+async fn authorized_grant(
+    db: &Database,
+    sa_id: &str,
+    token_scope: &str,
+) -> AppResult<ServiceAccountKeyReadGrant> {
+    let sa = service_account_service::get_service_account(db, sa_id).await?;
+    authorize_scope(&sa, token_scope)?;
+    get_grant(db, sa_id)
+        .await?
+        .filter(|g| g.owner_id == sa.effective_owner_user_id())
+        .filter(|g| g.expires_at.is_none_or(|expiry| expiry > Utc::now()))
+        .ok_or_else(|| AppError::Forbidden("Live key read grant required".into()))
+}
+
 /// Reads only projected metadata; this path never loads or decrypts credentials.
 pub async fn read(
     db: &Database,
@@ -198,23 +215,39 @@ pub async fn read(
     token_scope: &str,
     id: &str,
 ) -> AppResult<KeyMetadata> {
-    let sa = service_account_service::get_service_account(db, sa_id).await?;
-    authorize_scope(&sa, token_scope)?;
-    let grant = get_grant(db, sa_id)
-        .await?
-        .filter(|g| g.owner_id == sa.effective_owner_user_id())
-        .filter(|g| g.expires_at.is_none_or(|expiry| expiry > Utc::now()))
-        .ok_or_else(|| AppError::Forbidden("Live key read grant required".into()))?;
+    let grant = authorized_grant(db, sa_id, token_scope).await?;
     let target = grant
         .targets
         .iter()
         .find(|t| t.user_service_id == id)
         .ok_or_else(missing)?;
-    let row = service(db, id).await?;
+    read_target(db, &grant.owner_id, target).await
+}
+
+/// Lists only currently readable targets from the exact live grant.
+pub async fn list(db: &Database, sa_id: &str, token_scope: &str) -> AppResult<Vec<KeyMetadata>> {
+    let grant = authorized_grant(db, sa_id, token_scope).await?;
+    let mut keys = Vec::with_capacity(grant.targets.len());
+    for target in &grant.targets {
+        match read_target(db, &grant.owner_id, target).await {
+            Ok(key) => keys.push(key),
+            Err(AppError::NotFound(_)) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(keys)
+}
+
+async fn read_target(
+    db: &Database,
+    owner_id: &str,
+    target: &KeyReadTarget,
+) -> AppResult<KeyMetadata> {
+    let row = service(db, &target.user_service_id).await?;
     if row.user_id != target.owner_id {
         return Err(missing());
     }
-    check_owner_access(db, &grant.owner_id, &row).await?;
+    check_owner_access(db, owner_id, &row).await?;
     let endpoint = endpoint(db, &row).await?;
     let catalog = if let Some(id) = &row.catalog_service_id {
         db.collection::<CatalogRow>(CATALOG)

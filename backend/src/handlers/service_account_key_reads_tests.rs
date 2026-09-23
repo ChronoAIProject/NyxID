@@ -161,6 +161,61 @@ async fn sa_key_read_is_projected_and_has_no_connection_side_effects() {
 }
 
 #[tokio::test]
+async fn sa_key_list_contains_only_live_granted_metadata() {
+    let (f, svc, bearer) = setup("sa_key_list_granted", false).await;
+    let sibling = test_utils::test_user_service(
+        &Uuid::new_v4().to_string(),
+        &f.owner,
+        "ungranted",
+        &svc.endpoint_id,
+        None,
+        None,
+    );
+    f.state
+        .db
+        .collection::<UserService>(SERVICES)
+        .insert_one(&sibling)
+        .await
+        .unwrap();
+    let path = "/api/v1/keys";
+    assert_eq!(
+        request(&f.state, "GET", path, &bearer, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    grant(&f, std::slice::from_ref(&svc.id)).await;
+    let (status, body) = request(&f.state, "GET", path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["keys"].as_array().unwrap().len(), 1);
+    assert_eq!(body["keys"][0]["id"], svc.id);
+    assert_eq!(body["keys"][0]["recommended_skills"][0], "ops/manual");
+    assert!(!body.to_string().contains("secret"));
+    assert!(!body.to_string().contains(&sibling.id));
+
+    f.state
+        .db
+        .collection::<Document>(SERVICES)
+        .update_one(doc! {"_id": &svc.id}, doc! {"$set": {"is_active": false}})
+        .await
+        .unwrap();
+    let (status, body) = request(&f.state, "GET", path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["keys"][0]["is_active"], false);
+
+    f.state
+        .db
+        .collection::<Document>(ENDPOINTS)
+        .update_one(
+            doc! {"_id": &svc.endpoint_id},
+            doc! {"$set": {"deleted_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let (status, body) = request(&f.state, "GET", path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["keys"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn sa_key_read_rejects_other_ids_slugs_and_writes() {
     let (f, svc, bearer) = setup("sa_key_read_boundaries", false).await;
     grant(&f, std::slice::from_ref(&svc.id)).await;
@@ -216,7 +271,6 @@ async fn sa_key_read_rejects_other_ids_slugs_and_writes() {
         );
     }
     for path in [
-        "/api/v1/keys".to_string(),
         format!("{path}/authorization"),
         "/api/v1/user-services".into(),
     ] {
@@ -253,6 +307,12 @@ async fn sa_key_read_checks_live_scopes_grant_expiry_and_revocation() {
             .0,
         StatusCode::FORBIDDEN
     );
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &no_read_token, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
     f.state
         .db
         .collection::<Document>(ACCOUNTS)
@@ -264,6 +324,12 @@ async fn sa_key_read_checks_live_scopes_grant_expiry_and_revocation() {
         .unwrap();
     assert_eq!(
         request(&f.state, "GET", &path, &bearer, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &bearer, None)
+            .await
+            .0,
         StatusCode::FORBIDDEN
     );
     f.state
@@ -279,9 +345,21 @@ async fn sa_key_read_checks_live_scopes_grant_expiry_and_revocation() {
         request(&f.state, "GET", &path, &bearer, None).await.0,
         StatusCode::OK
     );
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &bearer, None)
+            .await
+            .0,
+        StatusCode::OK
+    );
     f.state.db.collection::<Document>(GRANTS).update_one(doc! {"_id":&f.sa.id}, doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
     assert_eq!(
         request(&f.state, "GET", &path, &bearer, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &bearer, None)
+            .await
+            .0,
         StatusCode::FORBIDDEN
     );
     grant(&f, std::slice::from_ref(&svc.id)).await;
@@ -299,6 +377,12 @@ async fn sa_key_read_checks_live_scopes_grant_expiry_and_revocation() {
     );
     assert_eq!(
         request(&f.state, "GET", &path, &bearer, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &bearer, None)
+            .await
+            .0,
         StatusCode::FORBIDDEN
     );
 }
@@ -357,11 +441,23 @@ async fn sa_key_read_curation_requires_both_grants() {
         request(&f.state, "GET", &path, &bearer, None).await.0,
         StatusCode::OK
     );
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &bearer, None)
+            .await
+            .0,
+        StatusCode::OK
+    );
     curation_grant_service::revoke(&f.state.db, &f.sa.id)
         .await
         .unwrap();
     assert_eq!(
         request(&f.state, "GET", &path, &bearer, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &bearer, None)
+            .await
+            .0,
         StatusCode::FORBIDDEN
     );
 }
@@ -639,27 +735,33 @@ async fn sa_key_read_replacement_custom_response_and_upgrade_boundaries() {
         assert!(body[field].is_null(), "{field}");
     }
     assert_eq!(body["name"], "Test connection");
-    for upgraded in [false, true] {
-        let (public, private) = crate::routes::build_router_with_state(f.state.clone());
-        let mut req = Request::builder()
-            .uri(&path)
-            .header("authorization", format!("Bearer {bearer}"));
-        if upgraded {
-            req = req
-                .header("upgrade", "websocket")
-                .header("connection", "upgrade");
-        }
-        let response = public
-            .merge(private)
-            .with_state(f.state.clone())
-            .oneshot(req.body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        if upgraded {
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        } else {
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.headers()["cache-control"], "private, no-store");
+    for path in [path.as_str(), "/api/v1/keys"] {
+        assert_eq!(
+            request(&f.state, "HEAD", path, &bearer, None).await.0,
+            StatusCode::FORBIDDEN
+        );
+        for upgraded in [false, true] {
+            let (public, private) = crate::routes::build_router_with_state(f.state.clone());
+            let mut req = Request::builder()
+                .uri(path)
+                .header("authorization", format!("Bearer {bearer}"));
+            if upgraded {
+                req = req
+                    .header("upgrade", "websocket")
+                    .header("connection", "upgrade");
+            }
+            let response = public
+                .merge(private)
+                .with_state(f.state.clone())
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if upgraded {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["cache-control"], "private, no-store");
+            }
         }
     }
 }
