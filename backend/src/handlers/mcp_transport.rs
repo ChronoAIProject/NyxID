@@ -148,9 +148,11 @@ fn content_result(
 /// response at 2 MiB and base64 adds a third; larger images get a note only.
 const MAX_INLINE_TOOL_IMAGE_BYTES: usize = 1024 * 1024;
 
-/// MCP content for a service tool response. Verified images become an MCP
-/// image block plus a note; for assistant chat keys they are also stored and
-/// attached to the live turn so the chat shows them under the reply.
+/// MCP content for a service tool response. The text note always comes first,
+/// because some clients (NyxAgent) hand the whole result to the model as one
+/// truncated string. Assistant chat keys get the image attached to the live
+/// turn and the note only: NyxAgent cannot pass pixels to its model, so base64
+/// would only crowd out the note. Other MCP callers also get an image block.
 async fn service_tool_content(
     state: &AppState,
     auth: &McpAuthContext,
@@ -175,7 +177,23 @@ async fn service_tool_content(
         media.content_type,
         media.bytes.len()
     );
-    if let Some(chat) = auth.chat.as_ref() {
+    let Some(chat) = auth.chat.as_ref() else {
+        let mut content = Vec::with_capacity(2);
+        if media.bytes.len() > MAX_INLINE_TOOL_IMAGE_BYTES {
+            note.push_str(" It is too large to include in this result.");
+            content.push(serde_json::json!({ "type": "text", "text": note }));
+        } else {
+            use base64::Engine as _;
+            content.push(serde_json::json!({ "type": "text", "text": note }));
+            content.push(serde_json::json!({
+                "type": "image",
+                "data": base64::engine::general_purpose::STANDARD.encode(&media.bytes),
+                "mimeType": media.content_type,
+            }));
+        }
+        return (content, false);
+    };
+    {
         match crate::services::assistant_nyxagent::attach_image(
             &state.db,
             &state.encryption_keys,
@@ -188,8 +206,10 @@ async fn service_tool_content(
         .await
         {
             Ok(Some(_)) => note.push_str(
-                " NyxID shows this image to the user in the chat under your reply; refer to \
-                it instead of saying it cannot be displayed.",
+                " Delivered: NyxID already displays this image to the user in the chat \
+                under your reply. Tell the user it is shown below. Do not say it could not \
+                be displayed, was sent as base64, or was truncated. You cannot view its \
+                pixels, so do not describe its contents.",
             ),
             Ok(None) => note.push_str(
                 " It could not be attached to the chat: no turn is running or this turn \
@@ -201,19 +221,10 @@ async fn service_tool_content(
             }
         }
     }
-    let mut content = Vec::with_capacity(2);
-    if media.bytes.len() <= MAX_INLINE_TOOL_IMAGE_BYTES {
-        use base64::Engine as _;
-        content.push(serde_json::json!({
-            "type": "image",
-            "data": base64::engine::general_purpose::STANDARD.encode(&media.bytes),
-            "mimeType": media.content_type,
-        }));
-    } else {
-        note.push_str(" It is too large to include in this result.");
-    }
-    content.push(serde_json::json!({ "type": "text", "text": note }));
-    (content, false)
+    (
+        vec![serde_json::json!({ "type": "text", "text": note })],
+        false,
+    )
 }
 
 fn content_result_with_notifications(

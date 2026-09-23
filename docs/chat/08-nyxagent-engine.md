@@ -350,17 +350,23 @@ receipt digests and every text consumer are unchanged. `media` is set only for a
 other type never qualify.
 
 For MCP `tools/call` (direct service tools and `nyx__call_tool`), a verified
-image becomes an MCP `image` content block (base64, `mimeType`) followed by a
-text note. Images over 1 MiB are described in the note but not inlined, because
-NyxAgent caps a whole MCP response at 2 MiB. This applies to every MCP caller.
+image produces a text note first, because NyxAgent hands the whole result to its
+model as one JSON string truncated at 10,000 characters and cannot pass pixels to
+the model. Callers other than assistant chat keys also get an MCP `image` content
+block (base64, `mimeType`) after the note, up to 1 MiB (NyxAgent caps a whole MCP
+response at 2 MiB); larger images are described in the note only. Assistant chat
+keys get the note alone: an image block would only push the note past the
+truncation point, which is what made the model claim the image "arrived as a
+truncated base64 string".
 
 When the caller is an assistant chat key and its conversation has a live turn,
 the image is also envelope-encrypted with `EncryptionKeys` into
 `assistant_attachments` and its metadata `{id,content_type,size,label}` is pushed
 onto `active_turn.attachments` (label = the tool identifier, at most 8 per turn;
 the slot is claimed before anything is encrypted or stored). Settlement copies
-the list onto the assistant reply. The note then tells the model the user sees
-the image under its reply, so it does not claim the image cannot be shown.
+the list onto the assistant reply. The note then tells the model the image is
+already displayed under its reply, that it must not claim otherwise, and that it
+cannot see the pixels and so must not describe them.
 Attachments are deleted with their conversation and in the admin user purge.
 
 `GET /conversations/{id}/attachments/{attachment_id}` is owner-only on the

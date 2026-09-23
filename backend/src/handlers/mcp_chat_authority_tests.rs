@@ -969,24 +969,26 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
     .await)
     .await;
     assert_eq!(image["isError"], false, "{image}");
+    // Chat keys get the note only: NyxAgent stringifies and truncates results
+    // and cannot pass pixels to its model, so base64 would crowd out the note.
     let content = image["content"].as_array().unwrap();
-    assert_eq!(content.len(), 2, "{image}");
-    assert_eq!(content[0]["type"], "image");
-    assert_eq!(content[0]["mimeType"], "image/png");
-    {
-        use base64::Engine as _;
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD
-                .decode(content[0]["data"].as_str().unwrap())
-                .unwrap(),
-            png
-        );
-    }
-    let note = content[1]["text"].as_str().unwrap();
+    assert_eq!(content.len(), 1, "{image}");
+    assert_eq!(content[0]["type"], "text");
+    let note = content[0]["text"].as_str().unwrap();
     assert!(
-        note.contains("image/png") && note.contains("shows this image to the user"),
+        note.starts_with("The tool returned an image (image/png"),
         "{note}"
     );
+    assert!(
+        note.contains("already displays this image to the user"),
+        "{note}"
+    );
+    assert!(
+        note.contains("Do not say it could not be displayed"),
+        "{note}"
+    );
+    // Small enough that NyxAgent's 10,000-character truncation never reaches the note.
+    assert!(image.to_string().len() < 1024, "{image}");
     // A body that claims image/png without PNG magic stays text.
     let spoofed = raw(call(
         &f,
@@ -1055,13 +1057,25 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
     )
     .await)
     .await;
-    assert_eq!(direct["content"][0]["type"], "image", "{direct}");
+    // Other MCP callers get the note first, then the image block.
+    assert_eq!(direct["content"][0]["type"], "text", "{direct}");
     assert!(
-        !direct["content"][1]["text"]
+        !direct["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("shows this image")
+            .contains("displays this image")
     );
+    assert_eq!(direct["content"][1]["type"], "image");
+    assert_eq!(direct["content"][1]["mimeType"], "image/png");
+    {
+        use base64::Engine as _;
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(direct["content"][1]["data"].as_str().unwrap())
+                .unwrap(),
+            png
+        );
+    }
     assert_eq!(
         f.state
             .db
