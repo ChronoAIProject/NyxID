@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ServiceIcon } from "@/components/service-icon";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
@@ -1243,7 +1244,9 @@ function CatalogConfirmForm({
             className="h-8 w-8 rounded"
             loading="lazy"
           />
-        ) : null}
+        ) : (
+          <ServiceIcon slug={entry.slug} size="lg" />
+        )}
         <div className="flex flex-col gap-0.5">
           <h3 className="font-medium">{entry.name}</h3>
           {entry.description ? (

@@ -165,6 +165,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-feishu-bot": ApiFeishuBotIcon,
   "api-telegram-bot": ApiTelegramBotIcon,
   "api-supabase": ApiSupabaseIcon,
+  supabase: ApiSupabaseIcon,
   "api-elevenlabs": ApiElevenLabsIcon,
   "api-telnyx": ApiTelnyxIcon,
   telnyx: ApiTelnyxIcon,
@@ -176,7 +177,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-ifttt-mcp": ApiIftttMcpIcon,
 
   "aws-cost-explorer": AwsCostExplorerIcon,
-} satisfies Readonly<Record<Slug | "telnyx" | "platform-telnyx" | "aurinko", IconComponent>>;
+} satisfies Readonly<Record<Slug | "supabase" | "telnyx" | "platform-telnyx" | "aurinko", IconComponent>>;
 
 // `data-fallback="true"` lets the test hook recognize fallbacks when an
 // unknown slug is rendered.
