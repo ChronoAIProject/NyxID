@@ -1,21 +1,55 @@
 use super::*;
 use crate::services::channel_platform::PlatformAdapter;
-use axum::{Json, Router, body::Bytes, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Extension, Json, Router,
+    body::Bytes,
+    extract::State,
+    http::StatusCode,
+    middleware,
+    routing::{get, post},
+};
 
 #[derive(Clone)]
 struct HttpFixture {
-    state: crate::AppState,
     telegram_url: String,
 }
 
+async fn create_http(
+    State(state): State<crate::AppState>,
+    Extension(fixture): Extension<HttpFixture>,
+    auth: crate::mw::auth::AuthUser,
+    tele: crate::telemetry::TelemetryContext,
+    Json(body): Json<crate::handlers::channel_bots::CreateChannelBotRequest>,
+) -> crate::errors::AppResult<(
+    StatusCode,
+    Json<crate::handlers::channel_bots::CreateChannelBotResponse>,
+)> {
+    let adapter = crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(
+        &fixture.telegram_url,
+    );
+    crate::handlers::channel_bots::create_bot_with_adapter(
+        &state,
+        auth,
+        tele,
+        body,
+        &adapter,
+        &TelegramApi {
+            http: &state.http_client,
+            base_url: &fixture.telegram_url,
+        },
+    )
+    .await
+}
+
 async fn manager_http(
-    State(fixture): State<HttpFixture>,
+    State(state): State<crate::AppState>,
+    Extension(fixture): Extension<HttpFixture>,
     headers: HeaderMap,
     body: Bytes,
 ) -> crate::errors::AppResult<StatusCode> {
     crate::handlers::telegram_new::webhook_with_service(
-        &fixture.state,
-        &service(&fixture.state, &fixture.telegram_url),
+        &state,
+        &service(&state, &fixture.telegram_url),
         &headers,
         &body,
     )
@@ -23,42 +57,94 @@ async fn manager_http(
 }
 
 async fn reply_http(
-    State(fixture): State<HttpFixture>,
+    State(state): State<crate::AppState>,
+    Extension(fixture): Extension<HttpFixture>,
     headers: HeaderMap,
     Json(body): Json<crate::handlers::channel_relay::AsyncReplyRequest>,
 ) -> crate::errors::AppResult<Json<crate::handlers::channel_relay::AsyncReplyResponse>> {
     let adapter = crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(
         &fixture.telegram_url,
     );
-    crate::handlers::channel_relay::async_reply_with_test_adapter(
-        &fixture.state,
-        &headers,
-        body,
-        &adapter,
-    )
-    .await
+    crate::handlers::channel_relay::async_reply_with_test_adapter(&state, &headers, body, &adapter)
+        .await
 }
 
 async fn start_http(
     state: &crate::AppState,
     server: &MockServer,
 ) -> (String, tokio::task::JoinHandle<()>) {
+    use crate::handlers::{channel_bots, channel_conversations, telegram_new};
+    use crate::mw::auth::{
+        reject_api_key_tokens, reject_delegated_tokens, reject_relay_tokens,
+        reject_service_account_tokens,
+    };
+
+    // Match the human-only route boundary; only Telegram's HTTP destination is injected.
+    let management = Router::new()
+        .route(
+            "/api/v1/channel-bots",
+            get(channel_bots::list_bots).post(create_http),
+        )
+        .route(
+            "/api/v1/channel-bots/{id}",
+            get(channel_bots::get_bot).delete(channel_bots::delete_bot),
+        )
+        .route(
+            "/api/v1/channel-bots/telegram-new",
+            post(telegram_new::begin),
+        )
+        .route(
+            "/api/v1/channel-bots/telegram-new/requests/{id}",
+            get(telegram_new::get),
+        )
+        .route(
+            "/api/v1/channel-conversations",
+            get(channel_conversations::list_conversations)
+                .post(channel_conversations::create_conversation),
+        )
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_api_key_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
     let app = Router::new()
+        .merge(management)
         .route(
             "/api/v1/webhooks/channel/telegram-new/manager",
             post(manager_http),
         )
         .route("/api/v1/channel-relay/reply", post(reply_http))
-        .with_state(HttpFixture {
-            state: state.clone(),
+        .layer(Extension(HttpFixture {
             telegram_url: server.uri(),
-        });
+        }))
+        .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
     (url, task)
+}
+
+fn access_token(state: &crate::AppState, actor: &str) -> String {
+    crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &uuid::Uuid::parse_str(actor).unwrap(),
+        "read write",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap()
+}
+
+async fn response_json(response: reqwest::Response, expected: StatusCode) -> Value {
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, expected, "{body}");
+    serde_json::from_str(&body).unwrap()
 }
 
 async fn add_agent(
@@ -102,36 +188,233 @@ async fn wait_for_callbacks(state: &crate::AppState, bot: &ChannelBot, expected:
 
 #[tokio::test]
 async fn telegram_new_manager_public_channel_http_chat_reply_and_creation_end_to_end() {
+    manager_channel_http_end_to_end(false).await;
+}
+
+#[tokio::test]
+async fn telegram_new_manager_org_channel_http_chat_reply_and_creation_end_to_end() {
+    manager_channel_http_end_to_end(true).await;
+}
+
+async fn manager_channel_http_end_to_end(org_owned: bool) {
     let (state, actor, server) = fixture().await;
-    let channel = register_manager_channel(&state, &actor, &server).await;
-    let public_agent = add_agent(&state, &actor, &server, "/public-agent").await;
-    let exact_agent = add_agent(&state, &actor, &server, "/exact-agent").await;
-    for (chat, agent, default) in [("*", &public_agent, true), ("700", &exact_agent, false)] {
-        crate::services::channel_routing_service::create_conversation(
+    let target_org_id = if org_owned {
+        use crate::models::org_membership::{MemberScopeSource, OrgRole};
+        let org =
+            crate::services::org_service::create_org_user(&state.db, "Manager channel", None, None)
+                .await
+                .unwrap();
+        crate::services::org_service::create_membership(
             &state.db,
+            &org.id,
             &actor,
-            Some(&channel.id),
-            "telegram",
-            chat,
-            "private",
+            OrgRole::Admin,
+            MemberScopeSource::Inherit,
             None,
-            agent,
-            default,
-            false,
         )
         .await
         .unwrap();
-    }
+        Some(org.id)
+    } else {
+        None
+    };
+    let owner = target_org_id.as_deref().unwrap_or(&actor);
+    super::manager_channel::bot_identity_api(&server, MANAGER).await;
     let (url, http_task) = start_http(&state, &server).await;
+    let token = access_token(&state, &actor);
+    let bots_url = format!("{url}/api/v1/channel-bots");
+    let conversations_url = format!("{url}/api/v1/channel-conversations");
+    let registration = json!({
+        "platform": "telegram", "bot_token": MANAGER, "label": "Public manager",
+        "target_org_id": target_org_id,
+    });
+    for (credential, expected) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some("nyxid_ag_denied"), StatusCode::FORBIDDEN),
+    ] {
+        let mut request = state.http_client.post(&bots_url).json(&registration);
+        if let Some(credential) = credential {
+            request = request.bearer_auth(credential);
+        }
+        response_json(request.send().await.unwrap(), expected).await;
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let created = response_json(
+        state
+            .http_client
+            .post(&bots_url)
+            .bearer_auth(&token)
+            .json(&registration)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(created["credential_source"], "telegram_manager");
+    assert_eq!(created["status"], "active");
+    assert!(created.get("webhook_secret").is_none());
+    let channel =
+        crate::services::channel_bot_service::get_bot(&state.db, created["id"].as_str().unwrap())
+            .await
+            .unwrap();
+    assert_eq!(channel.user_id, owner);
+    assert!(channel.bot_token_encrypted.is_empty());
+    assert!(channel.webhook_secret_hash.is_empty());
+    let detail_url = format!("{bots_url}/{}", channel.id);
+    let public_agent = add_agent(&state, owner, &server, "/public-agent").await;
+    let exact_agent = add_agent(&state, owner, &server, "/exact-agent").await;
+    let mut route_ids = Vec::new();
+    for (chat, agent, default) in [("*", &public_agent, true), ("700", &exact_agent, false)] {
+        let route = response_json(
+            state
+                .http_client
+                .post(&conversations_url)
+                .bearer_auth(&token)
+                .json(&json!({
+                    "channel_bot_id": channel.id, "agent_api_key_id": agent,
+                    "platform_conversation_id": chat, "default_agent": default,
+                    "target_org_id": target_org_id,
+                }))
+                .send()
+                .await
+                .unwrap(),
+            StatusCode::CREATED,
+        )
+        .await;
+        route_ids.push(route["id"].as_str().unwrap().to_owned());
+    }
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{MANAGER}/getWebhookInfo")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": {"url": ""}})),
+        )
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    response_json(
+        state
+            .http_client
+            .post(&bots_url)
+            .bearer_auth(&token)
+            .json(&registration)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    let bot_query: Vec<_> = target_org_id.iter().map(|org| ("org_id", org)).collect();
+    let failed = response_json(
+        state
+            .http_client
+            .get(&bots_url)
+            .bearer_auth(&token)
+            .query(&bot_query)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(failed["total"], 1);
+    assert_eq!(failed["bots"][0]["id"], channel.id);
+    assert_eq!(failed["bots"][0]["status"], "failed");
+    assert_eq!(failed["bots"][0]["webhook_registered"], false);
+
+    let outsider = uuid::Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(test_user(&outsider, crate::models::user::UserType::Person))
+        .await
+        .unwrap();
+    let outsider_token = access_token(&state, &outsider);
+    let denied = state
+        .http_client
+        .post(&bots_url)
+        .bearer_auth(&outsider_token)
+        .json(&registration)
+        .send()
+        .await
+        .unwrap();
+    assert!(denied.status().is_client_error());
+    response_json(
+        state
+            .http_client
+            .get(&detail_url)
+            .bearer_auth(&outsider_token)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    let mut retry = registration.clone();
+    retry["label"] = json!("Do not replace saved label");
+    let recovered = response_json(
+        state
+            .http_client
+            .post(&bots_url)
+            .bearer_auth(&token)
+            .json(&retry)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(recovered["id"], channel.id);
+    assert_eq!(recovered["status"], "active");
+    assert!(recovered.get("webhook_secret").is_none());
+    let detail = response_json(
+        state
+            .http_client
+            .get(&detail_url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(detail["label"], "Public manager");
+    assert_eq!(detail["status"], "active");
+    assert_eq!(detail["webhook_registered"], true);
+    assert_eq!(detail["conversations_count"], 2);
+    assert_eq!(detail["user_id"], owner);
+    let mut route_query = vec![("bot_id", channel.id.as_str())];
+    if let Some(org) = target_org_id.as_deref() {
+        route_query.push(("org_id", org));
+    }
+    let routes = response_json(
+        state
+            .http_client
+            .get(&conversations_url)
+            .bearer_auth(&token)
+            .query(&route_query)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(routes["total"], 2);
+    for route in routes["conversations"].as_array().unwrap() {
+        assert!(route_ids.contains(&route["id"].as_str().unwrap().to_owned()));
+    }
     let inbound = format!("{url}/api/v1/webhooks/channel/telegram-new/manager");
     let reply_url = format!("{url}/api/v1/channel-relay/reply");
     let base = server.uri();
     let manager = service(&state, &base);
-    let (request, link) = manager
-        .begin(&actor, &actor, "Created while chatting", true)
-        .await
-        .unwrap();
-    let challenge = reqwest::Url::parse(&link)
+    let launch = response_json(
+        state.http_client.post(format!("{bots_url}/telegram-new")).bearer_auth(&token)
+            .json(&json!({"label": "Created while chatting", "auto_connect": true, "target_org_id": target_org_id}))
+            .send().await.unwrap(), StatusCode::OK,
+    ).await;
+    let request_id = launch["request"]["id"].as_str().unwrap();
+    let challenge = reqwest::Url::parse(launch["launch_url"].as_str().unwrap())
         .unwrap()
         .query_pairs()
         .find(|(name, _)| name == "start")
@@ -204,12 +487,21 @@ async fn telegram_new_manager_public_channel_http_chat_reply_and_creation_end_to
             .status(),
         StatusCode::OK
     );
-    provider_connection(&server, &request.id, 200).await;
+    provider_connection(&server, request_id, 200).await;
     manager.complete_pending_creations().await.unwrap();
-    assert_eq!(
-        manager.get(&actor, &request.id).await.unwrap().status,
-        Status::Connected
-    );
+    let child = response_json(
+        state
+            .http_client
+            .get(format!("{bots_url}/telegram-new/requests/{request_id}"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(child["status"], "connected");
+    assert_eq!(child["owner_user_id"], owner);
     wait_for_callbacks(&state, &channel, 3).await;
 
     let callbacks: Vec<_> = server
@@ -310,17 +602,30 @@ async fn telegram_new_manager_public_channel_http_chat_reply_and_creation_end_to
     .unwrap();
     assert!(server.received_requests().await.unwrap().iter().any(|r| r.url.path() == "/exact-agent" && r.headers.contains_key("x-nyxid-user-token")));
 
-    crate::services::channel_bot_service::delete_bot(
-        &state.db,
-        &state.config,
-        &state.http_client,
-        &state.encryption_keys,
-        &adapter,
-        &channel.id,
-        &actor,
+    assert_eq!(
+        state
+            .http_client
+            .delete(&detail_url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let routes = response_json(
+        state
+            .http_client
+            .get(&conversations_url)
+            .bearer_auth(&token)
+            .query(&route_query)
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
     )
-    .await
-    .unwrap();
+    .await;
+    assert_eq!(routes["total"], 0);
     let rejected = state
         .http_client
         .post(&reply_url)

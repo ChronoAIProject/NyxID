@@ -12,11 +12,11 @@ const token = "123456:fixture-manager-token";
 const managerError =
   "Telegram manager is not ready. Check Admin Platform Credentials.";
 
-for (const viewport of [
+for (const { viewport, retryRegistration } of [
   { width: 1440, height: 1000 },
   { width: 390, height: 844 },
-]) {
-  test(`existing Telegram manager registration, public routing, verification and deletion at ${String(viewport.width)}px`, async ({
+].flatMap((viewport) => [false, true].map((retryRegistration) => ({ viewport, retryRegistration })))) {
+  test(`existing Telegram manager ${retryRegistration ? "registration recovery" : "registration"}, public routing, verification and deletion at ${String(viewport.width)}px`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize(viewport);
@@ -52,6 +52,7 @@ for (const viewport of [
     let registered = false;
     let deleted = false;
     let failVerify = false;
+    let registrationAttempts = 0;
     let registration: unknown;
     let rename: unknown;
     const routes: CreateChannelConversationRequest[] = [];
@@ -108,12 +109,21 @@ for (const viewport of [
         },
       }),
     );
-    await page.route("**/api/v1/channel-bots", (route) => {
+    await page.route(/\/api\/v1\/channel-bots(?:\?.*)?$/, (route) => {
       if (route.request().method() === "POST") {
         registration = route.request().postDataJSON();
         registered = true;
+        registrationAttempts += 1;
+        if (retryRegistration && registrationAttempts === 1) {
+          detail = { ...detail, status: "failed", webhook_registered: false, error: managerError };
+          return route.fulfill({
+            status: 400,
+            json: { error: "bad_request", error_code: 1000, message: managerError },
+          });
+        }
+        detail = { ...detail, status: "active", webhook_registered: true, error: null };
         return route.fulfill({
-          status: 201,
+          status: retryRegistration ? 200 : 201,
           json: {
             id: botId,
             platform: bot.platform,
@@ -216,7 +226,13 @@ for (const viewport of [
       dialog.getByLabel("Bot token", { exact: true }),
     ).toHaveAttribute("type", "password");
     await dialog.getByRole("button", { name: "Add Bot", exact: true }).click();
+    if (retryRegistration) {
+      await expect(page.getByText(managerError, { exact: true })).toBeVisible();
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Add Bot", exact: true }).click();
+    }
     await expect(page).toHaveURL(new RegExp(`/channel-bots/${botId}$`));
+    expect(registrationAttempts).toBe(retryRegistration ? 2 : 1);
     expect(registration).toEqual({
       platform: "telegram",
       label: bot.label,
@@ -470,6 +486,7 @@ for (const viewport of [
     expect(deleted).toBe(true);
     expect(writes).toEqual([
       "/api/v1/channel-bots",
+      ...(retryRegistration ? ["/api/v1/channel-bots"] : []),
       `/api/v1/channel-bots/${botId}`,
       "/api/v1/channel-conversations",
       "/api/v1/channel-conversations",

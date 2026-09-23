@@ -119,6 +119,64 @@ describe("channel bot mutations", () => {
     });
   });
 
+  it.each([null, "org-1", "all"])(
+    "shows a saved bot after webhook setup fails in scope %s",
+    async (scope) => {
+      const orgId = scope === "all" ? null : scope;
+      const client = new QueryClient({
+        defaultOptions: {
+          queries: { retry: false, staleTime: Infinity },
+          mutations: { retry: false },
+        },
+      });
+      client.setQueryData(
+        scope === "all"
+          ? channelBotsQueryKeys.allScopes()
+          : channelBotsQueryKeys.list(orgId),
+        [],
+      );
+      const failed = {
+        id: "manager-1",
+        credential_source: "telegram_manager",
+        status: "failed",
+        webhook_registered: false,
+      };
+      mockGet.mockResolvedValue({ bots: [failed] });
+      mockPost.mockRejectedValue(new Error("Webhook registration failed"));
+      const { result } = renderHook(
+        () => ({
+          list: useChannelBots(scope === "all" ? { scope: "all" } : { orgId }),
+          create: useCreateChannelBot(),
+        }),
+        {
+          wrapper: ({ children }: PropsWithChildren) => (
+            <QueryClientProvider client={client}>{children}</QueryClientProvider>
+          ),
+        },
+      );
+      expect(result.current.list.data).toEqual([]);
+      expect(mockGet).not.toHaveBeenCalled();
+
+      await expect(
+        result.current.create.mutateAsync({
+          platform: "telegram",
+          label: "Manager",
+          bot_token: "test-token",
+          ...(orgId ? { target_org_id: orgId } : {}),
+        }),
+      ).rejects.toThrow("Webhook registration failed");
+
+      await waitFor(() => expect(result.current.list.data).toEqual([failed]));
+      expect(mockPost).toHaveBeenCalledTimes(1);
+      expect(mockGet).toHaveBeenCalledWith(
+        scope === "all"
+          ? "/channel-bots?scope=all"
+          : orgId ? `/channel-bots?org_id=${orgId}` : "/channel-bots",
+      );
+      client.clear();
+    },
+  );
+
   it("useUpdateChannelBot PATCHes the specific bot with the data", async () => {
     mockPatch.mockResolvedValue({ id: "bot-1" });
     const { result } = renderHook(() => useUpdateChannelBot(), {
