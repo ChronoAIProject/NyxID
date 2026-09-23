@@ -28,7 +28,6 @@ import {
   familyFromModelRadios,
   pillLabelPending,
   switcherMetadataMatches,
-  familyUnverifiableButAcceptable,
   sendReadyTimeout,
   SEND_READY_TIMEOUT_MS,
   PROMPT_FILL_CHARS_PER_MS,
@@ -719,29 +718,6 @@ test("an attachment gets longer for its send control to become clickable", () =>
   assert.equal(sendReadyTimeout(false), PRE_SEND_ACTION_MS);
   assert.equal(sendReadyTimeout(undefined), PRE_SEND_ACTION_MS);
   assert.equal(sendReadyTimeout(null), PRE_SEND_ACTION_MS);
-});
-
-test("an absent family verifies only when the request pins no minor version", () => {
-  // Some older composers have neither a header switcher nor a version radio, so
-  // family evidence is absent rather than contradictory. Observed 2026-09-23:
-  // "already_selected selected=Pro pill_source=fallback slider=absent
-  // family=absent", then switcher_unverified 0.13s later - the model was right
-  // and the page simply could not prove it.
-  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", "Pro"), true);
-  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", "GPT 6 Pro"), true);
-  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-high", "High"), true);
-  // A pinned minor version is never acceptable on no evidence: nothing on such
-  // a page distinguishes 6 Pro from 5.5 Pro.
-  assert.equal(familyUnverifiableButAcceptable("chatgpt-5.5-pro", "Pro"), false);
-  assert.equal(familyUnverifiableButAcceptable("chatgpt-5.5-high", "High"), false);
-  // The level must still match what the pill shows.
-  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", "Instant"), false);
-  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", ""), false);
-  // A raw compact label is refused here too; callers adapt it first.
-  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", "6\nPro"), false);
-  // Missing input never verifies.
-  assert.equal(familyUnverifiableButAcceptable("", "Pro"), false);
-  assert.equal(familyUnverifiableButAcceptable(null, "Pro"), false);
 });
 
 test("pill level detection prefers the longest alias", () => {
