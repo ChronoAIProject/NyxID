@@ -3178,8 +3178,17 @@ async function handlePrompt(runtime, page, task, recovering) {
     // (every level below Pro) the family verified at selection still stands,
     // provided the pill still shows the requested level.
     const previousFamily = runtime.state.current_task?.observed_model_switcher;
+    // Mirror the selection-time rule. On a composer with neither a header
+    // switcher nor a version radio, previousFamily is the "absent" that
+    // selection recorded, so switcherMetadataMatches rejects it here too and
+    // the task dies presend_unverified after selection had already passed.
+    // Observed 2026-09-23: the first gate let the task through, it uploaded its
+    // attachment, and this one failed it 8s later.
+    const familyEvidenceAbsent = header.metadata === 'absent' &&
+      (!previousFamily || previousFamily === 'absent');
     const familyVerified = switcherMatches(header.text, task.model) ||
-      (header.metadata === 'absent' && verifiedEffort && switcherMetadataMatches(previousFamily, task.model));
+      (header.metadata === 'absent' && verifiedEffort && switcherMetadataMatches(previousFamily, task.model)) ||
+      (familyEvidenceAbsent && familyUnverifiableButAcceptable(task.model, pill.observed));
     const familyMetadata = header.metadata === 'absent' && familyVerified ? previousFamily : header.metadata;
     updateTaskState(runtime.state, { observed_model_switcher: familyMetadata, observed_model_effort: observedEffort });
     if (task.require_model_match !== false && (!familyVerified ||
