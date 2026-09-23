@@ -39,11 +39,76 @@ pub struct KeyMetadataResponse {
     pub skills_manifest_digest: String,
 }
 
+impl From<reads::KeyMetadata> for KeyMetadataResponse {
+    fn from(data: reads::KeyMetadata) -> Self {
+        let digest = catalog_skill_service::manifest_digest(&data.skills);
+        Self {
+            id: data.id,
+            slug: data.slug,
+            name: data
+                .catalog_service_name
+                .clone()
+                .unwrap_or_else(|| data.label.clone()),
+            label: data.label,
+            service_type: data.service_type,
+            is_active: data.is_active,
+            catalog_service_id: data.catalog_service_id,
+            catalog_service_slug: data.catalog_service_slug,
+            catalog_service_name: data.catalog_service_name,
+            recommended_skills: data.skills.recommended_skills,
+            recommended_skill_refs: data.skills.recommended_skill_refs,
+            skills_revision: data.skills_revision,
+            skills_manifest_digest: digest,
+        }
+    }
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct KeyMetadataListResponse {
+    pub keys: Vec<KeyMetadataResponse>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+pub enum KeyListReadResponse {
+    User(super::keys::KeyListResponse),
+    ServiceAccount(KeyMetadataListResponse),
+}
+
 #[derive(Serialize, utoipa::ToSchema)]
 #[serde(untagged)]
 pub enum KeyReadResponse {
     User(Box<super::keys::KeyResponse>),
     ServiceAccount(Box<KeyMetadataResponse>),
+}
+
+pub async fn list_keys(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    method: Method,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    if auth.auth_method != AuthMethod::ServiceAccount {
+        let Json(response) = super::keys::list_keys(State(state), auth).await?;
+        return Ok(Json(KeyListReadResponse::User(response)).into_response());
+    }
+    if method != Method::GET || headers.contains_key(axum::http::header::UPGRADE) {
+        return Err(AppError::Forbidden(
+            "Key metadata access requires an ordinary GET".into(),
+        ));
+    }
+    let keys = reads::list(&state.db, &auth.user_id.to_string(), &auth.scope)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+        Json(KeyListReadResponse::ServiceAccount(
+            KeyMetadataListResponse { keys },
+        )),
+    )
+        .into_response())
 }
 
 pub async fn get_key(
@@ -63,25 +128,7 @@ pub async fn get_key(
         ));
     }
     let data = reads::read(&state.db, &auth.user_id.to_string(), &auth.scope, &id).await?;
-    let digest = catalog_skill_service::manifest_digest(&data.skills);
-    let response = KeyReadResponse::ServiceAccount(Box::new(KeyMetadataResponse {
-        id: data.id,
-        slug: data.slug,
-        name: data
-            .catalog_service_name
-            .clone()
-            .unwrap_or_else(|| data.label.clone()),
-        label: data.label,
-        service_type: data.service_type,
-        is_active: data.is_active,
-        catalog_service_id: data.catalog_service_id,
-        catalog_service_slug: data.catalog_service_slug,
-        catalog_service_name: data.catalog_service_name,
-        recommended_skills: data.skills.recommended_skills,
-        recommended_skill_refs: data.skills.recommended_skill_refs,
-        skills_revision: data.skills_revision,
-        skills_manifest_digest: digest,
-    }));
+    let response = KeyReadResponse::ServiceAccount(Box::new(data.into()));
     Ok((
         [(axum::http::header::CACHE_CONTROL, "private, no-store")],
         Json(response),

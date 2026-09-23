@@ -249,7 +249,7 @@ the actor's own credentials. Org-shared service discovery uses `/keys` and
 `/user-services`; backing-resource detail reads enforce membership ACLs and key scope.
 
 All inventory writes and the entire NyxID `/api-keys` management router remain
-human-only for API keys. Relay and scheduled-invocation tokens remain denied on inventory reads; delegated read parity is unchanged. Service accounts have a separate exact-UUID `GET /keys/{id}` metadata projection, requiring `user-services:read`, a live admin-issued key read grant, and current owner access. It performs no credential resolution or reconciliation; other inventory routes remain denied. See `SERVICE_ACCOUNTS.md` → Connection metadata reads.
+human-only for API keys. Relay and scheduled-invocation tokens remain denied on inventory reads; delegated read parity is unchanged. Service accounts have separate grant-filtered `GET /keys` and exact-UUID `GET /keys/{id}` metadata projections, requiring `user-services:read`, a live admin-issued key read grant, and current owner access. They perform no credential resolution or reconciliation; other inventory routes remain denied. See `SERVICE_ACCOUNTS.md` → Connection metadata reads.
 
 ### API contract for consumers
 

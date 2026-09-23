@@ -3188,7 +3188,7 @@ Create a new key from catalog or custom endpoint. Auto-provisions all 3 records 
 
 #### GET /api/v1/keys
 
-List all user's keys (combined endpoint + key + service view).
+List all user's keys (combined endpoint + key + service view) for existing human/API-key/delegated callers. Service accounts with `user-services:read` in both the token and live account scopes and a live key read grant receive `{"keys":[...]}` containing only the grant's currently readable, nonsecret metadata entries. See the detail response below for the SA entry fields. Curation accounts also require their live Curation grant.
 
 **Auth:** Required
 
@@ -3196,7 +3196,7 @@ List all user's keys (combined endpoint + key + service view).
 
 Get a single key's combined view for existing human/API-key/delegated callers. Service accounts receive a smaller nonsecret metadata response and must use an exact UserService UUID.
 
-**SA auth:** `user-services:read` in both the token and live account scopes, an unexpired exact key read grant, and current SA-owner access. Curation accounts also require their live Curation grant. Listing, slug access, HEAD, upgrades, and key writes are not included.
+**SA auth:** `user-services:read` in both the token and live account scopes, an unexpired exact key read grant, and current SA-owner access. Curation accounts also require their live Curation grant. Slug access, HEAD, upgrades, and key writes are not included.
 
 The SA response includes identity/label, service type and active state, catalog association, effective `recommended_skills`/`recommended_skill_refs`, `skills_revision`, and `skills_manifest_digest`. It excludes credentials, raw URLs, headers, frame injections, and routing/authentication configuration. No credential resolution or OAuth reconciliation occurs.
 
