@@ -859,13 +859,26 @@ async fn execute_turn(
     )
     .await
     .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    // Cards decided while an earlier turn was still running never reached the
+    // model: NyxAgent ends a turn on a card and answers repeats locally. Report
+    // decisions made since the previous user message; a lookup failure only
+    // omits the note.
+    let decisions = match history.iter().rev().find(|message| message.role == "user") {
+        Some(previous) => {
+            acknowledgements::decided_since(&state.db, &row.user_id, &row.id, previous.created_at)
+                .await
+                .map(|rows| acknowledgements::decisions_note(&rows))
+                .unwrap_or_default()
+        }
+        None => String::new(),
+    };
     let mut binding = row.nyxagent_session_id.clone();
     let mut prompt = if binding.is_none() && row.context_reset_reason.is_some() {
         events.notice();
         engine::instructions(&history)
     } else {
         engine::SYSTEM_PROMPT.into()
-    };
+    } + &decisions;
     let mut recovery = engine::Recovery::default();
     loop {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -916,7 +929,7 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     binding = None;
-                    prompt = engine::instructions(&history);
+                    prompt = engine::instructions(&history) + &decisions;
                     events.notice();
                 }
                 RecoveryAction::ReplaceCredential => {
@@ -930,7 +943,7 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("agent_key_required"))?;
                     binding = None;
-                    prompt = engine::instructions(&history);
+                    prompt = engine::instructions(&history) + &decisions;
                     events.notice();
                 }
                 RecoveryAction::Backoff => {

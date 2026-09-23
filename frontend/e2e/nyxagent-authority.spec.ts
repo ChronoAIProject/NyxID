@@ -30,6 +30,29 @@ test("service card Allow is durable and resumes the assistant with a visible tur
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
 });
 
+test("Allow clicked while the reply is still streaming resumes once the reply finishes", async ({
+  page,
+}) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true, progressStallMs: 6000 } });
+  await sendMessage(page, "Use GitHub");
+  const card = page.getByRole("region", { name: "Allow this chat to use GitHub?" });
+  await expect(card).toBeVisible();
+  // The card arrives before the assistant has finished its reply.
+  await expect(stopButton(page)).toBeVisible();
+  await card.getByRole("button", { name: "Allow", exact: true }).click();
+  await expect(card).toHaveCount(0);
+  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toHaveCount(0);
+  // After the running reply settles, the approval is delivered as one continuation.
+  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByText("GitHub access granted. Repository lookup succeeded.")).toBeVisible({
+    timeout: 10_000,
+  });
+  await settled(page);
+  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toHaveCount(1);
+});
+
 test("Deny produces a refusal on retry without opening another card", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await sendMessage(page, "Use GitHub");
