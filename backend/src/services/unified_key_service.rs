@@ -3808,11 +3808,26 @@ async fn build_disconnect_plan(
             unaffected_keys.push(key);
         }
     }
+    // The initiating credential may already be failed or revoked. It still
+    // belongs to the service being deleted and must be reclaimed locally.
+    if let Some(key) = initiating_key.as_ref()
+        && !affected_keys.iter().any(|candidate| candidate.id == key.id)
+    {
+        unaffected_keys.retain(|candidate| candidate.id != key.id);
+        affected_keys.push(key.clone());
+    }
     let affected_key_ids: Vec<String> = affected_keys.iter().map(|key| key.id.clone()).collect();
     let unaffected_key_ids: Vec<String> =
         unaffected_keys.iter().map(|key| key.id.clone()).collect();
-    let affected_services = retained_services_for_keys(db, owner_id, &affected_key_ids).await?;
+    let mut affected_services = retained_services_for_keys(db, owner_id, &affected_key_ids).await?;
     let unaffected_services = retained_services_for_keys(db, owner_id, &unaffected_key_ids).await?;
+    if let Some(service) = primary_service.as_ref()
+        && !affected_services
+            .iter()
+            .any(|candidate| candidate.id == service.id)
+    {
+        affected_services.push(service.clone());
+    }
     let primary_service_id = primary_service.as_ref().map(|service| service.id.as_str());
     let mut siblings: Vec<GrantCascadeSibling> = affected_services
         .iter()
@@ -6858,7 +6873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_github_service_is_deleted_with_its_grant() {
+    async fn disabled_github_service_with_failed_credential_is_deleted_with_its_grant() {
         let Some(db) = connect_test_database("unified_revocation_disabled_github").await else {
             return;
         };
@@ -6882,6 +6897,13 @@ mod tests {
             .update_one(
                 doc! { "_id": "disabled-github" },
                 doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": "key-disabled-github" },
+                doc! { "$set": { "status": "failed" } },
             )
             .await
             .unwrap();
