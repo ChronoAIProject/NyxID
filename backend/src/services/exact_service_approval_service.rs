@@ -553,7 +553,11 @@ pub async fn redeem_request(
 
         let completed_at = Utc::now();
         let redemption = match executed {
-            Ok(mcp_service::McpToolExecutionOutcome::Response((http_status, response_body))) => {
+            Ok(mcp_service::McpToolExecutionOutcome::Response(mcp_service::ToolResponse {
+                status: http_status,
+                text: response_body,
+                ..
+            })) => {
                 let response_digest = format!(
                     "sha256:{}",
                     hex::encode(Sha256::digest(response_body.as_bytes()))

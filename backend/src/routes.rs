@@ -1255,10 +1255,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::node_agent::decline_pending_credential),
         );
 
-    // These inventory reads retain the service-account restriction. The exact
-    // key GET below separately checks SA scope and grants. Writes stay human-only.
+    // These inventory reads retain the service-account restriction. Key GETs
+    // below separately check SA scope and grants. Writes stay human-only.
     let service_inventory_read_routes = Router::new()
-        .route("/keys", get(handlers::keys::list_keys))
         .route(
             "/keys/{key_id}/authorization",
             get(handlers::keys::get_key_authorization),
@@ -1793,6 +1792,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Shared management routes; individual groups retain service-account gates.
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
+        .route("/keys", get(handlers::service_account_key_reads::list_keys))
         .route(
             "/keys/{key_id}",
             get(handlers::service_account_key_reads::get_key),
@@ -1876,6 +1876,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",
             post(handlers::assistant_nyxagent::decide_acknowledgement),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/attachments/{attachment_id}",
+            get(handlers::assistant_nyxagent::attachment),
         )
         .route("/wire-logs/{id}", get(handlers::assistant::get_wire_log))
         .route(

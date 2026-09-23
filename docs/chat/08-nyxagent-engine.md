@@ -206,8 +206,21 @@ turn is running, the browser sends an ordinary, visible user turn (`Approved: th
 chat may use <service>. Continue.`, `Approved: account management for this chat.
 Continue.`, or `Confirmed: <summary> (acknowledgement_id <id>). Retry it now.`).
 The continuation is a normal turn with no extra authority; the allowed grant is
-what the retried tool call consumes. If a turn is still running, nothing is sent
-because that turn's own retry observes the grant. **Deny** sends nothing.
+what the retried tool call consumes. If the user allows a card while a turn is
+still running (cards appear as soon as the tool call is refused, usually before
+the reply finishes), the running turn cannot observe the decision: NyxAgent ends
+a turn on a card and answers same-turn repeats locally. The browser therefore
+queues the continuation and sends one visible turn covering every card allowed
+during that turn as soon as it settles; nothing is sent if the user pressed Stop.
+**Deny** sends nothing.
+
+Independently, every turn's instructions end with a note listing the cards the
+user allowed or denied since the previous user message, oldest first and at most
+ten (`- allowed: service <slug>`, `- denied: account management`,
+`- allowed: action <tool> (acknowledgement_id <id>)`). Only identifiers are
+rendered, never display names or summaries. Each decision is reported to exactly
+one turn, so the model learns about decisions made in another tab, after a
+reload, or by Deny, the next time the user writes.
 
 ## NyxID account tools
 
@@ -269,13 +282,16 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | `POST /conversations/{id}/stop` | no body | 204; owner-only, no active turn is a no-op |
 | `PATCH /conversations/{id}/access-mode` | closed `{access_mode:"ask"|"full"}` | conversation DTO |
 | `POST /conversations/{id}/acknowledgements/{ack_id}` | closed `{decision:"allow"|"deny"}` | acknowledgement DTO |
+| `GET /conversations/{id}/attachments/{attachment_id}` | no body | image bytes (owner only; see Tool images) |
 | `POST /turns` | closed `{conversation_id?,text,model?,access_mode?}` | NyxID SSE events |
 | `GET /models` | no body | `[{id,label}]` |
 
 Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message_count,
 pending_acknowledgements,active_turn,context_reset_at`. `active_turn` is null or
 `{turn_id,started_at,activities}`.
-Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities`.
+Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`.
+`active_turn` also carries `attachments`. An attachment is
+`{id,content_type,size,label}` (see Tool images).
 
 `approvals` lists pending proxy approval requests raised by the chat's key:
 `{id,service_slug,service_name,summary,approval_mode,agent_key_prefix,created_at,expires_at}`.
@@ -321,6 +337,46 @@ server cache of successful upstream lists and an uncached fallback
 Discovery does not provision a key: users without one initially see the default
 profile. The browser refreshes profiles after a send, so provisioning makes the
 upstream list available immediately. No new NyxID environment variable is introduced.
+
+## Tool images
+
+Tool execution used to decode every downstream body as lossy UTF-8, so a camera
+snapshot reached NyxAgent as garbled text it could neither see nor show.
+`mcp_service::execute_tool_response` now returns `ToolResponse {status, text,
+media}`. `text` is byte-for-byte what callers received before, so exact-approval
+receipt digests and every text consumer are unchanged. `media` is set only for a
+2xx body of at most 5 MiB whose declared type is `image/png`, `image/jpeg`,
+`image/gif` or `image/webp` and whose magic bytes match that type. SVG and every
+other type never qualify.
+
+For MCP `tools/call` (direct service tools and `nyx__call_tool`), a verified
+image produces a text note first, because NyxAgent hands the whole result to its
+model as one JSON string truncated at 10,000 characters and cannot pass pixels to
+the model. Callers other than assistant chat keys also get an MCP `image` content
+block (base64, `mimeType`) after the note, up to 1 MiB (NyxAgent caps a whole MCP
+response at 2 MiB); larger images are described in the note only. Assistant chat
+keys get the note alone: an image block would only push the note past the
+truncation point, which is what made the model claim the image "arrived as a
+truncated base64 string".
+
+When the caller is an assistant chat key and its conversation has a live turn,
+the image is also envelope-encrypted with `EncryptionKeys` into
+`assistant_attachments` and its metadata `{id,content_type,size,label}` is pushed
+onto `active_turn.attachments` (label = the tool identifier, at most 8 per turn;
+the slot is claimed before anything is encrypted or stored). Settlement copies
+the list onto the assistant reply. The note then tells the model the image is
+already displayed under its reply, that it must not claim otherwise, and that it
+cannot see the pixels and so must not describe them.
+Attachments are deleted with their conversation and in the admin user purge.
+
+`GET /conversations/{id}/attachments/{attachment_id}` is owner-only on the
+human-only router (`/assistant` is already denied to delegated `account:read`),
+not-found-shaped for other owners, and serves the decrypted bytes inline with
+their stored type, `X-Content-Type-Options: nosniff`, a `default-src 'none';
+sandbox` CSP and `Cache-Control: private, max-age=3600`. The browser fetches it
+through the authenticated assistant client and renders a local object URL under
+the reply, including on the streaming message while the turn runs (via the
+polled `active_turn.attachments`). A failed fetch shows "Image unavailable".
 
 ## Persistence and execution
 

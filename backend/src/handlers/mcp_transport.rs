@@ -125,11 +125,119 @@ fn tool_result_with_notifications(
     is_error: bool,
     notifications: Vec<serde_json::Value>,
 ) -> Response {
+    content_result_with_notifications(
+        id,
+        vec![serde_json::json!({ "type": "text", "text": text })],
+        is_error,
+        notifications,
+    )
+}
+
+fn content_result(
+    id: Option<serde_json::Value>,
+    content: Vec<serde_json::Value>,
+    is_error: bool,
+) -> Response {
+    rpc_success(
+        id,
+        serde_json::json!({ "content": content, "isError": is_error }),
+    )
+}
+
+/// Largest image embedded in an MCP result. NyxAgent caps a whole MCP
+/// response at 2 MiB and base64 adds a third; larger images get a note only.
+const MAX_INLINE_TOOL_IMAGE_BYTES: usize = 1024 * 1024;
+
+/// MCP content for a service tool response. The text note always comes first,
+/// because some clients (NyxAgent) hand the whole result to the model as one
+/// truncated string. Assistant chat keys get the image attached to the live
+/// turn and the note only: NyxAgent cannot pass pixels to its model, so base64
+/// would only crowd out the note. Other MCP callers also get an image block.
+async fn service_tool_content(
+    state: &AppState,
+    auth: &McpAuthContext,
+    tool_name: &str,
+    response: mcp_service::ToolResponse,
+) -> (Vec<serde_json::Value>, bool) {
+    let status = response.status;
+    let is_error = !(200..300).contains(&status);
+    let Some(media) = response.media.filter(|_| !is_error) else {
+        let text = if is_error {
+            format!("Error ({status}): {}", response.text)
+        } else {
+            response.text
+        };
+        return (
+            vec![serde_json::json!({ "type": "text", "text": text })],
+            is_error,
+        );
+    };
+    let mut note = format!(
+        "The tool returned an image ({}, {} bytes).",
+        media.content_type,
+        media.bytes.len()
+    );
+    let Some(chat) = auth.chat.as_ref() else {
+        let mut content = Vec::with_capacity(2);
+        if media.bytes.len() > MAX_INLINE_TOOL_IMAGE_BYTES {
+            note.push_str(" It is too large to include in this result.");
+            content.push(serde_json::json!({ "type": "text", "text": note }));
+        } else {
+            use base64::Engine as _;
+            content.push(serde_json::json!({ "type": "text", "text": note }));
+            content.push(serde_json::json!({
+                "type": "image",
+                "data": base64::engine::general_purpose::STANDARD.encode(&media.bytes),
+                "mimeType": media.content_type,
+            }));
+        }
+        return (content, false);
+    };
+    {
+        match crate::services::assistant_nyxagent::attach_image(
+            &state.db,
+            &state.encryption_keys,
+            &chat.user_id,
+            &chat.conversation_id,
+            tool_name,
+            &media.content_type,
+            &media.bytes,
+        )
+        .await
+        {
+            Ok(Some(_)) => note.push_str(
+                " Delivered: NyxID already displays this image to the user in the chat \
+                under your reply. Tell the user it is shown below. Do not say it could not \
+                be displayed, was sent as base64, or was truncated. You cannot view its \
+                pixels, so do not describe its contents.",
+            ),
+            Ok(None) => note.push_str(
+                " It could not be attached to the chat: no turn is running or this turn \
+                already holds the maximum number of images.",
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "Failed to store assistant tool image");
+                note.push_str(" It could not be attached to the chat.");
+            }
+        }
+    }
+    (
+        vec![serde_json::json!({ "type": "text", "text": note })],
+        false,
+    )
+}
+
+fn content_result_with_notifications(
+    id: Option<serde_json::Value>,
+    content: Vec<serde_json::Value>,
+    is_error: bool,
+    notifications: Vec<serde_json::Value>,
+) -> Response {
     let result = JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.into(),
         id,
         result: Some(serde_json::json!({
-            "content": [{ "type": "text", "text": text }],
+            "content": content,
             "isError": is_error,
         })),
         error: None,
@@ -1637,7 +1745,7 @@ async fn dispatch_tools_call(
     }
 
     let exec_ctx = mcp_exec_context(auth);
-    let (status, body) = match mcp_service::execute_tool(
+    let response = match mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -1683,7 +1791,7 @@ async fn dispatch_tools_call(
         Some(serde_json::json!({
             "tool": tool_name,
             "service_id": service.service_id,
-            "response_status": status,
+            "response_status": response.status,
             "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
         })),
         auth.ip_address.clone(),
@@ -1692,14 +1800,8 @@ async fn dispatch_tools_call(
         auth.api_key_name.clone(),
     );
 
-    let is_error = !(200..300).contains(&status);
-    let content_text = if is_error {
-        format!("Error ({status}): {body}")
-    } else {
-        body
-    };
-
-    tool_result(request.id.clone(), &content_text, is_error)
+    let (content, is_error) = service_tool_content(state, auth, tool_name, response).await;
+    content_result(request.id.clone(), content, is_error)
 }
 
 /// Build the execution context passed to `mcp_service::execute_tool` from
@@ -2122,7 +2224,7 @@ async fn handle_meta_call_tool(
     };
 
     let exec_ctx = mcp_exec_context(auth);
-    let (status, body) = match mcp_service::execute_tool(
+    let response = match mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -2164,7 +2266,7 @@ async fn handle_meta_call_tool(
         Some(serde_json::json!({
             "tool": tool_name,
             "service_id": service.service_id,
-            "response_status": status,
+            "response_status": response.status,
             "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
             "via": "nyx__call_tool",
         })),
@@ -2174,18 +2276,13 @@ async fn handle_meta_call_tool(
         auth.api_key_name.clone(),
     );
 
-    let is_error = !(200..300).contains(&status);
-    let content_text = if is_error {
-        format!("Error ({status}): {body}")
-    } else {
-        body
-    };
+    let (content, is_error) = service_tool_content(state, auth, tool_name, response).await;
 
     // Embed tools/list_changed inline for SSE-capable clients
     if changed && client_accepts_sse {
-        tool_result_with_notifications(
+        content_result_with_notifications(
             request_id,
-            &content_text,
+            content,
             is_error,
             vec![serde_json::json!({
                 "jsonrpc": JSONRPC_VERSION,
@@ -2193,7 +2290,7 @@ async fn handle_meta_call_tool(
             })],
         )
     } else {
-        tool_result(request_id, &content_text, is_error)
+        content_result(request_id, content, is_error)
     }
 }
 

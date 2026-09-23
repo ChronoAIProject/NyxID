@@ -568,9 +568,27 @@ pub async fn create_bot(
     tele: TelemetryContext,
     Json(body): Json<CreateChannelBotRequest>,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
-    let actor = auth_user.user_id.to_string();
-
     let adapter = resolve_adapter(&body.platform, &state.token_exchange_cache)?;
+    create_bot_with_adapter(
+        &state,
+        auth_user,
+        tele,
+        body,
+        adapter.as_ref(),
+        &crate::services::telegram_new_api::TelegramApi::new(&state.http_client),
+    )
+    .await
+}
+
+pub(crate) async fn create_bot_with_adapter(
+    state: &AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    body: CreateChannelBotRequest,
+    adapter: &dyn PlatformAdapter,
+    telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
+    let actor = auth_user.user_id.to_string();
     let descriptor = adapter.registration();
     if descriptor.managed_only {
         return Err(AppError::ValidationError(
@@ -603,7 +621,7 @@ pub async fn create_bot(
     // Resolve the effective owner. When `target_org_id` is set the bot
     // is written under the org's user_id so every admin can manage it
     // and the org-delete blocker treats it as a live org resource.
-    let owner_id = resolve_create_owner(&state, &actor, body.target_org_id.as_deref()).await?;
+    let owner_id = resolve_create_owner(state, &actor, body.target_org_id.as_deref()).await?;
 
     // Create bot: verify token, encrypt, insert in pending status
     let create_result = channel_bot_service::create_bot(
@@ -611,7 +629,7 @@ pub async fn create_bot(
         &state.config,
         &state.encryption_keys,
         &state.http_client,
-        adapter.as_ref(),
+        adapter,
         &owner_id,
         label,
         &fields,
@@ -624,21 +642,34 @@ pub async fn create_bot(
     // Build the per-bot webhook URL (platform-specific path)
     let webhook_url = channel_bot_service::webhook_url(&state.config.base_url, &create_result.bot);
 
-    // Register the webhook with the platform
-    let reg_result = channel_bot_service::register_webhook(
-        &state.db,
-        &state.http_client,
-        adapter.as_ref(),
-        &bot_id,
-        &body.bot_token,
-        &webhook_url,
-        &webhook_secret,
-    )
-    .await;
+    let reg_result = if create_result.reused {
+        channel_bot_service::verify_telegram_bot(
+            &state.db,
+            &state.encryption_keys,
+            telegram_api,
+            adapter,
+            &bot_id,
+            &owner_id,
+            &state.config.base_url,
+        )
+        .await
+        .map(|_| ())
+    } else {
+        channel_bot_service::register_webhook_with_telegram_api(
+            &state.db,
+            telegram_api,
+            adapter,
+            &bot_id,
+            &body.bot_token,
+            &webhook_url,
+            &webhook_secret,
+        )
+        .await
+    };
 
     if let Err(e) = reg_result {
         // Webhook registration failed: mark the bot as failed and return error
-        if !adapter.serializes_lifecycle() {
+        if !create_result.reused && !adapter.serializes_lifecycle() {
             let _ = channel_bot_service::mark_bot_failed(&state.db, &bot_id).await;
         }
         return Err(AppError::BadRequest(format!(
@@ -646,31 +677,41 @@ pub async fn create_bot(
         )));
     }
 
-    emit_event(
-        state.telemetry.as_deref(),
-        &auth_user.user_id.to_string(),
-        auth_user.api_key_id.as_deref(),
-        &tele,
-        TelemetryEvent::ChannelBotRegistered {
-            platform: body.platform.clone(),
-        },
-    );
+    if !create_result.reused {
+        emit_event(
+            state.telemetry.as_deref(),
+            &auth_user.user_id.to_string(),
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::ChannelBotRegistered {
+                platform: body.platform.clone(),
+            },
+        );
+    }
 
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
-        "channel_bot_created",
+        if create_result.reused {
+            "channel_bot_verified"
+        } else {
+            "channel_bot_created"
+        },
         Some(serde_json::json!({
             "bot_id": &bot_id,
             "platform": &body.platform,
-            "label": label,
+            "label": &create_result.bot.label,
             "owner_user_id": &owner_id,
             "target_org_id": body.target_org_id,
         })),
     );
 
     Ok((
-        StatusCode::CREATED,
+        if create_result.reused {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
         Json(CreateChannelBotResponse::from_bot(
             create_result.bot,
             descriptor,

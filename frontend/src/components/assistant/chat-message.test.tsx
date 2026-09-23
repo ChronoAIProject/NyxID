@@ -105,6 +105,43 @@ describe("canonical chat presentation", () => {
     expect(container.querySelector("[data-running-tool]")).toBeNull();
   });
 
+  it("renders tool images from the authenticated client and reports failures", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const seen: string[] = [];
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      seen.push(endpoint);
+      return endpoint.endsWith("/missing")
+        ? new Response(JSON.stringify({ message: "Attachment not found" }), { status: 404 })
+        : new Response(png, { headers: { "content-type": "image/png" } });
+    };
+    const createObjectURL = vi.fn(() => "blob:tool-image");
+    const revokeObjectURL = vi.fn();
+    const original = { createObjectURL: URL.createObjectURL, revokeObjectURL: URL.revokeObjectURL };
+    Object.assign(URL, { createObjectURL, revokeObjectURL });
+    const image = (id: string) => ({
+      id,
+      endpoint: `/assistant/nyxagent/conversations/c/attachments/${id}`,
+      contentType: "image/png",
+      label: "lobby-camera__snapshot",
+    });
+    const { unmount } = render(
+      <ChatMessageBubble
+        message={{ ...BASE, content: "Here is the lobby.", images: [image("ok"), image("missing")] }}
+      />,
+    );
+    const img = await screen.findByRole("img", { name: "Image from lobby-camera__snapshot" });
+    expect(img).toHaveAttribute("src", "blob:tool-image");
+    expect(await screen.findByText("Image unavailable")).toBeVisible();
+    expect(seen).toEqual([
+      "/assistant/nyxagent/conversations/c/attachments/ok",
+      "/assistant/nyxagent/conversations/c/attachments/missing",
+    ]);
+    unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:tool-image");
+    Object.assign(URL, original);
+    globalThis.__nyxidAssistantHttpMock = undefined;
+  });
+
   it("does not render accumulator approval or workflow intervention cards", () => {
     render(
       <ChatMessageBubble

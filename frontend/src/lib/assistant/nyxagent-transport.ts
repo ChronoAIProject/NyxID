@@ -7,7 +7,7 @@ import {
 } from "@/lib/assistant/direct-transport";
 import { getAssistantIdentityUserId, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
-import type { ChatSessionState, ChatMessage } from "@/lib/assistant/chat-types";
+import type { ChatImage, ChatSessionState, ChatMessage } from "@/lib/assistant/chat-types";
 import type { RuntimeToolCallInfo } from "@/lib/assistant/runtime-event-semantics";
 import {
   nyxAgentAcknowledgementSchema,
@@ -20,6 +20,7 @@ import {
   type NyxAgentConversation,
   type NyxAgentHistory,
   type NyxAgentTurnActivity,
+  type NyxAgentAttachment,
 } from "@/schemas/assistant-nyxagent";
 
 const ROOT = "/assistant/nyxagent";
@@ -45,6 +46,21 @@ function toolCalls(
         activity.status === "running" ? "running" : activity.status === "error" ? "error" : "done",
       startedAt: Date.parse(activity.started_at),
       finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
+    })),
+  };
+}
+
+function images(
+  conversationId: string | undefined,
+  attachments: readonly NyxAgentAttachment[] | undefined,
+): { images?: ChatImage[] } {
+  if (!conversationId || !attachments?.length) return {};
+  return {
+    images: attachments.map((attachment) => ({
+      id: attachment.id,
+      endpoint: `${path(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`,
+      contentType: attachment.content_type,
+      label: attachment.label,
     })),
   };
 }
@@ -339,6 +355,7 @@ export class NyxAgentTransport {
         status: failed ? "error" : "complete",
         error: failed ? storedError(message.error_code) : undefined,
         ...toolCalls(message.activities),
+        ...images(id, message.attachments),
       };
     });
     // The live turn's tool activity arrives through the polled history metadata,
@@ -347,8 +364,11 @@ export class NyxAgentTransport {
     const polledTurn = history?.conversation.active_turn;
     const liveActivity =
       polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
-        ? toolCalls(polledTurn.activities)
+        ? { ...toolCalls(polledTurn.activities), ...images(id, polledTurn.attachments) }
         : {};
+    const settledImages = new Map(
+      (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),
+    );
     if (live) {
       messages = live.state.messages.map((message) => {
         const streaming =
@@ -359,7 +379,7 @@ export class NyxAgentTransport {
           content: message.blocks.map((block) => block.text).join("\n\n"),
           timestamp: Date.parse(message.created_at),
           status: streaming ? "streaming" : "complete",
-          ...(streaming ? liveActivity : {}),
+          ...(streaming ? liveActivity : settledImages.get(message.id)),
         };
       });
     }
@@ -529,7 +549,12 @@ export class NyxAgentTransport {
               }
               turn.conversation = {
                 ...turn.conversation,
-                active_turn: { turn_id: event.turn_id, started_at: now, activities: [] },
+                active_turn: {
+                  turn_id: event.turn_id,
+                  started_at: now,
+                  activities: [],
+                  attachments: [],
+                },
               };
               this.index.set(key, turn.conversation);
             }

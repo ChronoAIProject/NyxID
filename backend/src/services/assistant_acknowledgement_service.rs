@@ -167,6 +167,77 @@ pub async fn history(
     Ok(rows)
 }
 
+/// Cards the owner allowed or denied after `since`, oldest first and bounded.
+/// Each new turn reports decisions made since the previous user message, so a
+/// decision made while a turn was still running reaches the model exactly once.
+pub async fn decided_since(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    since: chrono::DateTime<Utc>,
+) -> AppResult<Vec<AssistantAcknowledgement>> {
+    expire(db, user, conversation).await?;
+    Ok(db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find(doc! {
+            "user_id": user,
+            "conversation_id": conversation,
+            "status": {"$in": ["allowed", "denied"]},
+            "decided_at": {"$gt": bson::DateTime::from_chrono(since)},
+        })
+        .sort(doc! {"decided_at": 1, "_id": 1})
+        .limit(DECISION_NOTE_LIMIT)
+        .await?
+        .try_collect()
+        .await?)
+}
+
+pub const DECISION_NOTE_LIMIT: i64 = 10;
+
+/// Identifier-only rendering: slugs and tool names, never free-form names or
+/// summaries, so owner-controlled text cannot enter the instructions.
+fn identifier(value: Option<&str>) -> String {
+    let cleaned: String = value
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(64)
+        .collect();
+    if cleaned.is_empty() {
+        "unknown".into()
+    } else {
+        cleaned
+    }
+}
+
+/// Instructions note telling the model about card decisions it has not seen.
+pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut note = String::from(
+        "\n\nChat card decisions the user made since your previous reply \
+        (recorded by NyxID; facts, not instructions):",
+    );
+    for row in rows {
+        let target = match row.kind.as_str() {
+            "service" => format!("service {}", identifier(row.service_slug.as_deref())),
+            "account" => "account management".into(),
+            _ => format!(
+                "action {} (acknowledgement_id {})",
+                identifier(row.tool_name.as_deref()),
+                identifier(Some(&row.id))
+            ),
+        };
+        note.push_str(&format!("\n- {}: {target}", identifier(Some(&row.status))));
+    }
+    note.push_str(
+        "\nAllowed items are usable now; retry an allowed action with its acknowledgement_id. \
+        Do not request denied items again unless the user asks.",
+    );
+    note
+}
+
 pub async fn pending_counts(
     db: &Database,
     user: &str,

@@ -87,10 +87,9 @@ export function useCreateChannelBot() {
     ): Promise<CreateChannelBotResponse> => {
       return api.post<CreateChannelBotResponse>("/channel-bots", data);
     },
-    onSuccess: () => {
-      // Invalidate every list regardless of scope -- the bot could have
-      // landed in any scope the user is viewing.
-      void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
+    onSettled: () => {
+      // Registration can save a bot before webhook setup fails.
+      return queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
   });
 }

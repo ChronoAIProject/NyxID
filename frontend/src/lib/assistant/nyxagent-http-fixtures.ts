@@ -2,6 +2,13 @@ import type { AssistantHttpMockHandler } from "@/lib/assistant/assistant-http";
 import type { NyxAgentHistory } from "@/schemas/assistant-nyxagent";
 
 const ROOT = "/assistant/nyxagent";
+/** A 1x1 PNG a fixture camera tool "returns". */
+const FIXTURE_PNG = Uint8Array.from(
+  atob(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+  ),
+  (char) => char.charCodeAt(0),
+);
 const STORAGE = "nyxagent-http-fixture";
 export const NYXAGENT_FIXTURE_REPLY =
   "Your connected services are ready. [GitHub](/connect/nyx_clk_fixture_github)";
@@ -51,6 +58,7 @@ export class NyxAgentHttpFixtures {
       error_code: cancelled ? "cancelled" : null,
       created_at: now,
       activities: [],
+      attachments: cancelled ? [] : turn.attachments,
     });
     row.history.conversation.active_turn = null;
     row.history.conversation.message_count = row.history.messages.length;
@@ -62,6 +70,19 @@ export class NyxAgentHttpFixtures {
 
   private prepareReply(row: Record, text: string) {
     const acknowledgements = row.history.acknowledgements;
+    if (text === "Show the lobby camera") {
+      // The camera tool returns an image during the turn; the server attaches it.
+      row.history.conversation.active_turn!.attachments = [
+        {
+          id: crypto.randomUUID(),
+          content_type: "image/png",
+          size: FIXTURE_PNG.byteLength,
+          label: "lobby-camera__snapshot",
+        },
+      ];
+      row.reply = "Here is the latest lobby snapshot.";
+      return;
+    }
     if (row.history.conversation.access_mode === "full") {
       row.reply =
         text === "Delete agent key ci-bot"
@@ -134,6 +155,18 @@ export class NyxAgentHttpFixtures {
         conversations: [...this.rows.values()].map((row) => row.history.conversation),
         next_cursor: null,
       });
+    }
+    const attachmentRoute = /\/conversations\/(nyxa-[a-f0-9]{32})\/attachments\/([^/]+)$/.exec(
+      url.pathname,
+    );
+    if (attachmentRoute && method === "GET") {
+      const row = this.rows.get(attachmentRoute[1]!);
+      const known = [
+        ...(row?.history.messages.flatMap((message) => message.attachments) ?? []),
+        ...(row?.history.conversation.active_turn?.attachments ?? []),
+      ].some((attachment) => attachment.id === attachmentRoute[2]);
+      if (!known) return json({ message: "Attachment not found" }, 404);
+      return new Response(FIXTURE_PNG, { headers: { "content-type": "image/png" } });
     }
     const modeRoute = /\/conversations\/(nyxa-[a-f0-9]{32})\/access-mode$/.exec(url.pathname);
     if (modeRoute && method === "PATCH") {
@@ -242,7 +275,7 @@ export class NyxAgentHttpFixtures {
       const rebind = body.text.includes("reset context");
       row.notice = Boolean(row.history.conversation.context_reset_at) || rebind;
       if (rebind) row.history.conversation.context_reset_at = now;
-      row.history.conversation.active_turn = { turn_id: turn, started_at: now, activities: [] };
+      row.history.conversation.active_turn = { turn_id: turn, started_at: now, activities: [], attachments: [] };
       row.history.messages.push({
         id: crypto.randomUUID(),
         seq: row.history.messages.length + 1,
@@ -252,7 +285,7 @@ export class NyxAgentHttpFixtures {
         status: "completed",
         error_code: null,
         created_at: now,
-        activities: [],
+        activities: [], attachments: [],
       });
       row.history.conversation.message_count = row.history.messages.length;
       this.prepareReply(row, body.text);

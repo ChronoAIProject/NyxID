@@ -1228,7 +1228,8 @@ pub(crate) async fn create_key_with_service_id(
     get,
     path = "/api/v1/keys",
     responses(
-        (status = 200, description = "List of user's AI service keys", body = KeyListResponse),
+        (status = 200, description = "List of user's AI service keys; service accounts receive grant-filtered nonsecret metadata", body = super::service_account_key_reads::KeyListReadResponse),
+        (status = 403, description = "Service account lacks a live read scope or key read grant", body = crate::errors::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse)
     ),
     tag = "AI Services"

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import type {
@@ -21,6 +21,11 @@ export function continuationText(acknowledgement: NyxAgentAcknowledgement): stri
     case "action":
       return `Confirmed: ${acknowledgement.summary} (acknowledgement_id ${acknowledgement.id}). Retry it now.`;
   }
+}
+
+/** One continuation for every card allowed while a turn was running. */
+export function continuationForAll(acknowledgements: readonly NyxAgentAcknowledgement[]): string {
+  return acknowledgements.map(continuationText).join("\n");
 }
 
 export function useNyxAgentAssistantChat({
@@ -106,6 +111,12 @@ export function useNyxAgentAssistantChat({
     },
   });
   const lastDecision = useRef(Number.NEGATIVE_INFINITY);
+  // Cards allowed while their conversation's turn was still running. The
+  // running turn cannot observe the decision (NyxAgent ends a turn on a card and
+  // answers same-turn repeats locally), so the continuation waits for settlement.
+  const pendingContinuations = useRef(
+    new Map<string, { owner: string | undefined; acknowledgements: NyxAgentAcknowledgement[] }>(),
+  );
   const decision = useMutation({
     mutationFn: async ({ id, choice }: { id: string; choice: "allow" | "deny" }) => {
       if (!selectedConversationId) throw new Error("Choose a conversation first.");
@@ -119,7 +130,15 @@ export function useNyxAgentAssistantChat({
     onSuccess: (acknowledgement, { choice }) => {
       // An allowed card resumes the assistant: the refusal told it to retry after
       // approval, and it cannot wait for the decision inside its own turn.
-      if (choice !== "allow" || nyxAgentTransport.isRunning(selectedConversationId)) return;
+      if (choice !== "allow" || !selectedConversationId) return;
+      if (nyxAgentTransport.isRunning(selectedConversationId)) {
+        const queued = pendingContinuations.current.get(selectedConversationId);
+        pendingContinuations.current.set(selectedConversationId, {
+          owner: userId,
+          acknowledgements: [...(queued?.acknowledgements ?? []), acknowledgement],
+        });
+        return;
+      }
       void send(continuationText(acknowledgement)).catch(() => undefined);
     },
     onSettled: async () => {
@@ -128,6 +147,25 @@ export function useNyxAgentAssistantChat({
         queryClient.invalidateQueries({ queryKey: indexKey }),
       ]);
     },
+  });
+
+  // Runs after every render: transport changes re-render this hook, so a queued
+  // continuation is sent as soon as its turn has settled and history is fresh.
+  useEffect(() => {
+    for (const [conversationId, queued] of pendingContinuations.current) {
+      if (queued.owner !== userId) {
+        pendingContinuations.current.delete(conversationId);
+        continue;
+      }
+      if (nyxAgentTransport.isRunning(conversationId)) continue;
+      pendingContinuations.current.delete(conversationId);
+      // Stop means the user wants the assistant to halt; do not resume it.
+      const tail = nyxAgentTransport.getHistory(conversationId)?.messages.at(-1);
+      if (tail?.error_code === "cancelled") continue;
+      void nyxAgentTransport
+        .send(conversationId, continuationForAll(queued.acknowledgements), onConversationAdopted)
+        .catch(() => undefined);
+    }
   });
 
   const approvalDecision = useDecideApproval();

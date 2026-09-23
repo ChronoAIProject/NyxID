@@ -70,6 +70,10 @@ After authentication and classification, ordinary messages are acknowledged with
 
 The channel reports `credential_source: "telegram_manager"`. Replies and media operations resolve the current manager token from Platform Credentials, so token rotation there takes effect without editing the channel. Rotation does not revoke this channel binding. The channel does not retain a second token or expose the shared webhook secret. **Verify Bot** checks the live Telegram webhook URL and all five required update subscriptions without changing them; a mismatch reports an error directing the operator to Platform Credentials. Existing managers saved before this support need an administrator to save Platform Credentials again to subscribe to edited messages and channel posts. Saving credentials temporarily marks the manager unready; a failed save keeps both roles unavailable, and channel responses show that configuration problem. Save successfully and use Verify Bot if the channel needs reactivation.
 
+Repeating **Add Bot → Telegram bot token** for a manager already connected under the selected owner reuses its existing channel and runs live verification. The API returns HTTP 200 for recovery and HTTP 201 for a new channel. Recovery preserves the channel ID, saved label, owner, and conversation routes, and works even when that owner has reached the bot limit. It still requires a valid submitted token and a ready manager configuration; it never replaces the shared webhook or saves a second token. Registration saves a new channel before checking its webhook, so a failed check can leave a saved connection with a failed status. The list refreshes after failed registration attempts so that connection is visible. Re-save **Admin → Platform Credentials → Telegram — bot creation** if the manager webhook needs repair, then retry **Add Bot** under the same owner or use **Verify Bot** on the existing channel.
+
+If **Add Bot** still reports that the manager is already registered, check both Personal and organization scopes for its existing entry. Only one active channel connection is allowed for the manager identity; a connection owned by another account must be managed by that owner. Ordinary token-backed channels are not converted into manager channels by retrying registration. Once the manager channel is active, assign a default agent or an exact chat route so ordinary messages can receive replies.
+
 Deleting the channel disables its routes and leaves bot creation available. Clearing or replacing the manager requires deleting this channel connection first, in addition to completing the existing managed-child/request cleanup. Upgrade **all backend replicas before registering the manager channel**: older replicas drop ordinary manager messages and do not understand its shared credential source.
 
 The implementation acceptance plan and verification record are in [TELEGRAM_MANAGER_CHANNEL_PLAN.md](TELEGRAM_MANAGER_CHANNEL_PLAN.md).
@@ -155,6 +159,29 @@ Local verification uses real MongoDB transactions and a simulated Telegram API. 
 No real manager token was configured, no live Telegram bot was created, and no production deployment was performed as part of local implementation.
 
 ## Local verification record
+
+Manager registration-recovery validation on 2026-09-23:
+
+- All 634 Telegram/channel backend tests passed against an isolated MongoDB
+  replica set; none failed or were ignored. The manager HTTP integration now
+  uses signed access tokens and the human-only middleware for registration,
+  recovery, route creation/listing, bot detail, child-creation requests, and
+  deletion. Both personal and organization-owned connections run through the
+  chat/reply/creation flow. A broken webhook must fail verification; restoring
+  it recovers the same connection, label, and routes. Unauthorized callers are
+  rejected, and channel deletion removes routes without removing the manager
+  webhook. Separate regressions cover recovery at the bot limit and a failed
+  initial registration that has already saved its connection.
+- All 66 focused frontend tests and four desktop/mobile browser flows passed.
+  Browser coverage includes fresh registration and failed-registration retry
+  at 1440×1000 and 390×844, followed by routing, verification, and deletion.
+- Backend/test Clippy passed with warnings denied. Rust formatting and diff
+  whitespace checks passed.
+
+The backend HTTP tests use simulated Telegram and agent endpoints. Browser
+tests use the real frontend with NyxID API fixtures; they do not connect the
+browser to the integration-test backend. These results do not establish live
+Telegram behavior or deployment status.
 
 Manager public-channel validation on 2026-09-20:
 
