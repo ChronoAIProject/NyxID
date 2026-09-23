@@ -307,8 +307,10 @@ order is irrelevant, so "skill search" and "search skills" both find
 ### Image tool results
 
 MCP `tools/call` results for service tools return verified images (PNG, JPEG,
-GIF, WebP; 2xx; at most 5 MiB; declared type and magic bytes must agree) as an
-MCP `image` content block followed by a short text note, instead of lossy text.
-Images over 1 MiB are described in the note but not inlined. Every other response
+GIF, WebP; 2xx; at most 5 MiB; declared type and magic bytes must agree) as a
+short text note followed by an MCP `image` content block, instead of lossy text.
+The note comes first so clients that stringify and truncate results keep it.
+Images over 1 MiB are described in the note but not inlined. Assistant chat keys
+receive the note only, because the image is shown in the chat instead. Every other response
 type keeps its previous text form. Assistant chat keys additionally get the image
 attached to the live chat turn (see `docs/chat/08-nyxagent-engine.md`, Tool images).
