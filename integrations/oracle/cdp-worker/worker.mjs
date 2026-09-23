@@ -95,6 +95,8 @@ const USAGE_COOLDOWN = usageCooldownConfig(process.env.NYXID_ORACLE_USAGE_COOLDO
 const USAGE_COOLDOWN_MS = USAGE_COOLDOWN.milliseconds;
 const HEARTBEAT_MS = 60000;
 const PRESENCE_MS = Number(process.env.NYXID_PRESENCE_MS || 20000);
+// How often an idle worker tidies its own tab. See tidyIdleTab.
+const IDLE_TIDY_MS = Number(process.env.NYXID_IDLE_TIDY_MS || 60000);
 const HTTP_TIMEOUT_MS = Number(process.env.NYXID_HTTP_TIMEOUT_MS || 30000);
 const MAX_HTTP_BACKOFF_MS = Number(process.env.NYXID_MAX_HTTP_BACKOFF_MS || 60000);
 const MAX_CDP_FAILURES_BEFORE_RELAUNCH = Number(
@@ -1734,6 +1736,26 @@ export function familyFromModelRadios(items) {
 // Canonical metadata compared to a request. gpt_latest satisfies a request
 // that names no minor version (chatgpt-6-high, chatgpt-6-pro) but never one
 // pinned to an older release (chatgpt-5.5-high needs the GPT-5.5 radio).
+// Some older composers offer neither control: no header switcher and no version
+// radio below Pro. Family evidence is then absent rather than contradictory,
+// and switcherMetadataMatches rejects "absent" - so such an account can never
+// verify, however correct its pill is. Observed 2026-09-23 on an account whose
+// composer renders button[aria-label="Select ChatGPT model"] instead of a
+// __composer-pill: selection logged
+//   reason=already_selected selected=Pro pill_source=fallback slider=absent family=absent
+// and the task failed switcher_unverified 0.13s later.
+//
+// Grant the same latitude gpt_latest already has: weak evidence satisfies a
+// request that pins no minor version, never one pinned to an older release.
+// chatgpt-6-pro is acceptable on the pill's own level; chatgpt-5.5-pro is not,
+// because nothing on such a page distinguishes 6 Pro from 5.5 Pro.
+export function familyUnverifiableButAcceptable(requested, observed) {
+  const request = String(requested || "");
+  if (!request || /\d+[._]\d+/.test(request)) return false;
+  const targets = modelLevelTargets(request);
+  return targets.length > 0 && pillShowsLevel(observed, targets);
+}
+
 export function switcherMetadataMatches(metadata, requested) {
   if (!metadata || ['absent', 'unrecognized'].includes(metadata)) return false;
   const request = String(requested || '').replace(/^openai-/, 'gpt-');
@@ -2562,6 +2584,45 @@ export async function dismissTemporaryChatOnboarding(page) {
 // MODEL_SELECT_TIMEOUT_MS and the task fails as operation_timeout@selecting_model
 // on every subsequent pickup. The prompt is (re)typed after selection, so
 // clearing here is a no-op on a fresh composer and never drops real work.
+// Repair a tab that a failed task left behind, without waiting for the next
+// task to do it.
+//
+// The repair already exists and works - clearComposerDraft plus the marker
+// handling in readModelSwitcher/pickerSnapshot - but every one of those runs
+// only on the task path. A worker whose task died mid-flight keeps the prompt
+// in its composer and data-nyx-switcher stranded on the pill, which leaves
+// pickerSnapshot with no selectable candidate. It then sits there, healthy by
+// every heartbeat measure and unable to select a model, until it happens to be
+// given work again. On a lightly loaded pool that is unbounded: a tab observed
+// 2026-09-23 stayed stranded for over an hour while the rest of the pool served
+// around it, showing a stale last_error the whole time.
+//
+// Measured, on a deliberately stranded tab: 90s of heartbeats changed nothing
+// (markers=1 draft=19199 selectable=0); one task pickup repaired it completely
+// (markers=0 draft=0 selectable=1) and cost that task nothing - it answered on
+// the first attempt. So this is not new recovery logic, only a second trigger
+// for the recovery that already works.
+//
+// Only runs when the server says there is no work, the tab is logged in and not
+// hands-off, so it can never touch a task in flight or a login screen.
+async function tidyIdleTab(runtime, page) {
+  if (Date.now() - (runtime.lastTidyAt || 0) < IDLE_TIDY_MS) return;
+  runtime.lastTidyAt = Date.now();
+  if (!page || page.isClosed()) return;
+  try {
+    await clearComposerDraft(page);
+    const stranded = await page.locator("body").evaluate((body) => {
+      const marked = body.querySelectorAll("[data-nyx-switcher]");
+      marked.forEach((el) => el.removeAttribute("data-nyx-switcher"));
+      return marked.length;
+    });
+    if (stranded) log(`idle_tidy cleared_markers=${stranded}`);
+  } catch (error) {
+    if (stableErrorCode(error) === "page_crashed") throw error;
+    // Best-effort: tidying must never fail the worker loop.
+  }
+}
+
 async function clearComposerDraft(page) {
   const budget = interactionBudget(PRE_SEND_ACTION_MS);
   const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
@@ -3018,8 +3079,10 @@ async function handlePrompt(runtime, page, task, recovering) {
     });
     // Below Pro the pill shows only the level; the checked version radio read
     // while the picker was open is then the family evidence.
+    const familyEvidenceAbsent = observedSwitcher.metadata === "absent" && selected.family === "absent";
     const familyVerified = switcherMatches(observedSwitcher.text, task.model) ||
-      (observedSwitcher.metadata === "absent" && switcherMetadataMatches(selected.family, task.model));
+      (observedSwitcher.metadata === "absent" && switcherMetadataMatches(selected.family, task.model)) ||
+      (familyEvidenceAbsent && familyUnverifiableButAcceptable(task.model, selected.observed));
     const familyMetadata = observedSwitcher.metadata === "absent" && familyVerified ? selected.family : observedSwitcher.metadata;
     updateTaskState(runtime.state, { observed_model_switcher: familyMetadata,
       observed_model_effort: effortMetadata(selected.observed), effort_levels_exposed: selected.recognizedLevels });
@@ -3032,6 +3095,15 @@ async function handlePrompt(runtime, page, task, recovering) {
       throw new TaskFailure("cancelled");
     }
   }
+
+  // Split the phase before typing. "ready_to_send" already separates the send
+  // step, but nothing separated model selection from the composer click, fill
+  // and readback - so a timeout in any of those reported
+  // operation_timeout@selecting_model, with the log line immediately above
+  // reading "already_selected selected=Pro". An 18-attempt trace of one task
+  // (2026-09-23) showed exactly that contradiction on every attempt, and
+  // ruling model selection out by hand cost two days.
+  if (await ack(runtime, task, "typing")) throw new TaskFailure("cancelled");
 
   // Type the prompt into the composer (native — more robust than the
   // userscript's execCommand fallbacks) and send.
@@ -3106,8 +3178,17 @@ async function handlePrompt(runtime, page, task, recovering) {
     // (every level below Pro) the family verified at selection still stands,
     // provided the pill still shows the requested level.
     const previousFamily = runtime.state.current_task?.observed_model_switcher;
+    // Mirror the selection-time rule. On a composer with neither a header
+    // switcher nor a version radio, previousFamily is the "absent" that
+    // selection recorded, so switcherMetadataMatches rejects it here too and
+    // the task dies presend_unverified after selection had already passed.
+    // Observed 2026-09-23: the first gate let the task through, it uploaded its
+    // attachment, and this one failed it 8s later.
+    const familyEvidenceAbsent = header.metadata === 'absent' &&
+      (!previousFamily || previousFamily === 'absent');
     const familyVerified = switcherMatches(header.text, task.model) ||
-      (header.metadata === 'absent' && verifiedEffort && switcherMetadataMatches(previousFamily, task.model));
+      (header.metadata === 'absent' && verifiedEffort && switcherMetadataMatches(previousFamily, task.model)) ||
+      (familyEvidenceAbsent && familyUnverifiableButAcceptable(task.model, pill.observed));
     const familyMetadata = header.metadata === 'absent' && familyVerified ? previousFamily : header.metadata;
     updateTaskState(runtime.state, { observed_model_switcher: familyMetadata, observed_model_effort: observedEffort });
     if (task.require_model_match !== false && (!familyVerified ||
@@ -4547,6 +4628,7 @@ async function main() {
       );
       if (response.status === "idle") {
         if (state.current_task) clearTaskState(state);
+        await tidyIdleTab(runtime, page);
         if (
           response.required_project_url &&
           !page.url().startsWith(response.required_project_url) &&
