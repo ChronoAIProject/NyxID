@@ -38,7 +38,7 @@ function history(): NyxAgentHistory {
         status: "completed",
         error_code: null,
         created_at: start,
-        activities: [],
+        activities: [], attachments: [],
       },
       {
         id: "a",
@@ -49,7 +49,7 @@ function history(): NyxAgentHistory {
         status: "completed",
         error_code: null,
         created_at: afterReset,
-        activities: [],
+        activities: [], attachments: [],
       },
     ],
     before_seq: null,
@@ -259,6 +259,9 @@ describe("NyxAgent server-backed transport", () => {
           { id: "t1", label: "nyx__search_tools", status: "completed", started_at: start, ended_at: reset },
           { id: "t2", label: "github__list_issues", status: "running", started_at: reset, ended_at: null },
         ],
+        attachments: [
+          { id: "img-1", content_type: "image/jpeg", size: 10, label: "lobby-camera__snapshot" },
+        ],
       };
       return json(page);
     };
@@ -271,6 +274,15 @@ describe("NyxAgent server-backed transport", () => {
     expect(session.messages.at(-1)?.toolCalls).toEqual([
       { id: "t1", name: "nyx__search_tools", status: "done", startedAt: Date.parse(start), finishedAt: Date.parse(reset) },
       { id: "t2", name: "github__list_issues", status: "running", startedAt: Date.parse(reset), finishedAt: undefined },
+    ]);
+    // Images a tool returned during the live turn show on the streaming placeholder.
+    expect(session.messages.at(-1)?.images).toEqual([
+      {
+        id: "img-1",
+        endpoint: `/assistant/nyxagent/conversations/${id}/attachments/img-1`,
+        contentType: "image/jpeg",
+        label: "lobby-camera__snapshot",
+      },
     ]);
     await transport.stop(id);
     expect(requests).toHaveLength(2);
@@ -344,7 +356,7 @@ describe("NyxAgent server-backed transport", () => {
         );
       }
       const page = history();
-      page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [] };
+      page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
       return endpoint.includes(`/conversations/${id}`)
         ? json(page)
         : json({ conversations: [page.conversation], next_cursor: null });
@@ -552,6 +564,9 @@ it("retains a settled reply's tool activity as done tool calls", async () => {
       activities: [
         { id: "t1", label: "nyxid__list_agent_keys", status: "error", started_at: start, ended_at: reset },
       ],
+      attachments: [
+        { id: "img-2", content_type: "image/png", size: 4, label: "frigate__latest" },
+      ],
     };
     return json(page);
   };
@@ -559,6 +574,15 @@ it("retains a settled reply's tool activity as done tool calls", async () => {
   await transport.history(id);
   const session = transport.session(id);
   expect(session.messages[0]?.toolCalls).toBeUndefined();
+  expect(session.messages[0]?.images).toBeUndefined();
+  expect(session.messages[1]?.images).toEqual([
+    {
+      id: "img-2",
+      endpoint: `/assistant/nyxagent/conversations/${id}/attachments/img-2`,
+      contentType: "image/png",
+      label: "frigate__latest",
+    },
+  ]);
   expect(session.messages[1]?.toolCalls).toEqual([
     { id: "t1", name: "nyxid__list_agent_keys", status: "error", startedAt: Date.parse(start), finishedAt: Date.parse(reset) },
   ]);
@@ -567,7 +591,7 @@ it("retains a settled reply's tool activity as done tool calls", async () => {
 it("shows pending proxy approvals raised by the chat key as cards at the tail", async () => {
   globalThis.__nyxidAssistantHttpMock = () => {
     const page = history();
-    page.conversation.active_turn = { turn_id: "running", started_at: start, activities: [] };
+    page.conversation.active_turn = { turn_id: "running", started_at: start, activities: [], attachments: [] };
     page.approvals = [
       {
         id: "req-1",

@@ -15,6 +15,16 @@ export const nyxAgentTurnActivitySchema = z.object({
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
+/// An image a tool returned during a turn, fetched from the owner-only
+/// attachment route.
+export const nyxAgentAttachmentSchema = z.object({
+  id: z.string(),
+  content_type: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+  size: z.number().int().nonnegative(),
+  label: z.string(),
+});
+export type NyxAgentAttachment = z.infer<typeof nyxAgentAttachmentSchema>;
+
 export const nyxAgentConversationSchema = z.object({
   id: z.string().regex(/^nyxa-[a-f0-9]{32}$/),
   title: z.string(),
@@ -29,6 +39,7 @@ export const nyxAgentConversationSchema = z.object({
       turn_id: z.string(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
+      attachments: z.array(nyxAgentAttachmentSchema).default([]),
     })
     .nullable(),
   context_reset_at: z.string().nullable(),
@@ -43,6 +54,7 @@ export const nyxAgentMessageSchema = z.object({
   error_code: z.string().nullable(),
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
+  attachments: z.array(nyxAgentAttachmentSchema).default([]),
 });
 export const nyxAgentAcknowledgementSchema = z.object({
   id: z.string().uuid(),

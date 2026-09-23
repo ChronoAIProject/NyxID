@@ -1877,6 +1877,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",
             post(handlers::assistant_nyxagent::decide_acknowledgement),
         )
+        .route(
+            "/nyxagent/conversations/{id}/attachments/{attachment_id}",
+            get(handlers::assistant_nyxagent::attachment),
+        )
         .route("/wire-logs/{id}", get(handlers::assistant::get_wire_log))
         .route(
             "/readiness",

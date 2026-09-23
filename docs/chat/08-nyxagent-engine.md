@@ -282,13 +282,16 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | `POST /conversations/{id}/stop` | no body | 204; owner-only, no active turn is a no-op |
 | `PATCH /conversations/{id}/access-mode` | closed `{access_mode:"ask"|"full"}` | conversation DTO |
 | `POST /conversations/{id}/acknowledgements/{ack_id}` | closed `{decision:"allow"|"deny"}` | acknowledgement DTO |
+| `GET /conversations/{id}/attachments/{attachment_id}` | no body | image bytes (owner only; see Tool images) |
 | `POST /turns` | closed `{conversation_id?,text,model?,access_mode?}` | NyxID SSE events |
 | `GET /models` | no body | `[{id,label}]` |
 
 Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message_count,
 pending_acknowledgements,active_turn,context_reset_at`. `active_turn` is null or
 `{turn_id,started_at,activities}`.
-Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities`.
+Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`.
+`active_turn` also carries `attachments`. An attachment is
+`{id,content_type,size,label}` (see Tool images).
 
 `approvals` lists pending proxy approval requests raised by the chat's key:
 `{id,service_slug,service_name,summary,approval_mode,agent_key_prefix,created_at,expires_at}`.
@@ -334,6 +337,40 @@ server cache of successful upstream lists and an uncached fallback
 Discovery does not provision a key: users without one initially see the default
 profile. The browser refreshes profiles after a send, so provisioning makes the
 upstream list available immediately. No new NyxID environment variable is introduced.
+
+## Tool images
+
+Tool execution used to decode every downstream body as lossy UTF-8, so a camera
+snapshot reached NyxAgent as garbled text it could neither see nor show.
+`mcp_service::execute_tool_response` now returns `ToolResponse {status, text,
+media}`. `text` is byte-for-byte what callers received before, so exact-approval
+receipt digests and every text consumer are unchanged. `media` is set only for a
+2xx body of at most 5 MiB whose declared type is `image/png`, `image/jpeg`,
+`image/gif` or `image/webp` and whose magic bytes match that type. SVG and every
+other type never qualify.
+
+For MCP `tools/call` (direct service tools and `nyx__call_tool`), a verified
+image becomes an MCP `image` content block (base64, `mimeType`) followed by a
+text note. Images over 1 MiB are described in the note but not inlined, because
+NyxAgent caps a whole MCP response at 2 MiB. This applies to every MCP caller.
+
+When the caller is an assistant chat key and its conversation has a live turn,
+the image is also envelope-encrypted with `EncryptionKeys` into
+`assistant_attachments` and its metadata `{id,content_type,size,label}` is pushed
+onto `active_turn.attachments` (label = the tool identifier, at most 8 per turn;
+the slot is claimed before anything is encrypted or stored). Settlement copies
+the list onto the assistant reply. The note then tells the model the user sees
+the image under its reply, so it does not claim the image cannot be shown.
+Attachments are deleted with their conversation and in the admin user purge.
+
+`GET /conversations/{id}/attachments/{attachment_id}` is owner-only on the
+human-only router (`/assistant` is already denied to delegated `account:read`),
+not-found-shaped for other owners, and serves the decrypted bytes inline with
+their stored type, `X-Content-Type-Options: nosniff`, a `default-src 'none';
+sandbox` CSP and `Cache-Control: private, max-age=3600`. The browser fetches it
+through the authenticated assistant client and renders a local object URL under
+the reply, including on the streaming message while the turn runs (via the
+polled `active_turn.attachments`). A failed fetch shows "Image unavailable".
 
 ## Persistence and execution
 

@@ -3768,6 +3768,9 @@ fn json_body_uses_wrapper(endpoint: &McpToolEndpoint) -> bool {
 /// For user-managed services, resolves by exact UserService ID (not slug) and
 /// routes through nodes when the service has a `node_id`, matching the same
 /// node/failover behavior as `handlers/proxy.rs::execute_proxy_inner`.
+/// This text-only form is a test convenience; MCP transport uses
+/// [`execute_tool_response`], which also carries verified image bytes.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_tool(
     http_client: &reqwest::Client,
@@ -3789,6 +3792,50 @@ pub async fn execute_tool(
     exec_ctx: &McpExecContext<'_>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<(u16, String)> {
+    execute_tool_response(
+        http_client,
+        db,
+        encryption_keys,
+        node_ws_manager,
+        billing,
+        user_id,
+        billing_principal_user_id,
+        service,
+        endpoint,
+        prepared,
+        jwt_keys,
+        config,
+        connection_expiry_notifier,
+        token_exchange_cache,
+        cloud_response_cache,
+        exec_ctx,
+        billing_egress_permit,
+    )
+    .await
+    .map(|response| (response.status, response.text))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_tool_response(
+    http_client: &reqwest::Client,
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &std::sync::Arc<NodeWsManager>,
+    billing: &std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &str,
+    billing_principal_user_id: &str,
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &crate::crypto::jwt::JwtKeys,
+    config: &crate::config::AppConfig,
+    connection_expiry_notifier:
+        &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &McpExecContext<'_>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> AppResult<ToolResponse> {
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
     let (target, node_route, has_server_credential, billing_context_builder) = match &service.source
@@ -4063,8 +4110,84 @@ pub async fn execute_tool(
 /// normal failure from a transport failure after the provider may already have
 /// committed the effect; collapsing both into `AppError` would make fallback
 /// replay unsafe.
+/// Largest downstream image kept as bytes for MCP image content and chat display.
+pub const MAX_TOOL_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// An image a tool returned, verified by content type and magic bytes.
+pub struct ToolMedia {
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+impl std::fmt::Debug for ToolMedia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolMedia")
+            .field("content_type", &self.content_type)
+            .field("len", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// A downstream tool response. `text` is exactly what callers received before
+/// media support (lossy UTF-8 of the body), so digests and existing consumers
+/// are unchanged; `media` is set only for verified images.
+#[derive(Debug)]
+pub struct ToolResponse {
+    pub status: u16,
+    pub text: String,
+    pub media: Option<ToolMedia>,
+}
+
+/// Only raster formats browsers render without script (never SVG).
+const TOOL_IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+fn tool_image_type(content_type: Option<&str>) -> Option<&'static str> {
+    let normalized =
+        crate::services::content_type::normalize_content_type(content_type.unwrap_or_default());
+    TOOL_IMAGE_TYPES
+        .into_iter()
+        .find(|allowed| *allowed == normalized)
+}
+
+fn image_magic_matches(content_type: &str, bytes: &[u8]) -> bool {
+    match content_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        _ => false,
+    }
+}
+
+/// Keep a successful image body as media when its declared type and magic bytes agree.
+pub fn tool_media(status: u16, content_type: Option<&str>, body: &[u8]) -> Option<ToolMedia> {
+    let content_type = tool_image_type(content_type)?;
+    ((200..300).contains(&status)
+        && !body.is_empty()
+        && body.len() <= MAX_TOOL_IMAGE_BYTES
+        && image_magic_matches(content_type, body))
+    .then(|| ToolMedia {
+        content_type: content_type.to_owned(),
+        bytes: body.to_vec(),
+    })
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn tool_response(status: u16, content_type: Option<&str>, body: &[u8]) -> ToolResponse {
+    ToolResponse {
+        status,
+        text: String::from_utf8_lossy(body).to_string(),
+        media: tool_media(status, content_type, body),
+    }
+}
+
 pub enum McpToolExecutionOutcome {
-    Response((u16, String)),
+    Response(ToolResponse),
     ProviderOutcomeUnknown(AppError),
     ProviderUnreachable(AppError),
 }
@@ -4085,19 +4208,23 @@ fn node_dispatch_failure_disposition(dispatched: bool) -> NodeDispatchFailureDis
 
 async fn collect_node_stream_response(
     mut stream: tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::StreamChunk>,
-) -> AppResult<(u16, Vec<u8>)> {
+) -> AppResult<(u16, Vec<(String, String)>, Vec<u8>)> {
     use crate::services::node_ws_manager::StreamChunk;
 
     let mut status = 200u16;
+    let mut headers = Vec::new();
     let mut body = Vec::new();
     while let Some(chunk) = stream.recv().await {
         match chunk {
             StreamChunk::Start {
                 status: stream_status,
-                ..
-            } => status = stream_status,
+                headers: stream_headers,
+            } => {
+                status = stream_status;
+                headers = stream_headers;
+            }
             StreamChunk::Data(data) => body.extend_from_slice(&data),
-            StreamChunk::End => return Ok((status, body)),
+            StreamChunk::End => return Ok((status, headers, body)),
             StreamChunk::Error(error) => {
                 tracing::error!(%error, "Node stream failed after provider dispatch");
                 return Err(AppError::Internal(
@@ -4443,12 +4570,15 @@ pub async fn execute_tool_resolved(
                             None,
                         )
                         .await?;
-                    let body_text = String::from_utf8_lossy(&resp.body).to_string();
                     destination_audit.complete(resp.status);
-                    return Ok(McpToolExecutionOutcome::Response((resp.status, body_text)));
+                    return Ok(McpToolExecutionOutcome::Response(tool_response(
+                        resp.status,
+                        header_value(&resp.headers, "content-type"),
+                        &resp.body,
+                    )));
                 }
                 Ok(ProxyResponseType::Streaming(rx)) => {
-                    let (status, body_buf) = match collect_node_stream_response(rx).await {
+                    let (status, headers, body_buf) = match collect_node_stream_response(rx).await {
                         Ok(response) => response,
                         Err(error) => {
                             return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
@@ -4469,9 +4599,10 @@ pub async fn execute_tool_resolved(
                         )
                         .await?;
                     destination_audit.complete(status);
-                    return Ok(McpToolExecutionOutcome::Response((
+                    return Ok(McpToolExecutionOutcome::Response(tool_response(
                         status,
-                        String::from_utf8_lossy(&body_buf).to_string(),
+                        header_value(&headers, "content-type"),
+                        &body_buf,
                     )));
                 }
                 Err(failure) => match node_dispatch_failure_disposition(failure.dispatched) {
@@ -4562,8 +4693,22 @@ pub async fn execute_tool_resolved(
     };
 
     let status = response.status().as_u16();
-    let body_text = match response.text().await {
-        Ok(body) => body,
+    // Images are read as bytes; everything else keeps charset-aware decoding.
+    let image_type = tool_image_type(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let read = match image_type {
+        Some(content_type) => response.bytes().await.map(|bytes| {
+            let media = tool_media(status, Some(content_type), &bytes);
+            (String::from_utf8_lossy(&bytes).to_string(), media)
+        }),
+        None => response.text().await.map(|text| (text, None)),
+    };
+    let (body_text, media) = match read {
+        Ok(read) => read,
         Err(error) => {
             tracing::error!(
                 timeout = error.is_timeout(),
@@ -4592,7 +4737,11 @@ pub async fn execute_tool_resolved(
         .await?;
 
     destination_audit.complete(status);
-    Ok(McpToolExecutionOutcome::Response((status, body_text)))
+    Ok(McpToolExecutionOutcome::Response(ToolResponse {
+        status,
+        text: body_text,
+        media,
+    }))
 }
 
 #[cfg(test)]
@@ -6446,6 +6595,39 @@ mod tests {
             opaque_operation_id(Some("downloadFile"), "GET", "/v1/files/{id}"),
             opaque_operation_id(Some("downloadFile"), "POST", "/v2/assets/{id}"),
         );
+    }
+
+    #[test]
+    fn tool_media_accepts_only_verified_raster_images() {
+        let png = [b"\x89PNG\r\n\x1a\n".as_slice(), b"rest"].concat();
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 1, 2];
+        let gif = b"GIF89a....".to_vec();
+        let webp = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
+        for (content_type, body) in [
+            ("image/png", png.clone()),
+            ("IMAGE/JPEG; charset=binary", jpeg.to_vec()),
+            ("image/gif", gif),
+            ("image/webp", webp),
+        ] {
+            let media = tool_media(200, Some(content_type), &body).expect(content_type);
+            assert_eq!(media.bytes, body);
+            assert!(TOOL_IMAGE_TYPES.contains(&media.content_type.as_str()));
+        }
+        // Declared type and magic bytes must agree; SVG and non-2xx never qualify.
+        assert!(tool_media(200, Some("image/jpeg"), &png).is_none());
+        assert!(tool_media(200, Some("image/svg+xml"), b"<svg/>").is_none());
+        assert!(tool_media(200, None, &png).is_none());
+        assert!(tool_media(404, Some("image/png"), &png).is_none());
+        assert!(tool_media(200, Some("image/png"), b"").is_none());
+        let oversized = [png.as_slice(), &vec![0u8; MAX_TOOL_IMAGE_BYTES]].concat();
+        assert!(tool_media(200, Some("image/png"), &oversized).is_none());
+        // The text form is unchanged for every existing consumer.
+        let response = tool_response(200, Some("image/png"), &png);
+        assert_eq!(response.text, String::from_utf8_lossy(&png));
+        assert!(response.media.is_some());
+        let json = tool_response(200, Some("application/json"), b"{\"ok\":true}");
+        assert_eq!(json.text, "{\"ok\":true}");
+        assert!(json.media.is_none());
     }
 
     #[test]
@@ -11020,7 +11202,8 @@ mod tests {
         let response = collect_node_stream_response(rx)
             .await
             .expect("explicitly terminated stream");
-        assert_eq!(response, (201, b"created".to_vec()));
+        assert_eq!(response.0, 201);
+        assert_eq!(response.2, b"created".to_vec());
 
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         tx.send(StreamChunk::Error("transport lost".to_string()))

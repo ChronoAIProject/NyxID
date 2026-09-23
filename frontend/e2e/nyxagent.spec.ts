@@ -91,3 +91,21 @@ test("existing actor history remains readable with NyxAgent enabled", async ({ p
   await page.getByRole("button", { name: "New chat", exact: true }).first().click();
   await expect(page.getByRole("combobox", { name: "Profile" })).toBeVisible();
 });
+
+test("images a tool returns show under the reply during the turn and after reload", async ({
+  page,
+}) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true, progressStallMs: 4000 } });
+  await sendMessage(page, "Show the lobby camera");
+  const image = page.getByRole("img", { name: "Image from lobby-camera__snapshot" });
+  // The polled live turn carries the attachment before the reply settles.
+  await expect(image).toBeVisible({ timeout: 6000 });
+  await expect(page.getByText("Here is the latest lobby snapshot.")).toBeVisible({
+    timeout: 8000,
+  });
+  await expect(image).toHaveJSProperty("naturalWidth", 1);
+  await page.reload();
+  await expect(page.getByText("Here is the latest lobby snapshot.")).toBeVisible();
+  await expect(image).toBeVisible();
+  await expect(image).toHaveJSProperty("naturalWidth", 1);
+});

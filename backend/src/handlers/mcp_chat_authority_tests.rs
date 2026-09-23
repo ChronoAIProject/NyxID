@@ -900,3 +900,176 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
         .unwrap();
     assert_eq!(row.active_turn.unwrap().activities.len(), 3);
 }
+
+#[tokio::test]
+async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachments() {
+    use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
+    let f = fixture("chat_tool_images").await;
+    // A camera-like service: one PNG snapshot, one image-typed body that is not an image.
+    let png: Vec<u8> = [b"\x89PNG\r\n\x1a\n".as_slice(), &[7u8; 64]].concat();
+    let body = png.clone();
+    let upstream = Router::new()
+        .route(
+            "/snapshot",
+            any(move || {
+                let body = body.clone();
+                async move { ([("content-type", "image/png")], body) }
+            }),
+        )
+        .route(
+            "/spoofed",
+            any(|| async { ([("content-type", "image/png")], "<html>not an image</html>") }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let service = connected(&f.state.db, &f.owner, "lobby-camera", &address).await;
+    let auth = authenticate(&f).await;
+    let services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let tool = services
+        .iter()
+        .find(|s| s.service_id == service)
+        .map(|s| format!("{}__{}", s.service_slug, s.endpoints[0].name))
+        .unwrap();
+    let refusal = result(
+        call(
+            &f,
+            &auth,
+            &tool,
+            json!({"method": "GET", "path": "/snapshot"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    acks::decide(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        refusal["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    let raw = |response: Response| async move {
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice::<Value>(&bytes).unwrap()["result"].clone()
+    };
+    let image = raw(call(
+        &f,
+        &auth,
+        &tool,
+        json!({"method": "GET", "path": "/snapshot"}),
+    )
+    .await)
+    .await;
+    assert_eq!(image["isError"], false, "{image}");
+    let content = image["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2, "{image}");
+    assert_eq!(content[0]["type"], "image");
+    assert_eq!(content[0]["mimeType"], "image/png");
+    {
+        use base64::Engine as _;
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(content[0]["data"].as_str().unwrap())
+                .unwrap(),
+            png
+        );
+    }
+    let note = content[1]["text"].as_str().unwrap();
+    assert!(
+        note.contains("image/png") && note.contains("shows this image to the user"),
+        "{note}"
+    );
+    // A body that claims image/png without PNG magic stays text.
+    let spoofed = raw(call(
+        &f,
+        &auth,
+        &tool,
+        json!({"method": "GET", "path": "/spoofed"}),
+    )
+    .await)
+    .await;
+    assert_eq!(spoofed["content"].as_array().unwrap().len(), 1, "{spoofed}");
+    assert_eq!(spoofed["content"][0]["type"], "text");
+
+    // The image is attached to the live turn, encrypted at rest, and owner-only.
+    let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    let attachments = row.active_turn.as_ref().unwrap().attachments.clone();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].content_type, "image/png");
+    assert_eq!(attachments[0].size, png.len() as i64);
+    assert_eq!(attachments[0].label, tool);
+    let stored = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(ATTACHMENTS)
+        .find_one(doc! {"_id": &attachments[0].id})
+        .await
+        .unwrap()
+        .unwrap();
+    let ciphertext = stored.get_binary_generic("data_encrypted").unwrap();
+    assert!(
+        !ciphertext.windows(8).any(|w| w == &png[..8]),
+        "stored encrypted"
+    );
+    let response = crate::handlers::assistant_nyxagent::attachment(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.owner),
+        axum::extract::Path((f.row.id.clone(), attachments[0].id.clone())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    let served = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(served.to_vec(), png);
+    let stranger = uuid::Uuid::new_v4().to_string();
+    assert!(matches!(
+        crate::handlers::assistant_nyxagent::attachment(
+            axum::extract::State(f.state.clone()),
+            crate::test_utils::test_auth_user(&stranger),
+            axum::extract::Path((f.row.id.clone(), attachments[0].id.clone())),
+        )
+        .await,
+        Err(crate::errors::AppError::NotFound(_))
+    ));
+
+    // Callers outside a chat still get the image block, with nothing stored.
+    let plain = McpAuthContext::user(f.owner.clone(), AuthMethod::Session);
+    let direct = raw(direct_call(
+        &f,
+        &plain,
+        &tool,
+        json!({"method": "GET", "path": "/snapshot"}),
+    )
+    .await)
+    .await;
+    assert_eq!(direct["content"][0]["type"], "image", "{direct}");
+    assert!(
+        !direct["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("shows this image")
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(ATTACHMENTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    server.abort();
+}
