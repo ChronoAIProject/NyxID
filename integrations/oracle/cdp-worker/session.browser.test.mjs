@@ -607,7 +607,7 @@ function reasoningPage(config) {
       background: white; border: 1px solid; padding: 10px; pointer-events: auto; z-index: 10; }
     [role=menuitemradio], [role=menuitem] { display: block; padding: 6px; }
     #sidebar { position: fixed; top: 0; left: 680px; }
-  </style><header><button id="header-model" ${config.headerTestId ? 'data-testid="model-switcher-dropdown-button"' : ''} aria-haspopup="menu">${config.headerLabel || "GPT-6 Pro"}</button></header>
+  </style>${config.noHeader ? "" : `<header><button id="header-model" ${config.headerTestId ? 'data-testid="model-switcher-dropdown-button"' : ''} aria-haspopup="menu">${config.headerLabel || "GPT-6 Pro"}</button></header>`}
   ${config.sidebar ? '<nav id="sidebar" role="listbox"><button role="option" id="sidebar-pro">Pro</button></nav>' : ''}
   <main><div id="turns"></div><${region}>
   ${config.contenteditable ? '<div id="prompt-textarea" contenteditable="true"></div>' : '<textarea id="prompt-textarea"></textarea>'}
@@ -657,7 +657,8 @@ function reasoningPage(config) {
       }
       document.body.append(menu);
     };
-    document.querySelector('#header-model').onclick = () => {
+    const headerModel = document.querySelector('#header-model');
+    if (headerModel) headerModel.onclick = () => {
       record('header'); closeMenu();
       const menu = document.createElement('div'); menu.setAttribute('role', 'menu'); menu.setAttribute('data-picker-menu', '');
       for (const label of config.headerItems || ['GPT-5 Pro', 'GPT-6', 'GPT-6 Pro']) {
@@ -927,7 +928,7 @@ async function assertReasoningDelivered(fixture, { model = 'GPT-6 Pro', detail =
   if (model !== 'chatgpt-6-pro') assert.equal(fixture.results[0].observed_model_effort, effortMetadata(model));
   assert.equal(fixture.results[0].error, undefined);
   const acks = fixture.acknowledgements;
-  assert.deepEqual(acks.map(body => body.phase), ['page_ready', 'selecting_model', 'selecting_model', 'ready_to_send', 'sent']);
+  assert.deepEqual(acks.map(body => body.phase), ['page_ready', 'selecting_model', 'selecting_model', 'typing', 'ready_to_send', 'sent']);
   assert.equal(acks[2].phase_detail, detail, fixture.process.output());
   assert.equal(acks.filter(body => body.phase === 'sent').length, 1);
   const events = await fixture.page.evaluate(() => window.clickLog);
@@ -945,6 +946,19 @@ async function assertReasoningDelivered(fixture, { model = 'GPT-6 Pro', detail =
   assert.ok(acks.every(body => body.page_url === undefined));
   return events;
 }
+
+test('reasoning: no header switcher and no version radio verifies on the pill\'s own level', options, async (t) => {
+  // Some older composers offer neither control: no header switcher, and a
+  // plain labelled button instead of a __composer-pill, so the picker's items
+  // carry no checked version radio either. Family evidence is then absent
+  // rather than contradictory, and rejecting "absent" made every task on such
+  // an account fail switcher_unverified while its pill read Pro. Observed
+  // 2026-09-23 on an account rendering button[aria-label="Select ChatGPT model"].
+  const fixture = await reasoningFixture(t, {
+    contenteditable: true, noHeader: true, fallback: true, initial: 'Pro',
+  });
+  await assertReasoningDelivered(fixture);
+});
 
 test('reasoning: unrecognized structural pill selects Pro and reports the observed pill', options, async (t) => {
   const fixture = await reasoningFixture(t, { contenteditable: true });
@@ -1116,7 +1130,7 @@ test('reasoning: expired page-side reads carry a deadline code instead of a Type
   assert.ok(!fixture.process.output().includes('TypeError'));
   assert.ok(!fixture.process.output().includes('reason=selection_failed'));
   assert.equal(fixture.results[0].response, 'ERROR: browser_recovery_exhausted');
-  assert.ok(fixture.process.output().includes('task reasoning-task browser failure 1/1 (composer_unobstructed_failed@selecting_model)'));
+  assert.ok(fixture.process.output().includes('task reasoning-task browser failure 1/1 (composer_unobstructed_failed@typing)'));
   assert.ok(!fixture.process.output().includes('paused for browser recovery'));
 });
 
