@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { continuationText, useNyxAgentAssistantChat } from "./use-assistant-nyxagent";
+import { continuationForAll, continuationText, useNyxAgentAssistantChat } from "./use-assistant-nyxagent";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { useAuthStore } from "@/stores/auth-store";
 import type { NyxAgentHistory } from "@/schemas/assistant-nyxagent";
@@ -198,12 +198,79 @@ it("polls pending acknowledgements after settlement, throttles decisions, and re
       "Approved: account management for this chat. Continue.",
       expect.any(Function),
     );
-    // A turn that is still running retries on its own; no second turn is queued.
-    vi.spyOn(nyxAgentTransport, "isRunning").mockReturnValue(true);
-    now += 750;
-    await act(() => result.current.decideAcknowledgement(allow));
-    expect(send).toHaveBeenCalledOnce();
     expect(requests.some((r) => r.startsWith("POST"))).toBe(false);
+  }, 8000,
+);
+
+it("sends one continuation after a turn settles for cards allowed while it ran, never after Stop",
+  async () => {
+    page.conversation.pending_acknowledgements = 2;
+    const card = (suffix: string, kind: "service" | "account") => ({
+      id: `12345678-1234-4123-8123-12345678901${suffix}`,
+      kind, status: "pending" as const, summary: "Card",
+      service_slug: kind === "service" ? "github" : null,
+      service_name: kind === "service" ? "GitHub" : null,
+      tool_name: null,
+      created_at: "2026-09-17T00:00:00Z", decided_at: null,
+      expires_at: "2026-09-17T00:15:00Z",
+    });
+    page.acknowledgements = [card("1", "service"), card("2", "account")];
+    const { result, rerender } = renderHook(() => useNyxAgentAssistantChat({
+      selectedConversationId: id, onConversationAdopted: vi.fn(),
+    }), { wrapper });
+    await waitFor(() => expect(result.current.acknowledgements).toHaveLength(2));
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+    vi.spyOn(nyxAgentTransport, "decide").mockImplementation(async (_c, ackId) => {
+      const row = page.acknowledgements.find((ack) => ack.id === ackId)!;
+      row.status = "allowed";
+      return row;
+    });
+    let running = true;
+    vi.spyOn(nyxAgentTransport, "isRunning").mockImplementation(() => running);
+    // The user allows both cards before the assistant finishes its reply.
+    for (const ack of page.acknowledgements) {
+      await act(() => result.current.decideAcknowledgement({ id: ack.id, choice: "allow" }));
+      now += 750;
+    }
+    rerender();
+    expect(send).not.toHaveBeenCalled();
+    // The turn settles: exactly one continuation carries both approvals.
+    running = false;
+    rerender();
+    await waitFor(() => expect(send).toHaveBeenCalledOnce());
+    expect(send).toHaveBeenCalledWith(
+      id,
+      "Approved: this chat may use GitHub. Continue.\n" +
+        "Approved: account management for this chat. Continue.",
+      expect.any(Function),
+    );
+    rerender();
+    expect(send).toHaveBeenCalledOnce();
+
+    // A turn the user stopped is not resumed.
+    running = true;
+    page.acknowledgements = [card("3", "service")];
+    await act(async () => {
+      await result.current.decideAcknowledgement({ id: page.acknowledgements[0]!.id, choice: "allow" });
+    });
+    const history = nyxAgentTransport.getHistory(id)!;
+    vi.spyOn(nyxAgentTransport, "getHistory").mockReturnValue({
+      ...history,
+      messages: [
+        ...history.messages,
+        {
+          id: "stopped", turn_id: "turn", seq: 2, role: "assistant", text: "",
+          status: "failed", error_code: "cancelled",
+          created_at: "2026-09-17T00:00:01Z", activities: [],
+        },
+      ],
+    });
+    running = false;
+    rerender();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(send).toHaveBeenCalledOnce();
   }, 8000,
 );
 
@@ -226,6 +293,9 @@ it("phrases continuation turns per acknowledgement kind", () => {
     "Approved: this chat may use github. Continue.",
   );
   expect(continuationText({ ...base, kind: "account" })).toBe(
+    "Approved: account management for this chat. Continue.",
+  );
+  expect(continuationForAll([{ ...base, kind: "account" }])).toBe(
     "Approved: account management for this chat. Continue.",
   );
   expect(continuationText({ ...base, kind: "action", tool_name: "delete_agent_key" })).toBe(

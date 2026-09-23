@@ -206,8 +206,21 @@ turn is running, the browser sends an ordinary, visible user turn (`Approved: th
 chat may use <service>. Continue.`, `Approved: account management for this chat.
 Continue.`, or `Confirmed: <summary> (acknowledgement_id <id>). Retry it now.`).
 The continuation is a normal turn with no extra authority; the allowed grant is
-what the retried tool call consumes. If a turn is still running, nothing is sent
-because that turn's own retry observes the grant. **Deny** sends nothing.
+what the retried tool call consumes. If the user allows a card while a turn is
+still running (cards appear as soon as the tool call is refused, usually before
+the reply finishes), the running turn cannot observe the decision: NyxAgent ends
+a turn on a card and answers same-turn repeats locally. The browser therefore
+queues the continuation and sends one visible turn covering every card allowed
+during that turn as soon as it settles; nothing is sent if the user pressed Stop.
+**Deny** sends nothing.
+
+Independently, every turn's instructions end with a note listing the cards the
+user allowed or denied since the previous user message, oldest first and at most
+ten (`- allowed: service <slug>`, `- denied: account management`,
+`- allowed: action <tool> (acknowledgement_id <id>)`). Only identifiers are
+rendered, never display names or summaries. Each decision is reported to exactly
+one turn, so the model learns about decisions made in another tab, after a
+reload, or by Deny, the next time the user writes.
 
 ## NyxID account tools
 
