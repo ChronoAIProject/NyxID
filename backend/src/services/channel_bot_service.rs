@@ -17,11 +17,12 @@ use crate::services::channel_platform::{
     BotCredentials, BotIdentity, PlatformAdapter, RegistrationDescriptor, RegistrationValues,
 };
 
-/// Result of creating a bot: the persisted record plus the raw webhook secret
-/// (shown once, never stored in cleartext).
+/// A new bot or the owner's existing manager connection. Reused connections
+/// require live verification and never return a webhook secret.
 pub struct CreateBotResult {
     pub bot: ChannelBot,
     pub webhook_secret: String,
+    pub reused: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -131,11 +132,12 @@ async fn write_registration_fields(
     Ok(())
 }
 
-/// Register a new channel bot for the given user.
+/// Register a channel bot or recover the owner's existing manager connection.
 ///
 /// Verifies the token with the platform, encrypts it, generates a webhook
-/// secret, and inserts the bot in `pending` status. The caller must follow up
-/// with [`register_webhook`] to activate the bot.
+/// secret, and inserts a new bot in `pending` status. The caller must follow up
+/// with [`register_webhook`] for a new bot or [`verify_telegram_bot`] for a reused
+/// manager connection to activate it.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_bot(
     db: &mongodb::Database,
@@ -159,19 +161,6 @@ pub async fn create_bot(
         return Err(AppError::ValidationError(
             "Label must be between 1 and 200 characters".to_string(),
         ));
-    }
-
-    // Enforce per-user bot limit
-    let active_count = db
-        .collection::<ChannelBot>(COLLECTION_NAME)
-        .count_documents(doc! { "user_id": user_id, "is_active": true })
-        .await?;
-
-    if active_count >= u64::from(config.channel_relay_max_bots_per_user) {
-        return Err(AppError::ChannelBotLimitReached(format!(
-            "maximum of {} bots per user reached",
-            config.channel_relay_max_bots_per_user
-        )));
     }
 
     let effective_token = adapter.registration_token(fields)?;
@@ -233,11 +222,34 @@ async fn persist_verified_bot(
         })
         .await?;
 
-    if existing.is_some() {
+    if let Some(existing) = existing {
+        if managed.is_none()
+            && connection.is_none()
+            && adapter.platform_id() == "telegram"
+            && existing.user_id == user_id
+            && existing.credential_source == "telegram_manager"
+        {
+            return Ok(CreateBotResult {
+                bot: existing,
+                webhook_secret: String::new(),
+                reused: true,
+            });
+        }
         return Err(AppError::Conflict(format!(
-            "Bot {} is already registered on {}",
+            "Bot {} is already registered on {}. Open its existing connection in Channel Bots to complete setup. Check Personal and organization scopes, or ask the connection owner for access.",
             platform_bot_username,
             adapter.platform_id()
+        )));
+    }
+
+    let active_count = db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .count_documents(doc! { "user_id": user_id, "is_active": true })
+        .await?;
+    if active_count >= u64::from(config.channel_relay_max_bots_per_user) {
+        return Err(AppError::ChannelBotLimitReached(format!(
+            "maximum of {} bots per user reached",
+            config.channel_relay_max_bots_per_user
         )));
     }
 
@@ -335,6 +347,7 @@ async fn persist_verified_bot(
     let bot = get_bot(db, &bot.id).await?;
 
     Ok(CreateBotResult {
+        reused: false,
         webhook_secret: if bot.credential_source == "telegram_manager" {
             String::new()
         } else {
@@ -482,6 +495,7 @@ pub async fn create_managed_bot(
         return Ok(CreateBotResult {
             bot: get_bot(db, &created.bot.id).await?,
             webhook_secret: created.webhook_secret,
+            reused: created.reused,
         });
     }
     let platform =
@@ -539,6 +553,7 @@ pub async fn create_managed_bot(
     Ok(CreateBotResult {
         bot: get_bot(db, &created.bot.id).await?,
         webhook_secret: created.webhook_secret,
+        reused: created.reused,
     })
 }
 
@@ -591,7 +606,7 @@ async fn insert_registered_bot_inner(
             }
             let platform = if matches!(bot.platform.as_str(), "telegram" | "telegram-new") { bson::Bson::Document(doc! {"$in": ["telegram", "telegram-new"]}) } else { bson::Bson::String(bot.platform.clone()) };
             if bots.find_one(doc! {"platform": platform, "platform_bot_id": &bot.platform_bot_id, "is_active": true}).session(&mut *session).await?.is_some() {
-                return Err(AppError::Conflict("This bot is already connected".into()));
+                return Err(AppError::Conflict("This bot is already connected. Open its existing connection in Channel Bots to complete setup. Check Personal and organization scopes, or ask the connection owner for access.".into()));
             }
             if matches!(bot.platform.as_str(), "telegram" | "telegram-new") && let Some(manager) = db.collection::<crate::models::platform_credential::PlatformCredential>(crate::models::platform_credential::COLLECTION_NAME).find_one(doc! {"provider": "telegram-new", "fields.manager_bot_id": &bot.platform_bot_id}).session(&mut *session).await? {
                 if bot.platform != "telegram" || manager.fields.get("webhook_ready").map(String::as_str) != Some("true") {
