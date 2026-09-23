@@ -303,3 +303,12 @@ every word rank first, then partial matches in catalog order, capped at 25. Word
 order is irrelevant, so "skill search" and "search skills" both find
 `ornn-api__searchskills`, and concatenated operation names such as
 `getentitystate` match "entity state". An empty query lists the first 25 tools.
+
+### Image tool results
+
+MCP `tools/call` results for service tools return verified images (PNG, JPEG,
+GIF, WebP; 2xx; at most 5 MiB; declared type and magic bytes must agree) as an
+MCP `image` content block followed by a short text note, instead of lossy text.
+Images over 1 MiB are described in the note but not inlined. Every other response
+type keeps its previous text form. Assistant chat keys additionally get the image
+attached to the live chat turn (see `docs/chat/08-nyxagent-engine.md`, Tool images).

@@ -230,6 +230,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             error_code: None,
             created_at: Utc::now(),
             activities: Vec::new(),
+            attachments: Vec::new(),
         })
         .collect();
     let prompt = instructions(&messages);
@@ -445,6 +446,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         message_count: 0,
         active_turn: Some(ActiveTurn {
             activities: Vec::new(),
+            attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
             started_at: now - chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS),
             stop_requested: false,
@@ -779,4 +781,125 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
             .count(),
         MAX_ACTIVITY_LABEL_CHARS
     );
+}
+
+#[tokio::test]
+async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat() {
+    use crate::models::assistant_attachment::COLLECTION_NAME as ATTACHMENTS;
+    let db = connect_transaction_test_database("nyxa_images").await;
+    ensure_indexes(&db).await.unwrap();
+    let user = Uuid::new_v4();
+    db.collection(USERS)
+        .insert_one(test_user(&user.to_string(), UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let owner = user.to_string();
+    let keys = &state.encryption_keys;
+    let png = b"\x89PNG\r\n\x1a\nimage".to_vec();
+    // No live turn: nothing is stored.
+    assert!(
+        attach_image(
+            &db,
+            keys,
+            &owner,
+            "nyxa-00000000000000000000000000000000",
+            "t",
+            "image/png",
+            &png
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let row = begin_turn(&db, &owner, &request(None, "show the lobby"), keys)
+        .await
+        .unwrap();
+    let credential = credentials::load_for_conversation(&db, keys, &owner, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    for i in 0..MAX_TURN_ATTACHMENTS {
+        attach_image(
+            &db,
+            keys,
+            &owner,
+            &row.id,
+            &format!("cam__snapshot_{i}"),
+            "image/png",
+            &png,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+    assert!(
+        attach_image(
+            &db,
+            keys,
+            &owner,
+            &row.id,
+            "cam__overflow",
+            "image/png",
+            &png
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "per-turn limit"
+    );
+    assert!(
+        attach_image(&db, keys, "someone-else", &row.id, "cam", "image/png", &png)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let count = || async {
+        db.collection::<bson::Document>(ATTACHMENTS)
+            .count_documents(doc! {"conversation_id": &row.id})
+            .await
+            .unwrap()
+    };
+    assert_eq!(count().await, MAX_TURN_ATTACHMENTS as u64);
+    let message_id = Uuid::new_v4().to_string();
+    finish_turn(
+        &db,
+        &row,
+        &credential.api_key_id,
+        &message_id,
+        &TurnResult {
+            text: "Here is the lobby.".into(),
+            session_id: Some("s".into()),
+            response_id: Some("r".into()),
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let reply = messages(&db, &owner, &row.id, 10, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == message_id)
+        .unwrap();
+    assert_eq!(reply.attachments.len(), MAX_TURN_ATTACHMENTS);
+    assert_eq!(reply.attachments[0].label, "cam__snapshot_0");
+    let (content_type, bytes) =
+        read_attachment(&db, keys, &owner, &row.id, &reply.attachments[0].id)
+            .await
+            .unwrap();
+    assert_eq!((content_type.as_str(), bytes), ("image/png", png.clone()));
+    assert!(matches!(
+        read_attachment(&db, keys, "someone-else", &row.id, &reply.attachments[0].id).await,
+        Err(AppError::NotFound(_))
+    ));
+    // Settled: a late tool response cannot attach to a finished turn.
+    assert!(
+        attach_image(&db, keys, &owner, &row.id, "late", "image/png", &png)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    delete(&db, &owner, &row.id).await.unwrap();
+    assert_eq!(count().await, 0, "deleted with the conversation");
 }

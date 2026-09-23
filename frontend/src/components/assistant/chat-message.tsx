@@ -20,6 +20,7 @@ import {
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
+import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { authorizationBlockerToConnectCard } from "@/lib/assistant/chat-authorization";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type {
@@ -165,6 +166,7 @@ export function ChatMessageBubble({
     content ||
       message.steps?.length ||
       message.toolCalls?.length ||
+      message.images?.length ||
       message.artifacts?.length ||
       message.authorizationBlockers?.length,
   );
@@ -189,6 +191,13 @@ export function ChatMessageBubble({
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
         <ActivityBlock message={message} />
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
+        {message.images?.length ? (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {message.images.map((image) => (
+              <ToolImage key={image.id} image={image} />
+            ))}
+          </div>
+        ) : null}
         {interactiveCards
           ? message.authorizationBlockers?.map((blocker) => (
               <div className="mt-2" key={blocker.serviceSlug}>
@@ -330,7 +339,11 @@ export function ChatMessageList({
       terminalAssistant?.role === "assistant" &&
       !terminalAssistant.content.trim() &&
       !terminalAssistant.error &&
-      !(terminalAssistant.steps?.length || terminalAssistant.toolCalls?.length) &&
+      !(
+        terminalAssistant.steps?.length ||
+        terminalAssistant.toolCalls?.length ||
+        terminalAssistant.images?.length
+      ) &&
       !(terminalAssistant.artifacts?.length ||
         terminalAssistant.authorizationBlockers?.length),
   );

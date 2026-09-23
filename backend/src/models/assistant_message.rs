@@ -20,6 +20,9 @@ pub struct AssistantMessage {
     /// Tool calls observed during the turn that produced this reply (assistant rows only).
     #[serde(default)]
     pub activities: Vec<super::assistant_conversation::TurnActivity>,
+    /// Images tools returned during the turn that produced this reply.
+    #[serde(default)]
+    pub attachments: Vec<super::assistant_conversation::TurnAttachment>,
 }
 
 impl std::fmt::Debug for AssistantMessage {

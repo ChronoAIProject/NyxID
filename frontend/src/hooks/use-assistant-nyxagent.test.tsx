@@ -42,7 +42,7 @@ beforeEach(() => {
       last_message_at: "2026-09-17T00:00:00Z",
       message_count: 1,
       pending_acknowledgements: 0,
-      active_turn: { turn_id: "turn", started_at: "2026-09-17T00:00:00Z", activities: [] },
+      active_turn: { turn_id: "turn", started_at: "2026-09-17T00:00:00Z", activities: [], attachments: [] },
       context_reset_at: null,
     },
     messages: [{
@@ -54,7 +54,7 @@ beforeEach(() => {
       status: "completed",
       error_code: null,
       created_at: "2026-09-17T00:00:00Z",
-      activities: [],
+      activities: [], attachments: [],
     }],
     before_seq: null,
     acknowledgements: [],
@@ -105,7 +105,7 @@ it("polls only selected history every two seconds and refreshes the index once o
       text: "Durable answer",
       status: "completed",
       error_code: null,
-      activities: [],
+      activities: [], attachments: [],
       created_at: "2026-09-17T00:00:01Z",
     });
     await waitFor(() => {
@@ -263,7 +263,7 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
         {
           id: "stopped", turn_id: "turn", seq: 2, role: "assistant", text: "",
           status: "failed", error_code: "cancelled",
-          created_at: "2026-09-17T00:00:01Z", activities: [],
+          created_at: "2026-09-17T00:00:01Z", activities: [], attachments: [],
         },
       ],
     });
