@@ -1,4 +1,4 @@
-//! WhatsApp admission shares the existing coordination store and commits with metadata.
+//! Inbound admission shares the coordination store and commits with metadata.
 
 use super::coordination_service::{EventDedupClaim, EventDedupClaimResult, EventDedupStore};
 use crate::errors::{AppError, AppResult};
@@ -11,16 +11,27 @@ pub(crate) async fn claim(
     message: &ChannelMessage,
 ) -> AppResult<EventDedupClaimResult> {
     let event = message.platform_message_id.as_deref().unwrap_or_default();
-    if message.platform != "whatsapp" || !super::channel_delivery_service::valid_message_id(event) {
-        return Err(AppError::ValidationError(
-            "Invalid WhatsApp message identity".into(),
-        ));
-    }
+    let namespace = match message.platform.as_str() {
+        "whatsapp" if super::channel_delivery_service::valid_message_id(event) => {
+            "whatsapp-inbound"
+        }
+        "x" if !event.is_empty()
+            && event.len() <= 32
+            && event.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            "x-inbound"
+        }
+        _ => {
+            return Err(AppError::ValidationError(
+                "Invalid channel message identity".into(),
+            ));
+        }
+    };
     let scope = serde_json::to_string(&(&message.channel_bot_id, &message.user_id))
         .map_err(|_| AppError::Internal("Unable to encode message admission".into()))?;
     EventDedupStore::claim(
         db,
-        "whatsapp-inbound",
+        namespace,
         &scope,
         event,
         std::time::Duration::from_secs(30),
@@ -48,7 +59,7 @@ pub(crate) async fn admit(
                     let existing = db.collection::<ChannelMessage>(COLLECTION_NAME)
                         .find_one(doc! {
                             "channel_bot_id":&message.channel_bot_id, "user_id":&message.user_id,
-                            "platform":"whatsapp", "direction":"inbound", "platform_message_id":&message.platform_message_id,
+                            "platform":&message.platform, "direction":"inbound", "platform_message_id":&message.platform_message_id,
                         }).session(&mut *session).await?;
                     if existing.is_some() { return Ok(false); }
                     db.collection::<ChannelMessage>(COLLECTION_NAME)

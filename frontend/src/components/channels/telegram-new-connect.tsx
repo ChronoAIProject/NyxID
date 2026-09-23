@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { useIsMutating } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useTelegramNewConfiguration } from "@/hooks/use-telegram-new";
@@ -10,6 +10,7 @@ export function TelegramNewConnect({
   label,
   orgId,
   form,
+  fullPage = false,
   onConnected,
   renderFields,
 }: ChannelBotConnectProps) {
@@ -28,6 +29,22 @@ export function TelegramNewConnect({
       ? request.owner_user_id
       : undefined;
   const { setValue } = form;
+  const updateSearch = useCallback(
+    (next: { label: string; target_org_id?: string; request_id?: string }) =>
+      fullPage
+        ? navigate({
+            to: "/channel-bots/connect/$platform",
+            params: { platform: "telegram-new" },
+            search: next,
+            replace: true,
+          })
+        : navigate({
+            to: "/channel-bots",
+            search: { connect: "telegram-new", ...next },
+            replace: true,
+          }),
+    [fullPage, navigate],
+  );
 
   useEffect(() => {
     if (!request) return;
@@ -42,21 +59,16 @@ export function TelegramNewConnect({
     const nextOrgId = request ? savedOrgId : (orgId ?? undefined);
     const requestId = request?.id ?? search.request_id;
     if (
-      search.connect === "telegram-new" &&
+      (fullPage || search.connect === "telegram-new") &&
       search.label === nextLabel &&
       search.target_org_id === nextOrgId &&
       search.request_id === requestId
     )
       return;
-    void navigate({
-      to: "/channel-bots",
-      search: {
-        connect: "telegram-new",
-        label: nextLabel,
-        target_org_id: nextOrgId,
-        request_id: requestId,
-      },
-      replace: true,
+    void updateSearch({
+      label: nextLabel,
+      target_org_id: nextOrgId,
+      request_id: requestId,
     });
   }, [
     request,
@@ -67,19 +79,15 @@ export function TelegramNewConnect({
     search.label,
     search.target_org_id,
     search.request_id,
-    navigate,
+    fullPage,
+    updateSearch,
   ]);
 
   async function saveRequest(requestId?: string) {
-    await navigate({
-      to: "/channel-bots",
-      search: {
-        connect: "telegram-new",
-        label,
-        target_org_id: orgId ?? undefined,
-        request_id: requestId,
-      },
-      replace: true,
+    await updateSearch({
+      label,
+      target_org_id: orgId ?? undefined,
+      request_id: requestId,
     });
   }
 
@@ -88,13 +96,14 @@ export function TelegramNewConnect({
       {renderFields({
         disabled: Boolean(request) || configuration.isPending || pending,
         scopeDescription: request
-          ? request.status === "provisioning" || request.status === "connected"
+          ? fullPage || request.status === "provisioning" || request.status === "connected"
             ? "These details are saved. You can manage the bot once it is connected."
             : "These details are saved. To change them, choose Cancel setup below."
           : undefined,
       })}
       <TelegramNew
         key={actor}
+        fullPage={fullPage}
         label={label}
         orgId={orgId}
         requestId={search.request_id}

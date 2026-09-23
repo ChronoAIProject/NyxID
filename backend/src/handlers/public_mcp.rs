@@ -205,6 +205,7 @@ mod tests {
 
     fn safe_anonymous_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,

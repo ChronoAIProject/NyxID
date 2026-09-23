@@ -725,3 +725,16 @@ Each pending proxy request is tracked as one of:
 - `PendingRequest::Streaming` -- streaming response (upgraded on `proxy_response_start`)
 
 When a `proxy_response_start` arrives, the oneshot sender is dropped and replaced with an `mpsc::unbounded_channel` for streaming chunks. The proxy handler in `proxy.rs` receives `ProxyResponseType::Complete` or `ProxyResponseType::Streaming` based on which path the response takes.
+
+## HTTP destination signature v2
+
+Nodes advertise `http_signature_v2: true` in their capabilities. For an HTTP request selecting a destination, the server requires this capability and a signing secret before dispatch, otherwise it returns `NodeHttpSignatureUnsupported` (8013). A selected request carries `target_id` and `signature_version: 2`; its `base_url` is a required, normalized HTTPS origin. The node must use this origin without its configured-target fallback. A missing or empty selected origin returns HTTP status 502 in the node error frame with reason `target_base_url_missing`; the v2 verifier independently requires a normalized HTTPS origin. The credential is still looked up by service slug, so all targets on a service use the same node credential. Selected requests require bearer injection, use a no-redirect client, and cannot open a WebSocket.
+
+The HMAC-SHA256 input is compact UTF-8 JSON for this ordered array (strings throughout):
+
+```text
+["nyxid-node-http.v2", timestamp, nonce, service_id, service_slug,
+ target_id, base_url, method, path, query_or_empty, base64_body_or_empty]
+```
+
+The usual timestamp and replay checks apply. The version tag separates the signature domain from legacy HTTP and WebSocket signatures. Service identity, target ID, and origin cannot be changed without invalidating the signature. Non-target HTTP calls retain the existing signature and wire shape, including compatibility with older nodes. Upgrade and verify every participating and failover node before starting a backend release that automatically activates Drive/Workspace editor routing. See the rollout prerequisites in [Google Workspace OAuth](GOOGLE_WORKSPACE_OAUTH.md).

@@ -1,0 +1,92 @@
+{
+  "rules": [
+    {
+      "method": "GET",
+      "path_template": "/drive/v3/files"
+    },
+    {
+      "method": "POST",
+      "path_template": "/drive/v3/files"
+    },
+    {
+      "method": "GET",
+      "path_template": "/drive/v3/files/{fileId}"
+    },
+    {
+      "method": "PATCH",
+      "path_template": "/drive/v3/files/{fileId}"
+    },
+    {
+      "method": "DELETE",
+      "path_template": "/drive/v3/files/{fileId}"
+    },
+    {
+      "method": "POST",
+      "path_template": "/drive/v3/files/{fileId}/copy"
+    },
+    {
+      "method": "GET",
+      "path_template": "/drive/v3/files/{fileId}/export"
+    },
+    {
+      "method": "POST",
+      "path_template": "/upload/drive/v3/files"
+    },
+    {
+      "method": "PATCH",
+      "path_template": "/upload/drive/v3/files/{fileId}"
+    },
+    {
+      "method": "GET",
+      "path_template": "/calendar/v3/users/me/calendarList"
+    },
+    {
+      "method": "POST",
+      "path_template": "/calendar/v3/users/me/calendarList"
+    },
+    {
+      "method": "DELETE",
+      "path_template": "/calendar/v3/users/me/calendarList/{calendarId}"
+    },
+    {
+      "method": "POST",
+      "path_template": "/calendar/v3/calendars"
+    },
+    {
+      "method": "GET",
+      "path_template": "/calendar/v3/calendars/{calendarId}"
+    },
+    {
+      "method": "PATCH",
+      "path_template": "/calendar/v3/calendars/{calendarId}"
+    },
+    {
+      "method": "DELETE",
+      "path_template": "/calendar/v3/calendars/{calendarId}"
+    },
+    {
+      "method": "GET",
+      "path_template": "/calendar/v3/calendars/{calendarId}/events"
+    },
+    {
+      "method": "POST",
+      "path_template": "/calendar/v3/calendars/{calendarId}/events"
+    },
+    {
+      "method": "GET",
+      "path_template": "/calendar/v3/calendars/{calendarId}/events/{eventId}"
+    },
+    {
+      "method": "PATCH",
+      "path_template": "/calendar/v3/calendars/{calendarId}/events/{eventId}"
+    },
+    {
+      "method": "DELETE",
+      "path_template": "/calendar/v3/calendars/{calendarId}/events/{eventId}"
+    },
+    {
+      "method": "POST",
+      "path_template": "/calendar/v3/freeBusy"
+    }
+  ]
+}

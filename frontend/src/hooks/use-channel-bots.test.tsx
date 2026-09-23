@@ -49,6 +49,23 @@ beforeEach(() => {
 });
 
 describe("useChannelBots", () => {
+  it("keeps all-scope, personal and organization results separate when switching", async () => {
+    mockGet.mockImplementation(async (path: string) => ({ bots: [{ id: path }] }));
+    const { result, rerender } = renderHook(
+      ({ scope }: { scope: string | null }) => useChannelBots(
+        scope === "all" ? { scope: "all" } : scope === null ? { scope: "user" } : { orgId: scope },
+      ),
+      { wrapper: createWrapper(), initialProps: { scope: "all" as string | null } },
+    );
+    await waitFor(() => expect(result.current.data).toEqual([{ id: "/channel-bots?scope=all" }]));
+    rerender({ scope: null });
+    await waitFor(() => expect(result.current.data).toEqual([{ id: "/channel-bots?scope=user" }]));
+    rerender({ scope: "org-1" });
+    await waitFor(() => expect(result.current.data).toEqual([{ id: "/channel-bots?org_id=org-1" }]));
+    rerender({ scope: "all" });
+    await waitFor(() => expect(result.current.data).toEqual([{ id: "/channel-bots?scope=all" }]));
+  });
+
   it("lists personal bots at the bare endpoint and unwraps `bots`", async () => {
     mockGet.mockResolvedValue({ bots: [{ id: "bot-1" }] });
     const { result } = renderHook(() => useChannelBots(), {

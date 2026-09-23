@@ -136,6 +136,10 @@ pub fn is_concrete_platform_address(id: &str) -> bool {
 
 pub fn is_addressable(conversation: &ChannelConversation) -> bool {
     conversation.platform != "device"
+        && !(conversation.platform == "x"
+            && super::channel_adapters::x::is_public_conversation(
+                &conversation.platform_conversation_id,
+            ))
         && is_concrete_platform_address(&conversation.platform_conversation_id)
 }
 

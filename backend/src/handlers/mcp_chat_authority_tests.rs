@@ -560,6 +560,7 @@ async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allo
         .db
         .collection(crate::models::service_endpoint::COLLECTION_NAME)
         .insert_one(ServiceEndpoint {
+            target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: service.id.clone(),
             name: "status".into(),

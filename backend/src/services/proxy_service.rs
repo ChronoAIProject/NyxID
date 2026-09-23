@@ -49,6 +49,8 @@ pub enum ProxyBody {
 
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
+    pub workspace_destinations_pending: bool,
+    pub target_id: Option<String>,
     pub base_url: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -157,6 +159,11 @@ pub async fn authorize_master_credential(
     service: &DownstreamService,
     actor: &EffectiveActor,
 ) -> AppResult<AuthorizedMasterCredential> {
+    if !service.destination_targets.is_empty() {
+        return Err(AppError::ValidationError(
+            "Destination targets do not support platform keys".into(),
+        ));
+    }
     super::retired_service_service::require_available(service)?;
     if service.platform_key.is_some() {
         super::platform_key_service::require(db, service, &actor.user_id).await?;
@@ -223,6 +230,11 @@ pub async fn authorize_master_credential_server_chosen(
     _db: &mongodb::Database,
     service: &DownstreamService,
 ) -> AppResult<AuthorizedMasterCredential> {
+    if !service.destination_targets.is_empty() {
+        return Err(AppError::ValidationError(
+            "Destination targets do not support platform keys".into(),
+        ));
+    }
     super::retired_service_service::require_available(service)?;
     if let Some(config) = &service.platform_key
         && (!config.enabled
@@ -449,6 +461,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "prefer",
     "x-trace-id",
     "range",
+    // PostgREST schema selection and item ranges.
+    "accept-profile",
+    "content-profile",
+    "range-unit",
     "if-range",
     "if-none-match",
     "if-modified-since",
@@ -1063,6 +1079,9 @@ pub async fn resolve_admin_proxy_target(
 
     if service.auth_method == "none" {
         return Ok(ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
             base_url: service.base_url.clone(),
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
@@ -1090,6 +1109,10 @@ pub async fn resolve_admin_proxy_target(
     })?;
 
     Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
@@ -1144,6 +1167,10 @@ pub async fn resolve_curation_proxy_target(
         }
     };
     Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
@@ -1249,6 +1276,9 @@ pub async fn resolve_proxy_target(
         let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
             base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
@@ -1296,6 +1326,10 @@ pub async fn resolve_proxy_target(
     let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
         base_url,
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
@@ -1328,6 +1362,10 @@ async fn resolve_catalog_platform_target(
     service.auth_key_name = auth_key_name.clone();
     service.requires_user_credential = false;
     Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method,
         auth_key_name,
@@ -1421,6 +1459,9 @@ pub async fn resolve_proxy_target_lenient(
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
+                workspace_destinations_pending:
+                    super::destination_routing::workspace_destinations_pending(&service),
+                target_id: None,
                 base_url,
                 auth_method: service.auth_method.clone(),
                 auth_key_name: service.auth_key_name.clone(),
@@ -1487,6 +1528,9 @@ pub async fn resolve_proxy_target_lenient(
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
             base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
@@ -2762,6 +2806,9 @@ async fn finish_resolution(
         return Ok(UserServiceResolution {
             target: ProxyTarget {
                 base_url: catalog_service.base_url.clone(),
+                workspace_destinations_pending: catalog_proxy_authorization
+                    .workspace_destinations_pending,
+                target_id: None,
                 auth_method,
                 auth_key_name,
                 credential,
@@ -2801,6 +2848,9 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+                workspace_destinations_pending: catalog_proxy_authorization
+                    .workspace_destinations_pending,
+                target_id: None,
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
                 auth_key_name: user_service.auth_key_name.clone(),
@@ -2901,6 +2951,9 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+                workspace_destinations_pending: catalog_proxy_authorization
+                    .workspace_destinations_pending,
+                target_id: None,
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
                 auth_key_name: user_service.auth_key_name.clone(),
@@ -2964,6 +3017,9 @@ async fn finish_resolution(
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
+            workspace_destinations_pending: catalog_proxy_authorization
+                .workspace_destinations_pending,
+            target_id: None,
             base_url: endpoint.url.clone(),
             auth_method: user_service.auth_method.clone(),
             auth_key_name: user_service.auth_key_name.clone(),
@@ -3017,6 +3073,8 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    workspace_destinations_pending: bool,
+    destination_targets: std::collections::BTreeMap<String, String>,
     policy: Option<ProxyOperationPolicy>,
     service_category: Option<String>,
     requires_user_credential: Option<bool>,
@@ -3039,8 +3097,13 @@ async fn load_catalog_proxy_authorization_for_user_service(
         // additive and must not turn that legacy shape into a new outage.
         return Ok(CatalogProxyAuthorization::default());
     };
+    super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        destination_targets: service.destination_targets,
         policy: service.proxy_operation_policy,
         service_category: Some(service.service_category),
         requires_user_credential: Some(service.requires_user_credential),
@@ -3052,6 +3115,7 @@ fn apply_catalog_proxy_authorization(
     authorization: &CatalogProxyAuthorization,
 ) {
     service.proxy_operation_policy = authorization.policy.clone();
+    service.destination_targets = authorization.destination_targets.clone();
     if let Some(service_category) = authorization.service_category.as_ref() {
         service.service_category = service_category.clone();
     }
@@ -3587,6 +3651,7 @@ fn build_minimal_downstream_service(
         && user_service.catalog_service_id.is_some();
 
     DownstreamService {
+        destination_targets: Default::default(),
         owner_user_id: None,
         recommended_skill_refs: None,
         skills_revision: 0,
@@ -3795,6 +3860,28 @@ impl From<reqwest::Error> for ForwardRequestError {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! { pub(crate) static TARGET_HTTP_CLIENT_BUILDER: std::sync::Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>; }
+
+fn target_http_client() -> Client {
+    #[cfg(test)]
+    if let Ok(builder) = TARGET_HTTP_CLIENT_BUILDER.try_with(|build| build()) {
+        return build_target_http_client(builder);
+    }
+    static CLIENT: std::sync::LazyLock<Client> =
+        std::sync::LazyLock::new(|| build_target_http_client(Client::builder()));
+    CLIENT.clone()
+}
+
+fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
+    builder
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build()
+        .expect("target HTTP client")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request_with_extra_outbound_headers(
     client: &Client,
@@ -3812,6 +3899,12 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     extra_outbound_headers: Vec<(String, String)>,
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    super::destination_routing::validate_outbound_destination(
+        target,
+        method.as_str(),
+        path,
+        &delegated_credentials,
+    )?;
     if matches!(
         target.auth_method.as_str(),
         nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
@@ -3843,6 +3936,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         )
     };
 
+    let destination_client;
+    let client = if target.target_id.is_some() {
+        destination_client = target_http_client();
+        &destination_client
+    } else {
+        client
+    };
     let mut request = client.request(method.clone(), &url);
 
     // Build the final outbound header list up front so reqwest's
@@ -4384,6 +4484,7 @@ mod tests {
             rules: vec![crate::models::downstream_service::ProxyOperationRule {
                 method: "GET".to_string(),
                 path_template: "/health".to_string(),
+                ..Default::default()
             }],
         }));
         let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
@@ -4954,6 +5055,16 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("tracestate"))
         );
+    }
+
+    #[test]
+    fn forward_allowlist_accepts_postgrest_request_headers() {
+        for header in ["prefer", "accept-profile", "content-profile", "range-unit"] {
+            assert!(
+                is_allowed_forward_header(header),
+                "PostgREST request header must be forwarded: {header}"
+            );
+        }
     }
 
     #[test]
@@ -5717,11 +5828,14 @@ mod tests {
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: "none".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential: String::new(),
             service: DownstreamService {
+                destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
@@ -6048,6 +6162,80 @@ mod tests {
         assert_eq!(captured.body, b"PK\x03\x04");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_supabase_preserves_postgrest_inputs_and_injects_apikey() {
+        use wiremock::matchers::{
+            body_json, header, headers as header_values, method, path, query_param,
+        };
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let row = serde_json::json!({"title": "Review audit log", "done": false});
+        Mock::given(method("POST"))
+            .and(path("/rest/v1/todos"))
+            .and(query_param("select", "id,title,done"))
+            .and(header("apikey", "sb_secret_test"))
+            .and(header("content-type", "application/json"))
+            .and(header_values(
+                "prefer",
+                vec!["return=representation", "count=exact"],
+            ))
+            .and(header("accept-profile", "analytics"))
+            .and(header("content-profile", "analytics"))
+            .and(header("range-unit", "items"))
+            .and(body_json(&row))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!([
+                {"id": 1, "title": "Review audit log", "done": false}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = crate::services::user_endpoint_service::normalize_catalog_endpoint_url(
+            Some("api-supabase"),
+            &server.uri(),
+        )
+        .unwrap();
+        let mut target = make_proxy_target(endpoint);
+        target.auth_method = "header".into();
+        target.auth_key_name = "apikey".into();
+        target.credential = "sb_secret_test".into();
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("authorization", "Bearer caller-nyxid-token"),
+            ("apikey", "caller-supplied-key"),
+            ("content-type", "application/json"),
+            ("prefer", "return=representation,count=exact"),
+            ("accept-profile", "analytics"),
+            ("content-profile", "analytics"),
+            ("range-unit", "items"),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+        }
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "todos",
+            Some("select=id,title,done"),
+            headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::from(serde_json::to_vec(&row).unwrap()))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .expect("Supabase request should succeed");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key("authorization"));
+        assert_eq!(requests[0].headers.get_all("apikey").iter().count(), 1);
     }
 
     #[tokio::test]
@@ -6967,11 +7155,14 @@ mod tests {
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: "token_exchange".to_string(),
             auth_key_name: String::new(),
             credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
             service: DownstreamService {
+                destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
@@ -7307,11 +7498,14 @@ mod tests {
     fn make_body_auth_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: "body".to_string(),
             auth_key_name: "app_secret".to_string(),
             credential: "super-secret".to_string(),
             service: DownstreamService {
+                destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
@@ -7534,11 +7728,14 @@ mod tests {
     ) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: auth_method.to_string(),
             auth_key_name: String::new(),
             credential,
             service: DownstreamService {
+                destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
@@ -7785,6 +7982,7 @@ mod tests {
 
     fn test_minimal_downstream() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
@@ -7938,6 +8136,8 @@ mod tests {
     #[test]
     fn credential_header_name_bearer_returns_authorization() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "bearer".to_string(),
             auth_key_name: String::new(),
@@ -7957,6 +8157,8 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_custom_name() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "header".to_string(),
             auth_key_name: "X-Api-Key".to_string(),
@@ -7976,6 +8178,8 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_empty_key() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "header".to_string(),
             auth_key_name: "  ".to_string(),
@@ -7992,6 +8196,8 @@ mod tests {
     #[test]
     fn credential_header_name_none_method() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
@@ -8008,6 +8214,8 @@ mod tests {
     #[test]
     fn credential_header_name_query_method() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "query".to_string(),
             auth_key_name: "key".to_string(),
@@ -8024,6 +8232,8 @@ mod tests {
     #[test]
     fn credential_header_name_aws_sigv4() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "aws_sigv4".to_string(),
             auth_key_name: String::new(),
@@ -8074,6 +8284,8 @@ mod tests {
     #[test]
     fn extend_with_path_credential_skips_non_path() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "bearer".to_string(),
             auth_key_name: String::new(),
@@ -8092,6 +8304,8 @@ mod tests {
     #[test]
     fn extend_with_path_credential_appends_for_path() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "path".to_string(),
             auth_key_name: "bot".to_string(),
@@ -8305,6 +8519,8 @@ mod tests {
         let mut ds = test_minimal_downstream();
         ds.token_exchange_config = None;
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: "https://example.test".into(),
             auth_method: auth_method.into(),
             auth_key_name: auth_key_name.into(),

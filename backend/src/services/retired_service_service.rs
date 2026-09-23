@@ -305,6 +305,8 @@ mod tests {
         internal.proxy_operation_policy =
             Some(crate::models::downstream_service::ProxyOperationPolicy {
                 rules: vec![crate::models::downstream_service::ProxyOperationRule {
+                    target_id: None,
+                    path_parameter_constraints: Default::default(),
                     method: "GET".into(),
                     path_template: "/models".into(),
                 }],

@@ -154,6 +154,8 @@ The `/endpoints` response includes structured endpoint data:
 }
 ```
 
+The parsed endpoint view applies declarative MCP projections: `x-nyxid-mcp-enum` on a path/query parameter narrows its declared enum, and `x-nyxid-mcp-media` on requestBody selects a declared media type. The complete hosted HTTP OpenAPI document retains all declared choices. Google upload tools therefore advertise media/base64 only while the HTTP spec also documents multipart/related.
+
 The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching.
 
 ### Rich catalog metadata
@@ -186,6 +188,7 @@ GET /api/v1/catalog-specs/{spec_key}/openapi.json
 ```
 
 - The registry (`backend/src/services/catalog_spec_registry.rs`) maps catalog slugs to spec keys; several slugs can share one overlay (`api-github` / `api-github-pat`, the Lark / Feishu pairs).
+- The hosted route accepts either the registered overlay key (`firecrawl`) or its catalog service slug (`api-firecrawl`). It only resolves the static in-tree registry; it never treats a user-service slug as a lookup into `/keys`.
 - Each operation carries an `x-aevatar-tool` annotation (`name`, `readOnly`, `destructive`, `requiresApproval`) so agent runtimes can admit operations without guessing.
 - Overlay schemas are restricted to the schema-keyword subset aevatar's workflow admission accepts (`type, enum, properties, required, items, additionalProperties, title, description, default, example, examples, deprecated`; no `$ref`, no union `type` arrays) -- anything outside it makes the operation inadmissible for workflow binding. Enforced by a registry unit test; upstream APIs still enforce real limits (lengths, ranges) at runtime.
 - Seeded services get their `openapi_spec_url` pointed at the hosted overlay automatically (new rows at seed time; existing rows via a null-guarded backfill that never overwrites an admin-set URL).
@@ -221,7 +224,7 @@ credential provisioning.
 
 Catalog responses add optional `recommended_skill_refs`, `skills_revision`, and a separate versioned `skills_manifest_digest`. MCP keeps the existing name-based `catalog_digest` construction; exact-ref changes are discoverable through the new manifest digest. An instance's `recommended_skills` override suppresses inherited refs, even for an empty override.
 
-A dedicated protected Curation service account uses `/api/v1/catalog-curation/services` for grant-scoped discovery and `/services/{id}/skills`, `/skills/history`, and `/skills/restore` for conditional recommendation management. It cannot use unrestricted catalog or service-management routes. Human service editing shares the same revision/history transaction and must send the observed skill revision; omitted legacy revision means zero. See [Service accounts: catalog skill curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for grant administration, request examples, no-op/replay semantics, rollout ordering, and the Ornn package-content boundary.
+A dedicated protected Curation service account uses `/api/v1/catalog-curation/services` for grant-scoped discovery, `/services/{id}/openapi.json` for a bounded operation-contract read, and `/services/{id}/skills`, `/skills/history`, and `/skills/restore` for conditional recommendation management. The contract route returns the source document with upstream servers intact for authoring, without granting execution access or rewriting proxy URLs. Generated skills must use the consumer's authorized NyxID service connection. It supports hosted overlays and anonymously readable custom documents; authenticated custom documents require a separate credentialed capability and are not fetched through the curation bearer. It cannot use unrestricted catalog, key listing/writes, or service-management routes. Exact `GET /keys/{uuid}` metadata reads require the separate `user-services:read` scope and admin-issued key read grant; that grant does not enable credentialed spec fetching. Human service editing shares the same revision/history transaction and must send the observed skill revision; omitted legacy revision means zero. See [Service accounts: catalog skill curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for grant administration, request examples, no-op/replay semantics, rollout ordering, and the Ornn package-content boundary.
 ## Inference and platform-key discovery (0.20)
 
 Catalog list, `?include_all=true`, single-entry lookup and MCP

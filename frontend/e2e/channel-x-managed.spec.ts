@@ -9,9 +9,11 @@ const bootstrap = {
   provider_slug: "twitter",
   required_scopes: [
     "tweet.read",
+    "tweet.write",
     "users.read",
     "dm.read",
     "dm.write",
+    "media.write",
     "offline.access",
   ],
   authorize_start_url: "/channel-bots/managed-onboarding/x/start",
@@ -26,6 +28,7 @@ const bot = {
   is_active: true,
   credential_source: "connection",
   connection_id: connection,
+  x_events: ["dm"],
   webhook_ingestion: false,
   webhook_registered: false,
   webhook_url: "",
@@ -58,9 +61,20 @@ for (const viewport of [
     await page.route("**/channel-bots/managed-onboarding/x", (route) =>
       route.fulfill({ json: bootstrap }),
     );
-    await page.route("**/api/v1/channel-bots/connected-x", (route) =>
-      route.fulfill({ json: currentBot }),
-    );
+    const updates: unknown[] = [];
+    await page.route("**/api/v1/channel-bots/connected-x", async (route) => {
+      if (route.request().method() === "PATCH") {
+        const update = route.request().postDataJSON() as { x_events: string[] };
+        updates.push(update);
+        currentBot = {
+          ...currentBot,
+          x_events: update.x_events,
+          webhook_ingestion: true,
+          webhook_registered: true,
+        };
+      }
+      await route.fulfill({ json: currentBot });
+    });
     const starts: unknown[] = [];
     const completes: unknown[] = [];
     const reconnects: unknown[] = [];
@@ -86,8 +100,13 @@ for (const viewport of [
     );
     await page.route("**/channel-bots/connected-x/reconnect", async (route) => {
       reconnects.push(route.request().postDataJSON());
-      currentBot = { ...currentBot, status: "active", poll_error_count: 0, error: null,
-        next_poll_at: "2026-09-08T00:10:00Z" };
+      currentBot = {
+        ...currentBot,
+        status: "active",
+        poll_error_count: 0,
+        error: null,
+        next_poll_at: "2026-09-08T00:10:00Z",
+      };
       await route.fulfill({ json: { ok: true } });
     });
     await context.route("https://x.com/i/oauth2/authorize?**", (route) =>
@@ -101,7 +120,7 @@ for (const viewport of [
     await page.goto("/channel-bots?connect=x&label=DM%20Support");
     const dialog = page.getByRole("dialog");
     await expect(
-      dialog.getByRole("button", { name: "Connect X account" }),
+      dialog.getByRole("button", { name: "Connect X (Twitter) account" }),
     ).toBeVisible();
     await expect(dialog.getByLabel("Bot Token", { exact: true })).toHaveCount(
       0,
@@ -117,34 +136,89 @@ for (const viewport of [
         (element) => element.scrollWidth <= element.clientWidth,
       ),
     ).toBe(true);
-    await dialog.getByRole("button", { name: "Connect X account" }).click();
+    await dialog
+      .getByRole("button", { name: "Connect X (Twitter) account" })
+      .click();
     await expect(page).toHaveURL(/channel-bots\/connected-x$/);
     expect(starts).toEqual([{ label: bot.label }]);
     expect(completes).toEqual([
       { connection_id: connection, label: bot.label },
     ]);
     await expect(
-      page.getByText("Connected X account", { exact: true }),
+      page.getByRole("heading", { name: "Connected account", exact: true }),
     ).toBeVisible();
     await expect(page.getByText("Last polled", { exact: true })).toBeVisible();
     await expect(
       page.getByText("Finish webhook setup", { exact: true }),
     ).toHaveCount(0);
-    currentBot = { ...currentBot, status: "failed", poll_error_count: 5, error: "Reconnect the account to resume polling" };
+    currentBot = {
+      ...currentBot,
+      webhook_ingestion: false,
+      status: "failed",
+      poll_error_count: 5,
+      error: "Reconnect the account to resume polling",
+    };
     await page.reload();
-    await expect(page.getByText(currentBot.error, { exact: true })).toBeVisible();
-    await expect(page.getByText("Consecutive errors", { exact: true }).locator("..")).toContainText("5");
+    await expect(
+      page.getByText(currentBot.error, { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Consecutive errors", { exact: true }).locator(".."),
+    ).toContainText("5");
     await page.getByRole("button", { name: "Reconnect", exact: true }).click();
     await expect.poll(() => reconnects.length).toBe(1);
     expect(reconnects[0]).toEqual({ connection_id: connection });
-    await expect(page.getByText("Account reconnected", { exact: true })).toBeVisible();
-    await expect(page.getByText("Reconnect the account to resume polling", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("Consecutive errors", { exact: true }).locator("..")).toContainText("0");
-    await expect(page.getByText("Next poll", { exact: true }).locator("..")).toContainText("2026-09-08T00:10:00Z");
-    await expect(page.getByText("Cursor", { exact: true }).locator("..")).toContainText("100");
+    await expect(
+      page.getByText("Account reconnected", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Reconnect the account to resume polling", {
+        exact: true,
+      }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByText("Consecutive errors", { exact: true }).locator(".."),
+    ).toContainText("0");
+    await expect(
+      page.getByText("Next poll", { exact: true }).locator(".."),
+    ).toContainText("2026-09-08T00:10:00Z");
+    await expect(
+      page.getByText("Cursor", { exact: true }).locator(".."),
+    ).toContainText("100");
+    const save = page.getByRole("button", { name: "Save event subscriptions" });
+    await expect(
+      page.getByRole("checkbox", { name: "Direct messages" }),
+    ).toBeChecked();
+    await expect(save).toBeDisabled();
+    await page.getByRole("checkbox", { name: "Direct messages" }).uncheck();
+    await expect(save).toBeDisabled();
+    await expect(page.getByRole("alert")).toContainText("Select at least one");
+    await page.getByRole("checkbox", { name: "Direct messages" }).check();
+    await page.getByRole("checkbox", { name: "Mentions", exact: true }).check();
+    await page.getByRole("checkbox", { name: "Replies to my posts" }).check();
+    await expect(save).toBeEnabled();
+    await save.click();
+    await expect(
+      page.getByText("X event subscriptions updated", { exact: true }),
+    ).toBeVisible();
+    expect(updates).toEqual([{ x_events: ["dm", "mentions", "replies"] }]);
+    await expect(save).toBeDisabled();
+    await page.reload();
+    await expect(
+      page.getByRole("checkbox", { name: "Mentions", exact: true }),
+    ).toBeChecked();
+    await expect(
+      page.getByRole("checkbox", { name: "Replies to my posts" }),
+    ).toBeChecked();
+    await page
+      .getByRole("heading", { name: "Events to receive" })
+      .locator("..")
+      .screenshot({
+        path: `/tmp/nyx-x-events-${String(viewport.width)}.png`,
+      });
     await page.getByRole("button", { name: "Delete", exact: true }).click();
     await expect(
-      page.getByRole("dialog").getByText(/OAuth connection stays connected/),
+      page.getByRole("dialog").getByText(/platform account stays connected/),
     ).toBeVisible();
     await page
       .getByRole("dialog")
@@ -176,7 +250,9 @@ test("X is unavailable until platform credentials are configured", async ({
     "Not available until an admin configures X (Twitter).",
   );
   await expect(
-    page.getByRole("dialog").getByRole("button", { name: "Connect X account" }),
+    page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Connect X (Twitter) account" }),
   ).toHaveCount(0);
 });
 
@@ -206,11 +282,90 @@ test("X OAuth denial leaves the dialog retryable", async ({
     }),
   );
   await page.goto("/channel-bots?connect=x&label=Support");
-  await page.getByRole("button", { name: "Connect X account" }).click();
+  await page
+    .getByRole("button", { name: "Connect X (Twitter) account" })
+    .click();
   await expect(
     page.getByText(/Account authorization failed or was cancelled/),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Connect X account" }),
+    page.getByRole("button", { name: "Connect X (Twitter) account" }),
   ).toBeEnabled();
+});
+
+test("X event permission errors preserve choices and partial setup errors refresh channel state", async ({
+  page,
+}) => {
+  await mockDashboard(page);
+  let currentBot = { ...bot, error: null as string | null };
+  let consentGranted = false;
+  await page.route("**/channel-bots/managed-onboarding/x", (route) =>
+    route.fulfill({ json: bootstrap }),
+  );
+  await page.route("**/api/v1/channel-bots/connected-x", async (route) => {
+    if (route.request().method() === "PATCH") {
+      if (!consentGranted) {
+        await route.fulfill({
+          status: 400,
+          json: {
+            message: "Reconnect the X account to grant tweet.write",
+            error_code: 1000,
+          },
+        });
+        return;
+      }
+      currentBot = {
+        ...currentBot,
+        x_events: route.request().postDataJSON().x_events as string[],
+        status: "failed",
+        error: "Webhook setup did not complete. Select Verify to retry.",
+      };
+      await route.fulfill({
+        status: 502,
+        json: { message: "X subscription setup failed", error_code: 10005 },
+      });
+      return;
+    }
+    await route.fulfill({ json: currentBot });
+  });
+  await page.goto("/channel-bots/connected-x");
+  await page.getByRole("checkbox", { name: "Mentions", exact: true }).check();
+  const save = page.getByRole("button", { name: "Save event subscriptions" });
+  await save.click();
+  await expect(
+    page.getByText("Reconnect the X account to grant tweet.write", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("checkbox", { name: "Mentions", exact: true }),
+  ).toBeChecked();
+  await expect(save).toBeEnabled();
+  consentGranted = true;
+  await save.click();
+  await expect(
+    page.getByText("Webhook setup did not complete. Select Verify to retry.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(save).toBeDisabled();
+  await page.route("**/channel-bots/connected-x/verify", async (route) => {
+    currentBot = { ...currentBot, status: "active", error: null };
+    await route.fulfill({
+      json: {
+        status: "active",
+        platform_bot_id: "10",
+        platform_bot_username: "support",
+      },
+    });
+  });
+  await page.getByRole("button", { name: "Verify Bot", exact: true }).click();
+  await expect(
+    page.getByText("Webhook setup did not complete. Select Verify to retry.", {
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("checkbox", { name: "Mentions", exact: true }),
+  ).toBeChecked();
 });

@@ -266,6 +266,12 @@ export const ChannelBotsPage = lazy(() =>
     default: m.ChannelBotsPage,
   })),
 );
+export const ChannelBotSetupPage = lazy(() =>
+  import("@/pages/channel-bot-setup").then((m) => ({ default: m.ChannelBotSetupPage })),
+);
+export const ChannelBotSetupLinksPage = lazy(() =>
+  import("@/pages/channel-bot-setup").then((m) => ({ default: m.ChannelBotSetupLinksPage })),
+);
 export const ChannelBotDetailPage = lazy(() =>
   import("@/pages/channel-bot-detail").then((m) => ({
     default: m.ChannelBotDetailPage,

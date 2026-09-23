@@ -532,6 +532,10 @@ See [ORACLE_RELAY.md](ORACLE_RELAY.md) for the full design.
 |----------|---------|-------------|
 | `RUST_LOG` | `nyxid=info,tower_http=info` | Tracing filter string |
 
+### Drive and Workspace automatic editor activation
+
+Drive and Workspace editor routing activates automatically at startup for recognized seeded catalogs. Startup preserves customized policies, maps, and provider requirements. Incomplete reconciliation of an exact legacy default returns HTTP 503/code 12300, `workspace_destinations_not_activated`; inspect the server's reconciliation warnings and service configuration. There is no activation environment variable. Before starting this release, verify all backend readers and participating/failover nodes support target routing and HTTP signature v2. See [Google Workspace OAuth](GOOGLE_WORKSPACE_OAUTH.md) for rollout, Google API prerequisites, and approval drift.
+
 
 ## Service-history database topology
 

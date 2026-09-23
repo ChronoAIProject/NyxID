@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loginAgentKeyRoute, loginDeviceRoute, loginCodeRoute, oauthCompleteRoute } from "./router";
+import { channelBotSetupRoute, loginAgentKeyRoute, loginDeviceRoute, loginCodeRoute, oauthCompleteRoute } from "./router";
 import { isPublicPath } from "./lib/public-paths";
 
 describe.each([loginAgentKeyRoute, loginDeviceRoute])("Login approval route $fullPath", (route) => {
@@ -31,4 +31,13 @@ describe("OAuth completion route registration", () => {
   it("registers the completion component outside the backend OAuth namespace", () => {
     expect(oauthCompleteRoute.fullPath).toBe("/oauth-complete");
   });
+});
+
+it("protects per-platform setup routes and accepts scalar prefill values", () => {
+  expect(channelBotSetupRoute.fullPath).toBe("/channel-bots/connect/$platform");
+  expect(isPublicPath("/channel-bots/connect/telegram")).toBe(false);
+  const validate = channelBotSetupRoute.options.validateSearch;
+  if (typeof validate !== "function") throw new Error("Expected a search validator");
+  expect(validate({ label: "a".repeat(150), target_org_id: ["org"], request_id: "invalid", bot_token: "private", future_field: "value", nested: { value: "ignored" } }))
+    .toEqual({ label: "a".repeat(128), target_org_id: undefined, request_id: undefined, bot_token: "private", future_field: "value" });
 });
