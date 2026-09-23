@@ -3808,8 +3808,8 @@ async fn build_disconnect_plan(
     let affected_key_ids: Vec<String> = affected_keys.iter().map(|key| key.id.clone()).collect();
     let unaffected_key_ids: Vec<String> =
         unaffected_keys.iter().map(|key| key.id.clone()).collect();
-    let affected_services = active_services_for_keys(db, owner_id, &affected_key_ids).await?;
-    let unaffected_services = active_services_for_keys(db, owner_id, &unaffected_key_ids).await?;
+    let affected_services = retained_services_for_keys(db, owner_id, &affected_key_ids).await?;
+    let unaffected_services = retained_services_for_keys(db, owner_id, &unaffected_key_ids).await?;
     let primary_service_id = primary_service.as_ref().map(|service| service.id.as_str());
     let mut siblings: Vec<GrantCascadeSibling> = affected_services
         .iter()
@@ -3919,7 +3919,7 @@ async fn build_disconnect_plan(
     })
 }
 
-async fn active_services_for_keys(
+async fn retained_services_for_keys(
     db: &mongodb::Database,
     owner_id: &str,
     key_ids: &[String],
@@ -3927,18 +3927,42 @@ async fn active_services_for_keys(
     if key_ids.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(crate::services::service_history::collection::<UserService>(
+    let services: Vec<UserService> = crate::services::service_history::collection::<UserService>(
         db,
         crate::models::user_service::COLLECTION_NAME,
     )
     .find(doc! {
         "user_id": owner_id,
         "api_key_id": { "$in": key_ids },
-        "is_active": true,
+        "deleted_at": null,
     })
     .await?
     .try_collect()
-    .await?)
+    .await?;
+    // Older deleted rows have no deleted_at marker. An extant endpoint
+    // distinguishes a disabled connection from one of those tombstones.
+    let disabled_endpoint_ids: Vec<&str> = services
+        .iter()
+        .filter(|service| !service.is_active)
+        .map(|service| service.endpoint_id.as_str())
+        .collect();
+    if disabled_endpoint_ids.is_empty() {
+        return Ok(services);
+    }
+    let retained_endpoint_ids: HashSet<String> = db
+        .collection::<UserEndpoint>(crate::models::user_endpoint::COLLECTION_NAME)
+        .distinct(
+            "_id",
+            doc! { "_id": { "$in": disabled_endpoint_ids }, "user_id": owner_id },
+        )
+        .await?
+        .into_iter()
+        .filter_map(|id| id.as_str().map(str::to_owned))
+        .collect();
+    Ok(services
+        .into_iter()
+        .filter(|service| service.is_active || retained_endpoint_ids.contains(&service.endpoint_id))
+        .collect())
 }
 
 fn grant_sibling_from_service(service: &UserService) -> GrantCascadeSibling {
@@ -6826,6 +6850,148 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_github_service_is_deleted_with_its_grant() {
+        let Some(db) = connect_test_database("unified_revocation_disabled_github").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider = grant_provider();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        insert_modern_oauth_service(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &provider.id,
+            "disabled-github",
+            None,
+        )
+        .await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": "disabled-github" },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        let result = super::disconnect_credentials(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &test_audit_actor(&user_id),
+            super::DisconnectTarget::UserService("disabled-github"),
+            super::DisconnectOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.deleted_services.len(), 1);
+        assert!(
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .find_one(doc! { "_id": "ep-disabled-github" })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! { "_id": "key-disabled-github" })
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn grant_cascade_includes_disabled_sibling_but_not_deleted_tombstone() {
+        let Some(db) = connect_test_database("unified_revocation_disabled_sibling").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider = grant_provider();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        for service_id in ["active-github", "disabled-github", "deleted-github"] {
+            insert_modern_oauth_service(
+                &db,
+                &encryption_keys,
+                &user_id,
+                &provider.id,
+                service_id,
+                None,
+            )
+            .await;
+        }
+        db.collection::<UserService>(USER_SERVICES)
+            .update_many(
+                doc! { "_id": { "$in": ["disabled-github", "deleted-github"] } },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .delete_one(doc! { "_id": "ep-deleted-github" })
+            .await
+            .unwrap();
+
+        let err = super::disconnect_credentials(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &test_audit_actor(&user_id),
+            super::DisconnectTarget::UserService("active-github"),
+            super::DisconnectOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        let AppError::GrantCascadeConfirmationRequired(payload) = err else {
+            panic!("expected grant cascade confirmation");
+        };
+        assert_eq!(payload.siblings.len(), 2);
+        assert!(
+            payload
+                .siblings
+                .iter()
+                .any(|s| s.user_service_id == "disabled-github")
+        );
+        assert!(
+            payload
+                .siblings
+                .iter()
+                .all(|s| s.user_service_id != "deleted-github")
+        );
+
+        let result = super::disconnect_credentials(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &test_audit_actor(&user_id),
+            super::DisconnectTarget::UserService("active-github"),
+            super::DisconnectOptions {
+                cascade_grant: true,
+                grant_scope: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.deleted_services.len(), 2);
+        assert!(
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .find_one(doc! { "_id": "ep-disabled-github" })
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
