@@ -92,7 +92,7 @@ async fn public_service_introspection_registration_requires_admin_and_confidenti
             assert!(f.evidence().await.is_ok());
         }
     }
-    update_service(
+    let cleared = update_service(
         State(state),
         test_auth_user(&f.owner),
         Default::default(),
@@ -101,6 +101,7 @@ async fn public_service_introspection_registration_requires_admin_and_confidenti
     )
     .await
     .unwrap();
+    assert_eq!(cleared.0.introspection_client_ids, Some(vec![]));
     assert!(f.evidence().await.is_err());
 }
 
