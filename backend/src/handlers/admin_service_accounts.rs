@@ -32,7 +32,7 @@ pub(crate) async fn require_admin_or_owning_org_admin(
     }
 
     if sa.platform_protected
-        || sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+        || sa.purpose != crate::models::service_account::ServiceAccountPurpose::General
     {
         return Err(AppError::Forbidden(
             "Protected service accounts require platform admin".into(),
@@ -74,7 +74,7 @@ async fn require_admin_read_or_owning_org_admin(
     }
 
     if sa.platform_protected
-        || sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+        || sa.purpose != crate::models::service_account::ServiceAccountPurpose::General
     {
         return Err(AppError::Forbidden(
             "Protected service accounts require platform administration".into(),

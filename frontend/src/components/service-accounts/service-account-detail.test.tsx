@@ -12,6 +12,7 @@ const mock = vi.hoisted(() => ({
     secret_prefix: "prefix",
     allowed_scopes: "openid",
     role_ids: ["role-a"],
+    purpose: "general" as "general" | "catalog_editor",
     rate_limit_override: 10,
     is_active: true,
     created_at: "2026-09-01T00:00:00Z",
@@ -34,7 +35,10 @@ vi.mock("@/hooks/use-service-accounts", () => ({
   useRevokeTokens: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 vi.mock("@/components/dashboard/sa-connected-services", () => ({
-  SaConnectedServices: () => null,
+  SaConnectedServices: () => <div data-testid="provider-connections" />,
+}));
+vi.mock("./curation-grant-section", () => ({
+  CurationGrantSection: () => <div data-testid="curation-grant-section" />,
 }));
 vi.mock("./key-read-grant-section", () => ({
   KeyReadGrantSection: ({ saId }: { readonly saId: string }) => (
@@ -162,4 +166,36 @@ it("blocks a reviewed role replacement after an observed revocation", async () =
     screen.getByRole("button", { name: "Confirm changes" }),
   ).toBeDisabled();
   expect(mock.update).not.toHaveBeenCalled();
+});
+
+it("shows standing catalog authority without UUID grant forms and keeps provider connections", () => {
+  mock.account = {
+    ...mock.account,
+    purpose: "catalog_editor",
+    allowed_scopes:
+      "catalog:skills:read catalog:skills:write user-services:read proxy",
+    role_ids: ["catalog-editor-role"],
+  };
+  render(
+    <ServiceAccountDetail
+      saId="sa-1"
+      backTo={{ to: "/admin/service-accounts", label: "Accounts" }}
+    />,
+  );
+
+  expect(
+    screen.getByText("All current and future catalog services"),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      /role must retain the matching NyxID catalog permissions/i,
+    ),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByTestId("curation-grant-section"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByTestId("key-read-grant-section"),
+  ).not.toBeInTheDocument();
+  expect(screen.getByTestId("provider-connections")).toBeInTheDocument();
 });

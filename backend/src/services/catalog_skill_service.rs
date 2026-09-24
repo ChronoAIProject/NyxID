@@ -26,7 +26,7 @@ use crate::{
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static COLLISION: transactions::TransactionCollisionHook;
-    static AUTHORITY_PAUSE: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+    pub(crate) static AUTHORITY_PAUSE: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<std::sync::atomic::AtomicBool>);
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -257,7 +257,18 @@ async fn machine_authority(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Unauthorized("Service account not found".into()))?;
-    grants::require_service(&sa, scope, grants::WRITE_SCOPE, service_id)?;
+    if sa.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor {
+        super::catalog_editor_service::authorize_in_session(
+            db,
+            session,
+            &sa,
+            scope,
+            grants::WRITE_SCOPE,
+        )
+        .await?;
+    } else {
+        grants::require_service(&sa, scope, grants::WRITE_SCOPE, service_id)?;
+    }
     let token = db
         .collection::<ServiceAccountToken>(TOKENS)
         .find_one(doc! {"jti": token_jti, "service_account_id": id})
@@ -281,6 +292,50 @@ async fn reserve_budget(
     session: &mut ClientSession,
     sa: &ServiceAccount,
 ) -> AppResult<String> {
+    if sa.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor {
+        super::catalog_editor_service::fence_write_in_session(db, session, sa).await?;
+        let now = Utc::now();
+        let current = db
+            .collection::<Document>(ACCOUNTS)
+            .find_one(doc! {"_id": &sa.id})
+            .projection(doc! {"catalog_editor_write_window": 1, "catalog_editor_writes_used": 1})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("Service account not found".into()))?;
+        let started = current
+            .get_datetime("catalog_editor_write_window")
+            .ok()
+            .copied();
+        let reset = started.is_none_or(|started| {
+            now.signed_duration_since(started.to_chrono())
+                .num_milliseconds()
+                >= 1000
+        });
+        let used = if reset {
+            0
+        } else {
+            current.get_i64("catalog_editor_writes_used").unwrap_or(0)
+        };
+        let limit = sa.rate_limit_override.unwrap_or(60).min(i64::MAX as u64) as i64;
+        if used >= limit {
+            return Err(AppError::RateLimited);
+        }
+        let window = if reset {
+            bson::DateTime::from_chrono(now)
+        } else {
+            started.unwrap()
+        };
+        let result = db.collection::<Document>(ACCOUNTS).update_one(
+            doc! {"_id": &sa.id, "purpose": "catalog_editor", "platform_protected": true, "is_active": true, "$expr": {"$eq": [{"$ifNull": ["$credential_generation", 0_i64]}, sa.credential_generation]}},
+            doc! {"$inc": {"catalog_editor_write_sequence": 1_i64}, "$set": {"catalog_editor_write_window": window, "catalog_editor_writes_used": used + 1}},
+        ).session(session).await?;
+        if result.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Catalog editor authority changed".into(),
+            ));
+        }
+        return Ok(format!("catalog-editor:{}", sa.id));
+    }
     let grant = grants::live_grant(sa)?;
     let now = Utc::now();
     let reset = now

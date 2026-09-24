@@ -1,5 +1,5 @@
 export interface ServiceAccount {
-  readonly purpose?: "general" | "curation";
+  readonly purpose?: "general" | "curation" | "catalog_editor";
   readonly platform_protected?: boolean;
   readonly credential_generation?: number;
   readonly curation_grant?: CurationGrant | null;

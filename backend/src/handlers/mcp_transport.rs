@@ -730,7 +730,7 @@ async fn verify_service_account_active(
     let sa = crate::services::service_account_service::validate_access_token(&state.db, claims)
         .await
         .map_err(|_| mcp_401(&state.config.base_url))?;
-    if sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation {
+    if sa.purpose != crate::models::service_account::ServiceAccountPurpose::General {
         return Err(mcp_403_insufficient_scope());
     }
     Ok((sa.id.clone(), sa.effective_owner_user_id().to_string()))

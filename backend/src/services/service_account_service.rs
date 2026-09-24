@@ -120,6 +120,11 @@ pub async fn create_service_account_with_id(
         }
     }
 
+    let catalog_editor =
+        super::catalog_editor_service::role_has_editor_permissions(db, role_ids).await?;
+    if catalog_editor {
+        super::catalog_editor_service::validate_scopes(allowed_scopes)?;
+    }
     let client_id = generate_client_id();
     let raw_secret = generate_client_secret();
     let secret_hash = hash_token(&raw_secret);
@@ -132,8 +137,12 @@ pub async fn create_service_account_with_id(
         description: description.map(String::from),
         client_id,
         client_secret_hash: secret_hash,
-        platform_protected: false,
-        purpose: crate::models::service_account::ServiceAccountPurpose::General,
+        platform_protected: catalog_editor,
+        purpose: if catalog_editor {
+            crate::models::service_account::ServiceAccountPurpose::CatalogEditor
+        } else {
+            crate::models::service_account::ServiceAccountPurpose::General
+        },
         curation_grant: None,
         credential_generation: 0,
         secret_prefix,
@@ -231,7 +240,21 @@ pub async fn update_service_account(
 ) -> AppResult<ServiceAccount> {
     // Verify it exists first
     let existing = get_service_account(db, sa_id).await?;
+    let activate_editor = if let Some(roles) = role_ids {
+        platform_admin
+            && super::catalog_editor_service::role_has_editor_permissions(db, roles).await?
+    } else {
+        false
+    };
+    if activate_editor
+        || existing.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor
+    {
+        super::catalog_editor_service::validate_scopes(
+            allowed_scopes.unwrap_or(&existing.allowed_scopes),
+        )?;
+    }
     if existing.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+        && !activate_editor
         && let Some(scopes) = allowed_scopes
     {
         super::curation_grant_service::validate_scopes(
@@ -279,6 +302,15 @@ pub async fn update_service_account(
     }
 
     if let Some(roles) = role_ids {
+        if !platform_admin {
+            return Err(AppError::Forbidden(
+                "Role assignment requires platform admin".into(),
+            ));
+        }
+        if activate_editor {
+            set_doc.insert("platform_protected", true);
+            set_doc.insert("purpose", "catalog_editor");
+        }
         if !roles.is_empty() {
             let existing_count = db
                 .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
@@ -319,10 +351,16 @@ pub async fn update_service_account(
     let mut filter = management_filter(sa_id, platform_admin);
     filter.insert(
         "purpose",
-        if existing.purpose == crate::models::service_account::ServiceAccountPurpose::Curation {
-            bson::Bson::String("curation".into())
-        } else {
-            bson::Bson::Document(doc! {"$ne": "curation"})
+        match existing.purpose {
+            crate::models::service_account::ServiceAccountPurpose::Curation => {
+                bson::Bson::String("curation".into())
+            }
+            crate::models::service_account::ServiceAccountPurpose::CatalogEditor => {
+                bson::Bson::String("catalog_editor".into())
+            }
+            crate::models::service_account::ServiceAccountPurpose::General => {
+                bson::Bson::Document(doc! {"$nin": ["curation", "catalog_editor"]})
+            }
         },
     );
     let mut update = doc! {"$set": set_doc};
@@ -406,7 +444,7 @@ fn management_filter(sa_id: &str, platform_admin: bool) -> bson::Document {
     let mut filter = doc! {"_id": sa_id};
     if !platform_admin {
         filter.insert("platform_protected", doc! {"$ne": true});
-        filter.insert("purpose", doc! {"$ne": "curation"});
+        filter.insert("purpose", doc! {"$nin": ["curation", "catalog_editor"]});
     }
     filter
 }

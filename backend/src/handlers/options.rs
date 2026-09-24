@@ -429,7 +429,11 @@ mod tests {
                 .unwrap()
                 .to_string();
             let expected_scopes: &[&str] = if path.contains("search=catalog:") {
-                &["catalog:skills:read", "catalog:skills:write"]
+                &[
+                    "catalog:skills:read",
+                    "catalog:skills:write",
+                    "user-services:read",
+                ]
             } else if path.contains("search=proxy:*") {
                 &["proxy:*"]
             } else if path.contains("search=groups") {

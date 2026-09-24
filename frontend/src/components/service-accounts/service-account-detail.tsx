@@ -317,8 +317,28 @@ function ServiceAccountDetailEditor({
 
       <Separator />
 
-      {showProviderSections && <CurationGrantSection account={sa} />}
-      {showKeyReadGrantSection && <KeyReadGrantSection saId={saId} />}
+      {sa.purpose === "catalog_editor" ? (
+        <DetailSection title="Catalog skill editing">
+          <DetailRow
+            label="Catalog coverage"
+            value="All current and future catalog services"
+          />
+          <DetailRow
+            label="Access"
+            value="Live catalog skill role and matching token scopes required"
+          />
+          <p className="px-4 py-3 text-[12px] text-muted-foreground">
+            GET /keys requires catalog:skills:read and user-services:read. Skill
+            changes require catalog:skills:write. The role must retain the
+            matching NyxID catalog permissions.
+          </p>
+        </DetailSection>
+      ) : (
+        <>
+          {showProviderSections && <CurationGrantSection account={sa} />}
+          {showKeyReadGrantSection && <KeyReadGrantSection saId={saId} />}
+        </>
+      )}
 
       {showProviderSections ? (
         <SaConnectedServices saId={saId} />
