@@ -208,6 +208,17 @@ pub(crate) async fn connect_transaction_test_database(prefix: &str) -> mongodb::
     db
 }
 
+pub(crate) async fn connect_transaction_test_database_with_command_handler(
+    prefix: &str,
+    handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
+) -> mongodb::Database {
+    let db = connect_test_database_with_command_handler(prefix, handler)
+        .await
+        .expect("MongoDB required");
+    assert_transaction_test_topology(&db).await;
+    db
+}
+
 async fn assert_transaction_test_topology(db: &mongodb::Database) {
     let hello = db
         .run_command(doc! { "hello": 1 })

@@ -135,6 +135,9 @@ pub async fn issue(
         return Err(AppError::ValidationError("Curation proxy target requires an active HTTP catalog service with an explicit proxy operation policy".into()));
     }
     let sa = super::service_account_service::get_service_account(db, sa_id).await?;
+    if sa.purpose == ServiceAccountPurpose::CatalogEditor {
+        return Err(AppError::Conflict("Catalog editors use role permissions; an exact curation grant cannot replace that authority".into()));
+    }
     let owner = db
         .collection::<User>(USERS)
         .find_one(doc! {"_id": sa.effective_owner_user_id()})
@@ -160,7 +163,7 @@ pub async fn issue(
         writes_used: 0,
     };
     db.collection::<ServiceAccount>(ACCOUNTS).find_one_and_update(
-        doc! {"_id": sa_id, "allowed_scopes": &sa.allowed_scopes, "owner_user_id": bson::to_bson(&sa.owner_user_id).map_err(|e| AppError::Internal(e.to_string()))?},
+        doc! {"_id": sa_id, "purpose": {"$ne": "catalog_editor"}, "allowed_scopes": &sa.allowed_scopes, "owner_user_id": bson::to_bson(&sa.owner_user_id).map_err(|e| AppError::Internal(e.to_string()))?},
         doc! {"$set": {"purpose": "curation", "platform_protected": true,
             "curation_grant": bson::to_bson(&grant).map_err(|e| AppError::Internal(e.to_string()))?, "updated_at": bson::DateTime::from_chrono(now)}})
         .return_document(mongodb::options::ReturnDocument::After).await?
@@ -168,7 +171,13 @@ pub async fn issue(
 }
 
 pub async fn revoke(db: &Database, sa_id: &str) -> AppResult<ServiceAccount> {
-    db.collection::<ServiceAccount>(ACCOUNTS).find_one_and_update(doc! {"_id": sa_id},
+    let sa = super::service_account_service::get_service_account(db, sa_id).await?;
+    if sa.purpose == ServiceAccountPurpose::CatalogEditor {
+        return Err(AppError::Forbidden(
+            "Catalog editors use role permissions; legacy grant removal is unavailable".into(),
+        ));
+    }
+    db.collection::<ServiceAccount>(ACCOUNTS).find_one_and_update(doc! {"_id": sa_id, "purpose": {"$ne": "catalog_editor"}},
         doc! {"$unset": {"curation_grant": ""}, "$set": {"updated_at": bson::DateTime::from_chrono(Utc::now())}})
         .return_document(mongodb::options::ReturnDocument::After).await?
         .ok_or_else(|| AppError::ServiceAccountNotFound(sa_id.into()))

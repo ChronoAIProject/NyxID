@@ -110,6 +110,8 @@ pub mod users;
 pub mod webhooks;
 
 pub mod catalog_curation;
+#[cfg(test)]
+mod catalog_editor_tests;
 
 pub mod assistant_nyxagent;
 pub mod channel_platforms;

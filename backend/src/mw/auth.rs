@@ -346,6 +346,52 @@ fn ensure_service_account_purpose_route(
     ))
 }
 
+async fn ensure_catalog_editor_route(
+    db: &mongodb::Database,
+    sa: &ServiceAccount,
+    scope: &str,
+    method: &Method,
+    path: &str,
+    websocket: bool,
+) -> Result<(), AppError> {
+    use crate::services::{
+        catalog_editor_proxy_service, catalog_editor_service, curation_grant_service,
+    };
+    if !sa.platform_protected || websocket {
+        return Err(AppError::Forbidden(
+            "Catalog editor requires protected ordinary HTTP access".into(),
+        ));
+    }
+    if *method == Method::GET
+        && crate::services::service_account_key_read_service::is_key_metadata_path(path)
+    {
+        curation_grant_service::require_scope(
+            sa,
+            scope,
+            crate::services::service_account_key_read_service::READ_SCOPE,
+        )?;
+        return catalog_editor_service::authorize(
+            db,
+            sa,
+            scope,
+            curation_grant_service::READ_SCOPE,
+        )
+        .await;
+    }
+    if path_matches_prefix(path, "/api/v1/catalog-curation") {
+        return Ok(());
+    }
+    if path_matches_prefix(path, "/api/v1/proxy") {
+        let target = catalog_editor_proxy_service::authorized_target(db, sa, scope).await?;
+        if path_matches_prefix(path, &format!("/api/v1/proxy/{target}")) {
+            return Ok(());
+        }
+    }
+    Err(AppError::Forbidden(
+        "Catalog editors can only manage catalog skills and use the Ornn HTTP proxy".into(),
+    ))
+}
+
 fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
     if api_key.purpose != ApiKeyPurpose::ScheduledInvocation {
         return Ok(());
@@ -778,13 +824,20 @@ impl FromRequestParts<AppState> for AuthUser {
                             .extensions
                             .get::<OriginalUri>()
                             .map_or_else(|| parts.uri.path(), |uri| uri.path());
-                        ensure_service_account_purpose_route(
-                            &sa,
-                            &claims.scope,
-                            &parts.method,
-                            request_path,
-                            is_websocket_upgrade(&parts.headers),
-                        )?;
+                        if sa.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor {
+                            ensure_catalog_editor_route(
+                                &state.db, &sa, &claims.scope, &parts.method, request_path,
+                                is_websocket_upgrade(&parts.headers),
+                            ).await?;
+                        } else {
+                            ensure_service_account_purpose_route(
+                                &sa,
+                                &claims.scope,
+                                &parts.method,
+                                request_path,
+                                is_websocket_upgrade(&parts.headers),
+                            )?;
+                        }
 
                         let sa_uuid = Uuid::parse_str(&sa_id).map_err(|_| {
                             AppError::Unauthorized("Invalid service account ID".to_string())

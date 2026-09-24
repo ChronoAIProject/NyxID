@@ -11,19 +11,22 @@ use crate::{
     AppState,
     errors::{AppError, AppResult},
     models::{
-        catalog_skill_revision::SkillReference,
+        catalog_skill_revision::SkillReference, service_account::ServiceAccountPurpose,
         service_account_key_read_grant::ServiceAccountKeyReadGrant,
     },
     mw::auth::{AuthMethod, AuthUser},
     services::{
-        audit_service, catalog_skill_service, service_account_key_read_service as reads,
-        service_account_service,
+        audit_service, catalog_editor_catalog_service as catalog, catalog_editor_service as editor,
+        catalog_skill_service, curation_grant_service as grants,
+        service_account_key_read_service as reads, service_account_service,
     },
 };
 
 #[derive(Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KeyMetadataResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
     pub id: String,
     pub slug: String,
     pub name: String,
@@ -43,6 +46,7 @@ impl From<reads::KeyMetadata> for KeyMetadataResponse {
     fn from(data: reads::KeyMetadata) -> Self {
         let digest = catalog_skill_service::manifest_digest(&data.skills);
         Self {
+            resource_type: None,
             id: data.id,
             slug: data.slug,
             name: data
@@ -59,6 +63,27 @@ impl From<reads::KeyMetadata> for KeyMetadataResponse {
             recommended_skill_refs: data.skills.recommended_skill_refs,
             skills_revision: data.skills_revision,
             skills_manifest_digest: digest,
+        }
+    }
+}
+
+impl From<catalog::CatalogMetadata> for KeyMetadataResponse {
+    fn from(data: catalog::CatalogMetadata) -> Self {
+        Self {
+            resource_type: Some("catalog_service".into()),
+            catalog_service_id: Some(data.id.clone()),
+            catalog_service_slug: Some(data.slug.clone()),
+            catalog_service_name: Some(data.name.clone()),
+            id: data.id,
+            slug: data.slug,
+            label: data.name.clone(),
+            name: data.name,
+            service_type: data.service_type,
+            is_active: data.is_active,
+            skills_manifest_digest: catalog_skill_service::manifest_digest(&data.skills),
+            recommended_skills: data.skills.recommended_skills,
+            recommended_skill_refs: data.skills.recommended_skill_refs,
+            skills_revision: Some(data.skills_revision),
         }
     }
 }
@@ -97,11 +122,23 @@ pub async fn list_keys(
             "Key metadata access requires an ordinary GET".into(),
         ));
     }
-    let keys = reads::list(&state.db, &auth.user_id.to_string(), &auth.scope)
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect();
+    let sa =
+        service_account_service::get_service_account(&state.db, &auth.user_id.to_string()).await?;
+    let keys = if sa.purpose == ServiceAccountPurpose::CatalogEditor {
+        grants::require_scope(&sa, &auth.scope, reads::READ_SCOPE)?;
+        editor::authorize(&state.db, &sa, &auth.scope, grants::READ_SCOPE).await?;
+        catalog::list(&state.db)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    } else {
+        reads::list(&state.db, &auth.user_id.to_string(), &auth.scope)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    };
     Ok((
         [(axum::http::header::CACHE_CONTROL, "private, no-store")],
         Json(KeyListReadResponse::ServiceAccount(
@@ -127,8 +164,18 @@ pub async fn get_key(
             "Key metadata access requires an ordinary GET".into(),
         ));
     }
-    let data = reads::read(&state.db, &auth.user_id.to_string(), &auth.scope, &id).await?;
-    let response = KeyReadResponse::ServiceAccount(Box::new(data.into()));
+    let sa =
+        service_account_service::get_service_account(&state.db, &auth.user_id.to_string()).await?;
+    let data: KeyMetadataResponse = if sa.purpose == ServiceAccountPurpose::CatalogEditor {
+        grants::require_scope(&sa, &auth.scope, reads::READ_SCOPE)?;
+        editor::authorize(&state.db, &sa, &auth.scope, grants::READ_SCOPE).await?;
+        catalog::read(&state.db, &id).await?.into()
+    } else {
+        reads::read(&state.db, &auth.user_id.to_string(), &auth.scope, &id)
+            .await?
+            .into()
+    };
+    let response = KeyReadResponse::ServiceAccount(Box::new(data));
     Ok((
         [(axum::http::header::CACHE_CONTROL, "private, no-store")],
         Json(response),

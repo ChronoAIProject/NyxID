@@ -18,13 +18,13 @@ use crate::{
         downstream_service::{
             COLLECTION_NAME as SERVICES, DownstreamService, legacy_http_service_type_filter,
         },
-        service_account::ServiceAccount,
+        service_account::{ServiceAccount, ServiceAccountPurpose},
     },
     mw::auth::{
         AuthMethod, AuthUser, reject_api_key_tokens, reject_delegated_tokens, reject_relay_tokens,
     },
     services::{
-        api_docs_service, audit_service,
+        api_docs_service, audit_service, catalog_editor_service as editor,
         catalog_skill_service::{self as skills, SkillActor, SkillUpdate},
         catalog_spec_registry, curation_grant_service as grants, service_account_service,
     },
@@ -56,10 +56,14 @@ async fn authorize(
     }
     let sa =
         service_account_service::get_service_account(&state.db, &auth.user_id.to_string()).await?;
-    grants::live_grant(&sa)?;
-    grants::require_scope(&sa, &auth.scope, scope)?;
-    if let Some(id) = service {
-        grants::require_service(&sa, &auth.scope, scope, id)?;
+    if sa.purpose == ServiceAccountPurpose::CatalogEditor {
+        editor::authorize(&state.db, &sa, &auth.scope, scope).await?;
+    } else {
+        grants::live_grant(&sa)?;
+        grants::require_scope(&sa, &auth.scope, scope)?;
+        if let Some(id) = service {
+            grants::require_service(&sa, &auth.scope, scope, id)?;
+        }
     }
     Ok(sa)
 }
@@ -102,11 +106,15 @@ async fn list_services(
     auth: AuthUser,
 ) -> AppResult<Json<ServicesResponse>> {
     let sa = authorize(&state, &auth, grants::READ_SCOPE, None).await?;
-    let grant = grants::live_grant(&sa)?;
+    let filter = if sa.purpose == ServiceAccountPurpose::CatalogEditor {
+        doc! {}
+    } else {
+        doc! {"_id": {"$in": &grants::live_grant(&sa)?.service_ids}}
+    };
     let rows: Vec<DownstreamService> = state
         .db
         .collection::<DownstreamService>(SERVICES)
-        .find(doc! {"_id": {"$in": &grant.service_ids}})
+        .find(filter)
         .sort(doc! {"_id": 1})
         .await?
         .try_collect()

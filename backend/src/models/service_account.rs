@@ -9,6 +9,7 @@ pub enum ServiceAccountPurpose {
     #[default]
     General,
     Curation,
+    CatalogEditor,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

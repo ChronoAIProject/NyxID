@@ -978,12 +978,28 @@ async fn proxy_request_inner(
             &auth_user.user_id.to_string(),
         )
         .await?;
-        if sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation {
-            let grant = crate::services::curation_grant_service::live_grant(&sa)?;
-            crate::services::curation_grant_service::require_scope(&sa, &auth_user.scope, "proxy")?;
-            if grant.ornn_proxy_service_id.as_deref() != Some(service_id)
-                || extract_via_service(&request).is_some()
+        if sa.purpose != crate::models::service_account::ServiceAccountPurpose::General {
+            let target_id = if sa.purpose
+                == crate::models::service_account::ServiceAccountPurpose::CatalogEditor
             {
+                Some(
+                    crate::services::catalog_editor_proxy_service::authorized_target(
+                        &state.db,
+                        &sa,
+                        &auth_user.scope,
+                    )
+                    .await?,
+                )
+            } else {
+                let grant = crate::services::curation_grant_service::live_grant(&sa)?;
+                crate::services::curation_grant_service::require_scope(
+                    &sa,
+                    &auth_user.scope,
+                    "proxy",
+                )?;
+                grant.ornn_proxy_service_id.clone()
+            };
+            if target_id.as_deref() != Some(service_id) || extract_via_service(&request).is_some() {
                 return Err(AppError::Forbidden(
                     "Curation proxy requires its exact catalog target without instance selection"
                         .into(),
