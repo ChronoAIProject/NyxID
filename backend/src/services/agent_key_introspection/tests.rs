@@ -13,6 +13,98 @@ use crate::{
 use uuid::Uuid;
 
 #[tokio::test]
+async fn public_service_introspection_registration_requires_admin_and_confidential_client() {
+    use crate::{
+        handlers::services::{UpdateServiceRequest, update_service},
+        services::role_service,
+        test_utils::{test_app_state, test_auth_user},
+    };
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+    let f = Fixture::new().await.unwrap();
+    f.db.collection::<OauthClient>(crate::models::oauth_client::COLLECTION_NAME)
+        .insert_one(&f.client)
+        .await
+        .unwrap();
+    f.db.collection::<DownstreamService>(SERVICES)
+        .update_one(doc! {"_id": &f.service}, doc! {"$set": {"created_by": &f.owner, "visibility": "public", "introspection_client_ids": []}})
+        .await.unwrap();
+    let state = test_app_state(f.db.clone());
+    let request = |ids: Vec<String>| {
+        serde_json::from_value::<UpdateServiceRequest>(
+            serde_json::json!({"introspection_client_ids": ids}),
+        )
+        .unwrap()
+    };
+    // Being the public service creator does not grant resource-server trust administration.
+    for ids in [vec![f.client.id.clone()], vec![]] {
+        let result = update_service(
+            State(state.clone()),
+            test_auth_user(&f.owner),
+            Default::default(),
+            Path(f.service.clone()),
+            Json(request(ids)),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Forbidden(_))));
+    }
+    assert!(f.evidence().await.is_err());
+    role_service::seed_system_roles(&f.db).await.unwrap();
+    let admin = role_service::get_platform_role_ids(&f.db)
+        .await
+        .unwrap()
+        .admin;
+    f.db.collection::<User>(USERS)
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$addToSet": {"role_ids": admin}},
+        )
+        .await
+        .unwrap();
+    for kind in ["public", "confidential"] {
+        f.db.collection::<OauthClient>(crate::models::oauth_client::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &f.client.id},
+                doc! {"$set": {"client_type": kind}},
+            )
+            .await
+            .unwrap();
+        let result = update_service(
+            State(state.clone()),
+            test_auth_user(&f.owner),
+            Default::default(),
+            Path(f.service.clone()),
+            Json(request(vec![f.client.id.clone()])),
+        )
+        .await;
+        if kind == "public" {
+            assert!(matches!(result, Err(AppError::ValidationError(_))));
+        } else {
+            let result = result.unwrap().0;
+            assert_eq!(result.visibility, "public");
+            assert_eq!(
+                result.introspection_client_ids,
+                Some(vec![f.client.id.clone()])
+            );
+            assert_eq!(result.developer_app_ids, None);
+            assert!(f.evidence().await.is_ok());
+        }
+    }
+    update_service(
+        State(state),
+        test_auth_user(&f.owner),
+        Default::default(),
+        Path(f.service.clone()),
+        Json(request(vec![])),
+    )
+    .await
+    .unwrap();
+    assert!(f.evidence().await.is_err());
+}
+
+#[tokio::test]
 async fn oauth_endpoint_authenticates_client_and_returns_service_bound_evidence() {
     use crate::handlers::oauth::{self, IntrospectRequest};
     use axum::{body::to_bytes, extract::State};
@@ -119,7 +211,7 @@ impl Fixture {
         let mut service = dummy_service();
         service.id = Uuid::new_v4().to_string();
         service.is_active = true;
-        service.developer_app_ids = Some(vec![client.id.clone()]);
+        service.introspection_client_ids = Some(vec![client.id.clone()]);
         db.collection::<DownstreamService>(SERVICES)
             .insert_one(&service)
             .await

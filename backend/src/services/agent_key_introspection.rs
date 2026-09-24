@@ -48,7 +48,7 @@ pub async fn introspect(
         .await?
         .ok_or_else(refused)?;
     if !service
-        .developer_app_ids
+        .introspection_client_ids
         .as_ref()
         .is_some_and(|ids| ids.contains(&client.id))
     {

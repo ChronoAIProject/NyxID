@@ -333,6 +333,7 @@ pub async fn service_to_response_with_viewer(
         proxy_operation_policy: s.proxy_operation_policy,
         destination_targets: s.destination_targets,
         developer_app_ids: s.developer_app_ids,
+        introspection_client_ids: s.introspection_client_ids,
         owner_user_id: s
             .owner_user_id
             .clone()
@@ -395,6 +396,34 @@ pub async fn validate_developer_app_ids(
         }
     }
 
+    Ok(())
+}
+
+/// Trust is separately administered from private-service consent/auto-connection.
+pub async fn validate_introspection_client_ids(
+    state: &AppState,
+    auth_user: &AuthUser,
+    client_ids: &[String],
+) -> AppResult<()> {
+    require_admin(state, auth_user).await?;
+    if client_ids.len() > 50 {
+        return Err(AppError::ValidationError(
+            "introspection_client_ids must not exceed 50 entries".into(),
+        ));
+    }
+    for id in client_ids {
+        let exists = state
+            .db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! {"_id": id, "is_active": true, "client_type": "confidential"})
+            .await?
+            .is_some();
+        if !exists {
+            return Err(AppError::ValidationError(
+                "introspection_client_ids must name active confidential OAuth clients".into(),
+            ));
+        }
+    }
     Ok(())
 }
 

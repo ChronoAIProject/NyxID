@@ -394,7 +394,7 @@ All changes are additive. No breaking changes for existing users:
 A downstream resource server can verify an ordinary agent key directly through
 `POST /oauth/introspect`. Send a form with `token`, `token_type_hint=api_key`,
 `client_id`, `client_secret` and the target catalog `service_id`. The active
-confidential OAuth client must appear in that catalog's `developer_app_ids`.
+confidential OAuth client must appear in that catalog's `introspection_client_ids`. Administrators set or clear this field through the catalog service create/update API; it accepts active confidential clients for either public or private services and never changes visibility or automatic connections.
 Public clients and unrelated confidential clients receive `active: false`.
 
 Successful evidence includes `active`, `token_type: api_key`, `aud` (the catalog

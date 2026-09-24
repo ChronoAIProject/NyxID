@@ -329,6 +329,7 @@ mod tests {
             default_request_headers: None,
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
+            introspection_client_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: vec![AnonymousEndpointRule {
                 id: "rule".to_string(),
@@ -466,6 +467,7 @@ mod tests {
                 default_request_headers: None,
                 ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
+                introspection_client_ids: None,
                 token_exchange_config: None,
                 anonymous_endpoints: vec![AnonymousEndpointRule {
                     id: Uuid::new_v4().to_string(),
