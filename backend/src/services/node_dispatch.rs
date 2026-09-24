@@ -1443,9 +1443,8 @@ async fn bridge_internal_ssh(
     loop {
         tokio::select! {
             inbound = socket.next() => match inbound.and_then(Result::ok).and_then(axum_json) {
-                Some(DuplexClientFrame::Data { data }) => {
-                    if manager.send_ssh_tunnel_data(node_id, session_id, &data).is_err() { break; }
-                }
+                Some(DuplexClientFrame::Data { data })
+                    if manager.send_ssh_tunnel_data(node_id, session_id, &data).is_err() => { break; }
                 Some(DuplexClientFrame::Close { .. }) | None => break,
                 _ => {}
             },
@@ -1479,12 +1478,10 @@ async fn bridge_internal_terminal(
     loop {
         tokio::select! {
             inbound = socket.next() => match inbound.and_then(Result::ok).and_then(axum_json) {
-                Some(DuplexClientFrame::Data { data }) => {
-                    if manager.send_web_terminal_data(node_id, session_id, &data).is_err() { break; }
-                }
-                Some(DuplexClientFrame::Resize { cols, rows }) => {
-                    if manager.send_web_terminal_resize(node_id, session_id, cols, rows).is_err() { break; }
-                }
+                Some(DuplexClientFrame::Data { data })
+                    if manager.send_web_terminal_data(node_id, session_id, &data).is_err() => { break; }
+                Some(DuplexClientFrame::Resize { cols, rows })
+                    if manager.send_web_terminal_resize(node_id, session_id, cols, rows).is_err() => { break; }
                 Some(DuplexClientFrame::Close { .. }) | None => break,
                 _ => {}
             },
@@ -1520,12 +1517,10 @@ async fn bridge_internal_ws_proxy(
     loop {
         tokio::select! {
             inbound = socket.next() => match inbound.and_then(Result::ok).and_then(axum_json) {
-                Some(DuplexClientFrame::Data { data }) => {
-                    if manager.send_ws_proxy_binary(node_id, session_id, &data).is_err() { break; }
-                }
-                Some(DuplexClientFrame::Text { data }) => {
-                    if manager.send_ws_proxy_text(node_id, session_id, &data).is_err() { break; }
-                }
+                Some(DuplexClientFrame::Data { data })
+                    if manager.send_ws_proxy_binary(node_id, session_id, &data).is_err() => { break; }
+                Some(DuplexClientFrame::Text { data })
+                    if manager.send_ws_proxy_text(node_id, session_id, &data).is_err() => { break; }
                 Some(DuplexClientFrame::Close { code, reason }) => {
                     close_code = code;
                     close_reason = reason;
