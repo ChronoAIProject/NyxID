@@ -36,6 +36,11 @@ vi.mock("@/hooks/use-service-accounts", () => ({
 vi.mock("@/components/dashboard/sa-connected-services", () => ({
   SaConnectedServices: () => null,
 }));
+vi.mock("./key-read-grant-section", () => ({
+  KeyReadGrantSection: ({ saId }: { readonly saId: string }) => (
+    <div data-testid="key-read-grant-section">{saId}</div>
+  ),
+}));
 vi.mock("@/hooks/use-options", () => ({
   useOptions: () => ({
     data: { pages: [{ items: [] }] },
@@ -48,6 +53,36 @@ vi.mock("@/hooks/use-options", () => ({
     retainPartialData: false,
   }),
 }));
+
+it("keeps key read grants available when provider sections are hidden", () => {
+  render(
+    <ServiceAccountDetail
+      saId="sa-1"
+      backTo={{ to: "/orgs/org-1", label: "Organization" }}
+      showProviderSections={false}
+    />,
+  );
+
+  expect(screen.getByTestId("key-read-grant-section")).toHaveTextContent(
+    "sa-1",
+  );
+});
+
+it("can hide key read grants independently of provider sections", () => {
+  render(
+    <ServiceAccountDetail
+      saId="sa-1"
+      backTo={{ to: "/orgs/org-1", label: "Organization" }}
+      showProviderSections={false}
+      showKeyReadGrantSection={false}
+    />,
+  );
+
+  expect(
+    screen.queryByTestId("key-read-grant-section"),
+  ).not.toBeInTheDocument();
+});
+
 it("does not restore revoked permissions after a refresh when renaming an account", async () => {
   const user = userEvent.setup();
   const element = (

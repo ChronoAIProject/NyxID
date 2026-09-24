@@ -53,9 +53,12 @@ export function KeyReadGrantSection({ saId }: { readonly saId: string }) {
     <DetailSection title="Connection metadata access">
       <div className="space-y-4 p-5">
         <p className="text-[12px] text-muted-foreground">
-          Allow this account to read selected connections and their skill recommendations.
-          Add user-services:read to Allowed Scopes and request a new token with that scope.
-          Connections must remain accessible to the account owner.
+          This grant is required for GET /api/v1/keys and GET /api/v1/keys/[id].
+          Make sure this is the service account whose Client ID is used by the
+          failing integration. The account needs user-services:read in Allowed
+          Scopes, and you must request a new token after changing that scope.
+          A full platform administrator must also grant the exact UserService
+          UUIDs below. Connections must remain accessible to the account owner.
         </p>
         {isLoading && <p>Loading grant…</p>}
         {error && <p role="alert">Could not load connection metadata access.</p>}

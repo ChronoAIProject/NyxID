@@ -68,6 +68,7 @@ interface ServiceAccountDetailProps {
   readonly saId: string;
   readonly backTo: { readonly to: string; readonly label: string };
   readonly showProviderSections?: boolean;
+  readonly showKeyReadGrantSection?: boolean;
 }
 
 export function ServiceAccountDetail(props: ServiceAccountDetailProps) {
@@ -78,6 +79,7 @@ function ServiceAccountDetailEditor({
   saId,
   backTo,
   showProviderSections = true,
+  showKeyReadGrantSection = true,
 }: ServiceAccountDetailProps) {
   const navigate = useNavigate();
 
@@ -316,7 +318,7 @@ function ServiceAccountDetailEditor({
       <Separator />
 
       {showProviderSections && <CurationGrantSection account={sa} />}
-      {showProviderSections && <KeyReadGrantSection saId={saId} />}
+      {showKeyReadGrantSection && <KeyReadGrantSection saId={saId} />}
 
       {showProviderSections ? (
         <SaConnectedServices saId={saId} />
