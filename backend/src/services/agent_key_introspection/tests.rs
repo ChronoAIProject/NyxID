@@ -24,6 +24,7 @@ async fn public_service_introspection_registration_requires_admin_and_confidenti
         extract::{Path, State},
     };
     let f = Fixture::new().await.unwrap();
+    role_service::seed_system_roles(&f.db).await.unwrap();
     f.db.collection::<OauthClient>(crate::models::oauth_client::COLLECTION_NAME)
         .insert_one(&f.client)
         .await
@@ -48,10 +49,9 @@ async fn public_service_introspection_registration_requires_admin_and_confidenti
             Json(request(ids)),
         )
         .await;
-        assert!(matches!(result, Err(AppError::Forbidden(_))));
+        assert!(matches!(result, Err(AppError::Forbidden(_))), "{result:?}");
     }
     assert!(f.evidence().await.is_err());
-    role_service::seed_system_roles(&f.db).await.unwrap();
     let admin = role_service::get_platform_role_ids(&f.db)
         .await
         .unwrap()
