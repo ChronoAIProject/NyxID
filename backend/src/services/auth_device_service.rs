@@ -19,7 +19,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::auth_device_code::AuthDeviceInitiatingOriginStatus;
 use crate::models::auth_device_code::{
     AuthDeviceClientIpAttribution, AuthDeviceCode, AuthDeviceCodeStatus,
-    COLLECTION_NAME as AUTH_DEVICE_CODES, V2_COLLECTION_NAME,
+    COLLECTION_NAME as AUTH_DEVICE_CODES, RESERVATION_COLLECTION_NAME, V2_COLLECTION_NAME,
 };
 #[cfg(test)]
 use crate::services::login_client_context::CLIENT_DISPLAY_MAX_LEN;
@@ -38,6 +38,7 @@ const AUTH_DEVICE_POLL_INTERVAL_SECS: u32 = 5;
 const AUTH_DEVICE_SLOW_DOWN_INCREMENT_SECS: i64 = 5;
 const AUTH_DEVICE_USER_CODE_LEN: usize = 8;
 const AUTH_DEVICE_USER_CODE_WRITE_RETRIES: usize = 5;
+const AUTH_DEVICE_TERMINAL_RETENTION_SECS: i64 = 86_400;
 const AUTH_DEVICE_USER_CODE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub(crate) use super::login_client_context::*;
 pub use crate::models::login_client_context::LoginClientContext as InitiateInput;
@@ -127,10 +128,22 @@ pub async fn initiate_v2(
     db: &Database,
     hmac_key: &[u8],
     input: InitiateInput,
+    eight_char_codes: bool,
 ) -> AppResult<InitiateOutput> {
-    initiate_with_user_code_generator(db, hmac_key, sanitize_context(input), || {
-        format!("2{}", generate_user_code())
-    })
+    initiate_with_user_code_generator_for_protocol(
+        db,
+        hmac_key,
+        sanitize_context(input),
+        true,
+        || {
+            let code = generate_user_code();
+            if eight_char_codes {
+                code
+            } else {
+                format!("2{code}")
+            }
+        },
+    )
     .await
 }
 
@@ -138,7 +151,44 @@ async fn initiate_with_user_code_generator<F>(
     db: &Database,
     hmac_key: &[u8],
     input: InitiateInput,
+    user_code_generator: F,
+) -> AppResult<InitiateOutput>
+where
+    F: FnMut() -> String,
+{
+    initiate_with_user_code_generator_for_protocol(db, hmac_key, input, false, user_code_generator)
+        .await
+}
+
+async fn initiate_with_user_code_generator_for_protocol<F>(
+    db: &Database,
+    hmac_key: &[u8],
+    input: InitiateInput,
+    supports_grant_choice: bool,
+    user_code_generator: F,
+) -> AppResult<InitiateOutput>
+where
+    F: FnMut() -> String,
+{
+    initiate_reserved(
+        db,
+        hmac_key,
+        input,
+        supports_grant_choice,
+        user_code_generator,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn initiate_reserved<F>(
+    db: &Database,
+    hmac_key: &[u8],
+    input: InitiateInput,
+    supports_grant_choice: bool,
     mut user_code_generator: F,
+    #[cfg(test)] reservation_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
 ) -> AppResult<InitiateOutput>
 where
     F: FnMut() -> String,
@@ -146,21 +196,52 @@ where
     for attempt in 0..=AUTH_DEVICE_USER_CODE_WRITE_RETRIES {
         let now = Utc::now();
         let user_code_normalized = user_code_generator();
-        let supports_grant_choice = is_v2_user_code(&user_code_normalized);
         let device_code = if supports_grant_choice {
             generate_device_code().replacen(AUTH_DEVICE_CODE_PREFIX, "nyx_adc2_", 1)
         } else {
             generate_device_code()
         };
-        let collection = collection_for_user_code(db, &user_code_normalized);
+        let target_collection = collection_for_protocol(db, supports_grant_choice);
         let user_code = format_user_code(&user_code_normalized);
         let user_code_hmac = hmac_hex(hmac_key, user_code_normalized.as_bytes());
-        if collection
+        let legacy_exists = collection_for_protocol(db, false)
             .find_one(doc! {"user_code_hmac": &user_code_hmac})
             .await?
-            .is_some()
-        {
+            .is_some();
+        let v2_exists = db
+            .collection::<AuthDeviceCode>(V2_COLLECTION_NAME)
+            .find_one(doc! {"user_code_hmac": &user_code_hmac})
+            .await?
+            .is_some();
+        if legacy_exists || v2_exists {
             continue;
+        }
+
+        #[cfg(test)]
+        if attempt == 0
+            && let Some(barrier) = &reservation_barrier
+        {
+            barrier.wait().await;
+        }
+
+        // Reserve the public code before inserting the protocol-specific row.
+        // This is the global uniqueness gate: the legacy and v2 collections
+        // each have their own unique index, so neither can prevent a
+        // cross-collection collision on its own.
+        let reservation_id = Uuid::new_v4().to_string();
+        let reservations = db.collection::<bson::Document>(RESERVATION_COLLECTION_NAME);
+        let reservation = doc! {
+            "_id": &reservation_id,
+            "user_code_hmac": &user_code_hmac,
+            "expires_at": bson::DateTime::from_chrono(
+                now + Duration::seconds(AUTH_DEVICE_EXPIRES_IN_SECS + AUTH_DEVICE_TERMINAL_RETENTION_SECS),
+            ),
+        };
+        if let Err(error) = reservations.insert_one(reservation).await {
+            if is_duplicate_key_error(&error) {
+                continue;
+            }
+            return Err(error.into());
         }
 
         let row = AuthDeviceCode {
@@ -216,7 +297,9 @@ where
             expires_at: now + Duration::seconds(AUTH_DEVICE_EXPIRES_IN_SECS),
         };
 
-        match collection.insert_one(&row).await {
+        // Keep reservations even after an error: a timeout/write-concern failure
+        // may follow a successful insert. The bounded TTL releases abandoned codes.
+        match target_collection.insert_one(&row).await {
             Ok(_) => {
                 tracing::Span::current().record("row_id", row.id.as_str());
                 tracing::info!(row_id = %row.id, "auth_device.initiate");
@@ -233,7 +316,9 @@ where
             {
                 continue;
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(error.into());
+            }
         }
     }
 
@@ -356,7 +441,7 @@ async fn poll_internal(
             AuthDeviceCodeStatus::Delivered | AuthDeviceCodeStatus::Denied
         )
     {
-        grants::expire(db, &row).await?;
+        grants::expire(db, &collection, &row).await?;
         record_poll_outcome(&row.id, "expired");
         return Ok(PollClaim::Expired);
     }
@@ -406,11 +491,7 @@ pub async fn preview(
 ) -> AppResult<PreviewOutput> {
     let normalized = normalize_user_code(user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
-    let row = collection_for_user_code(db, &normalized)
-        .find_one(doc! { "user_code_hmac": user_code_hmac })
-        .sort(doc! {"created_at": -1})
-        .await?
-        .ok_or(AppError::AuthDeviceUserCodeInvalid)?;
+    let (_, row) = find_by_user_code(db, &user_code_hmac).await?;
 
     tracing::Span::current().record("row_id", row.id.as_str());
     let context = InitiateInput {
@@ -443,6 +524,7 @@ pub async fn preview(
         row.created_at,
         row.expires_at,
         row.status,
+        row.supports_grant_choice,
         viewer_ip,
         viewer_ip_attribution,
     ))
@@ -464,14 +546,8 @@ pub async fn approve(
     let started_at = std::time::Instant::now();
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
-    let collection = collection_for_user_code(db, &normalized);
+    let (collection, row) = find_by_user_code(db, &user_code_hmac).await?;
     let now = Utc::now();
-
-    let row = collection
-        .find_one(doc! { "user_code_hmac": user_code_hmac })
-        .sort(doc! {"created_at": -1})
-        .await?
-        .ok_or(AppError::AuthDeviceUserCodeInvalid)?;
 
     tracing::Span::current().record("row_id", row.id.as_str());
 
@@ -599,14 +675,8 @@ pub async fn approve(
 pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
-    let collection = collection_for_user_code(db, &normalized);
+    let (collection, row) = find_by_user_code(db, &user_code_hmac).await?;
     let now = Utc::now();
-
-    let row = collection
-        .find_one(doc! { "user_code_hmac": user_code_hmac })
-        .sort(doc! {"created_at": -1})
-        .await?
-        .ok_or(AppError::AuthDeviceUserCodeInvalid)?;
 
     tracing::Span::current().record("row_id", row.id.as_str());
 
@@ -723,8 +793,28 @@ pub fn is_v2_user_code(normalized: &str) -> bool {
     normalized.len() == AUTH_DEVICE_USER_CODE_LEN + 1 && normalized.starts_with('2')
 }
 
-fn collection_for_user_code(db: &Database, normalized: &str) -> Collection<AuthDeviceCode> {
-    collection_for_protocol(db, is_v2_user_code(normalized))
+pub(crate) async fn find_by_user_code(
+    db: &Database,
+    user_code_hmac: &str,
+) -> AppResult<(Collection<AuthDeviceCode>, AuthDeviceCode)> {
+    use futures::TryStreamExt;
+    let mut found = None;
+    for supports_grant_choice in [false, true] {
+        let queried = collection_for_protocol(db, supports_grant_choice);
+        let rows: Vec<AuthDeviceCode> = queried
+            .find(doc! { "user_code_hmac": user_code_hmac })
+            .limit(2)
+            .await?
+            .try_collect()
+            .await?;
+        for row in rows {
+            if found.is_some() {
+                return Err(AppError::AuthDeviceUserCodeInvalid);
+            }
+            found = Some((queried.clone(), row));
+        }
+    }
+    found.ok_or(AppError::AuthDeviceUserCodeInvalid)
 }
 
 pub(super) fn collection_for_device_code(db: &Database, code: &str) -> Collection<AuthDeviceCode> {
@@ -1438,6 +1528,7 @@ mod tests {
 
         assert!(output.device_code.starts_with(AUTH_DEVICE_CODE_PREFIX));
         assert_eq!(output.user_code.len(), 9);
+        assert_eq!(normalize_user_code(&output.user_code).unwrap().len(), 8);
         assert_eq!(output.expires_in, AUTH_DEVICE_EXPIRES_IN_SECS);
         assert_eq!(output.interval, AUTH_DEVICE_POLL_INTERVAL_SECS);
 
@@ -1465,6 +1556,67 @@ mod tests {
         assert_eq!(
             row.client_ip_hmac.as_deref(),
             Some(hmac_hex(TEST_HMAC_KEY, b"203.0.113.10").as_str())
+        );
+        let reservation = db
+            .collection::<bson::Document>(RESERVATION_COLLECTION_NAME)
+            .find_one(doc! {
+                "user_code_hmac": hmac_hex(
+                    TEST_HMAC_KEY,
+                    normalize_user_code(&output.user_code).unwrap().as_bytes()
+                )
+            })
+            .await
+            .expect("reservation query")
+            .expect("reservation exists");
+        assert!(reservation.get_datetime("expires_at").is_ok());
+    }
+
+    #[tokio::test]
+    async fn public_code_reservation_is_global_across_protocol_collections() {
+        let Some(db) = connect_test_database("auth_device_global_code_reservation").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+
+        let first = initiate_with_user_code_generator_for_protocol(
+            &db,
+            TEST_HMAC_KEY,
+            InitiateInput::default(),
+            false,
+            || "ABCDEFGH".to_string(),
+        )
+        .await
+        .expect("legacy initiate");
+
+        let mut calls = 0;
+        let second = initiate_with_user_code_generator_for_protocol(
+            &db,
+            TEST_HMAC_KEY,
+            InitiateInput::default(),
+            true,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    "ABCDEFGH".to_string()
+                } else {
+                    "JKMNPQRS".to_string()
+                }
+            },
+        )
+        .await
+        .expect("v2 initiate");
+
+        assert_eq!(calls, 2, "the cross-protocol reservation must reject reuse");
+        assert_eq!(normalize_user_code(&first.user_code).unwrap(), "ABCDEFGH");
+        assert_eq!(normalize_user_code(&second.user_code).unwrap(), "JKMNPQRS");
+        assert!(
+            db.collection::<bson::Document>(RESERVATION_COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .expect("reservation count")
+                >= 2
         );
     }
 
@@ -2480,3 +2632,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod public_code_tests;

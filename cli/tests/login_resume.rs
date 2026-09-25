@@ -768,3 +768,259 @@ async fn failed_destination_save_clears_partial_credentials_and_revokes_either_g
         }
     }
 }
+
+#[tokio::test]
+async fn login_scope_flags_return_complete_approval_link_without_login_or_polling() {
+    for (mode, flow, approval_path) in [
+        ("--device", "device/v2", "/login/device"),
+        ("--agent-key", "agent-key", "/login/agent-key"),
+    ] {
+        let server = MockServer::start().await;
+        let home = tempfile::tempdir().unwrap();
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/auth/{flow}/request")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "device_code": POLL_SECRET, "user_code": "ABCD-EFGH",
+                "verification_uri": format!("{}{approval_path}?unknown=discard#fragment", server.uri()),
+                "expires_in": 300, "interval": 5
+            })))
+            .expect(1)
+            .mount(&server).await;
+        let output = run(
+            home.path(),
+            &[
+                "login",
+                mode,
+                "--base-url",
+                &server.uri(),
+                "--profile",
+                "mail-agent",
+                "--no-wait",
+                "--output",
+                "json",
+                "--scopes",
+                "read,proxy",
+                "--service",
+                "api-google-gmail",
+                "--service",
+                "api-github",
+                "--service-permission",
+                "api-google-gmail::https://www.googleapis.com/auth/gmail.readonly",
+                "--service-permission",
+                "api-github::repo",
+                "--key-source",
+                "new",
+                "--key-name",
+                "Mail + code & tools",
+                "--expiry-days",
+                "30",
+                "--platform",
+                "codex",
+            ],
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = output_json(&output);
+        let complete =
+            url::Url::parse(result["verification_uri_complete"].as_str().unwrap()).unwrap();
+        let pairs: std::collections::HashMap<_, _> = complete.query_pairs().collect();
+        assert_eq!(complete.path(), approval_path);
+        assert!(complete.fragment().is_none());
+        assert_eq!(pairs["user_code"], "ABCD-EFGH");
+        assert_eq!(pairs["login_type"], "agent");
+        assert_eq!(pairs["key_source"], "new");
+        assert_eq!(pairs["key_name"], "Mail + code & tools");
+        assert_eq!(pairs["permissions"], "read,proxy");
+        assert_eq!(pairs["services"], "api-google-gmail,api-github");
+        assert_eq!(
+            pairs["service_permissions"],
+            "api-google-gmail::https://www.googleapis.com/auth/gmail.readonly,api-github::repo"
+        );
+        assert_eq!(pairs["expiry_days"], "30");
+        assert_eq!(pairs["platform"], "codex");
+        assert!(!pairs.contains_key("unknown"));
+        assert!(!result["verification_uri"].as_str().unwrap().contains('?'));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(POLL_SECRET));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(POLL_SECRET));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(
+            !home
+                .path()
+                .join(".nyxid/profiles/mail-agent/access_token")
+                .exists()
+        );
+    }
+}
+
+#[tokio::test]
+async fn hinted_login_never_falls_back_to_account_callback_on_unsupported_backend() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/device/v2/request"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = run(
+        home.path(),
+        &[
+            "login",
+            "--device",
+            "--scopes",
+            "read,proxy",
+            "--base-url",
+            &server.uri(),
+        ],
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn invalid_login_preferences_fail_before_request_creation() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    for extra in [
+        vec!["--scopes", "root"],
+        vec!["--service", "../users"],
+        vec!["--service-permission", "repo"],
+        vec!["--agent-key", "--login-type", "full"],
+        vec!["--callback", "--scopes", "read"],
+        vec![
+            "--scopes",
+            "read",
+            "resume",
+            "00000000-0000-0000-0000-000000000000",
+        ],
+    ] {
+        let uri = server.uri();
+        let mut args = vec!["login", "--base-url", &uri];
+        args.extend(extra);
+        let output = run(home.path(), &args).await;
+        assert!(!output.status.success());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(!home.path().join(".nyxid/pending-logins").exists());
+}
+
+#[tokio::test]
+async fn public_catalog_discovery_never_sends_or_refreshes_saved_credentials() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    for (command, endpoint, body) in [
+        (
+            vec!["list", "--all"],
+            "/api/v1/catalog",
+            json!({"entries":[{"slug":"gmail", "scope_catalog":[{"scope":"mail.read", "label":"Read mail"}]}]}),
+        ),
+        (
+            vec!["show", "gmail"],
+            "/api/v1/catalog/gmail",
+            json!({"slug":"gmail", "scope_catalog":[{"scope":"mail.read", "label":"Read mail"}]}),
+        ),
+        (
+            vec!["endpoints", "gmail"],
+            "/api/v1/catalog/gmail/endpoints",
+            json!({"endpoints":[{"method":"GET", "path":"/messages"}]}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .expect(2)
+            .mount(&server)
+            .await;
+        for saved in [false, true] {
+            let dir = home.path().join(".nyxid");
+            if saved {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("access_token"), "private-saved-token").unwrap();
+                std::fs::write(dir.join("refresh_token"), "private-saved-refresh").unwrap();
+            }
+            let uri = server.uri();
+            let mut args = vec!["catalog"];
+            args.extend(command.clone());
+            args.extend(["--public", "--base-url", &uri, "--output", "json"]);
+            let output = run(home.path(), &args).await;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output_json(&output), body);
+            if saved {
+                std::fs::remove_dir_all(dir).unwrap();
+            }
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 6);
+    for request in requests {
+        assert!(request.headers.get("authorization").is_none());
+        assert!(request.headers.get("x-api-key").is_none());
+        assert!(request.headers.get("cookie").is_none());
+        if request.url.path() == "/api/v1/catalog" {
+            assert_eq!(request.url.query(), Some("include_all=true"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn mcp_discovery_uses_granted_profile_and_preserves_server_scope_and_schemas() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    let id = begin(&server, home.path(), "--agent-key").await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/agent-key/poll"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(key_delivery()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = run(
+        home.path(),
+        &["login", "resume", &id, "--once", "--output", "json"],
+    )
+    .await;
+    assert!(output.status.success());
+    let catalog = json!({
+        "services": [{"service_id":"allowed", "service_slug":"gmail-personal", "service_name":"Mail", "recommended_skills":["gmail"], "endpoints":[{"endpoint_id":"read", "method":"GET", "path":"/messages", "parameters":{"query":{"type":"string"}}}]}],
+        "total_services":1, "total_endpoints":1,
+        "diagnostics":{"service_scope_restricted":true, "unavailable_services":0}
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/mcp/config"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            format!("Bearer {KEY_SECRET}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&catalog))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = run(
+        home.path(),
+        &["mcp", "discover", "--profile", "agent", "--output", "json"],
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output_json(&output), catalog);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(KEY_SECRET));
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path().contains("/refresh"))
+    );
+}

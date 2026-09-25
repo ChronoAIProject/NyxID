@@ -1647,7 +1647,20 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let device_onboard_public_routes =
         Router::new().route("/redeem", post(handlers::devices::redeem_onboard_device));
 
+    let login_approval_routes = Router::new()
+        .route("/", post(handlers::login_approval::begin))
+        .route(
+            "/{id}",
+            get(handlers::login_approval::status).delete(handlers::login_approval::cancel),
+        )
+        .route("/{id}/password", post(handlers::login_approval::password))
+        .route("/{id}/mfa", post(handlers::login_approval::mfa))
+        .route("/{id}/inventory", get(handlers::login_approval::inventory))
+        .route("/{id}/approve", post(handlers::login_approval::approve))
+        .route("/{id}/deny", post(handlers::login_approval::deny));
+
     let api_v1_public = Router::new()
+        .nest("/auth/approval", login_approval_routes)
         .route(
             "/auth/agent-key/request",
             post(handlers::auth_agent_key::request),

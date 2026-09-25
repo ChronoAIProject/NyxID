@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { isPublicPath } from "./public-paths";
 
 describe("public route policy", () => {
+  it("allows the exact device entry without opening code paths or unrelated routes", () => {
+    expect(isPublicPath("/login/device")).toBe(true);
+    expect(isPublicPath("/login/device/ABCD-EFGH")).toBe(false);
+    expect(isPublicPath("/login/device-admin")).toBe(false);
+    expect(isPublicPath("/login/device/ABCD-EFGH/admin")).toBe(false);
+  });
   it("allows the exact onboarding entry before auth without broadening the route prefix", () => {
     expect(isPublicPath("/nyxbot/onboarding")).toBe(true);
     expect(isPublicPath("/nyxbot/onboarding/admin")).toBe(false);

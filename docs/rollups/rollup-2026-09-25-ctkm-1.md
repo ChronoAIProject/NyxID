@@ -19,8 +19,8 @@ billing analytics integration for review before it lands in `main`.
 
 ## Included changes and provenance
 
-The rollup has one direct source PR. Its source branch was validated before it
-was squash merged into this branch. The source PR remains the authoritative
+The billing integration has one direct source PR. Its source branch was
+validated before it was squash merged into this branch. The source PR remains the authoritative
 implementation discussion and test record.
 
 | Source PR | Reviewed source head | Landed squash | Intended behavior / scope |
@@ -100,3 +100,14 @@ Targeted local verification also passed:
 - [x] Source CI, coverage, CodeQL, release integrity, and local targeted checks
   pass.
 - [ ] Complete the required review and merge this rollup into `main`.
+
+## Device login contribution
+
+[PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666) adds eight-character
+device-code compatibility and web approval-time selection of account access or
+a scoped Agent Key. It retains the production implementation and removes the
+standalone HTML prototype and its supporting artifacts.
+
+See [the device login contribution record](rollup-2026-09-25-ctkm-1-device-login.md)
+for behavior, verification and rollout constraints. Its source PR records the
+reviewed revision, final checks and landed squash.
