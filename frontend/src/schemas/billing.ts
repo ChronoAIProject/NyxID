@@ -11,6 +11,22 @@ export const BILLING_USAGE_PERIODS = [
 
 export type BillingUsagePeriod = (typeof BILLING_USAGE_PERIODS)[number];
 
+export const billingSearchSchema = z.object({
+  tab: z.enum(["billing", "usage"]).optional().catch(undefined),
+  period: z.enum(BILLING_USAGE_PERIODS).optional().catch(undefined),
+  service: z.string().trim().min(1).max(200).optional().catch(undefined),
+});
+
+export function normalizeBillingSearch(search: Record<string, unknown>) {
+  const parsed = billingSearchSchema.parse(search);
+  return {
+    tab: parsed.tab ?? "billing",
+    period: parsed.period ?? "30d",
+    service: parsed.service ?? "all",
+  };
+}
+export type BillingSearch = ReturnType<typeof normalizeBillingSearch>;
+
 // Optional for compatibility with servers predating exact settlement display.
 const fundingBreakdownShape = {
   wallet_credits_micros: z.number().int().nonnegative().nullable().optional(),

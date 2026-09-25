@@ -425,6 +425,7 @@ async fn platform_auto_connections_reconcile_and_hosted_links_complete_once() {
             callback_url: None,
             ttl_secs: None,
             oauth_client_id: None,
+            endpoint_url: None,
         },
     )
     .await

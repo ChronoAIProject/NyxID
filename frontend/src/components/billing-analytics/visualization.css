@@ -1,0 +1,42 @@
+/* Chart colors are scoped so the shared NyxID surfaces keep their own tokens. */
+.analytics-visuals {
+  --analytics-label: var(--color-foreground);
+  --analytics-violet: #9775fa;
+  --analytics-blue: #638be7;
+  --analytics-lavender: #c0b2ec;
+  --analytics-indigo: #7b83cb;
+  --analytics-sky: #93b7e5;
+  --analytics-periwinkle: #aaa7da;
+  --analytics-steel: #7898b7;
+  --analytics-iris: #8d79bc;
+  --analytics-mist: #bbc7dd;
+  --analytics-slate: #919bac;
+  --analytics-other: #687184;
+  --analytics-grid: var(--color-border);
+  --analytics-area-top: 0.34;
+  --analytics-area-middle: 0.12;
+  --analytics-bar-start: 0.32;
+  --analytics-bar-end: 0.9;
+}
+
+.theme-light .analytics-visuals {
+  --analytics-violet: #8059d4;
+  --analytics-blue: #496fc0;
+  --analytics-lavender: #9385c0;
+  --analytics-indigo: #646eae;
+  --analytics-sky: #6c91bb;
+  --analytics-periwinkle: #8e8abb;
+  --analytics-steel: #5e809e;
+  --analytics-iris: #8165a3;
+  --analytics-mist: #858fa6;
+  --analytics-slate: #78859a;
+  --analytics-other: #878d9d;
+  --analytics-area-top: 0.24;
+  --analytics-area-middle: 0.08;
+  --analytics-bar-start: 0.3;
+  --analytics-bar-end: 0.85;
+}
+
+.analytics-chart .recharts-tooltip-wrapper {
+  z-index: 10;
+}

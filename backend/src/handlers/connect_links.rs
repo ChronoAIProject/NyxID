@@ -26,6 +26,8 @@ pub struct CreateConnectLinkRequest {
     #[serde(default)]
     pub label: Option<String>,
     #[serde(default)]
+    pub endpoint_url: Option<String>,
+    #[serde(default)]
     pub requested_by: Option<String>,
     #[serde(default)]
     pub callback_url: Option<String>,
@@ -66,6 +68,7 @@ pub struct PreviewConnectLinkResponse {
     pub status: String,
     pub connect_method: String,
     pub auth_key_name: String,
+    pub endpoint_url: Option<String>,
     pub credential_mode: Option<String>,
     pub has_platform_oauth_credentials: bool,
     pub requires_gateway_url: bool,
@@ -218,6 +221,7 @@ pub async fn create_connect_link(
             use_platform_key: body.use_platform_key,
             scopes: body.scopes,
             label: body.label,
+            endpoint_url: body.endpoint_url,
             requested_by: auth_user.api_key_name.clone().or(body.requested_by),
             callback_url: body.callback_url,
             ttl_secs: body.expires_in,
@@ -370,6 +374,7 @@ pub async fn preview_connect_link(
         status: status_name(view.link.status).to_string(),
         connect_method,
         auth_key_name: view.service.auth_key_name,
+        endpoint_url: view.link.endpoint_url,
         credential_mode: view.service.credential_mode,
         has_platform_oauth_credentials: view.service.has_platform_oauth_credentials,
         requires_gateway_url: view.service.requires_gateway_url,
@@ -800,6 +805,7 @@ mod tests {
                 service_slug: service.slug.clone(),
                 use_platform_key: None,
                 label: Some("Agent setup".to_string()),
+                endpoint_url: Some("https://gateway.example.test".to_string()),
                 requested_by: Some("handler-test".to_string()),
                 callback_url: None,
                 expires_in: None,
@@ -824,6 +830,10 @@ mod tests {
         .expect("preview response");
         assert_eq!(preview.service_slug, service.slug);
         assert_eq!(preview.requested_by.as_deref(), Some("handler-test"));
+        assert_eq!(
+            preview.endpoint_url.as_deref(),
+            Some("https://gateway.example.test")
+        );
         assert_eq!(preview.status, "pending");
         // The hosted page validates timestamps with a Z-suffix-friendly
         // parser; keep the wire format UTC-suffixed, never offset form.
@@ -895,6 +905,7 @@ mod tests {
                 service_slug: service.slug,
                 use_platform_key: None,
                 label: None,
+                endpoint_url: None,
                 requested_by: Some("untrusted body value".to_string()),
                 callback_url: Some(callback_url.to_string()),
                 expires_in: None,
@@ -973,6 +984,7 @@ mod tests {
                 callback_url: Some("https://desktop.example.test/return?flow=1".to_string()),
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await
@@ -1041,6 +1053,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await

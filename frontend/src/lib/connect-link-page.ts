@@ -1,7 +1,9 @@
 import type { ConnectLinkPreview } from "@/schemas/connect-links";
 
 export function connectLinkErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "The connection request failed.";
+  return error instanceof Error
+    ? error.message
+    : "The connection request failed.";
 }
 
 export function connectLinkNeedsOAuthCredentials(
@@ -16,12 +18,20 @@ export function connectLinkNeedsOAuthCredentials(
   );
 }
 
-export function connectLinkNeedsSetupForm(preview: ConnectLinkPreview): boolean {
+export function connectLinkNeedsSetupForm(
+  preview: ConnectLinkPreview,
+): boolean {
   return (
     preview.connect_method === "api_key" ||
-    preview.requires_gateway_url ||
+    connectLinkShowsEndpointUrl(preview) ||
     connectLinkNeedsOAuthCredentials(preview)
   );
+}
+
+export function connectLinkShowsEndpointUrl(
+  preview: ConnectLinkPreview,
+): boolean {
+  return preview.requires_gateway_url || Boolean(preview.endpoint_url);
 }
 
 export function connectLinkProviderError(search: string): string | null {

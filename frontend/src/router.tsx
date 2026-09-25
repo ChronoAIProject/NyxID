@@ -3,7 +3,11 @@ import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
-import { channelBotSetupRewrite, parseChannelBotSetupSearch, parseChannelBotSetupPageSearch } from "@/schemas/channel-bot-setup";
+import {
+  channelBotSetupRewrite,
+  parseChannelBotSetupPageSearch,
+  parseChannelBotSetupSearch,
+} from "@/schemas/channel-bot-setup";
 import {
   createRouter,
   createRoute,
@@ -18,6 +22,7 @@ import { AppRouteError } from "@/components/shared/app-route-error";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
+import { billingSearchSchema } from "@/schemas/billing";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite, hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
@@ -322,16 +327,15 @@ const sshTerminalRoute = createRoute({
   component: SshTerminalPage,
 });
 
-// Shared by every /assistant* route. Keep this auth mirror aligned with
-// dashboardLayout.beforeLoad below; the Assistant shell intentionally lives
-// outside DashboardLayout.
+// Shared by authenticated pages outside DashboardLayout. Keep this auth
+// mirror aligned with dashboardLayout.beforeLoad below.
 //
 // The assistant surface is deliberately not flag-gated here: both a reactive
 // component guard and a server-verified beforeLoad gate raced the auth store
 // (boot `checkAuth`, transient 401 `setUser(null)`) and bounced users whose
 // permission had simply not loaded yet. Reachability is nav-level only (the
 // sidebar link honours the flag) and the backend authorizes every API call.
-const assistantBeforeLoad = async ({
+const standaloneAuthBeforeLoad = async ({
   location,
 }: {
   location: { pathname: string; searchStr: string };
@@ -362,21 +366,21 @@ const assistantRoute = createRoute({
   // `?draft` means; a param dropped here makes the optimistic "New chat"
   // navigation a silent no-op.
   validateSearch: parseAssistantSearch,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: AssistantPage,
 });
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   getParentRoute: () => rootRoute,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="plugins" />,
 });
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
   getParentRoute: () => rootRoute,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="approvals" />,
 });
 
@@ -718,6 +722,7 @@ const keysRoute = createRoute({
 const billingRoute = createRoute({
   path: "/billing",
   getParentRoute: () => dashboardLayout,
+  validateSearch: (search: Record<string, unknown>) => billingSearchSchema.parse(search),
   beforeLoad: () => {
     const { isLoading, user } = useAuthStore.getState();
     if (shouldRedirectFromBilling({ isLoading, user })) {
@@ -762,17 +767,9 @@ const channelBotSetupLinksRoute = createRoute({
 
 export const channelBotSetupRoute = createRoute({
   path: "/channel-bots/connect/$platform",
-  validateSearch: parseChannelBotSetupPageSearch,
   getParentRoute: () => rootRoute,
-  beforeLoad: ({ location }) => {
-    const { isAuthenticated, isLoading } = useAuthStore.getState();
-    if (!isAuthenticated && !isLoading) {
-      throw redirect({
-        to: "/login",
-        search: { return_to: `${window.location.origin}${location.pathname}${location.searchStr}` },
-      });
-    }
-  },
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: parseChannelBotSetupPageSearch,
   component: ChannelBotSetupPage,
 });
 
@@ -913,11 +910,58 @@ const adminAuditLogRoute = createRoute({
   validateSearch: normalizeAdminAuditLogSearch,
 });
 
+const adminAnalyticsRoute = createRoute({
+  path: "analytics",
+  getParentRoute: () => adminLayout,
+  beforeLoad: ({ search }) => {
+    throw redirect({
+      to: "/admin/usage",
+      search: { ...search, tab: "dashboard" },
+      replace: true,
+    });
+  },
+  validateSearch: (search: Record<string, unknown>) => usagePageSearch(search),
+});
+
+function usagePageSearch(search: Record<string, unknown>): Partial<Pick<
+  ReturnType<typeof normalizeAdminUsageSearch>,
+  "sort" | "metric" | "page" | "per_page"
+>> & {
+  tab?: "dashboard" | "list";
+  sample?: "overview" | "operations" | "explorer";
+  mock?: string;
+} {
+  const { sort, metric, page, per_page } = normalizeAdminUsageSearch(search);
+  return {
+    sort,
+    metric,
+    page,
+    per_page,
+    tab: search.tab === "list" ? ("list" as const) : ("dashboard" as const),
+    sample:
+      import.meta.env.DEV &&
+      import.meta.env.MODE === "test" &&
+      ["overview", "operations", "explorer"].includes(String(search.sample))
+        ? (search.sample as "overview" | "operations" | "explorer")
+        : undefined,
+    mock: import.meta.env.DEV && search.mock ? String(search.mock) : undefined,
+  };
+}
 const adminUsageRoute = createRoute({
   path: "usage",
   getParentRoute: () => adminLayout,
   component: AdminUsagePage,
-  validateSearch: normalizeAdminUsageSearch,
+  validateSearch: usagePageSearch,
+  beforeLoad: ({ search, location }) => {
+    const params = new URLSearchParams(location.searchStr);
+    if (["period", "from", "to", "user", "service"].some((key) => params.has(key))) {
+      throw redirect({
+        to: "/admin/usage",
+        search: usagePageSearch(search),
+        replace: true,
+      });
+    }
+  },
 });
 
 const adminIntegrityRoute = createRoute({
@@ -1047,6 +1091,7 @@ const routeTree = rootRoute.addChildren([
       adminNodesRoute,
       adminAuditLogRoute,
       adminUsageRoute,
+      adminAnalyticsRoute,
       adminIntegrityRoute,
       adminCreditsRoute,
       adminInviteCodesRoute,
