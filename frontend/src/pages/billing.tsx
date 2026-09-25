@@ -1,5 +1,11 @@
+import { Link } from "@tanstack/react-router";
+import { useAuthStore } from "@/stores/auth-store";
 import { MetricBlock } from "@/components/shared/metric-block";
-import { formatCredits, formatNumber, formatEstimatedCredits } from "@/lib/billing-format";
+import {
+  formatCredits,
+  formatNumber,
+  formatEstimatedCredits,
+} from "@/lib/billing-format";
 import { billingMetricLabel } from "@/lib/billing-units";
 import { Fragment, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -44,6 +50,13 @@ import {
 } from "@/components/ui/table";
 
 export function BillingPage() {
+  const canViewAnalytics = useAuthStore(
+    (state) =>
+      state.user?.is_admin ||
+      state.user?.is_operator ||
+      state.user?.role === "admin" ||
+      state.user?.role === "operator",
+  );
   const [period, setPeriod] = useState<BillingUsagePeriod>("30d");
   const walletQuery = useBillingWallet();
   const usageQuery = useBillingUsage(period);
@@ -105,6 +118,14 @@ export function BillingPage() {
           </SelectContent>
         </Select>
       </div>
+
+      {canViewAnalytics && (
+        <Button variant="outline" asChild>
+          <Link to="/admin/usage" search={{ tab: "dashboard" }}>
+            View usage
+          </Link>
+        </Button>
+      )}
 
       {usageQuery.isError && (
         <ErrorBanner

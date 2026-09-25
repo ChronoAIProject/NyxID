@@ -190,3 +190,4 @@ pub mod service_history;
 
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;
+pub mod usage_workspace_service;
