@@ -802,3 +802,102 @@ async fn editor_proxy_permits_ornn_skill_cru_with_only_sa_credential() {
     );
     assert_eq!(upstream.received_requests().await.unwrap().len(), 3);
 }
+
+#[tokio::test]
+async fn activation_precondition_rejects_stale_access_and_accepts_unchanged_assignment() {
+    let (f, role_id, _) = editor("editor_activation_precondition").await;
+    let (_, ornn_role) = request(&f.state, "POST", "/api/v1/admin/roles", &f.human_token,
+        Some(json!({"name":"Ornn retained", "slug":format!("ornn-retained-{}", Uuid::new_v4()), "permissions":["ornn:skill:read"], "is_default":false}))).await;
+    let ornn_role_id = ornn_role["id"].as_str().unwrap();
+    let role_ids = vec![role_id.as_str(), ornn_role_id];
+    let accounts = f.state.db.collection::<Document>(ACCOUNTS);
+    accounts.update_one(doc! {"_id": &f.sa.id}, doc! {"$set": {"role_ids": &role_ids}, "$unset": {"purpose":"", "platform_protected":""}}).await.unwrap();
+    let before = accounts
+        .find_one(doc! {"_id": &f.sa.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let bearer = token(&f, None).await;
+    for path in [
+        "/api/v1/keys".to_owned(),
+        format!("/api/v1/keys/{}", f.service.id),
+    ] {
+        assert_eq!(
+            request(&f.state, "GET", &path, &bearer, None).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let expected = json!({"role_ids": role_ids, "allowed_scopes": SCOPES, "purpose": "general", "platform_protected": false, "is_active": true});
+    let path = format!("/api/v1/admin/service-accounts/{}", f.sa.id);
+    let body = json!({"role_ids": role_ids, "allowed_scopes": SCOPES, "expected_access": expected});
+    for mutation in [
+        doc! {"role_ids": []},
+        doc! {"allowed_scopes": "proxy"},
+        doc! {"is_active":false},
+        doc! {"purpose":"curation"},
+        doc! {"platform_protected":true},
+    ] {
+        accounts
+            .update_one(doc! {"_id": &f.sa.id}, doc! {"$set": &mutation})
+            .await
+            .unwrap();
+        assert_eq!(
+            request(&f.state, "PUT", &path, &f.human_token, Some(body.clone()))
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        let stored = accounts
+            .find_one(doc! {"_id": &f.sa.id})
+            .await
+            .unwrap()
+            .unwrap();
+        for (key, value) in &mutation {
+            assert_eq!(stored.get(key), Some(value));
+        }
+        accounts
+            .replace_one(doc! {"_id": &f.sa.id}, &before)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        request(&f.state, "PUT", &path, &f.human_token, Some(body))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let after = accounts
+        .find_one(doc! {"_id": &f.sa.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.get_array("role_ids").unwrap(),
+        before.get_array("role_ids").unwrap()
+    );
+    for field in [
+        "client_id",
+        "client_secret_hash",
+        "secret_prefix",
+        "credential_generation",
+        "is_active",
+    ] {
+        assert_eq!(after.get(field), before.get(field));
+    }
+    let bearer = token(&f, None).await;
+    let (status, listing) = request(&f.state, "GET", "/api/v1/keys", &bearer, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = listing["keys"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            &format!("/api/v1/keys/{id}"),
+            &bearer,
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}

@@ -53,12 +53,12 @@ export function KeyReadGrantSection({ saId }: { readonly saId: string }) {
     <DetailSection title="Connection metadata access">
       <div className="space-y-4 p-5">
         <p className="text-[12px] text-muted-foreground">
-          This grant is required for GET /api/v1/keys and GET /api/v1/keys/[id].
-          Make sure this is the service account whose Client ID is used by the
-          failing integration. The account needs user-services:read in Allowed
-          Scopes, and you must request a new token after changing that scope.
-          A full platform administrator must also grant the exact UserService
-          UUIDs below. Connections must remain accessible to the account owner.
+          Optional access to selected private connections owned by a person or
+          organization. Catalog editors read the platform catalog through their
+          assigned roles and do not need this grant. For private connection
+          reads, the account needs user-services:read and a platform
+          administrator must grant the connection UUIDs below. Connections must
+          remain accessible to the account owner.
         </p>
         {isLoading && <p>Loading grant…</p>}
         {error && <p role="alert">Could not load connection metadata access.</p>}

@@ -2433,6 +2433,7 @@ async fn update_service_account_action(
         HeaderMap::new(),
         Path(id.clone()),
         Json(admin_service_accounts::UpdateServiceAccountRequest {
+            expected_access: None,
             name: body.name,
             description: body.description,
             allowed_scopes: None,
