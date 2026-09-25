@@ -403,6 +403,11 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub developer_app_ids: Option<Vec<String>>,
 
+    /// Confidential resource servers allowed to inspect keys for this catalog service.
+    /// Administrator-managed; independent of visibility and auto-connection policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_client_ids: Option<Vec<String>>,
+
     /// Declarative token exchange config. Required when `auth_method` is
     /// `token_exchange`, ignored otherwise. See [`TokenExchangeConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -533,6 +538,7 @@ pub mod test_helpers {
             default_request_headers: None,
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
+            introspection_client_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
             proxy_operation_policy: None,
@@ -649,6 +655,7 @@ mod tests {
             ]),
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
+            introspection_client_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
             proxy_operation_policy: None,
@@ -726,6 +733,7 @@ mod tests {
             default_request_headers: None,
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
+            introspection_client_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
             proxy_operation_policy: None,

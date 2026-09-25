@@ -4897,6 +4897,7 @@ mod tests {
             default_request_headers: None,
             ws_frame_injections: Vec::new(),
             developer_app_ids: None,
+            introspection_client_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
             proxy_operation_policy: None,

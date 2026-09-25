@@ -388,3 +388,25 @@ All changes are additive. No breaking changes for existing users:
 | `cli/src/auth.rs` | Profile-aware token storage |
 | `cli/src/commands/api_key.rs` | bind command, --platform flag |
 | `cli/docker-entrypoint.sh` | Auto-register in Docker |
+
+## Service-bound agent key introspection
+
+A downstream resource server can verify an ordinary agent key directly through
+`POST /oauth/introspect`. Send a form with `token`, `token_type_hint=api_key`,
+`client_id`, `client_secret` and the target catalog `service_id`. The active
+confidential OAuth client must appear in that catalog's `introspection_client_ids`. Administrators set or clear this field through the catalog service create/update API; it accepts active confidential clients for either public or private services and never changes visibility or automatic connections.
+Public clients and unrelated confidential clients receive `active: false`.
+
+Successful evidence includes `active`, `token_type: api_key`, `aud` (the catalog
+service ID), `sub` (the exact key owner), `scope`, `jti`, `iat`, `iss` and current
+RBAC `permissions`. `exp` is the earlier parent/child credential expiry; it is
+omitted only for a nonexpiring credential. The resource server must validate
+the audience and credential type before accepting permissions.
+
+Verification requires an active owner, a general-purpose key with `proxy` scope,
+an active owner-bound connection to the catalog, and a current key service grant.
+It includes explicitly enabled auto-connected grants. It does not provision
+connections or widen service scopes. Restricted scheduled-invocation keys remain
+ineligible. Invalid, revoked, expired and out-of-scope keys return `active: false`;
+unexpected database failures in agent-key verification return 503 so consumers
+can distinguish an outage from revocation.
