@@ -14,8 +14,8 @@ async fn exercise(keep: bool, mfa: bool) {
         .unwrap();
     let actor_id = uuid::Uuid::new_v4().to_string();
     let mut actor = test_user(&actor_id, UserType::Person);
-    actor.password_hash =
-        Some(crate::crypto::password::hash_password("Local-test-password1!").unwrap());
+    let password = format!("Test-1!{}", uuid::Uuid::new_v4());
+    actor.password_hash = Some(crate::crypto::password::hash_password(&password).unwrap());
     let email = actor.email.clone();
     db.collection::<User>(crate::models::user::COLLECTION_NAME)
         .insert_one(actor)
@@ -102,7 +102,7 @@ async fn exercise(keep: bool, mfa: bool) {
         .post(format!("{approval}/password"))
         .header("Origin", "https://untrusted.example")
         .header("Cookie", &cookie)
-        .json(&json!({"email":email, "password":"Local-test-password1!"}))
+        .json(&json!({"email":email, "password":password}))
         .send()
         .await
         .unwrap();
@@ -111,7 +111,7 @@ async fn exercise(keep: bool, mfa: bool) {
         .post(format!("{approval}/password"))
         .header("Origin", &origin)
         .header("Cookie", &cookie)
-        .json(&json!({"email":email, "password":"Local-test-password1!", "client":"token"}))
+        .json(&json!({"email":email, "password":password, "client":"token"}))
         .send()
         .await
         .unwrap();
