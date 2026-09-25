@@ -536,7 +536,8 @@ jobs:
   coverage-backend:
     name: Coverage (Backend)
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    # Cache a report for every rollup tip, including documentation-only pushes.
+    if: inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
