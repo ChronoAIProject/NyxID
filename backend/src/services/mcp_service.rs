@@ -5282,6 +5282,7 @@ pub async fn connect_service(
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await?;

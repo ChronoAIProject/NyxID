@@ -491,7 +491,11 @@ export function ChannelBotSetup({
                 isLoading={createBot.isPending}
                 disabled={!catalog.data || !isDirty || !isValid}
               >
-                {fullPage ? "Create channel bot" : "Add Bot"}
+                {fullPage
+                  ? platform === "telegram"
+                    ? "Connect bot"
+                    : "Create channel bot"
+                  : "Add Bot"}
                 {fullPage && <ArrowRight aria-hidden="true" />}
               </Button>
             </div>
@@ -512,7 +516,7 @@ export function ChannelBotSetup({
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent
         ref={dialogContentRef}
-        className="max-h-[90dvh] overflow-y-auto md:max-w-md"
+        className="channel-connect-dialog max-h-[90dvh] overflow-y-auto md:max-w-md"
       >
         {content}
       </DialogContent>

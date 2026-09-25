@@ -624,7 +624,10 @@ it("generates shareable setup links for enabled catalog entries, including new p
 
 it.each(platformFixtures)("opens a full setup page for $platform without a dialog or platform picker", async (platform) => {
   await setup(`/channel-bots/connect/${platform.platform}`);
-  expect(await screen.findByRole("heading", { name: `Create your ${platform.platform.startsWith("telegram") ? "Telegram" : platform.display_name} channel bot` })).toBeVisible();
+  const title = platform.platform === "telegram"
+    ? "Connect your Telegram bot"
+    : `Create your ${platform.platform === "telegram-new" ? "Telegram" : platform.display_name} channel bot`;
+  expect(await screen.findByRole("heading", { name: title })).toBeVisible();
   expect(await screen.findByLabelText("Bot name", { exact: true })).toBeVisible();
   expect(screen.getByRole("img", { name: /^NyxID connects to/ })).toBeVisible();
   expect(screen.queryByRole("list", { name: "Connection progress" })).not.toBeInTheDocument();
@@ -649,7 +652,7 @@ it.each([[], [{ id: orgId, your_role: "member" }], [{ id: orgId, your_role: "vie
   await setup("/channel-bots/connect/telegram?bot_token=fixture-token");
   expect(await screen.findByLabelText("Bot name")).toHaveValue("Telegram bot");
   expect(screen.queryByRole("combobox", { name: "Create for" })).not.toBeInTheDocument();
-  const submit = screen.getByRole("button", { name: "Create channel bot" });
+  const submit = screen.getByRole("button", { name: "Connect bot" });
   await waitFor(() => expect(submit).toBeEnabled());
   await user.click(submit);
   expect(post).toHaveBeenCalledExactlyOnceWith("/channel-bots", {
@@ -720,7 +723,7 @@ it("shows one-time verification secrets on the full page until the user continue
   const user = userEvent.setup();
   const view = await setup("/channel-bots/connect/telegram?label=Support");
   await user.type(await screen.findByLabelText("Bot token"), "fixture-token");
-  await user.click(screen.getByRole("button", { name: "Create channel bot" }));
+  await user.click(screen.getByRole("button", { name: "Connect bot" }));
   expect(await screen.findByText("one-time-secret")).toBeVisible();
   expect(screen.getByText("Save this token in the platform console.")).toBeVisible();
   expect(view.router.state.location.pathname).toBe("/channel-bots/connect/telegram");

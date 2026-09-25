@@ -2550,6 +2550,7 @@ mod tests {
                 use_platform_key: None,
                 service_id: Uuid::new_v4().to_string(),
                 label: None,
+                endpoint_url: None,
                 requested_by: None,
                 requesting_app_id: None,
                 requesting_app_name: None,
