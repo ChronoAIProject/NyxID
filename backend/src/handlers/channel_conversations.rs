@@ -150,7 +150,7 @@ async fn resolve_list_owner(
 /// Resolve the owner id for a read/write on an existing conversation.
 /// Returns the conversation's `user_id` on success, gated on the caller's
 /// access level via `OwnerAccess`.
-async fn resolve_conversation_owner(
+pub(crate) async fn resolve_conversation_owner(
     state: &AppState,
     actor: &str,
     conversation_id: &str,

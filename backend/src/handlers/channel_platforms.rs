@@ -14,6 +14,7 @@ pub struct PlatformListResponse {
 }
 #[derive(Debug, Serialize)]
 pub struct PlatformItem {
+    pub activities: &'static [crate::services::channel_activity_service::ActivityDescriptor],
     pub platform: String,
     pub display_name: String,
     pub enabled: bool,
@@ -85,6 +86,7 @@ impl From<PlatformCatalogEntry> for PlatformItem {
     fn from(entry: PlatformCatalogEntry) -> Self {
         let r = entry.registration;
         Self {
+            activities: entry.activities,
             webhook_path: (r.enabled && r.webhook_ingestion)
                 .then(|| format!("/api/v1/webhooks/channel/{}/{{bot_id}}", entry.platform)),
             platform: entry.platform,

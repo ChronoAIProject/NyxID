@@ -199,3 +199,6 @@ pub mod usage_workspace_service;
 pub mod catalog_editor_catalog_service;
 pub mod catalog_editor_proxy_service;
 pub mod catalog_editor_service;
+
+pub mod channel_activity_callback_service;
+pub mod channel_activity_service;

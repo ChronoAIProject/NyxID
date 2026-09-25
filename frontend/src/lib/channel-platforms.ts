@@ -19,6 +19,7 @@ export function platformView(descriptor?: ChannelPlatformDescriptor, id = "") {
   const flow: ManagedFlow | undefined = candidate === "meta_embedded_signup" || candidate === "oauth_connection" ? candidate : undefined;
   return {
     label: descriptor?.display_name ?? id,
+    activities: descriptor?.activities ?? [],
     enabled: descriptor?.enabled ?? false,
     fields: (descriptor?.registration.fields ?? []).map((field): ChannelFieldDescriptor => ({
       ...field, name: field.name as ChannelCredentialField, configuredKey: configuredKeys[field.storage],

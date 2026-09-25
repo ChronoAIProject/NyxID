@@ -6,6 +6,8 @@ pub const COLLECTION_NAME: &str = "channel_bots";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum XChannelEvent {
+    Chat,
+    Posts,
     Dm,
     Mentions,
     Replies,

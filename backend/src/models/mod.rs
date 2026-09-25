@@ -120,3 +120,5 @@ pub mod usage_rollup_daily;
 pub mod usage_rollup_hourly;
 pub mod usage_rollup_state;
 pub mod usage_workspace;
+
+pub mod channel_activity;

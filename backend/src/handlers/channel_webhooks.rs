@@ -1425,6 +1425,7 @@ mod tests {
         };
 
         let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
             id: conversation_id.clone(),
             user_id: user_id.clone(),
             channel_bot_id: Some(bot_id.clone()),
