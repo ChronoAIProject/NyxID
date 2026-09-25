@@ -216,6 +216,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    db.collection::<mongodb::bson::Document>(crate::models::login_approval::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── sessions ──
     let sessions = db.collection::<mongodb::bson::Document>("sessions");
     sessions

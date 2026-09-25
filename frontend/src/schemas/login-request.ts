@@ -13,6 +13,7 @@ export type LoginRequestHints = RequestedPermissions & {
   key_name: string;
   expiry_days: "7" | "30" | "90" | "365" | "none";
   platform: "generic" | "codex" | "claude-code" | "openclaw";
+  show_details: boolean;
   errors: string[];
   query: string;
 };
@@ -25,6 +26,7 @@ const singles = [
   "key_name",
   "expiry_days",
   "platform",
+  "show_details",
 ];
 const slugPattern = /^[a-z0-9][a-z0-9_-]{0,127}$/;
 const hasControls = (value: string) =>
@@ -43,6 +45,7 @@ export function parseLoginRequestHints(
     key_name: "",
     expiry_days: "90",
     platform: "generic",
+    show_details: false,
     permissions: [],
     services: [],
     service_permissions: [],
@@ -82,6 +85,12 @@ export function parseLoginRequestHints(
     const parsed = userCodeSchema.safeParse(code);
     if (parsed.success) result.user_code = parsed.data;
     else result.errors.push("The code in this link is invalid.");
+  }
+  const showDetails = single("show_details");
+  if (showDetails !== undefined) {
+    if (showDetails !== "true" && showDetails !== "false")
+      result.errors.push("Invalid show_details.");
+    else result.show_details = showDetails === "true";
   }
   for (const [name, choices] of [
     ["login_type", ["full", "agent"]],

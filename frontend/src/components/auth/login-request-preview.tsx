@@ -1,6 +1,12 @@
 import { ChevronDown, Info } from "lucide-react";
-import { formatAuthDeviceUserCodeInput, type PreviewAuthDeviceResponse } from "@/schemas/auth-device";
-import { formatAuthDeviceRelativeTime, formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
+import {
+  formatAuthDeviceUserCodeInput,
+  type PreviewAuthDeviceResponse,
+} from "@/schemas/auth-device";
+import {
+  formatAuthDeviceRelativeTime,
+  formatWebAuthDeviceRemaining,
+} from "@/lib/auth-device-time";
 import { cn } from "@/lib/utils";
 
 export function LoginDeviceShell({
@@ -33,10 +39,16 @@ export function PreviewPanel({
   preview,
   remainingSeconds,
   userCode,
+  requestedProfile,
+  detailsOpen,
+  onDetailsOpenChange,
 }: {
   readonly preview: PreviewAuthDeviceResponse;
   readonly remainingSeconds: number | null;
   readonly userCode: string;
+  readonly requestedProfile?: string | null;
+  readonly detailsOpen: boolean;
+  readonly onDetailsOpenChange: (open: boolean) => void;
 }) {
   const expired = remainingSeconds === 0;
   const verifiedIp = preview.client_ip_attribution === "verified";
@@ -73,10 +85,6 @@ export function PreviewPanel({
     (preview.client_kind === "unknown"
       ? "Not identified"
       : `${preview.client_kind[0]?.toUpperCase()}${preview.client_kind.slice(1)} client`);
-  const deviceDescription =
-    preview.client_label && preview.client_model
-      ? `${preview.client_label} · ${preview.client_model}`
-      : (preview.client_label ?? preview.client_model ?? "Not provided");
   // Upstream's caution sentence owns one accent. Keep at most one additional
   // value tint, prioritizing the security signal over recognition details.
   const originTone: DetailValueTone = originValue ? "danger" : "default";
@@ -92,85 +100,114 @@ export function PreviewPanel({
           : "default";
 
   return (
-    <section
-      className="border-t border-border/50 pt-4"
-      aria-label="Request details"
-    >
-      <div className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-overlay/30">
-        <div data-sensitive>
-          <ApprovalDetailRow label="User code" value={formatAuthDeviceUserCodeInput(userCode)} mono />
-          <p className="px-4 pb-3 text-[12px] text-muted-foreground">
-            Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match.
-          </p>
-        </div>
-        {/*
-          A signal whose "good" state can be produced by an attacker choosing
-          what to send must never render as a positive assurance. Origin is a
-          forgeable header on this public endpoint, and even a first-party proof
-          would not stop an attacker from copying a genuine QR, so only negative
-          origin states are informative.
-        */}
-        {originValue ? (
+    <section className="space-y-3" aria-label="Request details">
+      <div
+        data-sensitive
+        className="rounded-lg border border-border bg-background px-4 py-5 text-center"
+      >
+        <span className="sr-only">User code: </span>
+        <p className="font-mono text-[28px] font-medium tracking-widest">
+          {formatAuthDeviceUserCodeInput(userCode)}
+        </p>
+        <p
+          className={cn(
+            "mt-2 text-[11px] text-muted-foreground",
+            expiryTone === "danger" && "text-destructive",
+            expiryTone === "warning" && "text-warning",
+          )}
+        >
+          {expired
+            ? "Expired"
+            : remainingSeconds === null
+              ? "Checking expiry…"
+              : `Expires in ${formatWebAuthDeviceRemaining(remainingSeconds)}`}
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[12px]">
+        <span className="text-muted-foreground">Requester</span>
+        <span className="min-w-0 break-words font-medium">
+          {preview.client_label ?? preview.client_app ?? "Requesting device"}
+        </span>
+        <span className="font-mono text-[11px] text-muted-foreground">
+          {verifiedIp && preview.client_ip
+            ? preview.client_ip
+            : unverifiedIp
+              ? "IP not verified"
+              : "IP unavailable"}
+        </span>
+      </div>
+      {/* Reported origin can be forged: show negative signals, never a trust badge. */}
+      {originValue && (
+        <div className="rounded-lg border border-destructive/20 bg-destructive/5">
           <ApprovalDetailRow
             label="Started from"
             value={originValue}
             tone={originTone}
           />
-        ) : null}
-        <ApprovalDetailRow label="Status" value={capitalize(preview.status)} />
+        </div>
+      )}
+      {timezoneDifferences.length > 0 && (
         <ApprovalDetailRow
-          label="Requester"
-          value={
-            verifiedIp && preview.client_ip
-              ? preview.client_ip
-              : unverifiedIp
-                ? "Not verified"
-                : "IP unavailable on this deployment"
-          }
-          mono={verifiedIp && preview.client_ip !== null}
+          label="Timezone"
+          value={timezoneValue}
+          tone={timezoneTone}
         />
-        <ApprovalDetailRow
-          label="Location"
-          value={verifiedIp ? (location ?? "Not available") : "Not available"}
-        />
-        <ApprovalDetailRow
-          label="Network"
-          value={
-            verifiedIp
-              ? formatNetworkRelation(networkRelation)
-              : "Not available"
-          }
-        />
-        {unverifiedIp && preview.client_ip ? (
-          <ApprovalDetailRow
-            label="Reported IP"
-            value={`${preview.client_ip} · unverified`}
-            mono
+      )}
+      <details
+        className="group rounded-lg border border-border/50"
+        open={detailsOpen}
+        onToggle={(event) => onDetailsOpenChange(event.currentTarget.open)}
+      >
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-[12px] text-muted-foreground hover:text-foreground">
+          Request details
+          <ChevronDown
+            aria-hidden="true"
+            className="size-3.5 transition-transform group-open:rotate-180"
           />
-        ) : null}
-        <ApprovalDetailRow
-          label="Requested"
-          value={`${formatAuthDeviceRelativeTime(preview.initiated_at)} · ${formatAbsoluteDateTime(preview.initiated_at)}`}
-        />
-        <ApprovalDetailRow
-          label="Expires in"
-          value={
-            expired
-              ? "Expired"
-              : formatWebAuthDeviceRemaining(remainingSeconds ?? 0)
-          }
-          tone={expiryTone}
-        />
-        <ApprovalDetailRow label="Reported device" value={deviceDescription} />
-        <ApprovalDetailRow label="Reported client" value={appDescription} />
-        <ApprovalDetailRow
-          label="Platform"
-          value={preview.client_platform ?? "Not identified"}
-        />
-        <details className="group">
-          <summary className="cursor-pointer px-4 py-2.5 text-[12px] text-muted-foreground">
-            Additional reported device details
-          </summary>
+        </summary>
+        <div className="divide-y divide-border/30 border-t border-border/50">
+          <ApprovalDetailRow
+            label="Status"
+            value={capitalize(preview.status)}
+          />
+          <ApprovalDetailRow
+            label="Location"
+            value={verifiedIp ? (location ?? "Not available") : "Not available"}
+          />
+          <ApprovalDetailRow
+            label="Network"
+            value={
+              verifiedIp
+                ? formatNetworkRelation(networkRelation)
+                : "Not available"
+            }
+          />
+          {unverifiedIp && preview.client_ip && (
+            <ApprovalDetailRow
+              label="Reported IP"
+              value={`${preview.client_ip} · unverified`}
+              mono
+            />
+          )}
+          <ApprovalDetailRow
+            label="Requested"
+            value={`${formatAuthDeviceRelativeTime(preview.initiated_at)} · ${formatAbsoluteDateTime(preview.initiated_at)}`}
+          />
+          <ApprovalDetailRow
+            label="Reported model"
+            value={preview.client_model ?? "Not provided"}
+          />
+          <ApprovalDetailRow label="Reported client" value={appDescription} />
+          <ApprovalDetailRow
+            label="Platform"
+            value={preview.client_platform ?? "Not identified"}
+          />
+          {requestedProfile && (
+            <ApprovalDetailRow
+              label="Requested profile"
+              value={requestedProfile}
+            />
+          )}
           <ApprovalDetailRow
             label="Form factor"
             value={
@@ -179,11 +216,9 @@ export function PreviewPanel({
                 : "Not reported"
             }
           />
-          <ApprovalDetailRow
-            label="Timezone"
-            value={timezoneValue}
-            tone={timezoneTone}
-          />
+          {timezoneDifferences.length === 0 && (
+            <ApprovalDetailRow label="Timezone" value={timezoneValue} />
+          )}
           <ApprovalDetailRow
             label="Locale"
             value={preview.client_locale ?? "Not reported"}
@@ -208,17 +243,13 @@ export function PreviewPanel({
                 : `${preview.client_device_memory} GB`
             }
           />
-        </details>
-        <details className="group px-4 py-2.5">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[12px] text-muted-foreground">
-            Raw user agent
-            <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
-          </summary>
-          <p className="mt-2 break-all font-mono text-[11px] leading-relaxed text-foreground">
-            {preview.client_user_agent ?? "Not provided"}
-          </p>
-        </details>
-      </div>
+          <ApprovalDetailRow
+            label="Raw user agent"
+            value={preview.client_user_agent ?? "Not provided"}
+            mono
+          />
+        </div>
+      </details>
     </section>
   );
 }

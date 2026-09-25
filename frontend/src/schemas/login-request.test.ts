@@ -10,6 +10,7 @@ describe("device approval link hints", () => {
       key_name: "CLI account",
       expiry_days: "30",
       platform: "codex",
+      show_details: "true",
       services: "github",
       service_permissions: "github::repo:read",
     });
@@ -19,6 +20,7 @@ describe("device approval link hints", () => {
     expect(hints.errors).toEqual([]);
     expect(hints.permissions).toEqual(["read", "proxy", "email"]);
     expect(hints.user_code).toBe("101VABCD");
+    expect(hints.show_details).toBe(true);
     const returned = loginRequestReturnTo("device", hints, hints.user_code!);
     expect(
       parseLoginRequestHints(returned.slice(returned.indexOf("?"))),
@@ -35,6 +37,8 @@ describe("device approval link hints", () => {
     "key_name=hello",
     "login_type=admin",
     "platform=unknown",
+    "show_details=1",
+    "show_details=true&show_details=false",
     "expiry_days=-1",
     "permissions=admin,",
     "permissions=unknown",

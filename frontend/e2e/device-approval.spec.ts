@@ -10,6 +10,17 @@ async function fixture(
   inventory = loginInventory(),
 ) {
   const requests: { path: string; body: unknown }[] = [];
+  const identity = {
+    id: "11111111-1111-4111-8111-111111111111",
+    flow: "device",
+    user_code: "ABCDEFGH",
+    keep_signed_in: false,
+    verified: false,
+    mfa_required: false,
+    expires_at: new Date(Date.now() + 600000).toISOString(),
+    user: { id: "user", email: "human@example.com", display_name: "Human" },
+  };
+  const approvalPath = `/api/v1/auth/approval/${identity.id}`;
   await page.addInitScript(() => {
     const writes: string[] = [];
     (window as unknown as { storageWrites: string[] }).storageWrites = writes;
@@ -23,7 +34,10 @@ async function fixture(
     const path = new URL(route.request().url()).pathname;
     let status = 200;
     let body: unknown = {};
-    if (path.startsWith("/api/v1/auth/device/")) {
+    if (
+      path.startsWith("/api/v1/auth/device/") ||
+      path.startsWith("/api/v1/auth/approval")
+    ) {
       requests.push({ path, body: route.request().postDataJSON() });
     }
     if (path === "/api/v1/users/me") {
@@ -70,31 +84,42 @@ async function fixture(
       ].includes(path)
     ) {
       body = { ok: true };
-    } else if (path.startsWith("/api/v1/auth/social/")) {
-      const returnTo = new URL(route.request().url()).searchParams.get(
-        "return_to",
-      )!;
-      expect(new URL(returnTo).origin).toBe(new URL(page.url()).origin);
-      expect(encodeURIComponent(returnTo).length).toBeLessThan(3000);
-      authenticated = true;
-      await route.fulfill({ status: 302, headers: { location: returnTo } });
-      return;
-    } else if (path === "/api/v1/auth/login") {
-      if (mfa) {
-        status = 403;
-        body = {
-          error: "mfa_required",
-          error_code: 2002,
-          message: "MFA required",
-          session_token: "fixture-mfa",
-        };
-      } else {
-        authenticated = true;
-        body = { ok: true };
-      }
-    } else if (path === "/api/v1/auth/mfa/verify") {
-      authenticated = true;
+    } else if (path === "/api/v1/auth/approval") {
+      identity.keep_signed_in = route.request().postDataJSON().keep_signed_in;
+      body = identity;
+    } else if (path === approvalPath) {
+      body = identity;
+    } else if (
+      path === `${approvalPath}/password` ||
+      path === `${approvalPath}/mfa`
+    ) {
+      identity.mfa_required = mfa && path.endsWith("/password");
+      identity.verified = !identity.mfa_required;
+      authenticated = identity.verified && identity.keep_signed_in;
+      body = identity;
+    } else if (path === `${approvalPath}/inventory`) {
+      body = {
+        options: inventory.options,
+        catalog: { entries: inventory.catalog },
+      };
+    } else if (
+      path === `${approvalPath}/approve` ||
+      path === `${approvalPath}/deny`
+    ) {
       body = { ok: true };
+    } else if (path.startsWith("/api/v1/auth/social/")) {
+      const params = new URL(route.request().url()).searchParams;
+      expect(params.get("approval_id")).toBe(identity.id);
+      expect(new URL(params.get("return_to")!).origin).toBe(
+        new URL(page.url()).origin,
+      );
+      identity.verified = true;
+      authenticated = identity.keep_signed_in;
+      await route.fulfill({
+        status: 302,
+        headers: { location: "/login/device?user_code=ABCDEFGH" },
+      });
+      return;
     } else if (path === "/api/v1/public/config") {
       body = {
         telemetry_dsn: null,
@@ -112,10 +137,10 @@ async function fixture(
 }
 
 async function verify(page: Page) {
+  await expect(
+    page.getByRole("region", { name: "Request details" }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page
-    .getByRole("button", { name: "This is my request — continue", exact: true })
-    .click();
 }
 async function restricted(page: Page) {
   await verify(page);
@@ -394,10 +419,10 @@ test("public preview preserves hints and identity login requires fresh explicit 
   await page.goto(
     `/login/device?${hints}&key_source=new&key_name=Build+agent&expiry_days=30&platform=codex`,
   );
-  await expect(page.getByLabel("User code")).toHaveValue("ABCD-EFGH");
-  expect(requests).toEqual([]);
-  await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(page.getByText("Requested profile: home-agent")).toBeVisible();
+  await expect(page.getByText("ABCD-EFGH", { exact: true })).toBeVisible();
+  await page.getByText("Request details", { exact: true }).click();
+  await expect(page.getByText("home-agent", { exact: true })).toBeVisible();
+  expect(requests.filter((r) => r.path.includes("/approval"))).toEqual([]);
   expect(await context.cookies()).toEqual([]);
   expect(
     await page.evaluate(() => ({
@@ -405,19 +430,17 @@ test("public preview preserves hints and identity login requires fresh explicit 
       session: sessionStorage.length,
     })),
   ).toEqual({ local: 0, session: 0 });
-  await page.getByRole("link", { name: "Verify identity to continue" }).click();
+  await page.getByRole("button", { name: "Continue with email" }).click();
   await page.getByLabel("Email", { exact: true }).fill("human@example.com");
   await page.getByLabel("Password", { exact: true }).fill("fixture-password");
-  await page.getByRole("button", { name: /Sign in/i }).click();
-  await page.getByLabel(/code/i).fill("123456");
-  await page.getByRole("button", { name: /Verify/i }).click();
+  await page.getByRole("button", { name: "Verify & continue" }).click();
+  await page.getByLabel("Authenticator code").fill("123456");
+  await page.getByRole("button", { name: "Verify & continue" }).click();
   await expect(page).toHaveURL(/\/login\/device\?/);
   expect(new URL(page.url()).searchParams.get("key_name")).toBe("Build agent");
-  expect(
-    requests.find((r) => r.path.includes("approve"))?.body,
-  ).not.toHaveProperty("credential_expires_at");
   expect(requests.filter((r) => r.path.includes("approve"))).toEqual([]);
-  await restricted(page);
+  await page.getByRole("radio", { name: /Restricted Agent Key/ }).check();
+  await page.getByRole("button", { name: "Continue to approval" }).click();
   await page.getByRole("button", { name: "Create new Agent Key" }).click();
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue(
     "Build agent",
@@ -442,7 +465,7 @@ test("public preview preserves hints and identity login requires fresh explicit 
   ).toBeVisible();
   expect(requests.filter((r) => r.path.includes("approve"))).toEqual([
     {
-      path: "/api/v1/auth/device/approve-agent-key",
+      path: "/api/v1/auth/approval/11111111-1111-4111-8111-111111111111/approve",
       body: expect.objectContaining({
         selection: expect.objectContaining({
           kind: "new",
@@ -454,6 +477,9 @@ test("public preview preserves hints and identity login requires fresh explicit 
       }),
     },
   ]);
+  expect(
+    requests.find((r) => r.path.includes("approve"))?.body,
+  ).not.toHaveProperty("credential_expires_at");
 });
 
 for (const grant of ["account", "agent-key"] as const) {
@@ -631,16 +657,17 @@ for (const long of [false, true]) {
         .join(","),
     });
     await page.goto(`/login/device?${params}`);
-    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "Continue with Google" }),
+    ).toBeVisible();
     expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
-    await page
-      .getByRole("link", { name: "Verify identity to continue" })
-      .click();
-    expect(await page.evaluate(() => sessionStorage.length)).toBe(long ? 1 : 0);
     await page.getByRole("button", { name: /Google/ }).click();
-    await expect(page.getByLabel("User code")).toHaveValue("ABCD-EFGH");
+    await expect(
+      page.getByRole("button", { name: "Continue to approval" }),
+    ).toBeVisible();
     expect(requests.filter((r) => r.path.includes("approve"))).toEqual([]);
-    await restricted(page);
+    await page.getByRole("radio", { name: /Restricted Agent Key/ }).check();
+    await page.getByRole("button", { name: "Continue to approval" }).click();
     await page.getByRole("button", { name: "Create new Agent Key" }).click();
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue(
       "Social Agent",
@@ -655,7 +682,7 @@ for (const long of [false, true]) {
     expect(
       await page.evaluate(() =>
         Object.keys(sessionStorage).filter((k) =>
-          k.startsWith("nyxid:device-identity:"),
+          k.startsWith("nyxid-approval:"),
         ),
       ),
     ).toEqual([]);

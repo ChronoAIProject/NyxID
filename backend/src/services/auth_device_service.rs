@@ -793,7 +793,7 @@ pub fn is_v2_user_code(normalized: &str) -> bool {
     normalized.len() == AUTH_DEVICE_USER_CODE_LEN + 1 && normalized.starts_with('2')
 }
 
-async fn find_by_user_code(
+pub(crate) async fn find_by_user_code(
     db: &Database,
     user_code_hmac: &str,
 ) -> AppResult<(Collection<AuthDeviceCode>, AuthDeviceCode)> {

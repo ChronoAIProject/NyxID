@@ -2,6 +2,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { Form, useAppForm } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
+import { LoginActions } from "./login-actions";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -275,15 +276,7 @@ export function LoginKeyDraft({
                     filters in Customize.
                   </p>
                 )}
-                <div className="flex flex-wrap justify-end gap-2">
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    onClick={onDeny}
-                    disabled={disabled}
-                  >
-                    Deny request
-                  </Button>
+                <LoginActions onDeny={onDeny} disabled={disabled}>
                   <Button
                     type="submit"
                     variant="primary"
@@ -297,7 +290,7 @@ export function LoginKeyDraft({
                   >
                     Create &amp; continue
                   </Button>
-                </div>
+                </LoginActions>
               </div>
             }
           >

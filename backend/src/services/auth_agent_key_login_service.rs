@@ -226,7 +226,7 @@ pub async fn request(
     ))
 }
 
-async fn find_by_user_code(
+pub(crate) async fn find_by_user_code(
     db: &Database,
     hmac_key: &[u8],
     raw: &str,

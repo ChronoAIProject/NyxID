@@ -23,6 +23,7 @@ const REFERENCE_FILES: &[&str] = &[
     "managing",
     "organizations",
     "nodes",
+    "device-login",
     "devices",
     "notifications",
     "channels",
