@@ -464,7 +464,7 @@ pub(crate) async fn resolve_bot_owner_for_write(
 
 /// Resolve the effective owner id for a READ operation on a bot.
 /// Allows any active member of the owning org (including viewers).
-async fn resolve_bot_owner_for_read(
+pub(crate) async fn resolve_bot_owner_for_read(
     state: &AppState,
     actor: &str,
     bot_id: &str,

@@ -156,6 +156,7 @@ pub struct CreateServiceAccountResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ServiceAccountItem {
+    pub catalog_scope_authorized: bool,
     pub purpose: crate::models::service_account::ServiceAccountPurpose,
     pub platform_protected: bool,
     pub credential_generation: i64,
@@ -235,6 +236,7 @@ pub struct RevokeTokensResponse {
 fn sa_to_item(sa: ServiceAccount) -> ServiceAccountItem {
     ServiceAccountItem {
         owner_id: sa.effective_owner_user_id().to_string(),
+        catalog_scope_authorized: sa.catalog_scope_authorized,
         purpose: sa.purpose,
         platform_protected: sa.platform_protected,
         credential_generation: sa.credential_generation,
@@ -314,33 +316,22 @@ pub(crate) async fn create_service_account_with_id(
         require_admin(&state, &auth_user).await?;
     }
 
-    let (sa, raw_secret) = match reserved_id {
-        Some(id) => {
-            service_account_service::create_service_account_with_id(
-                &state.db,
-                id,
-                &body.name,
-                body.description.as_deref(),
-                &body.allowed_scopes,
-                &role_ids,
-                body.rate_limit_override,
-                &effective_owner,
-            )
-            .await?
-        }
-        None => {
-            service_account_service::create_service_account(
-                &state.db,
-                &body.name,
-                body.description.as_deref(),
-                &body.allowed_scopes,
-                &role_ids,
-                body.rate_limit_override,
-                &effective_owner,
-            )
-            .await?
-        }
-    };
+    let platform_admin = require_admin(&state, &auth_user).await.is_ok();
+    let sa_id = reserved_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (sa, raw_secret) = service_account_service::create_service_account_with_authority(
+        &state.db,
+        &sa_id,
+        &body.name,
+        body.description.as_deref(),
+        &body.allowed_scopes,
+        &role_ids,
+        body.rate_limit_override,
+        &effective_owner,
+        platform_admin,
+    )
+    .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -718,6 +709,7 @@ mod tests {
         let item = ServiceAccountItem {
             purpose: crate::models::service_account::ServiceAccountPurpose::General,
             platform_protected: false,
+            catalog_scope_authorized: false,
             credential_generation: 0,
             curation_grant: None,
             owner_id: "owner".into(),

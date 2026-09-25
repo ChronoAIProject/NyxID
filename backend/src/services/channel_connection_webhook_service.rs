@@ -69,7 +69,7 @@ pub async fn configure(
         }
         let result = configure_inner(db, billing, keys, http, adapter, &current, base_url).await;
         if result.is_err() && current.platform == "x"
-            && (billing.billing_enabled() || current.webhook_registered || super::channel_adapters::x::public_events_enabled(&current)) {
+            && (billing.billing_enabled() || current.webhook_registered || super::channel_adapters::x::webhook_events_enabled(&current)) {
             super::channel_credentials::fail_bot(db, &current,
                 "Webhook or billing setup needs attention. Restore credits and configuration, then select Verify.").await?;
         }
@@ -79,7 +79,7 @@ pub async fn configure(
         && bot.platform == "x"
         && (billing.billing_enabled()
             || bot.webhook_registered
-            || super::channel_adapters::x::public_events_enabled(bot))
+            || super::channel_adapters::x::webhook_events_enabled(bot))
     {
         super::channel_credentials::fail_bot(db, bot,
             "Webhook setup did not complete. Check credits and webhook configuration, then select Verify.").await?;
@@ -106,10 +106,11 @@ async fn configure_inner(
         super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
     if !adapter.connection_webhook_configured(&platform) {
         if adapter.platform_id() == "x"
-            && (billing.billing_enabled() || super::channel_adapters::x::public_events_enabled(bot))
+            && (billing.billing_enabled()
+                || super::channel_adapters::x::webhook_events_enabled(bot))
         {
             return Err(AppError::BillingNotConfigured(
-                "Paid X channels and public events require the platform webhook credentials".into(),
+                "Paid X channels and events other than DMs require the platform webhook credentials".into(),
             ));
         }
         if bot.webhook_registered {
@@ -133,7 +134,7 @@ async fn configure_inner(
             token: &token, platform_bot_id: Some(&current.platform_bot_id), platform_secrets: Some(&platform),
         };
         let url = format!("{}/api/v1/webhooks/channel/{}/platform", base_url.trim_end_matches('/'), adapter.platform_id());
-        if billing.billing_enabled() || current.webhook_registered || super::channel_adapters::x::public_events_enabled(&current) {
+        if billing.billing_enabled() || current.webhook_registered || super::channel_adapters::x::webhook_events_enabled(&current) {
             // Record a possible remote subscription before the provider effect,
             // so failed/partial setup remains eligible for cleanup retry.
             let marked = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(

@@ -300,7 +300,7 @@ pub async fn get_catalog_entry(
     Ok(Json(catalog_entry_response(&state.config, entry)))
 }
 
-fn catalog_entry_response(
+pub(crate) fn catalog_entry_response(
     config: &crate::config::AppConfig,
     entry: catalog_service::CatalogEntry,
 ) -> CatalogEntryResponse {

@@ -27,6 +27,8 @@ type HmacSha256 = Hmac<Sha256>;
 /// Normalized message payload delivered to the agent's callback URL.
 #[derive(Clone, Serialize)]
 pub struct CallbackPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<super::channel_activity_service::CallbackActivity>,
     pub message_id: String,
     pub correlation_id: String,
     pub platform: String,
@@ -151,29 +153,6 @@ pub async fn inbound_platform_message_exists(
 /// held in memory for the duration of the callback forward and then
 /// discarded. Downstream agents keep any history they need.
 #[allow(clippy::too_many_arguments)]
-pub async fn store_inbound_message(
-    db: &mongodb::Database,
-    channel_bot_id: &str,
-    conversation_id: &str,
-    user_id: &str,
-    platform: &str,
-    inbound: &InboundMessage,
-    agent_api_key_id: &str,
-) -> AppResult<ChannelMessage> {
-    store_inbound_message_with_id(
-        db,
-        channel_bot_id,
-        conversation_id,
-        user_id,
-        platform,
-        inbound,
-        agent_api_key_id,
-        &uuid::Uuid::new_v4().to_string(),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn store_inbound_message_with_id(
     db: &mongodb::Database,
     channel_bot_id: &str,
@@ -212,6 +191,7 @@ pub(crate) fn inbound_metadata(
     message_id: &str,
 ) -> ChannelMessage {
     ChannelMessage {
+        activity: None,
         platform_send: None,
         attachments: inbound
             .attachments
@@ -269,6 +249,7 @@ pub async fn store_outbound_message(
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
+        activity: None,
         platform_send,
         attachments: vec![],
         id: uuid::Uuid::new_v4().to_string(),
@@ -333,6 +314,7 @@ pub async fn store_device_event_message(
     inherited_thread_id: Option<String>,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        activity: None,
         platform_send: None,
         attachments: vec![],
         id: uuid::Uuid::new_v4().to_string(),
@@ -711,6 +693,7 @@ pub fn build_callback_payload(
         .collect();
 
     CallbackPayload {
+        activity: None,
         message_id: message.id.clone(),
         correlation_id: String::new(),
         platform: message.platform.clone(),
@@ -831,6 +814,7 @@ mod tests {
         let agent_api_key_id = uuid::Uuid::new_v4().to_string();
         let platform_message_id = "platform-single-message";
         let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -902,6 +886,7 @@ mod tests {
         let other_agent_api_key_id = uuid::Uuid::new_v4().to_string();
         let platform_message_id = "platform-duplicate-message";
         let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -978,6 +963,7 @@ mod tests {
     #[test]
     fn callback_payload_serializes_to_json() {
         let payload = CallbackPayload {
+            activity: None,
             message_id: "msg-1".to_string(),
             correlation_id: String::new(),
             platform: "telegram".to_string(),
@@ -1007,6 +993,11 @@ mod tests {
             raw_platform_data: None,
         };
 
+        // Captured legacy wire shape: no activity:null or content changes.
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"message_id":"msg-1","correlation_id":"","platform":"telegram","agent":{"api_key_id":"key-1","name":"test-agent"},"conversation":{"id":"conv-1","platform_id":"12345","type":"private"},"sender":{"platform_id":"user-1","display_name":"Alice"},"content":{"type":"text","text":"Hello"},"timestamp":"2026-01-01T00:00:00Z"}"#
+        );
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["message_id"], "msg-1");
         assert_eq!(json["correlation_id"], "");
@@ -1022,6 +1013,7 @@ mod tests {
     #[test]
     fn callback_payload_includes_reply_token_when_present() {
         let payload = CallbackPayload {
+            activity: None,
             message_id: "msg-1".to_string(),
             correlation_id: String::new(),
             platform: "telegram".to_string(),
@@ -1095,6 +1087,7 @@ mod tests {
     fn build_callback_payload_preserves_provider_attachment_handles() {
         let now = Utc::now();
         let message = ChannelMessage {
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: "msg-attachment".to_string(),
@@ -1117,6 +1110,7 @@ mod tests {
             updated_at: None,
         };
         let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
             id: "conv-1".to_string(),
             user_id: "user-1".to_string(),
             channel_bot_id: Some("bot-1".to_string()),
@@ -1188,6 +1182,7 @@ mod tests {
 
     fn test_payload() -> CallbackPayload {
         CallbackPayload {
+            activity: None,
             message_id: "msg-test".to_string(),
             correlation_id: String::new(),
             platform: "device".to_string(),
@@ -1222,6 +1217,7 @@ mod tests {
         // Only fields touched by forward_to_agent matter. The rest are
         // padded with safe defaults to construct a complete AppConfig.
         crate::config::AppConfig {
+            auth_device_eight_char_codes: false,
             port: 0,
             base_url: "http://localhost".to_string(),
             frontend_url: "http://localhost".to_string(),

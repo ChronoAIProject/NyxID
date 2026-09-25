@@ -1,3 +1,4 @@
+import { useChannelPlatforms } from "@/hooks/use-channel-platforms";
 import { useEffect } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
@@ -13,32 +14,12 @@ import {
 } from "@/schemas/channels";
 import type { ChannelBotDetail, XChannelEvent } from "@/types/channels";
 
-const choices: readonly {
-  value: XChannelEvent;
-  label: string;
-  description: string;
-}[] = [
-  {
-    value: "dm",
-    label: "Direct messages",
-    description: "Receive unencrypted one-to-one DMs and reply privately.",
-  },
-  {
-    value: "mentions",
-    label: "Mentions",
-    description:
-      "Receive posts that explicitly mention your account. Agent replies are public.",
-  },
-  {
-    value: "replies",
-    label: "Replies to my posts",
-    description:
-      "Receive direct comments on your posts. Agent replies are public.",
-  },
-];
-
 export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
   const update = useUpdateChannelBot();
+  const catalog = useChannelPlatforms();
+  const choices =
+    catalog.data?.platforms.find((entry) => entry.platform === bot.platform)
+      ?.activities ?? [];
   const saved = (bot.x_events ?? ["dm"]).join(",");
   const form = useAppForm<XChannelEventsFormData>({
     resolver: zodResolver(xChannelEventsSchema),
@@ -69,27 +50,37 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
       className="space-y-4 border-t border-border px-4 py-4"
     >
       <h3 className="text-sm font-medium">Events to receive</h3>
-      {choices.map(({ value, label, description }) => (
-        <div key={value} className="flex items-start gap-3">
-          <Checkbox
-            id={`${bot.id}-x-${value}`}
-            checked={events.includes(value)}
-            disabled={update.isPending || !bot.is_active}
-            onCheckedChange={(checked) =>
-              form.setValue(
-                "events",
-                checked === true
-                  ? [...events, value]
-                  : events.filter((event) => event !== value),
-              )
-            }
-          />
-          <div className="space-y-1">
-            <Label htmlFor={`${bot.id}-x-${value}`}>{label}</Label>
-            <p className="text-xs text-muted-foreground">{description}</p>
-          </div>
-        </div>
-      ))}
+      {choices.map(
+        ({ subscription, subscription_label, label, description }) => {
+          const value = subscription as XChannelEvent;
+          return (
+            <div key={value} className="flex items-start gap-3">
+              <Checkbox
+                id={`${bot.id}-x-${value}`}
+                checked={events.includes(value)}
+                disabled={update.isPending || !bot.is_active}
+                onCheckedChange={(checked) =>
+                  form.setValue(
+                    "events",
+                    checked === true
+                      ? [...events, value]
+                      : events.filter((event) => event !== value),
+                  )
+                }
+              />
+              <div className="space-y-1">
+                <Label htmlFor={`${bot.id}-x-${value}`}>
+                  {subscription_label ?? label}
+                </Label>
+                <p className="text-xs text-muted-foreground">{description}</p>
+              </div>
+            </div>
+          );
+        },
+      )}
+      {catalog.error && (
+        <ErrorBanner message="Event choices could not be loaded." />
+      )}
       <p className="text-xs text-muted-foreground">
         Public replies support text. Reply events cover direct replies to your
         posts; protected posts are not delivered. Received events and sent
@@ -107,6 +98,7 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
         isLoading={update.isPending}
         disabled={
           !bot.is_active ||
+          !choices.length ||
           !form.formState.isDirty ||
           !form.formState.isValid ||
           update.isPending

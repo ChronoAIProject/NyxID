@@ -1682,6 +1682,7 @@ fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
 pub(crate) fn test_app_config() -> AppConfig {
     AppConfig {
         port: 3001,
+        auth_device_eight_char_codes: false,
         base_url: "http://localhost:3001".to_string(),
         frontend_url: "http://localhost:3000".to_string(),
         cors_allowed_origins: vec![],

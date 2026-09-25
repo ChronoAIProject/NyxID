@@ -2605,7 +2605,7 @@ fn auto_provision_auth_snapshot(service: &DownstreamService) -> (&str, &str) {
 ///
 /// Returns `Ok(())` if the service is still eligible or is not auto-provisioned.
 /// Returns `Err(NotFound)` if the service should no longer be accessible.
-async fn verify_auto_provision_eligibility(
+pub(crate) async fn verify_auto_provision_eligibility(
     db: &mongodb::Database,
     user_service: &crate::models::user_service::UserService,
     effective_owner_id: &str,
@@ -3527,7 +3527,7 @@ fn encrypted_material_present(material: Option<&Vec<u8>>) -> bool {
 /// Read-only mirror of credential materialization eligibility. It checks only
 /// durable encrypted seeds and cached material; it never decrypts, refreshes,
 /// mints, touches usage timestamps, or performs provider I/O.
-async fn credential_is_materializable(
+pub(crate) async fn credential_is_materializable(
     db: &mongodb::Database,
     api_key: &UserApiKey,
 ) -> AppResult<bool> {

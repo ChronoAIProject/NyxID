@@ -1,3 +1,5 @@
+import { ChannelActivities, ActivityCallbackSettings } from "@/components/channels/channel-activities";
+import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 import { useAppForm } from "@/components/ui/form";
@@ -368,6 +370,8 @@ export function ChannelConversationDetailPage() {
   const perPage = 50;
 
   const { data: bot } = useChannelBot(botId);
+  const { getPlatform } = useChannelPlatformViews();
+  const activities = getPlatform(bot?.platform ?? "").activities;
   const { data: conversation, error: conversationError } =
     useChannelConversation(conversationId);
   useBreadcrumbLabel(bot ? `${bot.label} messages` : "Messages");
@@ -381,7 +385,7 @@ export function ChannelConversationDetailPage() {
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
-  if (isLoading) {
+  if (isLoading && activities.length === 0) {
     return (
       <div className="space-y-8">
         <Skeleton className="h-12 w-64" />
@@ -403,8 +407,8 @@ export function ChannelConversationDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Messages"
-        description={`Conversation ${conversationId.slice(0, 12)}... -- ${String(total)} message${total === 1 ? "" : "s"}`}
+        title={activities.length ? "Channel activity" : "Messages"}
+        description={activities.length ? `Conversation ${conversationId.slice(0, 12)}…` : `Conversation ${conversationId.slice(0, 12)}... -- ${String(total)} message${total === 1 ? "" : "s"}`}
         actions={
           <Button
             variant="outline"
@@ -431,19 +435,24 @@ export function ChannelConversationDetailPage() {
       {conversationError && (
         <ErrorBanner message="Failed to load conversation settings." />
       )}
-      {conversation && (
-        <InitiatedMessageSettings
-          key={conversation.id}
-          conversation={conversation}
-        />
+      {activities.length > 0 && (
+        <>
+          <ChannelActivities scope="route" id={conversationId} descriptors={activities} />
+          <ActivityCallbackSettings id={conversationId} descriptors={activities} />
+        </>
       )}
-
+      {conversation && (
+        <InitiatedMessageSettings key={conversation.id} conversation={conversation} />
+      )}
+      {activities.length > 0 && <h2 className="text-lg font-medium">Message history</h2>}
       {/* Message list */}
       {error ? (
         <ErrorBanner
           message="Failed to load messages. Please try again."
           onRetry={refetch}
         />
+      ) : isLoading ? <p className="text-xs text-muted-foreground">Loading message history…</p> : messages.length === 0 && activities.length > 0 ? (
+        <p className="text-xs text-muted-foreground">No ordinary messages in this route. Encrypted chat and own-post notifications appear in Received activities above.</p>
       ) : messages.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MobileNotificationIcon className="h-64 w-64 text-muted-foreground" />

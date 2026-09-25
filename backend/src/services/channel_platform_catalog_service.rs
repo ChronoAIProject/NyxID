@@ -11,6 +11,7 @@ use crate::errors::AppResult;
 use std::sync::Arc;
 
 pub struct PlatformCatalogEntry {
+    pub activities: &'static [super::channel_activity_service::ActivityDescriptor],
     pub platform: String,
     pub display_name: String,
     pub registration: RegistrationDescriptor,
@@ -36,6 +37,7 @@ pub async fn list(
             None
         };
         entries.push(PlatformCatalogEntry {
+            activities: adapter.activity_descriptors(),
             platform: adapter.platform_id().to_string(),
             display_name: adapter.display_name().to_string(),
             registration: adapter.registration(),

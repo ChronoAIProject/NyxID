@@ -3655,6 +3655,7 @@ mod tests {
         };
 
         let conversation = ChannelConversation {
+            activity_callback: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             channel_bot_id: Some(bot.id.clone()),
@@ -3672,6 +3673,7 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: Uuid::new_v4().to_string(),
@@ -3695,6 +3697,7 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: Uuid::new_v4().to_string(),
@@ -3892,6 +3895,7 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: Uuid::new_v4().to_string(),
@@ -5222,3 +5226,7 @@ mod tests {
 #[cfg(test)]
 #[path = "channel_x_public_tests.rs"]
 mod x_public_tests;
+
+#[cfg(test)]
+#[path = "channel_activity_tests.rs"]
+mod activity_tests;

@@ -5,6 +5,7 @@ use utoipa::ToSchema;
 #[schema(as = AgentKeyLoginNewKeyInput)]
 #[serde(deny_unknown_fields)]
 pub struct NewKeyInput {
+    pub connection_snapshots: Option<Vec<ConnectionSnapshot>>,
     pub name: String,
     pub scopes: String,
     #[serde(default)]
@@ -29,6 +30,15 @@ pub struct NewKeyInput {
 #[schema(as = AgentKeyLoginSelection)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Selection {
-    Existing { api_key_id: String },
+    Existing {
+        api_key_id: String,
+        permission_snapshot: Option<String>,
+    },
     New(NewKeyInput),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct ConnectionSnapshot {
+    pub service_id: String,
+    pub permission_snapshot: String,
 }

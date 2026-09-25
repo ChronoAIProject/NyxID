@@ -92,8 +92,10 @@ pub(crate) async fn poll_bot(
         return Ok(());
     };
 
-    if super::channel_billing_service::require_webhooks(&state.config, &bot.platform).is_err() {
-        super::channel_credentials::fail_bot(&state.db, &bot, "Paid X channels require webhook delivery. Configure webhook credentials and select Verify.").await?;
+    if super::channel_billing_service::require_webhooks(&state.config, &bot.platform).is_err()
+        || (bot.platform == "x" && super::channel_adapters::x::webhook_events_enabled(&bot))
+    {
+        super::channel_credentials::fail_bot(&state.db, &bot, "This X channel requires webhook delivery. Configure webhook credentials and select Verify.").await?;
         return Ok(());
     }
 

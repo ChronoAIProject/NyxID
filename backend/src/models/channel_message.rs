@@ -36,6 +36,8 @@ impl std::fmt::Debug for StoredAttachment {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
     #[serde(default)]
+    pub activity: Option<super::channel_activity::ActivityMetadata>,
+    #[serde(default)]
     pub platform_send: Option<super::channel_delivery::PlatformSendRecord>,
     #[serde(rename = "_id")]
     pub id: String,
@@ -114,6 +116,7 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            activity: None,
             platform_send: None,
             attachments: vec![],
             id: uuid::Uuid::new_v4().to_string(),

@@ -199,6 +199,7 @@ async fn accept(db: &Database, actor: &str, key: &ApiKey, request: &RequestOutpu
         actor,
         &request.user_code,
         Selection::Existing {
+            permission_snapshot: None,
             api_key_id: key.id.clone(),
         },
         None,
@@ -293,7 +294,10 @@ async fn pending_slowdown_denial_and_replay_state_machine() {
             HMAC_KEY,
             &actor,
             &request.user_code,
-            Selection::Existing { api_key_id: key.id },
+            Selection::Existing {
+                api_key_id: key.id,
+                permission_snapshot: None
+            },
             None,
             None
         )
@@ -529,6 +533,7 @@ async fn approve_deny_race_commits_only_one_outcome() {
                 &actor,
                 &request.user_code,
                 Selection::Existing {
+                    permission_snapshot: None,
                     api_key_id: key.id.clone()
                 },
                 None,
@@ -763,6 +768,7 @@ async fn abandoned_new_parent_survives_reuse_and_concurrent_issuance() {
             &actor,
             &second.user_code,
             Selection::Existing {
+                permission_snapshot: None,
                 api_key_id: row.api_key_id.clone().unwrap(),
             },
             None,
@@ -1033,5 +1039,475 @@ async fn auto_connected_login_options_provision_and_mark_platform_services() {
             .count(),
         1
     );
+    db.drop().await.unwrap();
+}
+
+async fn consent_fixture(name: &str) -> (Database, String, ApiKey, String, String) {
+    use crate::models::user_api_key::{COLLECTION_NAME as CONNECTIONS, UserApiKey};
+    let (db, actor, key, _) = fixture(name).await;
+    let credential = Uuid::new_v4().to_string();
+    let service_id = Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    let external: UserApiKey = bson::from_document(doc! {
+        "_id": &credential, "user_id": &actor, "label": "Read connection", "credential_type": "oauth2",
+        "status": "active", "credential_epoch": 1_i64, "token_scopes": "repo:read",
+        "access_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1,2,3] },
+        "refresh_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![4,5,6] },
+        "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::hours(1)),
+        "created_at": now, "updated_at": now,
+    }).unwrap();
+    db.collection::<UserApiKey>(CONNECTIONS)
+        .insert_one(external)
+        .await
+        .unwrap();
+    let mut service = crate::test_utils::test_user_service(
+        &service_id,
+        &actor,
+        "github-personal",
+        "endpoint",
+        None,
+        None,
+    );
+    service.api_key_id = Some(credential.clone());
+    service.auth_method = "bearer".into();
+    db.collection::<UserService>(SERVICES)
+        .insert_one(service)
+        .await
+        .unwrap();
+    mutations::update_one(
+        &db,
+        doc! {"_id": &key.id},
+        doc! {"$set": {"allowed_service_ids": [&service_id]}},
+        None,
+    )
+    .await
+    .unwrap();
+    let key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": &key.id})
+        .await
+        .unwrap()
+        .unwrap();
+    (db, actor, key, service_id, credential)
+}
+
+#[tokio::test]
+async fn permission_summary_resolves_agent_override_and_never_falls_back_when_missing_or_inactive()
+{
+    use crate::models::user_api_key::{COLLECTION_NAME as CONNECTIONS, UserApiKey};
+    let (db, actor, key, service, credential) = consent_fixture("login_bound_permissions").await;
+    let mut override_key = db
+        .collection::<UserApiKey>(CONNECTIONS)
+        .find_one(doc! {"_id": &credential})
+        .await
+        .unwrap()
+        .unwrap();
+    override_key.id = Uuid::new_v4().to_string();
+    override_key.label = "Write connection".into();
+    override_key.token_scopes = Some("repo:read repo:write email".into());
+    db.collection::<UserApiKey>(CONNECTIONS)
+        .insert_one(&override_key)
+        .await
+        .unwrap();
+    crate::services::agent_binding_service::create_binding(
+        &db,
+        &actor,
+        &key.id,
+        &service,
+        &override_key.id,
+    )
+    .await
+    .unwrap();
+    let summary = key_summary(&db, &key, false).await.unwrap();
+    assert_eq!(summary.effective_services[0].label, "Write connection");
+    assert_eq!(
+        summary.effective_services[0]
+            .granted_scopes
+            .as_ref()
+            .unwrap(),
+        &["email", "repo:read", "repo:write"]
+    );
+    db.collection::<UserApiKey>(CONNECTIONS)
+        .update_one(
+            doc! {"_id": &override_key.id},
+            doc! {"$set": {"status": "revoked"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        key_summary(&db, &key, false)
+            .await
+            .unwrap()
+            .effective_services[0]
+            .status,
+        "revoked"
+    );
+    db.collection::<UserApiKey>(CONNECTIONS)
+        .delete_one(doc! {"_id": &override_key.id})
+        .await
+        .unwrap();
+    let missing = key_summary(&db, &key, false).await.unwrap();
+    assert!(missing.effective_services[0].credential_missing);
+    assert!(missing.effective_services[0].granted_scopes.is_none());
+}
+
+#[tokio::test]
+async fn refreshable_oauth_remains_eligible_and_refresh_does_not_change_permission_snapshot() {
+    let (db, _, key, _, credential) = consent_fixture("login_refresh_stable_consent").await;
+    let before = key_summary(&db, &key, false).await.unwrap();
+    assert_eq!(before.effective_services[0].status, "active");
+    assert_eq!(
+        before.effective_services[0].connection_status.as_deref(),
+        Some("active")
+    );
+    assert!(!before.effective_services[0].credential_missing);
+    assert!(before.effective_services[0].expires_at.is_none());
+    db.collection::<bson::Document>("user_api_keys").update_one(doc! {"_id": &credential}, doc! {"$set": {
+        "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::hours(1)),
+        "updated_at": bson::DateTime::now(),
+        "access_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![9,8,7] }
+    }}).await.unwrap();
+    let after = key_summary(&db, &key, false).await.unwrap();
+    assert_eq!(before.permission_snapshot, after.permission_snapshot);
+}
+
+#[tokio::test]
+async fn new_client_consent_rejects_broadened_existing_and_new_connection_grants_atomically() {
+    for existing in [true, false] {
+        let (db, actor, key, service, credential) = consent_fixture("login_consent_drift").await;
+        let options = options_for_actor(&db, &actor).await.unwrap();
+        let selection = if existing {
+            Selection::Existing {
+                api_key_id: key.id.clone(),
+                permission_snapshot: Some(options.keys[0].permission_snapshot.clone()),
+            }
+        } else {
+            serde_json::from_value(serde_json::json!({"kind":"new", "name":"Reviewed reader", "scopes":"read proxy", "allowed_service_ids":[service], "connection_snapshots":[{"service_id":service,"permission_snapshot":options.connections[0].permission_snapshot}]})).unwrap()
+        };
+        let request = start(&db).await;
+        db.collection::<bson::Document>("user_api_keys")
+            .update_one(
+                doc! {"_id": &credential},
+                doc! {"$set": {"token_scopes": "repo:read repo:write", "credential_epoch": 2_i64}},
+            )
+            .await
+            .unwrap();
+        let result = approve(
+            &db,
+            &test_encryption_keys(),
+            HMAC_KEY,
+            &actor,
+            &request.user_code,
+            selection,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))), "{result:?}");
+        assert_eq!(
+            db.collection::<ApiKeyCredential>(CREDENTIALS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<ApiKey>(API_KEYS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            find_by_user_code(&db, HMAC_KEY, &request.user_code)
+                .await
+                .unwrap()
+                .status,
+            Status::Pending
+        );
+    }
+}
+
+#[tokio::test]
+async fn new_client_unchanged_consent_issues_real_existing_and_new_credentials() {
+    for existing in [true, false] {
+        let (db, actor, key, service, _) = consent_fixture("login_consent_approve").await;
+        let options = options_for_actor(&db, &actor).await.unwrap();
+        let selection = if existing {
+            Selection::Existing {
+                api_key_id: key.id.clone(),
+                permission_snapshot: Some(options.keys[0].permission_snapshot.clone()),
+            }
+        } else {
+            serde_json::from_value(serde_json::json!({"kind":"new", "name":"Reviewed reader", "scopes":"read proxy", "allowed_service_ids":[service], "connection_snapshots":[{"service_id":service,"permission_snapshot":options.connections[0].permission_snapshot}]})).unwrap()
+        };
+        let request = start(&db).await;
+        approve(
+            &db,
+            &test_encryption_keys(),
+            HMAC_KEY,
+            &actor,
+            &request.user_code,
+            selection,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let delivery = poll(&db, &test_encryption_keys(), HMAC_KEY, &request.device_code)
+            .await
+            .unwrap();
+        assert!(delivery.credential.starts_with("nyxid_ag_"));
+        assert_eq!(delivery.api_key.allowed_service_ids, [service]);
+    }
+}
+
+#[tokio::test]
+async fn legacy_provider_fallback_scopes_are_unreported_even_when_cached_scopes_exist() {
+    let (db, _, key, _, credential) = consent_fixture("login_legacy_provider_unknown").await;
+    db.collection::<bson::Document>("user_api_keys").update_one(doc! {"_id": &credential}, doc! {"$set": {"provider_config_id": "legacy-provider", "connection_id": bson::Bson::Null}}).await.unwrap();
+    let summary = key_summary(&db, &key, false).await.unwrap();
+    assert!(summary.effective_services[0].granted_scopes.is_none());
+    assert!(!summary.effective_services[0].credential_missing);
+}
+
+#[tokio::test]
+async fn unchanged_unavailable_extras_do_not_prevent_existing_key_issuance() {
+    let (db, actor, key, service, _) = consent_fixture("login_unavailable_extras").await;
+    let inactive_id = Uuid::new_v4().to_string();
+    let missing_id = Uuid::new_v4().to_string();
+    let mut inactive = crate::test_utils::test_user_service(
+        &inactive_id,
+        &actor,
+        "disabled-extra",
+        "endpoint",
+        None,
+        None,
+    );
+    inactive.is_active = false;
+    db.collection::<UserService>(SERVICES)
+        .insert_one(inactive)
+        .await
+        .unwrap();
+    mutations::update_one(
+        &db,
+        doc! {"_id": &key.id},
+        doc! {"$set": {"allowed_service_ids": [&service, &inactive_id, &missing_id]}},
+        None,
+    )
+    .await
+    .unwrap();
+    let options = options_for_actor(&db, &actor).await.unwrap();
+    assert_eq!(options.keys[0].effective_services.len(), 2);
+    let request = start(&db).await;
+    approve(
+        &db,
+        &test_encryption_keys(),
+        HMAC_KEY,
+        &actor,
+        &request.user_code,
+        Selection::Existing {
+            api_key_id: key.id,
+            permission_snapshot: Some(options.keys[0].permission_snapshot.clone()),
+        },
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        db.collection::<ApiKeyCredential>(CREDENTIALS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn concurrent_post_read_scope_change_conflicts_then_rejects_stale_consent() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (db, actor, key, _, credential) = consent_fixture("login_concurrent_consent").await;
+    let summary = key_summary(&db, &key, false).await.unwrap();
+    let observed = Arc::new(tokio::sync::Notify::new());
+    let changed = Arc::new(tokio::sync::Notify::new());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let approve_db = db.clone();
+    let observed_approval = observed.clone();
+    let changed_approval = changed.clone();
+    let tries = attempts.clone();
+    let approval = async move {
+        let mut session = approve_db.client().start_session().await.unwrap();
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let attempt = tries.fetch_add(1, Ordering::SeqCst);
+                let result: AppResult<()> = async {
+                    // Pin the issuance transaction's snapshot before the concurrent
+                    // provider mutation. The real flow pins it when claiming the request.
+                    approve_db
+                        .collection::<ApiKey>(API_KEYS)
+                        .find_one(doc! {"_id": &key.id})
+                        .session(&mut *session)
+                        .await?;
+                    if attempt == 0 {
+                        observed_approval.notify_one();
+                        changed_approval.notified().await;
+                    }
+                    issue_selected(
+                        &approve_db,
+                        &actor,
+                        "concurrent-review",
+                        &LoginClientContext::default(),
+                        None,
+                        &Selection::Existing {
+                            api_key_id: key.id.clone(),
+                            permission_snapshot: Some(summary.permission_snapshot.clone()),
+                        },
+                        None,
+                        &key.id,
+                        "concurrent-child",
+                        &credentials::generate_secret(),
+                        &mut *session,
+                    )
+                    .await?;
+                    Ok(())
+                }
+                .await;
+                mutations::transaction_result(result)
+            })
+            .await
+            .map_err(mutations::map_transaction_error)
+    };
+    let mutation = async {
+        observed.notified().await;
+        db.collection::<bson::Document>("user_api_keys")
+            .update_one(
+                doc! {"_id": &credential},
+                doc! {"$set": {"token_scopes": "repo:read repo:write", "credential_epoch": 2_i64}},
+            )
+            .await
+            .unwrap();
+        changed.notify_one();
+    };
+    let (result, ()) = tokio::join!(approval, mutation);
+    assert!(matches!(result, Err(AppError::Conflict(_))), "{result:?}");
+    assert!(
+        attempts.load(Ordering::SeqCst) >= 2,
+        "the post-read mutation must force a transaction retry"
+    );
+    assert_eq!(
+        db.collection::<ApiKeyCredential>(CREDENTIALS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn consent_platform_grants_are_owner_bound_and_use_live_platform_readiness() {
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as CATALOG, DownstreamService, PlatformKeyAudience, PlatformKeyConfig,
+    };
+    let (db, actor, mut key, _, _) = consent_fixture("login_platform_consent").await;
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = Uuid::new_v4().to_string();
+    catalog.slug = "consent-platform".into();
+    catalog.is_active = true;
+    catalog.service_type = "http".into();
+    catalog.auth_method = "bearer".into();
+    catalog.auth_key_name = "Authorization".into();
+    catalog.provider_config_id = None;
+    catalog.credential_encrypted = vec![1]; // Intentionally not decryptable: consent reads metadata only.
+    catalog.platform_key = Some(PlatformKeyConfig {
+        enabled: true,
+        audience: PlatformKeyAudience::Public,
+        allowed_owner_ids: vec![],
+    });
+    db.collection::<DownstreamService>(CATALOG)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let mut expected = Vec::new();
+    for (owner, explicit_binding, active) in [
+        (actor.as_str(), false, true),
+        (actor.as_str(), true, true),
+        (actor.as_str(), true, false),
+        ("foreign-owner", true, true),
+    ] {
+        let id = Uuid::new_v4().to_string();
+        let mut service =
+            crate::test_utils::test_user_service(&id, owner, &id, "endpoint", None, None);
+        service.catalog_service_id = Some(catalog.id.clone());
+        service.api_key_id = None;
+        service.auth_method = "bearer".into();
+        service.auth_key_name = "Authorization".into();
+        service.is_active = active;
+        if explicit_binding {
+            service.credential_binding = Some("platform".into());
+        } else {
+            service.source = Some(crate::models::user_service::AUTO_PROVISION_SOURCE.into());
+        }
+        db.collection::<UserService>(SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+        if owner == actor.as_str() && active {
+            expected.push(id);
+        }
+    }
+    key.allow_auto_connected_services = true;
+    let enabled = key_summary(&db, &key, false).await.unwrap();
+    assert_eq!(enabled.effective_services.len(), 3);
+    for id in &expected {
+        assert!(
+            enabled
+                .allowed_services
+                .iter()
+                .find(|s| &s.id == id)
+                .unwrap()
+                .auto_connected
+        );
+        let service = enabled
+            .effective_services
+            .iter()
+            .find(|s| &s.id == id)
+            .unwrap();
+        assert!(service.auto_connected && service.is_active && !service.credential_missing);
+        assert_eq!(service.owner_id, actor);
+        assert_eq!(service.status, "active");
+        assert_eq!(service.credential_binding, "platform");
+        assert!(service.granted_scopes.is_none());
+    }
+    key.allow_auto_connected_services = false;
+    assert_ne!(
+        enabled.permission_snapshot,
+        key_summary(&db, &key, false)
+            .await
+            .unwrap()
+            .permission_snapshot
+    );
+    key.allow_auto_connected_services = true;
+    db.collection::<bson::Document>(CATALOG)
+        .update_one(
+            doc! {"_id": &catalog.id},
+            doc! {"$set": {"platform_key.enabled": false}},
+        )
+        .await
+        .unwrap();
+    let disabled = key_summary(&db, &key, false).await.unwrap();
+    for service in disabled
+        .effective_services
+        .iter()
+        .filter(|s| expected.contains(&s.id))
+    {
+        assert!(service.credential_missing);
+        assert_eq!(service.status, "missing");
+    }
+    assert_ne!(enabled.permission_snapshot, disabled.permission_snapshot);
     db.drop().await.unwrap();
 }

@@ -48,13 +48,13 @@ jobs:
       force-all: true
 
   # ---------------------------------------------------------------------------
-  # Build each component for each platform on its native runner. Each job
-  # pushes by digest only (no tags). Tags are applied by the `merge` job.
+  # Build each component for each platform on its native runner while CI runs.
+  # Each job pushes by digest only (no tags). A failed CI gate leaves no tagged
+  # release because `merge` waits for both the builds and the gate.
   # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.component }} (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
-    needs: ci-gate
     strategy:
       fail-fast: false
       matrix:
@@ -153,7 +153,7 @@ jobs:
   merge:
     name: Merge ${{ matrix.component }} manifest
     runs-on: ubuntu-latest
-    needs: build
+    needs: [ci-gate, build]
     strategy:
       fail-fast: false
       matrix:

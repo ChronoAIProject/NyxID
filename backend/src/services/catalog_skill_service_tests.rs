@@ -904,3 +904,49 @@ async fn catalog_editor_legacy_generation_writes_and_rotation_rejects_old_token(
         );
     }
 }
+
+#[tokio::test]
+async fn direct_scope_revocation_during_write_is_fenced() {
+    let (db, mut sa, actor, services) = fixture("direct_scope_revoke_race", 10).await;
+    sa.purpose = ServiceAccountPurpose::CatalogEditor;
+    sa.catalog_scope_authorized = true;
+    sa.role_ids.clear();
+    db.collection::<ServiceAccount>(ACCOUNTS)
+        .replace_one(doc! {"_id": &sa.id}, &sa)
+        .await
+        .unwrap();
+    let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let input = names(&["must-not-commit"]);
+    let operation = Uuid::new_v4().to_string();
+    let writer = AUTHORITY_PAUSE.scope(
+        (reached.clone(), resume.clone(), once),
+        write(&db, &services[0].id, &actor, &input, 0, &operation),
+    );
+    let revoker = async {
+        reached.wait().await;
+        db.collection::<Document>(ACCOUNTS)
+            .update_one(
+                doc! {"_id":&sa.id},
+                doc! {"$set":{"allowed_scopes":"catalog:skills:read"}},
+            )
+            .await
+            .unwrap();
+        resume.wait().await;
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(writer, revoker)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(AppError::Forbidden(_))));
+    assert_eq!(stored(&db, &services[0].id).await.skills_revision, 0);
+    assert_eq!(
+        db.collection::<Document>(HISTORY)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}

@@ -44,6 +44,7 @@ pub mod feature_flag_metadata;
 pub mod feature_flag_override;
 pub mod group;
 pub mod invite_code;
+pub mod login_approval;
 pub mod login_client_context;
 pub mod login_code;
 pub mod login_grant;
@@ -118,3 +119,6 @@ pub mod service_change_event;
 pub mod usage_rollup_daily;
 pub mod usage_rollup_hourly;
 pub mod usage_rollup_state;
+pub mod usage_workspace;
+
+pub mod channel_activity;

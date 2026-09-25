@@ -61,6 +61,7 @@ pub mod invite_codes;
 pub mod keys;
 pub mod llm_gateway;
 pub mod llms_txt;
+pub mod login_approval;
 mod login_client_context;
 pub mod login_code;
 pub mod mcp;
@@ -120,3 +121,5 @@ mod curation_tests;
 pub mod options;
 
 pub mod service_history;
+
+pub mod channel_activities;

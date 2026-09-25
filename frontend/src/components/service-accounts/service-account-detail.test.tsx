@@ -1,14 +1,10 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
-import type { Role } from "@/types/rbac";
 import { ServiceAccountDetail } from "./service-account-detail";
 const mock = vi.hoisted(() => ({
   update: vi.fn(),
   isAdmin: false,
-  roles: [] as Role[],
-  rolesError: false,
-  rolesQuery: vi.fn(),
   account: {
     id: "sa-1",
     name: "Worker",
@@ -17,7 +13,9 @@ const mock = vi.hoisted(() => ({
     secret_prefix: "prefix",
     allowed_scopes: "openid",
     role_ids: ["role-a"],
-    purpose: "general" as "general" | "catalog_editor",
+    purpose: "general" as "general" | "catalog_editor" | "curation",
+    platform_protected: false,
+    catalog_scope_authorized: false,
     rate_limit_override: 10,
     is_active: true,
     created_at: "2026-09-01T00:00:00Z",
@@ -28,16 +26,6 @@ const mock = vi.hoisted(() => ({
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (select: (state: { user: { is_admin: boolean } }) => unknown) =>
     select({ user: { is_admin: mock.isAdmin } }),
-}));
-vi.mock("@/hooks/use-rbac", () => ({
-  useRoles: (options: { enabled: boolean }) => {
-    mock.rolesQuery(options);
-    return {
-      data: { roles: mock.roles },
-      isError: mock.rolesError,
-      refetch: vi.fn(),
-    };
-  },
 }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
@@ -80,8 +68,6 @@ vi.mock("@/hooks/use-options", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mock.isAdmin = false;
-  mock.roles = [];
-  mock.rolesError = false;
   mock.account = {
     ...mock.account,
     id: "sa-1",
@@ -89,80 +75,133 @@ beforeEach(() => {
     role_ids: ["role-a"],
     purpose: "general",
     allowed_scopes: "openid",
+    catalog_scope_authorized: false,
+    platform_protected: false,
     is_active: true,
   };
 });
 
-function catalogRole(): Role {
-  return {
-    id: "role-a",
-    name: "Catalog editor",
-    slug: "catalog-editor",
-    description: null,
-    client_id: null,
-    permissions: ["nyxid:catalog:skills:read", "nyxid:catalog:skills:write"],
-    is_default: false,
-    is_system: false,
-    created_at: "2026-09-01T00:00:00Z",
-    updated_at: "2026-09-01T00:00:00Z",
-  };
-}
-
-it("keeps legacy grants manageable until catalog activation succeeds", () => {
+it("grants unchanged catalog scopes through ordinary save without roles or activation", async () => {
   mock.isAdmin = true;
-  mock.roles = [catalogRole()];
-  mock.account.allowed_scopes =
-    "catalog:skills:read catalog:skills:write user-services:read proxy";
+  mock.account.role_ids = [];
+  mock.account.allowed_scopes = "catalog:skills:read";
+  mock.update.mockResolvedValue({
+    ...mock.account,
+    catalog_scope_authorized: true,
+  });
+  const user = userEvent.setup();
   render(
     <ServiceAccountDetail
       saId="sa-1"
       backTo={{ to: "/admin/service-accounts", label: "Accounts" }}
     />,
   );
-
-  expect(
-    screen.getByRole("button", { name: "Apply catalog access" }),
-  ).toBeEnabled();
-  expect(screen.queryByTestId("key-read-grant-section")).toBeInTheDocument();
-  expect(screen.queryByTestId("curation-grant-section")).toBeInTheDocument();
-  expect(screen.getByTestId("provider-connections")).toBeInTheDocument();
-});
-
-it("does not treat scope strings or client-associated roles as catalog authority", () => {
-  mock.isAdmin = true;
-  mock.roles = [{ ...catalogRole(), client_id: "oauth-client" }];
-  mock.account.allowed_scopes =
-    "catalog:skills:read catalog:skills:write user-services:read proxy";
-  render(
-    <ServiceAccountDetail
-      saId="sa-1"
-      backTo={{ to: "/admin/service-accounts", label: "Accounts" }}
-    />,
-  );
-
-  expect(screen.getByTestId("key-read-grant-section")).toBeInTheDocument();
-  expect(screen.getByTestId("curation-grant-section")).toBeInTheDocument();
-  expect(
-    screen.queryByRole("button", { name: "Apply catalog access" }),
-  ).not.toBeEnabled();
-});
-
-it("does not hide grants or offer activation when role checking fails", () => {
-  mock.isAdmin = true;
-  mock.roles = [catalogRole()];
-  mock.rolesError = true;
-  render(
-    <ServiceAccountDetail
-      saId="sa-1"
-      backTo={{ to: "/admin/service-accounts", label: "Accounts" }}
-    />,
-  );
-
-  expect(screen.getByRole("alert")).toHaveTextContent("Could not check");
-  expect(screen.getByTestId("key-read-grant-section")).toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "Apply catalog access" }),
   ).not.toBeInTheDocument();
+  expect(
+    screen.queryByTestId("curation-grant-section"),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  expect(screen.getByRole("button", { name: "Save Changes" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "Save Changes" }));
+  expect(
+    screen.getByText(/Selected catalog scopes authorize all current/),
+  ).toBeInTheDocument();
+  await user.click(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mock.update).toHaveBeenCalledExactlyOnceWith({
+      saId: "sa-1",
+      data: {
+        allowed_scopes: "catalog:skills:read",
+        expected_access: {
+          role_ids: [],
+          allowed_scopes: "catalog:skills:read",
+          purpose: "general",
+          platform_protected: false,
+          catalog_scope_authorized: false,
+          is_active: true,
+        },
+      },
+    }),
+  );
+});
+
+it("does not offer an unchanged scope grant to an organization administrator", async () => {
+  mock.account.allowed_scopes = "catalog:skills:read";
+  const user = userEvent.setup();
+  render(
+    <ServiceAccountDetail
+      saId="sa-1"
+      backTo={{ to: "/orgs/org-1", label: "Organization" }}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
+  expect(
+    screen.getByText(
+      "Platform catalog scopes must be granted by a platform administrator.",
+    ),
+  ).toBeInTheDocument();
+});
+
+it("keeps an existing legacy curation grant manageable", () => {
+  mock.account.purpose = "curation";
+  render(
+    <ServiceAccountDetail
+      saId="sa-1"
+      backTo={{ to: "/admin/service-accounts", label: "Accounts" }}
+    />,
+  );
+  expect(screen.getByTestId("curation-grant-section")).toBeInTheDocument();
+});
+
+it.each(["before review", "after review"])(
+  "blocks scope grants when authority changes %s",
+  async (timing) => {
+    mock.isAdmin = true;
+    mock.account.allowed_scopes = "catalog:skills:read proxy";
+    const user = userEvent.setup();
+    const props = {
+      saId: "sa-1",
+      backTo: { to: "/admin/service-accounts", label: "Accounts" },
+    };
+    const view = render(<ServiceAccountDetail {...props} />);
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    if (timing === "after review")
+      await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    mock.account = { ...mock.account, is_active: false, role_ids: [] };
+    view.rerender(<ServiceAccountDetail {...props} />);
+    if (timing === "before review")
+      await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    expect(
+      await screen.findByRole("button", { name: "Confirm changes" }),
+    ).toBeDisabled();
+    expect(mock.update).not.toHaveBeenCalled();
+  },
+);
+
+it("surfaces a backend that did not apply the scope grant", async () => {
+  mock.isAdmin = true;
+  mock.account.allowed_scopes = "catalog:skills:read";
+  mock.update.mockResolvedValue(mock.account);
+  const user = userEvent.setup();
+  render(
+    <ServiceAccountDetail
+      saId="sa-1"
+      backTo={{ to: "/admin/service-accounts", label: "Accounts" }}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  await user.click(screen.getByRole("button", { name: "Save Changes" }));
+  await user.click(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Catalog access was not granted",
+  );
 });
 
 it("keeps key read grants available when provider sections are hidden", () => {
@@ -177,7 +216,6 @@ it("keeps key read grants available when provider sections are hidden", () => {
   expect(screen.getByTestId("key-read-grant-section")).toHaveTextContent(
     "sa-1",
   );
-  expect(mock.rolesQuery).toHaveBeenCalledWith({ enabled: false });
 });
 
 it("can hide key read grants independently of provider sections", () => {
@@ -295,9 +333,7 @@ it("shows standing catalog authority without UUID grant forms and keeps provider
     screen.getByText("All current and future catalog services"),
   ).toBeInTheDocument();
   expect(
-    screen.getByText(
-      /role must retain the matching NyxID catalog permissions/i,
-    ),
+    screen.getByText(/This account uses its existing catalog roles/i),
   ).toBeInTheDocument();
   expect(
     screen.queryByTestId("curation-grant-section"),
