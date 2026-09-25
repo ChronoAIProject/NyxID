@@ -1,0 +1,929 @@
+.billing-page {
+  .service-category {
+    margin-top: 24px;
+  }
+  .service-category > h4 {
+    display: flex;
+    gap: 12px;
+    font-size: 12px;
+    font-weight: 500;
+    margin-bottom: 12px;
+  }
+  .service-category > h4 > span {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--color-muted-foreground);
+  }
+  .fine-print {
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--color-muted-foreground);
+  }
+  .empty-inline {
+    padding: 24px 0;
+    font-size: 12px;
+    color: var(--color-muted-foreground);
+  }
+  .usage-column-labels {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 0;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--color-text-tertiary);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .usage-status {
+    display: block;
+    margin-top: 5px;
+    font: 400 10px var(--font-sans);
+    color: var(--color-muted-foreground);
+  }
+  .usage-status.text-warning {
+    color: var(--color-warning);
+  }
+  .usage-status.text-success {
+    color: var(--color-success);
+  }
+  .metric-family + .metric-family,
+  .allowance-funding {
+    margin-top: 20px;
+  }
+  .metric-family h4,
+  .allowance-funding h4 {
+    font-size: 11px;
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+  .payments-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--color-muted-foreground);
+  }
+  .usage-column-labels {
+    padding-left: 8px;
+    padding-right: 28px;
+  }
+  .all-metrics > summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 24px;
+    font-size: 11px;
+    border-top: 1px solid var(--color-border);
+  }
+  .all-metrics > summary strong {
+    font-weight: 500;
+  }
+  .all-metrics > summary span {
+    color: var(--color-muted-foreground);
+    margin-left: auto;
+    font-size: 10px;
+  }
+  .all-metrics > summary:hover,
+  .expandable-service > summary:hover,
+  .records-disclosure > summary:hover {
+    background: color-mix(in srgb, var(--color-foreground) 2.5%, transparent);
+  }
+  .expanded-metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    padding: 20px 24px;
+    border-top: 1px solid var(--color-border);
+  }
+  .expanded-metrics h3 {
+    margin-bottom: 12px;
+    font-size: 12px;
+  }
+  .split-facts {
+    margin: 0;
+  }
+  .split-facts > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 11px;
+  }
+  .split-facts dt {
+    color: var(--color-muted-foreground);
+    flex-shrink: 1;
+  }
+  .split-facts dd {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    text-align: right;
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .expanded-metrics .fine-print {
+    margin-top: 14px;
+    font-size: 10px;
+  }
+  .expandable-usage {
+    border-top: 1px solid var(--color-border);
+  }
+  .expandable-usage > .usage-column-labels {
+    padding: 12px 16px;
+  }
+  .expandable-service {
+    border-bottom: 1px solid var(--color-border);
+  }
+  .expandable-service > summary {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 18px 16px;
+  }
+  .expandable-service[open] > summary {
+    background: color-mix(in srgb, var(--color-foreground) 2.5%, transparent);
+  }
+  .expandable-name {
+    min-width: 0;
+    flex: 1;
+  }
+  .expandable-name strong {
+    font-size: 12px;
+    font-weight: 500;
+    display: block;
+    overflow-wrap: anywhere;
+  }
+  .expandable-name small {
+    display: block;
+    font-size: 10px;
+    color: var(--color-muted-foreground);
+    margin-top: 4px;
+  }
+  .row-credit {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    text-align: right;
+  }
+  .row-credit small {
+    font-family: var(--font-sans);
+    font-size: 10px;
+    color: var(--color-muted-foreground);
+  }
+  .detailed-usage {
+    padding: 20px 24px;
+    background: color-mix(in srgb, var(--color-foreground) 1.5%, transparent);
+  }
+  .detail-intro {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 28px;
+  }
+  .detail-intro h4 {
+    margin-bottom: 10px;
+  }
+  .records-disclosure {
+    margin-top: 20px;
+    border-top: 1px solid var(--color-border);
+  }
+  .records-disclosure > summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 0;
+  }
+  .records-disclosure > summary strong {
+    font-weight: 500;
+    font-size: 11px;
+  }
+  .records-disclosure > summary span {
+    margin-left: auto;
+    color: var(--color-muted-foreground);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .meter-record {
+    padding: 16px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    background: var(--color-card);
+  }
+  .meter-record header {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+    margin-bottom: 12px;
+  }
+  .meter-record header strong {
+    font-weight: 500;
+  }
+  .meter-record header > span {
+    color: var(--color-muted-foreground);
+    font-size: 10px;
+  }
+  .record-details {
+    margin-top: 10px;
+  }
+  .record-details > summary {
+    font-size: 10px;
+    color: var(--color-muted-foreground);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+  }
+  @media (max-width: 640px) {
+    .all-metrics > summary {
+      padding: 12px 16px;
+      flex-wrap: wrap;
+    }
+    .all-metrics > summary span {
+      width: 100%;
+      margin-left: 22px;
+      line-height: 1.6;
+    }
+    .expanded-metrics {
+      grid-template-columns: 1fr;
+      gap: 24px;
+      padding: 16px;
+    }
+    .expandable-usage > .usage-column-labels {
+      padding-left: 4px;
+      padding-right: 4px;
+    }
+    .expandable-service > summary {
+      padding: 16px 4px;
+      gap: 8px;
+    }
+    .row-credit {
+      font-size: 11px;
+    }
+    .row-credit small {
+      display: block;
+      margin-top: 4px;
+    }
+    .detailed-usage {
+      padding: 16px 10px;
+    }
+    .detail-intro {
+      grid-template-columns: 1fr;
+      gap: 20px;
+    }
+    .records-disclosure > summary {
+      flex-wrap: wrap;
+    }
+    .records-disclosure > summary span {
+      margin-left: 21px;
+      width: 100%;
+    }
+    .meter-record {
+      padding: 12px;
+    }
+    .meter-record header {
+      flex-wrap: wrap;
+    }
+    .split-facts > div {
+      gap: 12px;
+    }
+    .split-facts dt {
+      max-width: 56%;
+    }
+    .split-facts dd {
+      font-size: 10px;
+    }
+  }
+  .tabbed-billing {
+    margin-top: 24px;
+    font-size: 12px;
+  }
+  .tabbed-billing h3,
+  .tabbed-billing h4 {
+    font-weight: 600;
+  }
+  .benefit-section + .benefit-section {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid var(--color-border);
+  }
+  .benefit-disclosure {
+    border-top: 1px solid var(--color-border);
+  }
+  .benefit-disclosure > summary {
+    padding: 14px 0 0;
+  }
+  .benefit-disclosure > summary:hover {
+    color: var(--color-foreground);
+  }
+  .benefit-disclosure[open] > summary .disclosure-arrow {
+    transform: rotate(180deg);
+  }
+  .benefit-gauge {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 190px;
+    flex-shrink: 0;
+  }
+  .benefit-gauge > span:last-child {
+    min-width: 62px;
+    text-align: right;
+    font-size: 10px;
+    color: var(--color-muted-foreground);
+    font-variant-numeric: tabular-nums;
+  }
+  .benefit-track {
+    display: block;
+    flex: 1;
+    height: 5px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--color-muted);
+  }
+  .benefit-track > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--color-info);
+  }
+  .benefit-allowances {
+    margin-top: 12px;
+  }
+  .benefit-unit-family {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .benefit-unit-family:last-child {
+    border-bottom: 0;
+  }
+  .benefit-unit-family > span {
+    width: 80px;
+    flex-shrink: 0;
+    color: var(--color-muted-foreground);
+    font-size: 11px;
+  }
+  .benefit-unit-family > div {
+    flex: 1;
+    min-width: 0;
+  }
+  .benefit-unit {
+    display: grid;
+    grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) 190px;
+    align-items: center;
+    gap: 12px;
+  }
+  .benefit-unit + .benefit-unit {
+    margin-top: 10px;
+  }
+  .benefit-unit > span {
+    font-size: 11px;
+  }
+  .benefit-unit > span:nth-child(2) {
+    font-variant-numeric: tabular-nums;
+    color: var(--color-muted-foreground);
+  }
+  .benefit-unit strong {
+    font-weight: 500;
+    color: var(--color-foreground);
+  }
+  .benefit-expanded {
+    border-top: 1px solid var(--color-border);
+    margin-top: 16px;
+    padding: 16px 0 4px;
+  }
+  .benefit-expanded section + section {
+    margin-top: 20px;
+  }
+  .benefit-expanded h4 {
+    font-size: 12px;
+    margin-bottom: 8px;
+  }
+  .benefit-expanded .split-facts {
+    max-width: 720px;
+  }
+  .usage-filters {
+    display: flex;
+    align-items: end;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .usage-filters > label {
+    display: block;
+    width: 240px;
+  }
+  .usage-filters > label:nth-child(2) {
+    width: 160px;
+  }
+  .usage-filters > label > span {
+    display: block;
+    color: var(--color-muted-foreground);
+    font-size: 11px;
+    margin-bottom: 8px;
+  }
+  .usage-filters button {
+    width: 100%;
+  }
+  .usage-filters p {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--color-muted-foreground);
+    padding-bottom: 8px;
+  }
+  .tab-usage-summary {
+    display: flex;
+    margin-bottom: 24px;
+  }
+  .summary-family {
+    flex: 1;
+    min-width: 0;
+    padding: 20px;
+  }
+  .summary-family + .summary-family {
+    border-left: 1px solid var(--color-border);
+  }
+  .summary-family h3 {
+    font-size: 12px;
+    margin-bottom: 16px;
+  }
+  .summary-family > strong {
+    display: block;
+    font-size: 28px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
+  .summary-family > strong small {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--color-muted-foreground);
+  }
+  .summary-family > p {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--color-muted-foreground);
+  }
+  .summary-family dl {
+    margin-top: 18px;
+  }
+  .summary-family dl > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+    margin-top: 8px;
+  }
+  .summary-family dt {
+    color: var(--color-muted-foreground);
+  }
+  .summary-family dd {
+    text-align: right;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
+  .usage-results .service-category:first-child {
+    margin-top: 20px;
+  }
+  .usage-results .service-category > h4 {
+    font-size: 12px;
+  }
+  .history-heading {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: start;
+    gap: 16px;
+  }
+  .topup-mobile {
+    display: none;
+  }
+  .mobile-topup {
+    border: 1px solid var(--color-border);
+    padding: 12px;
+    border-radius: 8px;
+    margin-top: 12px;
+  }
+  .mobile-topup > div:first-child {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .mobile-topup .split-facts {
+    margin: 12px 0;
+  }
+  @media (max-width: 1050px) {
+    .benefit-unit {
+      grid-template-columns: minmax(90px, 1fr) minmax(95px, 1fr) 150px;
+    }
+    .benefit-unit .benefit-gauge {
+      width: 150px;
+    }
+    .usage-filters {
+      flex-wrap: wrap;
+    }
+    .usage-filters > p {
+      width: 100%;
+      margin-left: 0;
+      padding: 0;
+    }
+    .summary-family {
+      padding: 16px;
+    }
+    .summary-family > strong {
+      font-size: 22px;
+    }
+    .summary-family dl > div {
+      flex-wrap: wrap;
+      gap: 4px 8px;
+    }
+  }
+  @media (max-width: 640px) {
+    .benefit-gauge {
+      width: 100%;
+    }
+    .benefit-unit-family {
+      display: block;
+    }
+    .benefit-unit-family > span {
+      display: block;
+      margin-bottom: 10px;
+    }
+    .benefit-unit {
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+    .benefit-unit .benefit-gauge {
+      grid-column: 1 / -1;
+      width: 100%;
+    }
+    .benefit-unit + .benefit-unit {
+      margin-top: 14px;
+    }
+    .usage-filters {
+      gap: 12px;
+    }
+    .usage-filters > label,
+    .usage-filters > label:nth-child(2) {
+      width: 100%;
+    }
+    .tab-usage-summary {
+      flex-direction: column;
+    }
+    .summary-family + .summary-family {
+      border-left: 0;
+      border-top: 1px solid var(--color-border);
+    }
+    .summary-family {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 4px 12px;
+    }
+    .summary-family h3 {
+      margin: 0;
+      align-self: center;
+    }
+    .summary-family > strong {
+      text-align: right;
+      font-size: 22px;
+    }
+    .summary-family > p {
+      margin: 0;
+      grid-column: 1 / -1;
+    }
+    .summary-family dl {
+      grid-column: 1 / -1;
+      margin-top: 4px;
+    }
+    .summary-family dl > div {
+      margin-top: 6px;
+    }
+    .history-heading {
+      flex-direction: column;
+    }
+    .topup-desktop {
+      display: none;
+    }
+    .topup-mobile {
+      display: block;
+    }
+    .benefit-expanded .split-facts dd {
+      max-width: 60%;
+    }
+  }
+
+  .compact-benefits .benefit-section + .benefit-section {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+  .compact-benefits .benefit-disclosure > summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 12px 24px;
+    padding: 16px 0;
+  }
+  .compact-benefits
+    .benefit-section:first-child
+    .benefit-disclosure:first-child {
+    border-top: 0;
+  }
+  .compact-benefits
+    .benefit-section:first-child
+    .benefit-disclosure:first-child
+    > summary {
+    padding-top: 0;
+  }
+  .compact-benefit-label > strong {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    overflow-wrap: anywhere;
+  }
+  .compact-benefit-label > span {
+    display: block;
+    font-size: 11px;
+    color: var(--color-muted-foreground);
+    margin-top: 4px;
+  }
+  .compact-grant-balance > strong {
+    display: block;
+    font-size: 15px;
+    font-weight: 600;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .compact-grant-balance > strong > small {
+    font-size: 11px;
+    color: var(--color-muted-foreground);
+    font-weight: 400;
+  }
+  .compact-grant-balance .benefit-gauge {
+    margin: 6px 0 0 auto;
+  }
+  .compact-benefit-action {
+    display: flex;
+    align-items: center;
+    justify-content: end;
+    gap: 8px;
+    grid-column: 3;
+    font-size: 11px;
+    color: var(--color-muted-foreground);
+  }
+  .compact-coverage {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 24px;
+  }
+  .compact-coverage > span {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .compact-coverage > span > span,
+  .compact-coverage > small {
+    font-size: 11px;
+    color: var(--color-muted-foreground);
+  }
+  .compact-coverage strong {
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .compact-benefits .benefit-expanded {
+    margin-top: 0;
+    padding-bottom: 20px;
+  }
+  @media (max-width: 640px) {
+    .compact-benefits .benefit-disclosure > summary {
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+    }
+    .compact-benefit-action {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .compact-grant-balance {
+      grid-column: 1 / -1;
+      grid-row: 2;
+    }
+    .compact-grant-balance > strong {
+      text-align: left;
+    }
+    .compact-grant-balance .benefit-gauge {
+      width: 100%;
+      margin-top: 8px;
+    }
+    .compact-coverage {
+      gap: 8px;
+    }
+    .compact-coverage > span {
+      width: 100%;
+    }
+    .compact-coverage > span > span {
+      min-width: 40px;
+    }
+  }
+
+  .allowance-chart {
+    flex: 0 0 190px;
+    margin-left: auto;
+    width: 190px;
+    --allowance-used: color-mix(
+      in srgb,
+      var(--color-foreground) 70%,
+      var(--color-card)
+    );
+    --allowance-reserved: color-mix(
+      in srgb,
+      var(--color-foreground) 40%,
+      var(--color-card)
+    );
+    --allowance-remaining: var(--color-muted);
+  }
+  .allowance-chart-trigger {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0;
+    border-radius: 3px;
+    outline-offset: 3px;
+  }
+  .allowance-chart-trigger:focus-visible {
+    outline: 1px solid var(--color-foreground);
+  }
+  .allowance-chart-bar {
+    display: flex;
+    flex: 1;
+    gap: 2px;
+    min-width: 0;
+  }
+  .allowance-chart-segment {
+    flex: 1 1 0;
+    min-width: 0;
+    border-radius: 3px;
+  }
+  .allowance-chart-stack {
+    display: flex;
+    height: 5px;
+    overflow: hidden;
+    background: var(--color-muted);
+  }
+  .allowance-chart-segment:first-child .allowance-chart-stack {
+    border-radius: 3px 0 0 3px;
+  }
+  .allowance-chart-segment:last-child .allowance-chart-stack {
+    border-radius: 0 3px 3px 0;
+  }
+  .allowance-used {
+    background: var(--allowance-used);
+  }
+  .allowance-reserved {
+    background: var(--allowance-reserved);
+  }
+  .allowance-remaining {
+    background: var(--allowance-remaining);
+  }
+  .allowance-chart-status {
+    min-width: 62px;
+    font-size: 10px;
+    text-align: right;
+    color: var(--color-muted-foreground);
+  }
+  .compact-benefits .benefit-track > span {
+    background: color-mix(
+      in srgb,
+      var(--color-foreground) 70%,
+      var(--color-card)
+    );
+  }
+  @media (max-width: 640px) {
+    .allowance-chart {
+      flex-basis: 100%;
+      margin-left: 0;
+      width: 100%;
+    }
+  }
+
+  .compact-benefit-label .benefit-label-with-help {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .benefit-help-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin: -4px 0;
+    color: var(--color-muted-foreground);
+    cursor: help;
+    border-radius: 4px;
+  }
+  .benefit-help-trigger:hover,
+  .benefit-help-trigger:focus-visible {
+    color: var(--color-foreground);
+  }
+  .benefit-help-trigger:focus-visible {
+    outline: 1px solid var(--color-foreground);
+    outline-offset: 2px;
+  }
+}
+.billing-allowance-chart-tooltip {
+  min-width: 200px;
+  max-width: min(260px, calc(100vw - 32px));
+  font-size: 11px;
+}
+.billing-allowance-chart-tooltip > p {
+  margin-bottom: 8px;
+  line-height: 1.6;
+}
+.billing-allowance-chart-tooltip strong {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+.billing-allowance-chart-tooltip dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 4px 0;
+}
+.billing-allowance-chart-tooltip dd {
+  font-variant-numeric: tabular-nums;
+}
+.billing-benefit-help-content {
+  max-width: min(330px, calc(100vw - 32px));
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 12px;
+}
+.billing-benefit-help-content > strong {
+  font-weight: 600;
+}
+.billing-benefit-help-content > p {
+  margin-top: 8px;
+}
+.billing-page {
+  summary {
+    list-style: none;
+    cursor: pointer;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 3px;
+  }
+  .disclosure-arrow {
+    transition: transform 150ms ease;
+    flex-shrink: 0;
+  }
+  .records-disclosure[open] > summary > .disclosure-arrow,
+  .expandable-service[open] > summary > .disclosure-arrow {
+    transform: rotate(90deg);
+  }
+  .all-metrics[open] > summary > .disclosure-arrow,
+  .record-details[open] > summary > .disclosure-arrow {
+    transform: rotate(180deg);
+  }
+  @media (max-width: 640px) {
+    .expanded-metrics,
+    .detail-intro {
+      grid-template-columns: 1fr;
+      gap: 20px;
+      padding: 16px 0;
+    }
+    .detailed-usage {
+      padding: 16px 8px;
+    }
+    .all-metrics > summary {
+      flex-wrap: wrap;
+      padding: 12px 0;
+    }
+    .all-metrics > summary > span {
+      margin-left: 22px;
+      width: 100%;
+    }
+    .expandable-service > summary {
+      padding: 16px 0;
+    }
+    .records-disclosure > summary {
+      flex-wrap: wrap;
+    }
+    .meter-record {
+      padding: 12px;
+    }
+  }
+}
