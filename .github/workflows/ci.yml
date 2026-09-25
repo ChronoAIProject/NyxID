@@ -8,7 +8,7 @@ on:
     # `main` is intentionally not listed here -- pushes to main are gated
     # through publish-images.yml, which calls this workflow via workflow_call.
     # Listing main twice would cause CI to run on every merge commit twice.
-    branches: [dev]
+    branches: [dev, 'rollup-*']
   # Allow other workflows (publish-images, release) to reuse this one as a
   # gate via `uses: ./.github/workflows/ci.yml`. Callers should pass
   # `force-all: true` to skip path filtering and run the full suite as a
@@ -32,7 +32,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
-# Both backend jobs start an explicit single-node replica set and use this
+# Backend test and coverage jobs start an explicit single-node replica set and use this
 # authoritative URI. Multi-document transaction tests must never fall back to a
 # standalone developer mongod or silently skip because topology is unsupported.
   NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
@@ -72,8 +72,12 @@ jobs:
       cursor_plugin: ${{ steps.filter.outputs.cursor_plugin }}
       oracle_worker: ${{ steps.filter.outputs.oracle_worker }}
       ci: ${{ steps.filter.outputs.ci }}
+      workflow_hash: ${{ steps.workflow-hash.outputs.value }}
     steps:
       - uses: actions/checkout@v6
+      - name: Hash CI workflow
+        id: workflow-hash
+        run: echo "value=$(sha256sum .github/workflows/ci.yml | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -167,6 +171,7 @@ jobs:
             ci:
               - '.github/workflows/**'
               - '.github/actions/**'
+              - '.github/scripts/**'
 
   # ---------------------------------------------------------------------------
   # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
@@ -239,7 +244,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
-  # Rust: backend build + test
+  # Rust: backend tests
   # Handler + service tests use the explicit NYXID_TEST_DATABASE_URL above. The
   # container is started as a single-node replica set so atomic rotation/binding
   # tests exercise real transactions rather than silently skipping.
@@ -252,44 +257,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Start transaction-capable MongoDB
-        run: |
-          # MongoDB 8 otherwise retains dropped per-test WiredTiger idents for
-          # the default 300-second snapshot window, exhausting FDs during this
-          # high-churn suite. This container is dedicated to this CI job.
-          docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
-            --ulimit nofile=65536:65536 \
-            mongo:8.0 --replSet rs0 --bind_ip_all \
-            --setParameter minSnapshotHistoryWindowInSeconds=0
-          for attempt in {1..30}; do
-            if docker exec nyxid-test-mongodb mongosh --quiet \
-              --eval 'db.adminCommand({ ping: 1 }).ok' >/dev/null 2>&1; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs nyxid-test-mongodb
-              exit 1
-            fi
-            sleep 1
-          done
-          snapshot_window="$(docker exec nyxid-test-mongodb mongosh --quiet --eval \
-            'db.adminCommand({getParameter:1,minSnapshotHistoryWindowInSeconds:1}).minSnapshotHistoryWindowInSeconds')"
-          if [ "$snapshot_window" != "0" ]; then
-            echo "expected minSnapshotHistoryWindowInSeconds=0, got: $snapshot_window"
-            exit 1
-          fi
-          docker exec nyxid-test-mongodb mongosh --quiet --eval \
-            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
-          for attempt in {1..30}; do
-            if docker exec nyxid-test-mongodb mongosh --quiet \
-              --eval 'db.hello().isWritablePrimary' | grep -q true; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs nyxid-test-mongodb
-              exit 1
-            fi
-            sleep 1
-          done
+        run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -300,17 +268,6 @@ jobs:
 
       - name: Check RCI backend boundary
         run: bash scripts/check-rci-backend-boundary.sh
-
-      - name: Billing route coverage smoke
-        run: cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
-
-      # Keep this feature/profile aligned with backend/Dockerfile so the
-      # dep-info guard covers every compile-time input of the image build.
-      - name: Build backend image binary
-        run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
-
-      - name: Check backend Docker embedded assets
-        run: python3 scripts/check-backend-docker-embeds.py
 
       - name: Run backend tests
         run: cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
@@ -329,6 +286,46 @@ jobs:
           name: test-results-backend
           path: target/nextest/ci/junit.xml
           if-no-files-found: warn
+
+  # Keep the standalone test-profile build and smoke assertion. It exercises
+  # a different Cargo feature-unification path from the combined nextest run.
+  backend-billing-smoke:
+    name: Backend Billing Smoke
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Start transaction-capable MongoDB
+        run: bash .github/scripts/start-test-mongodb.sh
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-billing-smoke
+      - name: Billing route coverage smoke
+        run: cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+
+  # Keep the production feature/profile and dep-info guard together while
+  # letting the full backend tests run on their own runner.
+  backend-image-inputs:
+    name: Backend Image Inputs
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend-image-inputs
+      - name: Build backend image binary
+        run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
+      - name: Check backend Docker embedded assets
+        run: python3 scripts/check-backend-docker-embeds.py
 
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
@@ -512,10 +509,10 @@ jobs:
   #      enforced threshold (Rust: `cargo llvm-cov --fail-under-lines`;
   #      Frontend: vitest `coverage.thresholds.lines` in vite.config.ts).
   #   2. Emit a machine-readable line-% number + an lcov report.
-  #   3. On pull_request events, also measure the BASE branch so the comment
-  #      job can show a per-component line-% delta (AC #4). The base measurement
-  #      is best-effort (`continue-on-error`): if it can't be produced the head
-  #      gate still runs and the delta simply renders as "n/a". It never blocks.
+  #   3. On pull_request events, also compare with the BASE branch so the
+  #      comment can show a per-component line-% delta (AC #4). Backend base
+  #      measurement runs in parallel and reuses an exact-commit report when
+  #      available. Base results remain best-effort and never gate the head.
   #   4. Upload the report + a tiny `coverage-<component>.json` summary as a CI
   #      artifact (AC #6). The summary files feed the PR-comment job.
   #
@@ -533,10 +530,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Backend (nyxid) line coverage. Mirrors `backend-test`: uses the same explicit
-  # single-node replica set so DB and transaction tests run (otherwise coverage
-  # would be understated). The instrumented run is slow (~15 min); the base-branch
-  # comparison adds a second run, so it is gated to pull_request only and allowed
-  # to fail without blocking the gate.
+  # single-node replica set so DB and transaction tests run. PR-head coverage
+  # retains its threshold; the informational base comparison runs separately.
   # ---------------------------------------------------------------------------
   coverage-backend:
     name: Coverage (Backend)
@@ -548,44 +543,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Start transaction-capable MongoDB
-        run: |
-          # MongoDB 8 otherwise retains dropped per-test WiredTiger idents for
-          # the default 300-second snapshot window, exhausting FDs during this
-          # high-churn suite. This container is dedicated to this CI job.
-          docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
-            --ulimit nofile=65536:65536 \
-            mongo:8.0 --replSet rs0 --bind_ip_all \
-            --setParameter minSnapshotHistoryWindowInSeconds=0
-          for attempt in {1..30}; do
-            if docker exec nyxid-test-mongodb mongosh --quiet \
-              --eval 'db.adminCommand({ ping: 1 }).ok' >/dev/null 2>&1; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs nyxid-test-mongodb
-              exit 1
-            fi
-            sleep 1
-          done
-          snapshot_window="$(docker exec nyxid-test-mongodb mongosh --quiet --eval \
-            'db.adminCommand({getParameter:1,minSnapshotHistoryWindowInSeconds:1}).minSnapshotHistoryWindowInSeconds')"
-          if [ "$snapshot_window" != "0" ]; then
-            echo "expected minSnapshotHistoryWindowInSeconds=0, got: $snapshot_window"
-            exit 1
-          fi
-          docker exec nyxid-test-mongodb mongosh --quiet --eval \
-            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
-          for attempt in {1..30}; do
-            if docker exec nyxid-test-mongodb mongosh --quiet \
-              --eval 'db.hello().isWritablePrimary' | grep -q true; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              docker logs nyxid-test-mongodb
-              exit 1
-            fi
-            sleep 1
-          done
+        run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -614,32 +572,129 @@ jobs:
             backend "Backend (nyxid)" 73 \
             coverage-backend.raw.json coverage-backend.json
 
-      # Base: best-effort second run for the delta. Never blocks the gate.
-      - name: Measure base branch
-        if: github.event_name == 'pull_request'
+      # Push and publish runs make their measured head available to PRs whose
+      # base is this exact commit. A workflow edit changes the key so the PR
+      # falls back to a fresh base measurement.
+      - name: Prepare reusable base report
+        if: github.event_name != 'pull_request'
+        run: cp coverage-backend.raw.json coverage-backend.base.json
+      - name: Cache reusable base report
+        if: github.event_name != 'pull_request'
         continue-on-error: true
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.sha }}
-        run: |
-          git worktree add ../base-coverage "$BASE_REF"
-          ( cd ../base-coverage && cargo llvm-cov --package nyxid --summary-only \
-              && cargo llvm-cov report --package nyxid --json --summary-only \
-                 --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json" )
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-backend.base.json
+          key: coverage-backend-base-v1-${{ github.sha }}-${{ needs.changes.outputs.workflow_hash }}
 
-      - name: Merge base line % into summary
-        if: github.event_name == 'pull_request'
-        run: |
-          python3 .github/scripts/coverage_merge_base.py \
-            coverage-backend.json coverage-backend.base.json
-
-      # Enforce the threshold LAST, after the report + summary + delta are built,
-      # so a regression fails the job *and* still surfaces the failing number in
-      # the PR comment. Re-reads the existing profdata (no re-run).
+      # Re-reads the existing profdata (no re-run). The report and summary are
+      # produced before a regression fails the job and remain available to the
+      # PR comment.
       - name: Enforce coverage gate (head)
         run: cargo llvm-cov report --package nyxid --fail-under-lines 73
 
       - name: Upload coverage artifact
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event_name == 'pull_request' && 'backend-coverage-head' || 'coverage-backend' }}
+          path: |
+            coverage-backend.lcov
+            coverage-backend.json
+          if-no-files-found: warn
+
+  # The base percentage is informational. Reuse only a report for the exact
+  # base SHA and CI workflow; otherwise run the same Mongo-backed measurement
+  # as before on the base commit, in parallel with PR-head coverage.
+  coverage-backend-base:
+    name: Coverage (Backend Base)
+    needs: changes
+    if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v6
+      - name: Restore exact base report
+        id: base-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: coverage-backend.base.json
+          key: coverage-backend-base-v1-${{ github.event.pull_request.base.sha }}-${{ needs.changes.outputs.workflow_hash }}
+      - name: Checkout base tree
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-coverage
+      - name: Start transaction-capable MongoDB
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        run: bash .github/scripts/start-test-mongodb.sh
+      - name: Install system dependencies
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        with:
+          key: coverage-backend-base
+      - uses: taiki-e/install-action@cargo-llvm-cov
+        if: steps.base-cache.outputs.cache-hit != 'true'
+      - name: Measure base branch
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        working-directory: base-coverage
+        run: |
+          cargo llvm-cov --package nyxid --summary-only
+          cargo llvm-cov report --package nyxid --json --summary-only \
+            --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json"
+      - name: Cache measured base report
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-backend.base.json
+          key: coverage-backend-base-v1-${{ github.event.pull_request.base.sha }}-${{ needs.changes.outputs.workflow_hash }}
+      - name: Upload base report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-base-report
+          path: coverage-backend.base.json
+          if-no-files-found: warn
+
+  # Restore the original PR artifact contract after the parallel base lookup.
+  # This is informational; the coverage-backend job remains the threshold gate.
+  coverage-backend-summary:
+    name: Coverage (Backend Summary)
+    needs: [changes, coverage-backend, coverage-backend-base]
+    if: always() && github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download head report
+        id: head-report
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-coverage-head
+        continue-on-error: true
+      - name: Download base report
+        if: steps.head-report.outcome == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-base-report
+        continue-on-error: true
+      - name: Merge base line % into summary
+        if: steps.head-report.outcome == 'success'
+        run: |
+          python3 .github/scripts/coverage_merge_base.py \
+            coverage-backend.json coverage-backend.base.json
+      - name: Upload coverage artifact
+        if: steps.head-report.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-backend
@@ -823,7 +878,7 @@ jobs:
     name: Coverage Comment Payload
     if: always() && github.event_name == 'pull_request'
     needs:
-      - coverage-backend
+      - coverage-backend-summary
       - coverage-cli
       - coverage-frontend
     runs-on: ubuntu-latest
@@ -882,6 +937,8 @@ jobs:
       - rust-fmt
       - rust-clippy
       - backend-test
+      - backend-billing-smoke
+      - backend-image-inputs
       - cli-test
       - rust-features
       - frontend
@@ -905,6 +962,8 @@ jobs:
             rust-fmt=${{ needs.rust-fmt.result }}
             rust-clippy=${{ needs.rust-clippy.result }}
             backend-test=${{ needs.backend-test.result }}
+            backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
+            backend-image-inputs=${{ needs.backend-image-inputs.result }}
             cli-test=${{ needs.cli-test.result }}
             rust-features=${{ needs.rust-features.result }}
             frontend=${{ needs.frontend.result }}
