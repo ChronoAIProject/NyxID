@@ -320,7 +320,15 @@ jobs:
         uses: test-summary/action@v2.6
         with:
           paths: target/nextest/ci/junit.xml
-          show: all
+          show: fail
+
+      - name: Upload backend test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-backend
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
@@ -351,7 +359,15 @@ jobs:
         uses: test-summary/action@v2.6
         with:
           paths: target/nextest/ci/junit.xml
-          show: all
+          show: fail
+
+      - name: Upload CLI test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-cli
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
   # Rust: build with feature flags (KMS providers). Backend-only build.
