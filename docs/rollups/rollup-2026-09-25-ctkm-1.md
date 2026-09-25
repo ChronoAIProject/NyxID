@@ -1,88 +1,113 @@
 # Rollup: 2026-09-25 ctkm-1
 
 This rollup starts from `main` commit
-`1b031c77062880e572ec375041a4c029241a86f1` and collects
-[PR #1662](https://github.com/ChronoAIProject/NyxID/pull/1662),
-`feat: add configurable billing analytics workspace`.
+`1b031c77062880e572ec375041a4c029241a86f1` and presents the configurable
+billing analytics integration for review before it lands in `main`.
 
-[PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666) adds device-code
-compatibility and scoped login approval. Both feature records are retained
-below. PR #1662 landed as squash commit `2018b7a9`.
+## Summary
 
-## Billing analytics workspace
+- Add the production admin Usage page at `/admin/usage`.
+- Replace the preview-only analytics direction with a persisted workspace backed
+  by real NyxID usage data.
+- Provide Dashboard and List views with Operations, Overview, and Explorer
+  templates. Operations is the recommended default.
+- Allow administrators to configure filters, measures, breakdowns, chart
+  types, Top 5/Top 10 or aggregate views, time intervals, panel order, panel
+  width, panel height, and named saved views.
+- Preserve the user-facing `/billing` Billing & Usage page and its Billing and
+  Usage tabs from the rollup base.
 
-The source branch adds the production admin Usage analytics page at
-`/admin/usage`. It replaces the earlier preview-only direction with a persisted
-workspace backed by real NyxID usage data. Administrators can use Dashboard and
-List views, choose Operations, Overview, or Explorer templates, configure
-filters and measures, add and arrange chart panels, resize and drag panels on a
-three-column grid, and save named views. Operations is the default template.
+## Included changes and provenance
 
-The implementation uses the existing Recharts frontend dependency and the
-existing usage and billing records. It also preserves the separate user-facing
-Billing & Usage page introduced by the base branch, including its Billing and
-Usage tabs.
+The billing integration has one direct source PR. Its source branch was
+validated before it was squash merged into this branch. The source PR remains the authoritative
+implementation discussion and test record.
 
-## Device login and scoped approval
+| Source PR | Reviewed source head | Landed squash | Intended behavior / scope |
+| --- | --- | --- | --- |
+| [#1662](https://github.com/ChronoAIProject/NyxID/pull/1662) | `99a063906bedd56874e1ff89ee3b1cbaccb7031f` | `2018b7a9b10966b710a126c3bb3efc7e13bc5cdd` | Add the configurable admin Usage analytics workspace, persisted workspace state, saved views, three layout templates, Recharts visualizations, draggable/resizable panels, real usage aggregation, and the supporting route, API, tests, and documentation. |
 
-[PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666) addresses the
-installed iOS app rejecting nine-character device codes and the approval-time
-scope selection requested in
-[issue #1535](https://github.com/ChronoAIProject/NyxID/issues/1535).
-It supersedes the closed, unmerged PR #1569.
+The starting `main` commit already contains the separately merged hosted
+service/channel work from [#1664](https://github.com/ChronoAIProject/NyxID/pull/1664)
+and the tabbed user Billing & Usage page from
+[#1663](https://github.com/ChronoAIProject/NyxID/pull/1663). Those PRs are
+inherited base history; they are not repeated in this rollup's diff. The rollup
+record itself was introduced in `0286d437` and expanded with this provenance
+table in the follow-up documentation commit.
 
-The intended behavior is:
+## Problem and resulting behavior
 
-- Ordinary browser login uses the legacy eight-character account-login
-  exchange. Grant-capable device requests can also use eight-character codes
-  after the staged compatibility flag is enabled. Existing prefixed codes
-  remain readable, and ambiguous codes cannot approve either request.
-- `/login/device?user_code=…` reviews the request, asks the approver to choose
-  full account access or a restricted Agent Key, then shows the applicable
-  permission review. The approver can reuse an eligible key or create a new
-  one. Existing and new keys use the same permission display.
-- An existing browser session skips sign-in. Otherwise the user verifies
-  identity for this request through a configured sign-in provider or
-  password/MFA. That proof expires within ten minutes and ends after the
-  decision. Keeping a browser session is an explicit choice. Verification
-  alone does not authorize the requesting device.
-- Permission filters show exact matches before keys with additional access.
-  The server supplies effective service permissions and revalidates consent
-  snapshots before approval. URL hints prefill preferences without granting
-  authority or automatically creating keys.
-- CLI login options construct the corresponding approval links. Public
-  catalog discovery and credential-scoped MCP discovery help requesters
-  identify services and operations. The protocol and local NyxID skill
-  document the supported URL fields and commands.
+Administrators previously had no durable, configurable analytics workspace for
+exploring service usage. The new page loads the existing NyxID usage rollups and
+lets an administrator choose how to group and visualize them without inventing
+metrics or replacing the existing Billing & Usage experience.
 
-The production React implementation and its backend, CLI, mobile capability
-and regression-test support are retained. The standalone HTML prototype,
-saved service snapshot, prototype notes and prototype-only tests are removed.
-They are not runtime dependencies. This work does not add mobile browser
-handoff or scoped browser sessions.
+The workspace supports:
 
-## Device login verification and rollout
+- Dashboard/List tabs with an Operations default and Overview/Explorer templates.
+- Real service, acting-user, billing-account, credential-class, metric, and
+  interval dimensions exposed by the backend reporting contract.
+- Requests, billing events, exact/legacy/uncosted event counts, token classes,
+  gross cost, wallet/grant/allowance funding, and billed-unit measures.
+- Line, bar, pie, and combination visualizations through the existing Recharts
+  dependency.
+- Top 5, Top 10, and aggregate views, with panel-level measure and breakdown
+  settings.
+- Dragging, resizing, panel visibility, chart height, ordering, filters, and
+  saved views persisted to the user's workspace.
+- Clear treatment of UTC bucket boundaries, partial windows, unknown-cost
+  events, and unsupported metrics rather than fabricated data.
 
-The production-code revision passed backend, CLI, frontend and mobile tests,
-coverage gates, Clippy, formatting, feature builds and CodeQL. After prototype
-removal, the production frontend build and all 11 application browser tests
-passed again. The source PR records the checks for the final rollup-targeted
-revision and the squash commit that lands it.
+## Implementation and safety review
 
-`AUTH_DEVICE_EIGHT_CHAR_CODES` defaults to `false`. Upgrade all backend readers
-and writers and drain incompatible replicas before enabling eight-character
-v2 issuance. Physical installed-iPhone scan and manual-entry acceptance remain
-rollout checks. Merging into this rollup does not deploy or enable the flag.
+The backend analytics aggregation and workspace persistence live in the admin
+usage and usage workspace services. The frontend uses the existing NyxID
+components, Recharts, TanStack Router, and query hooks. The implementation
+keeps `/billing` and `/admin/usage` as separate routes and retains the current
+user Billing & Usage behavior while adding the admin analytics surface.
 
-See [the device login protocol](../DEVICE_LOGIN_PROTOCOL.md),
-[the compatibility rollout ADR](../ADR-015-auth-device-login.md), and
-[the HTTP API contract](../API.md#selectable-device-login-v2).
+The source PR's review verified that analytics read existing usage fields,
+workspace writes are scoped to the acting administrator, stale revisions are
+handled, and demo/sample data is limited to development and browser-test
+fixtures. No secrets, billing credentials, or fabricated production metrics are
+introduced.
+
+## Validation evidence
+
+The source PR was checked against the current `main` base before this rollup was
+created. The final source-PR workflow run was
+[CI run 36115024967](https://github.com/ChronoAIProject/NyxID/actions/runs/36115024967),
+which passed the frontend, backend, CLI, Rust feature, coverage, wizard
+freshness, CodeQL, and release-integrity checks.
+
+Targeted local verification also passed:
+
+- 40 frontend tests covering analytics workspace persistence, analytics data
+  helpers, admin usage routing/page behavior, and Billing & Usage.
+- Rust formatting with `cargo fmt --all -- --check`.
+- CLI wizard bundle freshness with
+  `cargo test -p nyxid-cli --test wizard_bundle_freshness --quiet`.
+- `git diff --check` and a repository-wide conflict-marker scan.
 
 ## Rollup acceptance
 
-Each source PR must merge cleanly into the current rollup and pass its applicable
-frontend, backend, CLI, mobile, formatting, Clippy, feature, wizard, coverage and
-security checks. The combined branch must retain `/billing`, `/admin/usage` and
-the device approval routes, with no unresolved conflict markers. Source PRs
-land as squash commits only after their checks pass and GitHub reports them
-mergeable. Their PR records provide the reviewed head and landed commit.
+- [x] The rollup branch starts from current `main` and contains the source PR's
+  squash integration.
+- [x] The source PR is merged into this rollup and its implementation record is
+  listed above.
+- [x] Both `/billing` and `/admin/usage` remain registered routes.
+- [x] The rollup has no unresolved merge entries or conflict markers.
+- [x] Source CI, coverage, CodeQL, release integrity, and local targeted checks
+  pass.
+- [ ] Complete the required review and merge this rollup into `main`.
+
+## Device login contribution
+
+[PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666) adds eight-character
+device-code compatibility and web approval-time selection of account access or
+a scoped Agent Key. It retains the production implementation and removes the
+standalone HTML prototype and its supporting artifacts.
+
+See [the device login contribution record](rollup-2026-09-25-ctkm-1-device-login.md)
+for behavior, verification and rollout constraints. Its source PR records the
+reviewed revision, final checks and landed squash.
