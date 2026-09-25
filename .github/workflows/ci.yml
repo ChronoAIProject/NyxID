@@ -634,6 +634,13 @@ jobs:
           cargo llvm-cov --package nyxid --summary-only
           cargo llvm-cov report --package nyxid --json --summary-only \
             --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json"
+      - name: Cache measured base report
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-backend.base.json
+          key: coverage-backend-base-v1-${{ github.event.pull_request.base.sha }}-${{ needs.changes.outputs.workflow_hash }}
       - name: Upload base report
         if: always()
         uses: actions/upload-artifact@v4
