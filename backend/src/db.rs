@@ -2147,6 +2147,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // ── channel_messages ──
+    crate::services::channel_activity_service::ensure_indexes(db).await?;
     crate::services::channel_delivery_service::ensure_indexes(db).await?;
     let channel_msgs = db.collection::<mongodb::bson::Document>("channel_messages");
     channel_msgs

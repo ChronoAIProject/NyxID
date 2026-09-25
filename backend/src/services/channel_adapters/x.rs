@@ -1,5 +1,7 @@
 //! X user-context Direct Messages with X Activity webhook delivery.
 
+#[path = "x_activity.rs"]
+mod activity;
 #[cfg(test)]
 #[path = "x_webhook_tests.rs"]
 mod webhook_tests;
@@ -59,12 +61,20 @@ pub fn selected_events(bot: &ChannelBot) -> &[XChannelEvent] {
 pub fn public_events_enabled(bot: &ChannelBot) -> bool {
     selected_events(bot)
         .iter()
+        .any(|event| matches!(event, XChannelEvent::Mentions | XChannelEvent::Replies))
+}
+
+pub fn webhook_events_enabled(bot: &ChannelBot) -> bool {
+    selected_events(bot)
+        .iter()
         .any(|event| *event != XChannelEvent::Dm)
 }
 
 pub fn event_name(event: XChannelEvent) -> &'static str {
     match event {
         XChannelEvent::Dm => "dm.received",
+        XChannelEvent::Chat => "chat.received",
+        XChannelEvent::Posts => "post.create",
         XChannelEvent::Mentions => "post.mention.create",
         XChannelEvent::Replies => "post.reply.create",
     }
@@ -73,14 +83,14 @@ pub fn event_name(event: XChannelEvent) -> &'static str {
 pub fn validate_events(platform: &str, events: &[XChannelEvent]) -> AppResult<()> {
     if platform != "x"
         || events.is_empty()
-        || events.len() > 3
+        || events.len() > 5
         || events
             .iter()
             .enumerate()
             .any(|(index, event)| events[..index].contains(event))
     {
         return Err(AppError::ValidationError(
-            "X events must be a non-empty selection of dm, mentions, and replies on an X channel"
+            "X events must be a non-empty selection of dm, chat, mentions, replies, and posts on an X channel"
                 .into(),
         ));
     }
@@ -374,6 +384,18 @@ fn reply_bodies(reply: &OutboundReply) -> AppResult<Vec<Value>> {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for XAdapter {
+    fn activity_descriptors(
+        &self,
+    ) -> &'static [crate::services::channel_activity_service::ActivityDescriptor] {
+        activity::DESCRIPTORS
+    }
+    fn activity_metadata(
+        &self,
+        inbound: &InboundMessage,
+    ) -> Option<crate::models::channel_activity::ActivityMetadata> {
+        Some(activity::metadata(inbound))
+    }
+
     fn atomic_inbound_admission(&self) -> bool {
         true
     }
@@ -828,6 +850,13 @@ impl PlatformAdapter for XAdapter {
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        if crate::services::channel_activity_service::notification_only(original)
+            || conversation_id.starts_with("chat:")
+        {
+            return Err(AppError::Forbidden(
+                "This activity does not support replies".into(),
+            ));
+        }
         if !is_public_conversation(conversation_id) {
             if !selected_events(bot).contains(&XChannelEvent::Dm) {
                 return Err(AppError::ValidationError(

@@ -122,6 +122,10 @@ impl ChannelBilling {
         self.received_event(event_id, "x-dm-received").await
     }
 
+    pub async fn received_chat(&self, event_id: &str) -> AppResult<()> {
+        self.received_event(event_id, "x-chat-received").await
+    }
+
     pub async fn received_post(&self, post_id: &str) -> AppResult<()> {
         self.received_event(post_id, "x-post-received").await
     }

@@ -56,7 +56,13 @@ pub(super) fn target(body: &[u8]) -> AppResult<Option<String>> {
     let body: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
     if !matches!(
         body["data"]["event_type"].as_str(),
-        Some("dm.received" | "post.mention.create" | "post.reply.create")
+        Some(
+            "dm.received"
+                | "chat.received"
+                | "post.mention.create"
+                | "post.reply.create"
+                | "post.create"
+        )
     ) {
         return Ok(None);
     }
@@ -74,6 +80,12 @@ pub(super) fn parse(body: &[u8]) -> AppResult<Vec<InboundMessage>> {
         return Ok(vec![]);
     };
     let body: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
+    if body["data"]["event_type"] == "chat.received" {
+        return activity::parse_chat(&body, &own_id);
+    }
+    if body["data"]["event_type"] == "post.create" {
+        return activity::parse_own_post(&body, &own_id);
+    }
     if body["data"]["event_type"] != "dm.received" {
         return parse_post(&body, &own_id);
     }

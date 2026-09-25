@@ -4916,8 +4916,8 @@ pub enum ChannelBotCommands {
     Update {
         /// Bot ID
         id: String,
-        /// X events to receive: dm, mentions, replies (replaces the selection)
-        #[arg(long, value_delimiter = ',', num_args = 1.., value_parser = ["dm", "mentions", "replies"])]
+        /// X events to receive: dm, chat, mentions, replies, posts (replaces the selection)
+        #[arg(long, value_delimiter = ',', num_args = 1.., value_parser = ["dm", "chat", "mentions", "replies", "posts"])]
         x_events: Vec<String>,
         /// New label
         #[arg(long)]

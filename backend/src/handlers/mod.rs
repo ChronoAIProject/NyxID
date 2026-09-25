@@ -120,3 +120,5 @@ mod curation_tests;
 pub mod options;
 
 pub mod service_history;
+
+pub mod channel_activities;

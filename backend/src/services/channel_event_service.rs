@@ -621,6 +621,7 @@ fn build_device_callback_payload(
         .map_err(|e| AppError::Internal(format!("failed to serialize event envelope: {e}")))?;
 
     Ok(CallbackPayload {
+        activity: None,
         // NyxID-assigned message id so async replies via /channel-relay/reply
         // resolve to the persisted ChannelMessage. The client-supplied
         // `event_id` is preserved in `ChannelMessage.platform_message_id`.
@@ -740,6 +741,7 @@ mod tests {
 
     fn conversation() -> ChannelConversation {
         ChannelConversation {
+            activity_callback: None,
             id: "conv-1".to_string(),
             user_id: "user-1".to_string(),
             // Device channels have no backing bot. See NyxID#221 /
