@@ -157,6 +157,7 @@ export function DashboardLayout() {
 
 const SECTION_TITLES: Record<string, string> = {
   dashboard: "dashboard",
+  billing: "billing & usage",
   keys: "ai services",
   orgs: "org",
   nodes: "nodes",
@@ -178,6 +179,7 @@ function sectionTitleFor(pathname: string): string {
 
 const SIDEBAR_ITEMS: Record<string, string> = {
   "/dashboard": "Dashboard",
+  "/billing": "Billing & Usage",
   "/keys": "Services & Credentials",
   "/orgs": "Organizations",
   "/nodes": "Credential Nodes",
