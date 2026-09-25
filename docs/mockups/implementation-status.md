@@ -1,7 +1,7 @@
 # Device login implementation status
 
 Updated 2026-09-25 on `fix/device-login-approval`, integrated with main
-`ff089247` (0.30.2). Review: [PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666),
+`1b031c77` (0.30.2). Review: [PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666),
 which supersedes closed, unmerged PR #1569. No deployment
 or physical-device validation is claimed. See [the protocol](../DEVICE_LOGIN_PROTOCOL.md)
 for the implemented contract and [ADR-015](../ADR-015-auth-device-login.md) for rollout.
@@ -17,7 +17,7 @@ for the implemented contract and [ADR-015](../ADR-015-auth-device-login.md) for 
 | Normal `/login` | Legacy full-account browser login. Scoped browser sessions and mobile browser handoff are outside this implementation. |
 | Documentation | Protocol, ADR, API docs, agent playbook and local NyxID skill reference describe the implemented flow and hint contract. No external skill publication is claimed by this update. |
 
-Verification after integration with main:
+Local verification after integration with main `ff089247`:
 
 - Frontend: 3,667 unit tests; production build; lint with zero errors and 27
   warnings in existing main files.
@@ -32,6 +32,10 @@ Verification after integration with main:
   security results are recorded against the current head in
   [PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666). Historical
   results from #1569 are not reported as results for this revision.
+
+The later billing-only main update (`1b031c77`) also passed the production
+build and all 53 focused login, permission-picker and billing checks. The PR
+records the complete CI run against that combined revision.
 
 Physical iPhone acceptance remains a rollout check. The HTML preview and parser
 fixture do not establish it. Enable eight-character v2 issuance only after every
