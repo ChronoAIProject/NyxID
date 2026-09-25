@@ -658,10 +658,23 @@ Aevatar's platform catalog workflow uses a standing global role and OAuth scopes
 A platform administrator configures the account once:
 
 1. Create or update a **global role** (no OAuth client association) with `nyxid:catalog:skills:read` and `nyxid:catalog:skills:write`. Include `ornn:skill:read`, `ornn:skill:create`, and `ornn:skill:update` for Ornn package content operations. Omit Ornn delete/admin permissions.
-2. Assign that role through Admin → Service Accounts and set `allowed_scopes` to `catalog:skills:read catalog:skills:write user-services:read proxy`. Existing Ornn roles may remain assigned.
+2. Assign that role through Admin → Service Accounts. On an existing account, use **Catalog access → Apply catalog access**, review, and confirm. This explicitly submits the assigned roles even when they have not changed, and adds the catalog read/write scopes supported by those roles (`user-services:read` is included for reads). Keep `proxy` configured for Ornn. Existing Ornn roles remain assigned.
 3. Obtain a fresh client-credentials token carrying those scopes. Secret rotation is unnecessary.
 
-Assigning a qualifying global role through platform-admin account create/update atomically sets `purpose: "catalog_editor"` and `platform_protected: true`. Adding a permission to a role already assigned to a General account does not silently convert it; save the role assignment on the intended account to activate catalog editing. Ordinary account input cannot directly set purpose or protection. Removing the role revokes its catalog authority while protection remains, so owner or organization administrators cannot take custody or restore access. Client-associated roles and wildcard permission strings do not authorize catalog editing.
+Assigning a qualifying global role through platform-admin account create/update atomically sets `purpose: "catalog_editor"` and `platform_protected: true`. Adding a permission to a role already assigned to a General account does not silently convert it; use **Apply catalog access** on the intended account to activate catalog editing. The ordinary edit form only submits changed fields, so saving an unrelated field does not reapply unchanged roles. Ordinary account input cannot directly set purpose or protection. Removing the role revokes its catalog authority while protection remains, so owner or organization administrators cannot take custody or restore access. Client-associated roles and wildcard permission strings do not authorize catalog editing.
+
+The catalog access section checks assigned global role permissions and account scopes. It reports read and write settings separately; an activated account without the read role is not ready for either key GET. A successful settings update is not a live-token test. Legacy grant controls remain available until activation succeeds; activated CatalogEditor accounts show catalog access instead. Applying catalog access includes the reviewed original roles, scopes, purpose, protection, and enabled state as an atomic precondition. A concurrent change returns HTTP 409 and requires reloading, so stale setup cannot restore revoked account roles or scopes. Ordinary account updates without this optional precondition retain their existing behavior. Deploy the updated backend before using the guarded UI action; older backends reject the unknown precondition field without updating the account.
+
+An administrator can also activate an existing account with the deployed CLI, without creating a new SA or rotating its secret:
+
+```sh
+nyxid service-account update "$SA_ID" \
+  --role-ids "$EXISTING_ROLE_IDS" \
+  --scopes 'catalog:skills:read catalog:skills:write user-services:read proxy' \
+  --output json
+```
+
+`EXISTING_ROLE_IDS` is a comma-separated list containing the qualifying global role and every role to retain, including Ornn roles. This command uses the signed-in platform administrator's credentials and intentionally replaces the listed roles and scopes. Inspect the latest account first; the CLI does not send the UI activation precondition. Use the guarded UI action when concurrent administrators may edit the account. Verify the response reports `purpose: "catalog_editor"` and `platform_protected: true`, then test both GETs with the SA token. A token refresh alone does not activate the account.
 
 | Operation | Token and live account scopes | Live global role permission |
 | --- | --- | --- |

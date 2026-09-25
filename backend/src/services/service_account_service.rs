@@ -225,7 +225,16 @@ pub async fn get_service_account(db: &Database, sa_id: &str) -> AppResult<Servic
         .ok_or_else(|| AppError::ServiceAccountNotFound(sa_id.to_string()))
 }
 
-/// Update a service account's mutable fields.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedAccessState {
+    pub role_ids: Vec<String>,
+    pub allowed_scopes: String,
+    pub purpose: crate::models::service_account::ServiceAccountPurpose,
+    pub platform_protected: bool,
+    pub is_active: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn update_service_account(
     db: &Database,
@@ -237,6 +246,7 @@ pub async fn update_service_account(
     rate_limit_override: Option<Option<u64>>,
     is_active: Option<bool>,
     platform_admin: bool,
+    expected_access: Option<&ExpectedAccessState>,
 ) -> AppResult<ServiceAccount> {
     // Verify it exists first
     let existing = get_service_account(db, sa_id).await?;
@@ -363,6 +373,16 @@ pub async fn update_service_account(
             }
         },
     );
+    if let Some(expected) = expected_access {
+        // Missing fields on legacy accounts have the same defaults as serde.
+        filter.insert("$expr", doc! {"$and": [
+            {"$eq": [{"$ifNull": ["$role_ids", []]}, {"$literal": &expected.role_ids}]},
+            {"$eq": ["$allowed_scopes", {"$literal": &expected.allowed_scopes}]},
+            {"$eq": [{"$ifNull": ["$purpose", "general"]}, bson::to_bson(&expected.purpose).map_err(|e| AppError::Internal(e.to_string()))?]},
+            {"$eq": [{"$ifNull": ["$platform_protected", false]}, expected.platform_protected]},
+            {"$eq": ["$is_active", expected.is_active]},
+        ]});
+    }
     let mut update = doc! {"$set": set_doc};
     if is_active == Some(false) {
         update.insert("$inc", doc! {"credential_generation": 1_i64});
@@ -371,6 +391,11 @@ pub async fn update_service_account(
         .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
         .update_one(filter, update)
         .await?;
+    if expected_access.is_some() && result.matched_count == 0 {
+        return Err(AppError::Conflict(
+            "Service account access changed; reload before applying catalog access".into(),
+        ));
+    }
     require_managed_match(result.matched_count)?;
 
     get_service_account(db, sa_id).await
@@ -875,6 +900,7 @@ mod custom_scope_regression_tests {
             None,
             None,
             true,
+            None,
         )
         .await
         .unwrap();

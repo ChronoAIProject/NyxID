@@ -22,6 +22,8 @@ import {
 } from "@/schemas/service-accounts";
 import { formatDate, copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
+import { useRoles } from "@/hooks/use-rbac";
+import { useAuthStore } from "@/stores/auth-store";
 import { SaConnectedServices } from "@/components/dashboard/sa-connected-services";
 import type { RotateSecretResponse } from "@/types/service-accounts";
 import { PageHeader } from "@/components/shared/page-header";
@@ -61,6 +63,7 @@ import {
 import { toast } from "sonner";
 import { CurationGrantSection } from "./curation-grant-section";
 import { KeyReadGrantSection } from "./key-read-grant-section";
+import { CatalogAccessSection } from "./catalog-access-section";
 
 type ConfirmAction = "delete" | "revoke-tokens" | null;
 
@@ -84,6 +87,8 @@ function ServiceAccountDetailEditor({
   const navigate = useNavigate();
 
   const { data: sa, isLoading } = useServiceAccount(saId);
+  const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
+  const roles = useRoles({ enabled: isAdmin });
 
   const updateMutation = useUpdateServiceAccount();
   const deleteMutation = useDeleteServiceAccount();
@@ -317,7 +322,33 @@ function ServiceAccountDetailEditor({
 
       <Separator />
 
-      {sa.purpose === "catalog_editor" ? (
+      {isAdmin &&
+        (roles.isError ? (
+          <DetailSection title="Catalog skill editing">
+            <div className="space-y-3 px-4 py-3">
+              <p role="alert">
+                Could not check the account's catalog role permissions.
+              </p>
+              <Button variant="outline" onClick={() => void roles.refetch()}>
+                Retry role check
+              </Button>
+            </div>
+          </DetailSection>
+        ) : roles.data ? (
+          <CatalogAccessSection
+            account={sa}
+            roles={roles.data.roles}
+            onEditAccount={openEditDialog}
+          />
+        ) : (
+          <DetailSection title="Catalog skill editing">
+            <p className="px-4 py-3 text-[12px] text-muted-foreground">
+              Checking catalog role permissions…
+            </p>
+          </DetailSection>
+        ))}
+
+      {sa.purpose === "catalog_editor" && !isAdmin && (
         <DetailSection title="Catalog skill editing">
           <DetailRow
             label="Catalog coverage"
@@ -333,7 +364,9 @@ function ServiceAccountDetailEditor({
             matching NyxID catalog permissions.
           </p>
         </DetailSection>
-      ) : (
+      )}
+
+      {sa.purpose !== "catalog_editor" && (
         <>
           {showProviderSections && <CurationGrantSection account={sa} />}
           {showKeyReadGrantSection && <KeyReadGrantSection saId={saId} />}

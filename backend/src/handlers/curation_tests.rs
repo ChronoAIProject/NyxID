@@ -625,7 +625,8 @@ async fn curation_grant_platform_custody_and_revoked_account_management() {
             None,
             None,
             None,
-            false
+            false,
+            None
         )
         .await
         .is_err()
