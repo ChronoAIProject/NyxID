@@ -75,6 +75,7 @@ pub struct ExecutionAuthorityProjection {
     pub credential: CredentialProjection,
     pub identity_injection: IdentityInjectionProjection,
     pub default_headers: DefaultHeadersProjection,
+    #[serde(serialize_with = "serialize_policy_projection")]
     pub proxy_operation_policy: Option<ProxyOperationPolicy>,
     pub node_route: NodeRouteProjection,
 }
@@ -164,9 +165,32 @@ pub fn legacy_digest(projection: &ExecutionAuthorityProjection) -> String {
         "credential": &projection.credential,
         "identity_injection": &projection.identity_injection,
         "default_headers": &projection.default_headers,
-        "proxy_operation_policy": &projection.proxy_operation_policy,
+        "proxy_operation_policy": policy_projection(projection.proxy_operation_policy.as_ref()),
         "node_route": &projection.node_route,
     }))
+}
+
+// Freeze the real v1/v2 nested policy shape explicitly. New routing selectors
+// are already bound by destination_base_url and the endpoint/catalog fences;
+// serializing the extended model here would silently redefine old projections.
+fn policy_projection(policy: Option<&ProxyOperationPolicy>) -> serde_json::Value {
+    match policy {
+        None => serde_json::Value::Null,
+        Some(policy) => serde_json::json!({"rules": policy.rules.iter().map(|rule| {
+            let mut value = serde_json::json!({"method": rule.method, "path_template": rule.path_template});
+            if !rule.path_parameter_constraints.is_empty() {
+                value["path_parameter_constraints"] = serde_json::json!(rule.path_parameter_constraints);
+            }
+            value
+        }).collect::<Vec<_>>() }),
+    }
+}
+
+fn serialize_policy_projection<S: serde::Serializer>(
+    policy: &Option<ProxyOperationPolicy>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    policy_projection(policy.as_ref()).serialize(serializer)
 }
 
 fn project_headers(headers: &[DefaultRequestHeader]) -> Vec<HeaderProjection> {
@@ -259,6 +283,43 @@ mod tests {
             digest(&changed),
             "v2 must reject authority changes that v1 cannot observe"
         );
+    }
+
+    #[test]
+    fn workspace_preserves_v1_v2_policy_shape_and_binds_the_selected_origin() {
+        use crate::models::downstream_service::{ProxyOperationRule, ProxyPathConstraint};
+        let mut projection = sample_projection();
+        projection.proxy_operation_policy = Some(ProxyOperationPolicy {
+            rules: vec![ProxyOperationRule {
+                method: "GET".into(),
+                path_template: "/v4/spreadsheets/{id}/values/{range}".into(),
+                target_id: None,
+                path_parameter_constraints: [("range".into(), ProxyPathConstraint::SheetsA1Range)]
+                    .into(),
+            }],
+        });
+        // This literal is the pre-B nested policy, including A's path grammar.
+        let expected = serde_json::json!({"rules":[{
+            "method":"GET", "path_template":"/v4/spreadsheets/{id}/values/{range}",
+            "path_parameter_constraints":{"range":"sheets_a1_range"}
+        }]});
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap()["proxy_operation_policy"],
+            expected
+        );
+        let v1 = legacy_digest(&projection);
+        let v2 = digest(&projection);
+        projection.proxy_operation_policy.as_mut().unwrap().rules[0].target_id =
+            Some("sheets".into());
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap()["proxy_operation_policy"],
+            expected
+        );
+        assert_eq!(legacy_digest(&projection), v1);
+        assert_eq!(digest(&projection), v2);
+        projection.destination_base_url = "https://sheets.googleapis.com".into();
+        assert_ne!(legacy_digest(&projection), v1);
+        assert_ne!(digest(&projection), v2);
     }
 
     #[test]

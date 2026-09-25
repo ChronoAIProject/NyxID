@@ -50,7 +50,7 @@ pub mod channel_routing_service;
 pub mod channel_send_service;
 pub mod channel_verification_service;
 #[cfg(test)]
-mod channel_x_tests;
+pub(crate) mod channel_x_tests;
 pub mod chatgpt_translator;
 pub mod cli_pairing_service;
 pub mod cloud_credential_verify;
@@ -66,6 +66,7 @@ pub mod content_type;
 pub mod coordination_service;
 pub mod credential_push_service;
 pub mod delegation_service;
+pub mod destination_routing;
 pub mod developer_webhook_service;
 pub mod device_code_service;
 pub mod dpop_jti_cache;
@@ -122,6 +123,7 @@ pub mod org_invite_service;
 pub mod org_role_scope_service;
 pub mod org_service;
 pub mod org_slug;
+pub mod ownership_transfer_access;
 pub mod ownership_transfer_service;
 #[cfg(test)]
 mod ownership_transfer_tests;
@@ -138,6 +140,7 @@ pub mod rbac_helpers;
 pub mod rci_audit_service;
 pub mod role_service;
 pub mod scope_catalog;
+pub mod service_account_key_read_service;
 pub mod service_account_service;
 pub mod service_endpoint_service;
 pub mod service_pool_service;
@@ -191,3 +194,7 @@ pub mod service_history;
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;
 pub mod usage_workspace_service;
+
+pub mod catalog_editor_catalog_service;
+pub mod catalog_editor_proxy_service;
+pub mod catalog_editor_service;

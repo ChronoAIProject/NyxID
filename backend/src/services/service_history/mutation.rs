@@ -18,6 +18,49 @@ use super::{
 };
 use crate::models::service_change_event::HistoryContext;
 
+#[derive(Debug)]
+struct BackingReferenceOwnerChanged;
+
+/// Serialize new references with backing edits. Credentials that can move
+/// independently must still belong to the referencing owner. Preserve legacy
+/// endpoint references and missing backing rows.
+pub(crate) async fn fence_backing_reference(
+    db: &Database,
+    collection: &str,
+    id: &str,
+    owner: &str,
+    session: &mut ClientSession,
+) -> mongodb::error::Result<bool> {
+    debug_assert!(matches!(collection, "user_endpoints" | "user_api_keys"));
+    let mut filter = doc! { "_id": id };
+    if collection == "user_api_keys" {
+        filter.insert("user_id", owner);
+    }
+    let result = db
+        .collection::<Document>(collection)
+        .update_one(
+            filter,
+            doc! { "$inc": { "service_history_ref_epoch": 1_i64 } },
+        )
+        .session(&mut *session)
+        .await?;
+    if result.matched_count == 1 {
+        return Ok(true);
+    }
+    if collection == "user_api_keys"
+        && db
+            .collection::<Document>(collection)
+            .find_one(doc! { "_id": id })
+            .projection(doc! { "_id": 1 })
+            .session(&mut *session)
+            .await?
+            .is_some()
+    {
+        return Err(mongodb::error::Error::custom(BackingReferenceOwnerChanged));
+    }
+    Ok(false)
+}
+
 /// Only the three instance collections may enter this mutation boundary.
 pub struct Collection<T: Send + Sync> {
     db: Database,
@@ -515,6 +558,9 @@ impl LocalCommit {
                 let old = before
                     .iter()
                     .find(|old| old.get("_id") == service.get("_id"));
+                let owner = service.get_str("user_id").map_err(|_| {
+                    mongodb::error::Error::custom("Service history reference missing owner")
+                })?;
                 for (field, backing) in [
                     ("endpoint_id", "user_endpoints"),
                     ("api_key_id", "user_api_keys"),
@@ -523,21 +569,12 @@ impl LocalCommit {
                         continue;
                     };
                     if old.and_then(|old| old.get_str(field).ok()) != Some(id) {
-                        references.insert((backing, id));
+                        references.insert((backing, id, owner));
                     }
                 }
             }
-            for (backing, id) in references {
-                // Deliberately non-upserting: missing legacy backing rows remain
-                // missing, and unrelated configuration/no-op saves never touch them.
-                self.db
-                    .collection::<Document>(backing)
-                    .update_one(
-                        doc! { "_id": id },
-                        doc! { "$inc": { "service_history_ref_epoch": 1_i64 } },
-                    )
-                    .session(&mut *session)
-                    .await?;
+            for (backing, id, owner) in references {
+                fence_backing_reference(&self.db, backing, id, owner, session).await?;
             }
         }
         record_changes(

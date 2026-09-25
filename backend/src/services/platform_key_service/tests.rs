@@ -593,6 +593,7 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
         ..Default::default()
     };
     let tool = mcp_service::McpToolService {
+        workspace_destinations_pending: false,
         service_id: result.service.id.clone(),
         service_name: "xAI".into(),
         service_slug: result.service.slug.clone(),
@@ -1864,7 +1865,7 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
 
 #[tokio::test]
 async fn llm_status_fetches_memberships_once_for_many_providers_and_owners() {
-    let db = connect_transaction_test_database("review_status_membership_bound").await;
+    let (db, counts) = monitored_listing_database("review_status_membership_bound").await;
     let enc = test_encryption_keys();
     let person = owner(&db, UserType::Person).await;
     let mut orgs = vec![];
@@ -1886,26 +1887,11 @@ async fn llm_status_fetches_memberships_once_for_many_providers_and_owners() {
         "platform_key": {"enabled":true,"audience":"restricted","allowed_owner_ids": &orgs},
         "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: enc.encrypt(b"secret").await.unwrap() },
     }}).await.unwrap();
-    db.run_command(doc! {"profile":2}).await.unwrap();
-    let statuses = llm_gateway_service::get_llm_status(&db, &person, "https://nyx.example")
-        .await
-        .unwrap();
-    db.run_command(doc! {"profile":0}).await.unwrap();
-    assert_eq!(
-        db.collection::<bson::Document>("system.profile")
-            .count_documents(doc! {"command.find": MEMBERSHIPS})
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        db.collection::<bson::Document>("system.profile")
-            .count_documents(doc! {"command.find": PROVIDERS})
-            .await
-            .unwrap(),
-        1,
-        "status must reuse its provider batch for every owner",
-    );
+    let statuses = assert_listing_queries(
+        &counts,
+        llm_gateway_service::get_llm_status(&db, &person, "https://nyx.example"),
+    )
+    .await;
     for slug in ["openai", "xai", "deepseek"] {
         assert_eq!(
             statuses
@@ -1925,6 +1911,8 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     let mut service = platform_service();
     service.requires_user_credential = false;
     let mut target = proxy_service::ProxyTarget {
+        workspace_destinations_pending: false,
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method: "bearer".into(),
         auth_key_name: "Authorization".into(),
@@ -1945,40 +1933,57 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     assert!(!proxy_service::uses_server_held_master(&target));
 }
 
-/// Profiles only this test's isolated database, never the shared server's
-/// configuration. Counts deltas so multiple requests can test live revocation.
-async fn profile_listing<T>(
-    db: &mongodb::Database,
+#[derive(Default)]
+struct ListingCommands {
+    database: String,
+    memberships: usize,
+    providers: usize,
+}
+
+type ListingRecorder = Arc<std::sync::Mutex<ListingCommands>>;
+
+async fn monitored_listing_database(prefix: &str) -> (mongodb::Database, ListingRecorder) {
+    let counts = Arc::new(std::sync::Mutex::new(ListingCommands::default()));
+    let recorded = counts.clone();
+    let handler = mongodb::event::EventHandler::callback(move |event| {
+        if let mongodb::event::command::CommandEvent::Started(event) = event {
+            let mut counts = recorded.lock().unwrap();
+            if event.db != counts.database {
+                return;
+            }
+            match event.command.get_str("find").ok() {
+                Some(MEMBERSHIPS) => counts.memberships += 1,
+                Some(PROVIDERS) => counts.providers += 1,
+                _ => {}
+            }
+        }
+    });
+    let db =
+        crate::test_utils::connect_transaction_test_database_with_command_handler(prefix, handler)
+            .await;
+    counts.lock().unwrap().database = db.name().to_string();
+    (db, counts)
+}
+
+// Driver callbacks run before the command completes, avoiding the server profiler's
+// capped storage and delivery behavior. Each recorder belongs to one test/client.
+async fn assert_listing_queries<T>(
+    counts: &ListingRecorder,
     request: impl std::future::Future<Output = AppResult<T>>,
 ) -> T {
-    let profile = db.collection::<bson::Document>("system.profile");
-    let before_memberships = profile
-        .count_documents(doc! {"command.find": MEMBERSHIPS})
-        .await
-        .unwrap();
-    let before_providers = profile
-        .count_documents(doc! {"command.find": PROVIDERS})
-        .await
-        .unwrap();
-    db.run_command(doc! {"profile": 2}).await.unwrap();
-    let result = request.await;
-    db.run_command(doc! {"profile": 0}).await.unwrap();
-    let result = result.unwrap();
+    let before = {
+        let counts = counts.lock().unwrap();
+        (counts.memberships, counts.providers)
+    };
+    let result = request.await.unwrap();
+    let after = counts.lock().unwrap();
     assert_eq!(
-        profile
-            .count_documents(doc! {"command.find": MEMBERSHIPS})
-            .await
-            .unwrap()
-            - before_memberships,
+        after.memberships - before.0,
         1,
         "each request must fetch memberships once, independent of service/owner count"
     );
     assert_eq!(
-        profile
-            .count_documents(doc! {"command.find": PROVIDERS})
-            .await
-            .unwrap()
-            - before_providers,
+        after.providers - before.1,
         1,
         "each request must batch providers once"
     );
@@ -2037,7 +2042,7 @@ async fn listing_fixture(db: &mongodb::Database) -> (String, Vec<String>, Vec<Do
 
 #[tokio::test]
 async fn catalog_list_fetches_memberships_and_providers_once_for_many_platform_entries() {
-    let db = connect_transaction_test_database("catalog_grant_batch").await;
+    let (db, counts) = monitored_listing_database("catalog_grant_batch").await;
     let enc = test_encryption_keys();
     let (person, orgs, _) = listing_fixture(&db).await;
     // Only org grants: the actor must inherit these via its membership snapshot.
@@ -2048,7 +2053,8 @@ async fn catalog_list_fetches_memberships_and_providers_once_for_many_platform_e
         )
         .await
         .unwrap();
-    let entries = profile_listing(&db, catalog_service::list_catalog(&db, &enc, &person)).await;
+    let entries =
+        assert_listing_queries(&counts, catalog_service::list_catalog(&db, &enc, &person)).await;
     assert_eq!(entries.len(), 3);
     assert!(
         entries.iter().all(
@@ -2064,7 +2070,11 @@ async fn catalog_list_fetches_memberships_and_providers_once_for_many_platform_e
         )
         .await
         .unwrap();
-    let entries = profile_listing(&db, catalog_service::list_catalog_all(&db, &enc, &person)).await;
+    let entries = assert_listing_queries(
+        &counts,
+        catalog_service::list_catalog_all(&db, &enc, &person),
+    )
+    .await;
     assert_eq!(
         entries.len(),
         2,
@@ -2079,7 +2089,8 @@ async fn catalog_list_fetches_memberships_and_providers_once_for_many_platform_e
         )
         .await
         .unwrap();
-    let entries = profile_listing(&db, catalog_service::list_catalog(&db, &enc, &person)).await;
+    let entries =
+        assert_listing_queries(&counts, catalog_service::list_catalog(&db, &enc, &person)).await;
     assert!(entries.is_empty());
     db.drop().await.unwrap();
 }
@@ -2087,7 +2098,7 @@ async fn catalog_list_fetches_memberships_and_providers_once_for_many_platform_e
 #[tokio::test]
 async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and_reconciliation() {
     use axum::extract::State;
-    let db = connect_transaction_test_database("keys_grant_batch").await;
+    let (db, counts) = monitored_listing_database("keys_grant_batch").await;
     let state = crate::test_utils::test_app_state(db.clone());
     let (person, orgs, _) = listing_fixture(&db).await;
     db.collection::<OrgMembership>(MEMBERSHIPS)
@@ -2097,7 +2108,7 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
         )
         .await
         .unwrap();
-    let keys = profile_listing(&db, async {
+    let keys = assert_listing_queries(&counts, async {
         let providers = load_providers(&db).await?;
         unified_key_service::list_keys(&db, &state.encryption_keys, &person, &providers).await
     })
@@ -2112,8 +2123,8 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
         && k.credential_binding == "platform"));
 
     // Exercise the HTTP entry point too, including already-provisioned row reconciliation.
-    let response = profile_listing(
-        &db,
+    let response = assert_listing_queries(
+        &counts,
         crate::handlers::keys::list_keys(
             State(state.clone()),
             crate::test_utils::test_auth_user(&person),
@@ -2134,8 +2145,8 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
 
     let mut inventory_auth = crate::test_utils::test_auth_user(&person);
     inventory_auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
-    let response = profile_listing(
-        &db,
+    let response = assert_listing_queries(
+        &counts,
         crate::handlers::keys::list_keys(State(state.clone()), inventory_auth),
     )
     .await;
@@ -2157,8 +2168,8 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
         )
         .await
         .unwrap();
-    let response = profile_listing(
-        &db,
+    let response = assert_listing_queries(
+        &counts,
         crate::handlers::keys::list_keys(
             State(state.clone()),
             crate::test_utils::test_auth_user(&person),
@@ -2186,8 +2197,8 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
     )
     .await
     .unwrap();
-    let response = profile_listing(
-        &db,
+    let response = assert_listing_queries(
+        &counts,
         crate::handlers::keys::list_keys(
             State(state.clone()),
             crate::test_utils::test_auth_user(&person),
@@ -2211,8 +2222,8 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
         )
         .await
         .unwrap();
-    let response = profile_listing(
-        &db,
+    let response = assert_listing_queries(
+        &counts,
         crate::handlers::keys::list_keys(State(state), crate::test_utils::test_auth_user(&person)),
     )
     .await;
@@ -2236,10 +2247,10 @@ async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and
 #[tokio::test]
 async fn mcp_discovery_and_callable_services_share_grants_and_providers_per_request() {
     use crate::services::{mcp_service, node_ws_manager::NodeWsManager};
-    let db = connect_transaction_test_database("mcp_grant_batch").await;
+    let (db, counts) = monitored_listing_database("mcp_grant_batch").await;
     let (person, _, catalogs) = listing_fixture(&db).await;
-    let discovered = profile_listing(
-        &db,
+    let discovered = assert_listing_queries(
+        &counts,
         mcp_service::discover_services(&db, &person, None, None),
     )
     .await;
@@ -2267,13 +2278,17 @@ async fn mcp_discovery_and_callable_services_share_grants_and_providers_per_requ
         .unwrap();
     }
     let manager = NodeWsManager::new(30, 100);
-    let tools = profile_listing(&db, mcp_service::load_user_tools(&db, &manager, &person)).await;
+    let tools = assert_listing_queries(
+        &counts,
+        mcp_service::load_user_tools(&db, &manager, &person),
+    )
+    .await;
     assert_eq!(tools.len(), 3);
     assert!(tools.iter().all(|t| t.executable));
     // Scoped operation catalog computes both visible and pre-node-scope views;
     // even those two passes must share a single request snapshot.
-    profile_listing(
-        &db,
+    assert_listing_queries(
+        &counts,
         mcp_service::load_operation_catalog(
             &db,
             &manager,
@@ -2291,7 +2306,11 @@ async fn mcp_discovery_and_callable_services_share_grants_and_providers_per_requ
         )
         .await
         .unwrap();
-    let tools = profile_listing(&db, mcp_service::load_user_tools(&db, &manager, &person)).await;
+    let tools = assert_listing_queries(
+        &counts,
+        mcp_service::load_user_tools(&db, &manager, &person),
+    )
+    .await;
     assert!(
         tools.is_empty(),
         "a new request must recheck grants for explicit platform rows"

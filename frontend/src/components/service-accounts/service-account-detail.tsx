@@ -22,6 +22,8 @@ import {
 } from "@/schemas/service-accounts";
 import { formatDate, copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
+import { useRoles } from "@/hooks/use-rbac";
+import { useAuthStore } from "@/stores/auth-store";
 import { SaConnectedServices } from "@/components/dashboard/sa-connected-services";
 import type { RotateSecretResponse } from "@/types/service-accounts";
 import { PageHeader } from "@/components/shared/page-header";
@@ -60,6 +62,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { CurationGrantSection } from "./curation-grant-section";
+import { KeyReadGrantSection } from "./key-read-grant-section";
+import { CatalogAccessSection } from "./catalog-access-section";
 
 type ConfirmAction = "delete" | "revoke-tokens" | null;
 
@@ -67,6 +71,7 @@ interface ServiceAccountDetailProps {
   readonly saId: string;
   readonly backTo: { readonly to: string; readonly label: string };
   readonly showProviderSections?: boolean;
+  readonly showKeyReadGrantSection?: boolean;
 }
 
 export function ServiceAccountDetail(props: ServiceAccountDetailProps) {
@@ -77,10 +82,13 @@ function ServiceAccountDetailEditor({
   saId,
   backTo,
   showProviderSections = true,
+  showKeyReadGrantSection = true,
 }: ServiceAccountDetailProps) {
   const navigate = useNavigate();
 
   const { data: sa, isLoading } = useServiceAccount(saId);
+  const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
+  const roles = useRoles({ enabled: isAdmin });
 
   const updateMutation = useUpdateServiceAccount();
   const deleteMutation = useDeleteServiceAccount();
@@ -314,7 +322,56 @@ function ServiceAccountDetailEditor({
 
       <Separator />
 
-      {showProviderSections && <CurationGrantSection account={sa} />}
+      {isAdmin &&
+        (roles.isError ? (
+          <DetailSection title="Catalog skill editing">
+            <div className="space-y-3 px-4 py-3">
+              <p role="alert">
+                Could not check the account's catalog role permissions.
+              </p>
+              <Button variant="outline" onClick={() => void roles.refetch()}>
+                Retry role check
+              </Button>
+            </div>
+          </DetailSection>
+        ) : roles.data ? (
+          <CatalogAccessSection
+            account={sa}
+            roles={roles.data.roles}
+            onEditAccount={openEditDialog}
+          />
+        ) : (
+          <DetailSection title="Catalog skill editing">
+            <p className="px-4 py-3 text-[12px] text-muted-foreground">
+              Checking catalog role permissions…
+            </p>
+          </DetailSection>
+        ))}
+
+      {sa.purpose === "catalog_editor" && !isAdmin && (
+        <DetailSection title="Catalog skill editing">
+          <DetailRow
+            label="Catalog coverage"
+            value="All current and future catalog services"
+          />
+          <DetailRow
+            label="Access"
+            value="Live catalog skill role and matching token scopes required"
+          />
+          <p className="px-4 py-3 text-[12px] text-muted-foreground">
+            GET /keys requires catalog:skills:read and user-services:read. Skill
+            changes require catalog:skills:write. The role must retain the
+            matching NyxID catalog permissions.
+          </p>
+        </DetailSection>
+      )}
+
+      {sa.purpose !== "catalog_editor" && (
+        <>
+          {showProviderSections && <CurationGrantSection account={sa} />}
+          {showKeyReadGrantSection && <KeyReadGrantSection saId={saId} />}
+        </>
+      )}
 
       {showProviderSections ? (
         <SaConnectedServices saId={saId} />

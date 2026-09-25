@@ -1,5 +1,5 @@
 export interface ServiceAccount {
-  readonly purpose?: "general" | "curation";
+  readonly purpose?: "general" | "curation" | "catalog_editor";
   readonly platform_protected?: boolean;
   readonly credential_generation?: number;
   readonly curation_grant?: CurationGrant | null;
@@ -48,6 +48,13 @@ export interface CreateServiceAccountResponse {
 }
 
 export interface UpdateServiceAccountRequest {
+  readonly expected_access?: {
+    readonly role_ids: readonly string[];
+    readonly allowed_scopes: string;
+    readonly purpose: "general" | "curation" | "catalog_editor";
+    readonly platform_protected: boolean;
+    readonly is_active: boolean;
+  };
   readonly name?: string;
   readonly description?: string;
   readonly allowed_scopes?: string;

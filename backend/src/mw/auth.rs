@@ -308,6 +308,7 @@ pub fn scope_allows_llm_proxy(scopes: &str) -> bool {
 fn ensure_service_account_purpose_route(
     sa: &ServiceAccount,
     scope: &str,
+    method: &Method,
     path: &str,
     websocket: bool,
 ) -> Result<(), AppError> {
@@ -318,6 +319,16 @@ fn ensure_service_account_purpose_route(
     }
     let grant = live_grant(sa)?;
     if !websocket {
+        if *method == Method::GET
+            && crate::services::service_account_key_read_service::is_key_metadata_path(path)
+        {
+            require_scope(
+                sa,
+                scope,
+                crate::services::service_account_key_read_service::READ_SCOPE,
+            )?;
+            return Ok(());
+        }
         if path_matches_prefix(path, "/api/v1/catalog-curation") {
             return Ok(());
         }
@@ -332,6 +343,52 @@ fn ensure_service_account_purpose_route(
     Err(AppError::Forbidden(
         "Curation accounts can only curate granted services and use their exact Ornn HTTP proxy"
             .into(),
+    ))
+}
+
+async fn ensure_catalog_editor_route(
+    db: &mongodb::Database,
+    sa: &ServiceAccount,
+    scope: &str,
+    method: &Method,
+    path: &str,
+    websocket: bool,
+) -> Result<(), AppError> {
+    use crate::services::{
+        catalog_editor_proxy_service, catalog_editor_service, curation_grant_service,
+    };
+    if !sa.platform_protected || websocket {
+        return Err(AppError::Forbidden(
+            "Catalog editor requires protected ordinary HTTP access".into(),
+        ));
+    }
+    if *method == Method::GET
+        && crate::services::service_account_key_read_service::is_key_metadata_path(path)
+    {
+        curation_grant_service::require_scope(
+            sa,
+            scope,
+            crate::services::service_account_key_read_service::READ_SCOPE,
+        )?;
+        return catalog_editor_service::authorize(
+            db,
+            sa,
+            scope,
+            curation_grant_service::READ_SCOPE,
+        )
+        .await;
+    }
+    if path_matches_prefix(path, "/api/v1/catalog-curation") {
+        return Ok(());
+    }
+    if path_matches_prefix(path, "/api/v1/proxy") {
+        let target = catalog_editor_proxy_service::authorized_target(db, sa, scope).await?;
+        if path_matches_prefix(path, &format!("/api/v1/proxy/{target}")) {
+            return Ok(());
+        }
+    }
+    Err(AppError::Forbidden(
+        "Catalog editors can only manage catalog skills and use the Ornn HTTP proxy".into(),
     ))
 }
 
@@ -447,6 +504,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
         segments.first().copied(),
         Some(
             "admin"
+                | "ownership"
                 | "ssh"
                 | "assistant"
                 | "auth"
@@ -766,12 +824,20 @@ impl FromRequestParts<AppState> for AuthUser {
                             .extensions
                             .get::<OriginalUri>()
                             .map_or_else(|| parts.uri.path(), |uri| uri.path());
-                        ensure_service_account_purpose_route(
-                            &sa,
-                            &claims.scope,
-                            request_path,
-                            is_websocket_upgrade(&parts.headers),
-                        )?;
+                        if sa.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor {
+                            ensure_catalog_editor_route(
+                                &state.db, &sa, &claims.scope, &parts.method, request_path,
+                                is_websocket_upgrade(&parts.headers),
+                            ).await?;
+                        } else {
+                            ensure_service_account_purpose_route(
+                                &sa,
+                                &claims.scope,
+                                &parts.method,
+                                request_path,
+                                is_websocket_upgrade(&parts.headers),
+                            )?;
+                        }
 
                         let sa_uuid = Uuid::parse_str(&sa_id).map_err(|_| {
                             AppError::Unauthorized("Invalid service account ID".to_string())
@@ -1646,6 +1712,8 @@ mod tests {
             "/api/v1/integrations/openclaw/mappings",
             "/api/v1/billing/wallet",
             "/api/v1/oracle/pools",
+            "/api/v1/ownership/service/id/authorization",
+            "/api/v1/ownership/service/id/destinations",
             "/api/v1/channel-bots",
             "/api/v1/channel-conversations/conversation-id",
             "/api/v1/nodes/ws",
@@ -3713,11 +3781,13 @@ mod curation_purpose_regressions {
             "/api/v1/triggers",
         ] {
             assert!(
-                ensure_service_account_purpose_route(&sa, "proxy", path, false).is_ok(),
+                ensure_service_account_purpose_route(&sa, "proxy", &Method::GET, path, false)
+                    .is_ok(),
                 "{path}"
             );
             assert!(
-                ensure_service_account_purpose_route(&sa, "proxy", path, true).is_ok(),
+                ensure_service_account_purpose_route(&sa, "proxy", &Method::GET, path, true)
+                    .is_ok(),
                 "{path}"
             );
         }

@@ -25,6 +25,17 @@ pub struct TurnActivity {
     pub ended_at: Option<DateTime<Utc>>,
 }
 
+/// Metadata for an image a tool returned during a turn; the bytes live in
+/// `assistant_attachments`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnAttachment {
+    pub id: String,
+    pub content_type: String,
+    pub size: i64,
+    /// The tool identifier that produced it, never arguments.
+    pub label: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     pub turn_id: String,
@@ -35,6 +46,9 @@ pub struct ActiveTurn {
     /// Bounded, oldest first; the newest entries are retained.
     #[serde(default)]
     pub activities: Vec<TurnActivity>,
+    /// Bounded; see `MAX_TURN_ATTACHMENTS`.
+    #[serde(default)]
+    pub attachments: Vec<TurnAttachment>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

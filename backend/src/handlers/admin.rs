@@ -2300,6 +2300,7 @@ mod tests {
 
         let active_id = uuid::Uuid::new_v4().to_string();
         let active = DownstreamService {
+            destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
@@ -2312,6 +2313,7 @@ mod tests {
         // Deactivated services must still resolve: audit rows reference them
         // long after an admin retires the catalog entry.
         let inactive = DownstreamService {
+            destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,

@@ -40,7 +40,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
-  writeFileSync, realpathSync, existsSync } from "node:fs";
+  writeFileSync, realpathSync, existsSync, readdirSync, unlinkSync } from "node:fs";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -95,6 +95,8 @@ const USAGE_COOLDOWN = usageCooldownConfig(process.env.NYXID_ORACLE_USAGE_COOLDO
 const USAGE_COOLDOWN_MS = USAGE_COOLDOWN.milliseconds;
 const HEARTBEAT_MS = 60000;
 const PRESENCE_MS = Number(process.env.NYXID_PRESENCE_MS || 20000);
+// How often an idle worker tidies its own tab. See tidyIdleTab.
+const IDLE_TIDY_MS = Number(process.env.NYXID_IDLE_TIDY_MS || 60000);
 const HTTP_TIMEOUT_MS = Number(process.env.NYXID_HTTP_TIMEOUT_MS || 30000);
 const MAX_HTTP_BACKOFF_MS = Number(process.env.NYXID_MAX_HTTP_BACKOFF_MS || 60000);
 const MAX_CDP_FAILURES_BEFORE_RELAUNCH = Number(
@@ -310,6 +312,30 @@ export function decidePromptResume({ phase, prompt, turns, generating, transcrip
   return { action: "uncertain" };
 }
 
+// ChatGPT's Temporary Chat: not saved to history, no memory, and a fresh
+// document every time. With NYXID_ORACLE_TEMPORARY_CHAT=1 single-shot prompts
+// run there so no draft, transcript or model state from an earlier task can
+// bleed into the next one (a stale oversized draft is what stranded a
+// 15-worker pool on 2026-09-21). Off by default: a Temporary Chat has no
+// /c/<id> URL, so `nyxid oracle attach` cannot pick a single-shot answer up
+// later. Session turns, follow-ups and project-pinned pools always keep
+// persistent chats because their conversation URL must stay reachable.
+export const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+const TEMPORARY_CHAT_ENABLED = process.env.NYXID_ORACLE_TEMPORARY_CHAT === "1";
+const TEMPORARY_CHAT_ONBOARDING_SELECTOR = '[data-testid="modal-temporary-chat-onboarding"]';
+
+export function isTemporaryChatUrl(url) {
+  try {
+    return new URL(url || "").searchParams.get("temporary-chat") === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function promptUsesTemporaryChat(task, enabled = TEMPORARY_CHAT_ENABLED) {
+  return !!enabled && !task?.is_followup && !task?.conversation_id && !task?.required_project_url;
+}
+
 export function choosePromptNavigation({
   recovering,
   phase = "claimed",
@@ -318,6 +344,7 @@ export function choosePromptNavigation({
   persistedUrl,
   taskConversationUrl,
   requiredProjectUrl,
+  temporaryChat = false,
 }) {
   const currentConversationId = convId(currentUrl);
   const onConvPage = Boolean(currentConversationId);
@@ -342,6 +369,14 @@ export function choosePromptNavigation({
   if (recovering && !preSend && onConvPage && !resumeConversationId) {
     return { error: null, target: null };
   }
+  // A Temporary Chat never exposes a /c/<id> URL, so after a send the live tab
+  // is the only place the conversation exists. Keep it for post-send recovery
+  // (the transcript check decides whether the sent prompt is really there);
+  // any navigation would open an empty chat and lose the answer.
+  if (recovering && !preSend && isTemporaryChatUrl(currentUrl) && !convId(currentUrl) &&
+      isTemporaryChatUrl(persistedUrl) && !persistedConversationId && !taskConversationId) {
+    return { error: null, target: null };
+  }
   if ((isFollowup || recovering) && resumeUrl) {
     return {
       error: null,
@@ -349,8 +384,16 @@ export function choosePromptNavigation({
         !resumeConversationId || currentConversationId !== resumeConversationId ? resumeUrl : null,
     };
   }
-  const base = requiredProjectUrl || "https://chatgpt.com/";
-  return { error: null, target: onConvPage || !currentUrl.startsWith(base) ? base : null };
+  if (requiredProjectUrl) {
+    return { error: null, target: onConvPage || !currentUrl.startsWith(requiredProjectUrl) ? requiredProjectUrl : null };
+  }
+  // Every fresh Temporary Chat prompt reloads the surface: the URL does not
+  // change after a turn, so it cannot prove the document is still pristine.
+  if (temporaryChat) return { error: null, target: TEMPORARY_CHAT_URL };
+  // A persistent prompt must never reuse a Temporary Chat surface left behind
+  // by an earlier task: that conversation would vanish with the tab.
+  const base = "https://chatgpt.com/";
+  return { error: null, target: onConvPage || isTemporaryChatUrl(currentUrl) || !currentUrl.startsWith(base) ? base : null };
 }
 
 export function taskRecoveryDecision({
@@ -390,6 +433,7 @@ export function cooldownRemaining(until, now = Date.now()) {
 export function classifyChatGptError(text) {
   if (/reached.{0,60}(limit|cap)|usage limit|message cap|too many requests|达到.{0,20}(上限|限制)|已达.{0,20}上限/i.test(text || "")) return "usage_limit_reached";
   if (/model.{0,40}(unavailable|not available)|模型.{0,20}(不可用|无法使用)/i.test(text || "")) return "model_unavailable";
+  if (/message.{0,40}too long|too long.{0,80}shorter|消息.{0,12}(太长|过长)|内容.{0,12}(太长|过长)/i.test(text || "")) return "prompt_too_long";
   if (/something went wrong|network error|error generating|unable to (generate|load)|出错了|发生错误|网络错误/i.test(text || "")) return "chatgpt_error_response";
   return null;
 }
@@ -590,7 +634,7 @@ async function assertPublicTarget(rawUrl) {
 // Ported from the proven userscript extractors: KaTeX/MathJax → LaTeX, the
 // Pro-reasoning "still generating" probe, latest-answer + full-transcript
 // extraction. Installed on window.__nyx and re-installed after navigation.
-const DOM_CORE_VERSION = 4;
+export const DOM_CORE_VERSION = 5;
 const DOM_CORE = `
 window.__nyx = (function () {
   const artifactFileId = ${artifactFileId.toString()};
@@ -704,6 +748,37 @@ window.__nyx = (function () {
 
   function assistantCount() {
     return document.querySelectorAll("[data-message-author-role='assistant']").length;
+  }
+
+  // Structure only, never content: what the page looked like when a task
+  // failed. Lengths and roles stand in for text; test ids and ARIA state
+  // stand in for labels. The composer draft is reported by length alone.
+  function diagnosticSummary() {
+    const { input, send } = discoverControls();
+    const visible = (el) => pickerElementVisible(el);
+    const describe = (el) => ({ tag: el.tagName, testid: el.getAttribute('data-testid'), role: el.getAttribute('role'),
+      aria_label_length: (el.getAttribute('aria-label') || '').length, text_length: (el.innerText || '').trim().length });
+    const pill = document.querySelector('button.__composer-pill');
+    const draft = input ? String(input.value ?? input.innerText ?? '') : '';
+    const latest = latestAssistantTurn();
+    return {
+      viewport: { width: innerWidth, height: innerHeight, visibility: document.visibilityState, ready: document.readyState },
+      body_pointer_events: getComputedStyle(document.body).pointerEvents,
+      composer: input ? { ...describe(input), editable: !!input.isContentEditable || input.tagName === 'TEXTAREA', draft_length: draft.length,
+        rect: (() => { const r = input.getBoundingClientRect(); return { top: Math.round(r.top), height: Math.round(r.height) }; })() } : null,
+      send: send ? { ...describe(send), disabled: !!send.disabled } : null,
+      pill: pill ? { text_length: (pill.innerText || '').trim().length, expanded: pill.getAttribute('aria-expanded'), state: pill.getAttribute('data-state') } : null,
+      dialogs: [...document.querySelectorAll('dialog[open], [role="dialog"]')].filter(visible).map((el) => ({
+        ...describe(el), modal_testid: el.querySelector('[data-testid]')?.getAttribute('data-testid') || null,
+        buttons: [...el.querySelectorAll('button')].filter(visible).length })),
+      menus: [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(visible).length,
+      alerts: [...document.querySelectorAll('[role="alert"], [role="status"]')].filter(visible).map((el) => ({ ...describe(el), code: classifyChatGptError(el.innerText) })),
+      error_code: errorCode(),
+      generating: isStillGenerating(),
+      turns: { total: document.querySelectorAll('[data-message-author-role]').length, assistant: assistantCount(),
+        latest_role: latest ? 'assistant' : 'none', latest_length: latest ? (latest.innerText || '').length : 0 },
+      url: { host: location.hostname, path: location.pathname, temporary: new URLSearchParams(location.search).get('temporary-chat') === 'true' },
+    };
   }
 
   function latestAssistantTurn() {
@@ -886,10 +961,53 @@ window.__nyx = (function () {
     return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
   }
 
-  return { version: ${DOM_CORE_VERSION}, discoverControls, structuralProbe, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+  return { version: ${DOM_CORE_VERSION}, discoverControls, structuralProbe, diagnosticSummary, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
     beginModelPicker, finishNestedModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem, compactModelLabel };
 })();
 `;
+
+// Wait for the page to go quiet instead of sleeping a fixed interval: resolve
+// once no DOM mutation has landed for `quietMs`, or after `maxMs` regardless.
+// A fixed sleep is either too short on a loaded page or wasted on a fast one;
+// this returns as soon as React's last batch settles. Falls back to a short
+// sleep when the page cannot be evaluated (navigating, crashed).
+export async function settleDom(page, { quietMs = 150, maxMs = 2500 } = {}) {
+  const started = Date.now();
+  try {
+    const waited = await Promise.race([
+      page.evaluate(({ quiet, max }) => new Promise((resolveSettle) => {
+        let timer = null;
+        const done = () => { observer.disconnect(); clearTimeout(timer); clearTimeout(cap); resolveSettle(true); };
+        const bump = () => { clearTimeout(timer); timer = setTimeout(done, quiet); };
+        const observer = new MutationObserver(bump);
+        observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true });
+        const cap = setTimeout(done, max);
+        bump();
+      }), { quiet: quietMs, max: maxMs }),
+      sleep(maxMs + 1000).then(() => false),
+    ]);
+    return { settled: waited === true, ms: Date.now() - started };
+  } catch (error) {
+    if (["page_crashed", "cdp_disconnected"].includes(stableErrorCode(error))) throw error;
+    await sleep(Math.min(maxMs, 500));
+    return { settled: false, ms: Date.now() - started };
+  }
+}
+
+// Poll for the composer to hydrate, bounded; a missing composer is reported
+// by the caller's own composer_not_found path, never here.
+async function waitForComposer(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (await page.evaluate(() => !!window.__nyx?.discoverControls().input)) return true;
+    } catch (error) {
+      if (["page_crashed", "cdp_disconnected"].includes(stableErrorCode(error))) throw error;
+    }
+    await sleep(100);
+  }
+  return false;
+}
 
 const initializedPages = new WeakSet();
 export async function installDomCore(page) {
@@ -908,6 +1026,72 @@ export async function installDomCore(page) {
     await sleep(100);
   }
   throw Object.assign(new Error('dom_core_unavailable'), { code: 'dom_core_unavailable' });
+}
+
+// ── Failure diagnostics ──────────────────────────────────────────────────
+// On every task failure the worker writes a structural snapshot of the page
+// next to its state file, so a failure can be explained after the fact
+// without sudo on the host or a repro. JSON always; a PNG only when
+// NYXID_ORACLE_DIAGNOSTIC_SCREENSHOTS=1, because a screenshot shows content.
+// The newest NYXID_ORACLE_DIAGNOSTICS_KEEP snapshots are retained.
+const DIAGNOSTICS_DIR = process.env.NYXID_ORACLE_DIAGNOSTICS_DIR || resolve(dirname(STATE_FILE), "diagnostics");
+const DIAGNOSTICS_KEEP = Math.max(0, Math.min(500, Number(process.env.NYXID_ORACLE_DIAGNOSTICS_KEEP) || 20));
+const DIAGNOSTIC_SCREENSHOTS = process.env.NYXID_ORACLE_DIAGNOSTIC_SCREENSHOTS === "1";
+const DIAGNOSTIC_CAPTURE_MS = 5000;
+
+export function diagnosticFileName(now, taskId, code) {
+  const stamp = new Date(now).toISOString().replace(/[:.]/g, "-").replace(/Z$/, "Z");
+  const task = String(taskId || "task").replace(/[^a-z0-9]/gi, "").slice(0, 8) || "task";
+  const safeCode = /^[a-z0-9_]{1,64}$/.test(code || "") ? code : "worker_error";
+  return `${stamp}-${task}-${safeCode}`;
+}
+
+// Snapshot base names sort chronologically; return the ones beyond `keep`.
+export function diagnosticsToPrune(names, keep) {
+  const bases = [...new Set((names || []).map((name) => String(name).replace(/\.(json|png)$/, "")))]
+    .filter((base) => /^\d{4}-\d{2}-\d{2}T/.test(base)).sort();
+  const stale = bases.slice(0, Math.max(0, bases.length - keep));
+  return (names || []).filter((name) => stale.includes(String(name).replace(/\.(json|png)$/, "")));
+}
+
+export async function writeDiagnosticSnapshot(runtime, task, code, detail) {
+  const page = runtime?.page;
+  const base = diagnosticFileName(Date.now(), task?.task_id, code);
+  try {
+    mkdirSync(DIAGNOSTICS_DIR, { recursive: true, mode: 0o700 });
+    const capture = async (read) => Promise.race([
+      read().catch((error) => ({ unavailable: stableErrorCode(error) })),
+      new Promise((resolveTimeout) => setTimeout(() => resolveTimeout({ unavailable: "capture_timeout" }), DIAGNOSTIC_CAPTURE_MS)),
+    ]);
+    const live = page && !page.isClosed();
+    const snapshot = {
+      at: new Date().toISOString(), worker: LABEL, script_version: SCRIPT_VERSION,
+      task_id: task?.task_id || null, kind: task?.kind || null, code, detail,
+      phase: runtime?.state?.current_task?.phase || null, last_phase: runtime?.state?.current_task?.last_phase || null,
+      recovery_failures: runtime?.state?.current_task?.recovery_failures || 0,
+      prompt_length: typeof task?.prompt === "string" ? task.prompt.length : null,
+      model: task?.model || null,
+      observed_model_switcher: runtime?.state?.current_task?.observed_model_switcher || null,
+      observed_model_effort: runtime?.state?.current_task?.observed_model_effort || null,
+      url: live ? page.url() : null,
+      chrome_alive: !!runtime?.chromeAlive, logged_in: runtime?.loggedIn ?? null,
+      probe: live ? await capture(() => failureProbe(page)) : { unavailable: "no_page" },
+      summary: live ? await capture(async () => { await installDomCore(page); return page.evaluate(() => window.__nyx?.diagnosticSummary()); }) : { unavailable: "no_page" },
+    };
+    const jsonPath = resolve(DIAGNOSTICS_DIR, `${base}.json`);
+    writeFileSync(jsonPath, JSON.stringify(snapshot, null, 1), { mode: 0o600 });
+    if (DIAGNOSTIC_SCREENSHOTS && live) {
+      await capture(() => page.screenshot({ path: resolve(DIAGNOSTICS_DIR, `${base}.png`), timeout: DIAGNOSTIC_CAPTURE_MS }));
+    }
+    for (const stale of diagnosticsToPrune(readdirSync(DIAGNOSTICS_DIR), DIAGNOSTICS_KEEP)) {
+      try { unlinkSync(resolve(DIAGNOSTICS_DIR, stale)); } catch {}
+    }
+    log(`diagnostic_snapshot file=${base}.json`);
+    return jsonPath;
+  } catch (error) {
+    log(`diagnostic_snapshot failed (${stableErrorCode(error)})`);
+    return null;
+  }
 }
 
 async function failureProbe(page) {
@@ -1281,7 +1465,7 @@ export function modelLevelTargets(label) {
   if (/\bpro\b|pro$|专业/.test(lower) || compact.endsWith("pro")) {
     return ["Pro", "Pro Extended", "Pro 扩展", "扩展"];
   }
-  if (/extra\s*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
+  if (/extra[\s._-]*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
   if (/\bhigh\b|高级|advanced/.test(lower)) return ["High", "高级"];
   if (/medium|balanced|均衡/.test(lower)) return ["Medium", "均衡"];
   if (/instant|fast|极速/.test(lower)) return ["Instant", "极速"];
@@ -1307,6 +1491,12 @@ export function modelItemMatches(itemText, targets, exact) {
 
 const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
   Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
+// Selection is bounded by silence, not by the clock: every observed step
+// (menu opened, slider moved, entry clicked, read-back confirmed) restarts the
+// MODEL_SELECT_TIMEOUT_MS window, up to this hard ceiling. A slow page that
+// keeps making progress finishes; a stuck one still dies within one window.
+const MODEL_SELECT_MAX_MS = Math.max(MODEL_SELECT_TIMEOUT_MS, Math.min(180000,
+  Number(process.env.NYXID_MODEL_SELECT_MAX_MS) || 90000));
 const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
 // Clamp a composer bounding rect to the region actually on screen and return
 // the centre of what remains, or null when nothing is visible. Intersect the
@@ -1353,6 +1543,89 @@ export function draftNeedsFastClear(length) {
 }
 
 export const PRE_SEND_ACTION_MS = 5000;
+
+// Typing the prompt must not share the flat pre-send allowance. fill() drives
+// the whole prompt through the composer's React handlers, and five seconds is
+// ample for a chat message but not for a long one. When it overruns, the error
+// carries "timeout", stableErrorCode maps it to operation_timeout, and the last
+// acked phase is still selecting_model - so a task that selected its model
+// perfectly reports operation_timeout@selecting_model, with the partly typed
+// prompt left in the composer. That leftover then strands the tab for the next
+// pickup. Observed 2026-09-22: task 9a6d7697 carried a 50,432 character prompt,
+// logged "already_selected selected=Pro", then died ~8s later on every worker it
+// reached, leaving an identical draft on four machines.
+// Scale the allowance with the prompt and keep a ceiling so a pathological one
+// still fails promptly rather than hanging the attempt.
+export const PROMPT_FILL_CHARS_PER_MS = 5;
+export const PROMPT_FILL_MAX_MS = 60000;
+
+// An attachment needs longer than the flat pre-send allowance before its send
+// control becomes clickable. ChatGPT finishes wiring the composer after the
+// upload reports "attached", and a promo card can sit over the button while it
+// does. The trial click then expires exactly on the 5s boundary and the task
+// fails send_button_not_found - while the failure probe taken moments later
+// records send_found=true, because the button was there all along, just not
+// hittable yet. Observed 2026-09-22: "attachment attached (2s)" at 09:19:02,
+// "browser failure ... send_button_not_found" at 09:19:07.
+export const SEND_READY_TIMEOUT_MS = 20000;
+
+export function sendReadyTimeout(hasAttachment) {
+  return hasAttachment ? SEND_READY_TIMEOUT_MS : PRE_SEND_ACTION_MS;
+}
+
+export function promptFillTimeout(length) {
+  const n = Number(length);
+  const scaled = Number.isFinite(n) && n > 0 ? Math.ceil(n / PROMPT_FILL_CHARS_PER_MS) : 0;
+  return Math.min(PROMPT_FILL_MAX_MS, Math.max(PRE_SEND_ACTION_MS, scaled));
+}
+
+// ChatGPT refuses an over-long message server-side: the conversation POST
+// returns HTTP 413 (message_length_exceeds_limit) and the page shows "The
+// message you submitted was too long". By then the worker has spent the whole
+// fill allowance typing it and, on an overrun, left the draft behind for the
+// next pickup. Refuse a prompt that cannot be delivered before touching the
+// composer, and name the rejection precisely when ChatGPT refuses one that
+// was typed. The default ceiling is what the fill allowance can type at all
+// (PROMPT_FILL_MAX_MS at PROMPT_FILL_CHARS_PER_MS); a pool that has proven a
+// higher limit can raise NYXID_MAX_PROMPT_CHARS, and 0 disables the check.
+export const PROMPT_MAX_CHARS = (() => {
+  const configured = Number(process.env.NYXID_MAX_PROMPT_CHARS);
+  if (process.env.NYXID_MAX_PROMPT_CHARS !== undefined && Number.isFinite(configured) && configured >= 0) return configured;
+  return PROMPT_FILL_MAX_MS * PROMPT_FILL_CHARS_PER_MS;
+})();
+
+export function promptExceedsLimit(length, max = PROMPT_MAX_CHARS) {
+  const n = Number(length);
+  return Number.isFinite(n) && Number.isFinite(max) && max > 0 && n > max;
+}
+
+// Only the page's own conversation POST from the main frame can classify this
+// send; a background endpoint, another tab or an old response cannot.
+export function classifySubmissionResponse({ method, url, status }) {
+  if (method !== "POST") return null;
+  // Observed 2026-09-22: the page POSTs .../f/conversation/prepare, then
+  // .../f/conversation. Either may refuse the message.
+  if (!/^https:\/\/(chatgpt\.com|chat\.openai\.com)\/backend-api\/(f\/)?conversation(\/prepare)?(\?|$)/.test(url || "")) return null;
+  if (status === 413) return "prompt_too_long";
+  return null;
+}
+
+function observeSubmissionRejection(page) {
+  const observer = { code: null, stop: () => {} };
+  const onResponse = (response) => {
+    try {
+      const request = response.request();
+      if (request.frame() !== page.mainFrame()) return;
+      const code = classifySubmissionResponse({ method: request.method(), url: request.url(), status: response.status() });
+      if (code && !observer.code) observer.code = code;
+    } catch {
+      // Diagnostics only; never let an observer error touch the task flow.
+    }
+  };
+  page.on("response", onResponse);
+  observer.stop = () => { try { page.off("response", onResponse); } catch {} };
+  return observer;
+}
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
 const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible:not([data-nyx-switcher])';
@@ -1446,6 +1719,58 @@ export function switcherMetadata(text) {
   return `gpt_${Number(match[1])}${match[2] ? `_${Number(match[2])}` : ''}${pro ? '_pro' : ''}`;
 }
 
+// Family evidence from the picker's model-version radios ("Latest",
+// "GPT-5.6 Sol", "GPT-5.5"). At every level except Pro the composer pill and
+// the "Select model" row show only the level ("High"), so the checked radio
+// is the only place the family can be read. "Latest" carries no number and
+// is reported as gpt_latest.
+export function familyFromModelRadios(items) {
+  const checked = (items || []).find((item) => item?.checked);
+  const label = String(checked?.text || '').trim().split(/\r?\n/)[0].trim();
+  if (!label) return 'absent';
+  if (/^(latest|最新)$/i.test(label)) return 'gpt_latest';
+  const metadata = switcherMetadata(label.replace(/\s+(sol|thinking)$/i, ''));
+  return metadata === 'unrecognized' ? 'absent' : metadata;
+}
+
+// Canonical metadata compared to a request. gpt_latest satisfies a request
+// that names no minor version (chatgpt-6-high, chatgpt-6-pro) but never one
+// pinned to an older release (chatgpt-5.5-high needs the GPT-5.5 radio).
+// Some older composers offer neither control: no header switcher and no version
+// radio below Pro. Family evidence is then absent rather than contradictory,
+// and switcherMetadataMatches rejects "absent" - so such an account can never
+// verify, however correct its pill is. Observed 2026-09-23 on an account whose
+// composer renders button[aria-label="Select ChatGPT model"] instead of a
+// __composer-pill: selection logged
+//   reason=already_selected selected=Pro pill_source=fallback slider=absent family=absent
+// and the task failed switcher_unverified 0.13s later.
+//
+// Grant the same latitude gpt_latest already has: weak evidence satisfies a
+// request that pins no minor version, never one pinned to an older release.
+// chatgpt-6-pro is acceptable on the pill's own level; chatgpt-5.5-pro is not,
+// because nothing on such a page distinguishes 6 Pro from 5.5 Pro.
+export function familyUnverifiableButAcceptable(requested, observed) {
+  const request = String(requested || "");
+  if (!request || /\d+[._]\d+/.test(request)) return false;
+  const targets = modelLevelTargets(request);
+  return targets.length > 0 && pillShowsLevel(observed, targets);
+}
+
+export function switcherMetadataMatches(metadata, requested) {
+  if (!metadata || ['absent', 'unrecognized'].includes(metadata)) return false;
+  const request = String(requested || '').replace(/^openai-/, 'gpt-');
+  if (metadata === 'gpt_latest') {
+    const wanted = switcherMetadata(request);
+    if (wanted === 'unrecognized') return modelLevelTargets(request).length > 0 && !/\d+[._]\d+/.test(request);
+    return !/^gpt_\d+_\d+/.test(wanted);
+  }
+  const parse = (meta) => /^gpt_(\d+)(?:_(\d+))?(_pro)?$/.exec(meta);
+  let target = switcherMetadata(request);
+  if (target === 'unrecognized' && !/\d/.test(request) && modelLevelTargets(request)[0] === 'Pro') target = 'gpt_6_pro';
+  const wanted = parse(target), observed = parse(metadata);
+  return !!(wanted && observed && wanted[1] === observed[1] && (!wanted[2] || !observed[2] || wanted[2] === observed[2]));
+}
+
 export function switcherMatches(text, requested, familyOnly = false) {
   const request = String(requested || '').replace(/^openai-/, 'gpt-');
   let target = switcherMetadata(request);
@@ -1524,8 +1849,8 @@ export async function readModelSwitcher(page, budget = interactionBudget(1000)) 
 
 export async function selectModelSwitcher(page, requested) {
   await installDomCore(page);
-  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID() });
-  const timer = setTimeout(() => budget.controller.abort(), MODEL_SELECT_TIMEOUT_MS);
+  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID() }, { cap: MODEL_SELECT_MAX_MS });
+  const stopWatch = watchBudget(budget);
   let result = { verified: false, metadata: 'absent', reason: 'switcher_unverified' };
   try {
     let snapshot = await readModelSwitcher(page, budget);
@@ -1551,6 +1876,7 @@ export async function selectModelSwitcher(page, requested) {
         await budgetPause(budget, 100);
         snapshot = await readModelSwitcher(page, budget);
       } while (!snapshot.open && Date.now() < menuDeadline);
+      if (snapshot.open) budget.progress();
       let index = chooseSwitcherEntry(snapshot.items, requested, snapshot.text);
       if (index < 0) {
         const familyIndex = chooseSwitcherFamilyEntry(snapshot.items, requested);
@@ -1567,7 +1893,7 @@ export async function selectModelSwitcher(page, requested) {
           index = chooseSwitcherEntry(snapshot.items, requested, family);
         }
       }
-      if (index >= 0) await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
+      if (index >= 0) { await clickPickerElement(page, budget, { index, text: snapshot.items[index].text }); budget.progress(); }
       const verifyDeadline = Math.min(budget.deadline, Date.now() + 1000);
       do {
         await budgetPause(budget, 100);
@@ -1581,7 +1907,7 @@ export async function selectModelSwitcher(page, requested) {
     if (stableErrorCode(error) === 'page_crashed') throw error;
   } finally {
     budget.controller.abort();
-    clearTimeout(timer);
+    stopWatch();
     const cleanup = interactionBudget(2000, budget.picker);
     const cleanupTimer = setTimeout(() => cleanup.controller.abort(), 2000);
     try {
@@ -1632,6 +1958,30 @@ export function preferredModelPillIndex(labels) {
   return labels.findIndex((text) => String(text || '').trim().length > 0);
 }
 
+// While its menu is open or animating closed, the composer pill swaps its
+// label for a hint ("Thinking effort") or renders empty, so a snapshot taken
+// in that window shows a structural pill with no usable label. Observed
+// 2026-09-22: five consecutive selections reported picker_unavailable because
+// each one raced the previous menu's close. Such a snapshot must be retried,
+// not trusted.
+const PILL_LABEL_WAIT_MS = Math.max(1000, Math.min(20000, Number(process.env.NYXID_PILL_LABEL_WAIT_MS) || 8000));
+
+// A composer whose pill has not rendered yet looks the same from outside:
+// the form is there, no structural pill is visible, and no labelled control
+// stands in for it. Observed 2026-09-22: the pill stayed hidden for several
+// seconds after the composer was ready, and every selection in that window
+// failed instantly as picker_unavailable.
+export function pillLabelPending(snapshot) {
+  if (!snapshot) return false;
+  if (!snapshot.structural) {
+    return !!snapshot.form && !snapshot.pill &&
+      !(snapshot.candidates || []).some((text) => String(text || "").trim().length > 0);
+  }
+  if (!snapshot.pill) return true;
+  const observed = String(snapshot.observed || "").trim();
+  return !observed || /^(thinking effort|思考强度|推理强度)$/i.test(observed);
+}
+
 export function modelSelectionDiagnostics(snapshot) {
   const source = snapshot?.pill ? (snapshot.pill.structural ? "structural" : "fallback") : "none";
   const observed = snapshot?.observed || "";
@@ -1664,8 +2014,26 @@ export function modelSelectionFailureReason(error, { deadline, aborted }, now) {
   return error?.code === "interaction_deadline" ? "interaction_deadline" : "selection_failed";
 }
 
-function interactionBudget(duration, picker = null) {
-  return { deadline: Date.now() + duration, controller: new AbortController(), picker };
+export function interactionBudget(duration, picker = null, { cap = duration, now = Date.now() } = {}) {
+  const budget = { deadline: now + duration, controller: new AbortController(), picker,
+    window: duration, hardDeadline: now + Math.max(duration, cap) };
+  // Progress restarts the window; the hard deadline never moves.
+  budget.progress = (at = Date.now()) => {
+    if (!budget.controller.signal.aborted) budget.deadline = Math.min(budget.hardDeadline, at + budget.window);
+    return budget.deadline;
+  };
+  return budget;
+}
+
+// Abort a budget as soon as its (possibly extended) deadline passes.
+function watchBudget(budget, onExpire = () => {}) {
+  const timer = setInterval(() => {
+    if (Date.now() >= budget.deadline && !budget.controller.signal.aborted) {
+      budget.controller.abort();
+      onExpire();
+    }
+  }, 100);
+  return () => clearInterval(timer);
 }
 
 function interactionOptions(budget, maximum = 3000) {
@@ -1879,6 +2247,7 @@ async function clickMatchingLevel(page, targets, budget, allowChecked = false) {
   // Hidden hints in textContent cannot invalidate a visible level match.
   budget.picker.expectedEffort = effortMetadata(snapshot.items[index].text);
   await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
+  budget.progress();
   return true;
 }
 
@@ -1889,18 +2258,160 @@ async function closeOpenMenus(page, budget) {
   }
 }
 
+// ── Reasoning-effort slider ──────────────────────────────────────────────
+// The current composer picker exposes the reasoning level as a Radix slider
+// (role="slider", aria-valuemin/max/now) under a "Power" menu item, with the
+// model family/version in a separate "Select model" submenu. Driving the
+// slider by its ARIA state is what codex-chatgpt-web (MIT) does; it survives
+// label, layout and locale changes that broke every text-matching path here.
+// Levels are ordered Instant, Medium, High, Extra High, Pro from the minimum.
+// A range shorter than five entries hides the top levels (Pro disappears when
+// its usage limit is reached), never the bottom ones.
+const EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider]';
+const EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"]';
+const EFFORT_SLIDER_LEVELS = ["Instant", "Medium", "High", "Extra High", "Pro"];
+const EFFORT_SLIDER_STEP_MS = 1000;
+
+export function effortSliderIndex(level) {
+  return EFFORT_SLIDER_LEVELS.indexOf(level);
+}
+
+function safeIntegerAttribute(value) {
+  if (value === null || value === undefined || !/^-?\d+$/.test(String(value))) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+export function parseEffortSliderState(rawMin, rawMax, rawValue) {
+  const min = safeIntegerAttribute(rawMin);
+  const max = safeIntegerAttribute(rawMax);
+  const value = safeIntegerAttribute(rawValue);
+  if (min === undefined || max === undefined || value === undefined) return null;
+  const options = max - min + 1;
+  if (options < 1 || options > EFFORT_SLIDER_LEVELS.length) return null;
+  if (value < min || value > max) return null;
+  return { min, max, value };
+}
+
+// How to move a parsed slider onto a canonical level: the signed number of
+// single-step key presses, or unavailable when the range does not reach it.
+export function effortSliderPlan(state, level) {
+  const index = effortSliderIndex(level);
+  if (!state || index < 0) return { steps: null, unavailable: true, hint: "unsupported" };
+  const target = state.min + index;
+  if (target > state.max) {
+    return { steps: null, unavailable: true, target,
+      hint: level === "Pro" && state.max - state.min === 3 ? "pro_hidden_usage_limit" : "range_too_short" };
+  }
+  return { steps: target - state.value, unavailable: false, target };
+}
+
+function effortSliderLocators(page) {
+  const container = page.locator(EFFORT_SLIDER_CONTAINER_SELECTOR).filter({ visible: true }).last();
+  const slider = container.locator('[role="slider"]');
+  return { container, slider, control: slider.locator("xpath=ancestor::*[@role='menuitem'][1]") };
+}
+
+// Read the slider inside this picker's own menus only; null when absent.
+async function effortSliderState(page, budget) {
+  return boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { deadline, pickerId, selector }) => {
+    if (Date.now() >= deadline) return null;
+    const menus = window.__nyx?.modelPickerMenus(pickerId) || [];
+    const slider = [...body.querySelectorAll(selector)].find((el) => {
+      const container = el.closest("[data-model-reasoning-effort-slider]");
+      const rect = container?.getBoundingClientRect();
+      return rect && rect.width > 0 && rect.height > 0 && menus.includes(el.closest('[role="menu"], [role="listbox"]'));
+    });
+    if (!slider) return { absent: true };
+    return { absent: false, min: slider.getAttribute("aria-valuemin"), max: slider.getAttribute("aria-valuemax"),
+      value: slider.getAttribute("aria-valuenow") };
+  }, { deadline: Date.now() + timeout, pickerId: budget.picker?.id, selector: EFFORT_SLIDER_SELECTOR },
+  interactionOptions(budget, 1000))).then((read) => (read.absent ? null : parseEffortSliderState(read.min, read.max, read.value)));
+}
+
+async function waitForEffortSliderValue(page, budget, previous, until) {
+  let state;
+  do {
+    state = await effortSliderState(page, budget);
+    if (state && state.value !== previous) return state;
+    await budgetPause(budget, 50);
+  } while (Date.now() < until);
+  return state;
+}
+
+// Returns false when the open menu has no slider (legacy picker: caller falls
+// back to text matching). Otherwise sets result.reason and returns true.
+async function selectEffortBySlider(page, targets, budget, result, state) {
+  const plan = effortSliderPlan(state, targets[0]);
+  if (plan.unavailable && plan.hint === "unsupported") return false;
+  budget.picker.recognizedLevels = true;
+  // The menu is open here, so this snapshot carries the version radios.
+  budget.picker.family = familyFromModelRadios((await pickerSnapshot(page, budget)).items);
+  budget.picker.slider = { min: state.min, max: state.max, before: state.value, hint: plan.hint || null };
+  if (plan.unavailable) {
+    await closeOpenMenus(page, budget);
+    result.reason = "level_unavailable";
+    return true;
+  }
+  if (plan.steps === 0) {
+    await closeOpenMenus(page, budget);
+    result.reason = "already_selected";
+    return true;
+  }
+  const { control } = effortSliderLocators(page);
+  const key = plan.steps > 0 ? "ArrowRight" : "ArrowLeft";
+  const direction = plan.steps > 0 ? 1 : -1;
+  let current = state;
+  while (current.value !== plan.target) {
+    const previous = current.value;
+    await control.press(key, interactionOptions(budget));
+    current = await waitForEffortSliderValue(page, budget, previous, Math.min(budget.deadline, Date.now() + EFFORT_SLIDER_STEP_MS));
+    if (current && current.value !== previous) budget.progress();
+    if (!current || current.value !== previous + direction) {
+      // The slider moved unexpectedly or stalled: stop and let the pill decide.
+      await closeOpenMenus(page, budget);
+      result.reason = "unverified";
+      return true;
+    }
+  }
+  budget.picker.slider.after = current.value;
+  await closeOpenMenus(page, budget);
+  // Reopen once: ChatGPT can drop a keyboard selection when the menu closes.
+  await budgetPause(budget, 200);
+  const before = await pickerSnapshot(page, budget);
+  if (before.pill) {
+    await pickerLocator(page, before.pill).click(interactionOptions(budget));
+    const reopened = await waitForEffortSliderValue(page, budget, null, Math.min(budget.deadline, Date.now() + 3000));
+    if (reopened) budget.progress();
+    budget.picker.slider.confirmed = reopened?.value ?? null;
+    await closeOpenMenus(page, budget);
+    if (!reopened || reopened.value !== plan.target) {
+      result.reason = "unverified";
+      return true;
+    }
+  }
+  result.reason = "unverified"; // promoted to "selected" once the pill agrees
+  return true;
+}
+
+export function effortSliderDetail(slider) {
+  if (!slider) return "slider=absent";
+  const range = `${slider.min}-${slider.max}`;
+  const path = [slider.before, slider.after, slider.confirmed].filter((v) => v !== undefined && v !== null).join(">");
+  return `slider=${path}/${range}${slider.hint ? ` hint=${slider.hint}` : ""}`;
+}
+
 // Returns { level, verified, observed, reason }. Only the actual pill can
 // verify a level or populate observed. Selection never throws into the task
 // flow. Abort cancels Playwright actions, and the deadline is checked before
 // EVERY interaction, including after reads that resolve late. The backstop
 // drains the inner promise before menu cleanup; no detached selection loop
 // can race prompt typing or Send.
-async function selectModel(page, modelLabel) {
+export async function selectModel(page, modelLabel) {
   await installDomCore(page);
   const targets = modelLevelTargets(modelLabel);
   const result = { level: targets[0] || null, verified: false, observed: null, reason: "picker_unavailable" };
-  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID(), snapshot: null });
-  let timer;
+  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID(), snapshot: null }, { cap: MODEL_SELECT_MAX_MS });
   let drainTimer;
   const inner = selectModelInner(page, targets, budget, result).catch((error) => {
     if (stableErrorCode(error) === "page_crashed") result.failureCode = "page_crashed";
@@ -1908,12 +2419,10 @@ async function selectModel(page, modelLabel) {
       deadline: budget.deadline, aborted: budget.controller.signal.aborted,
     }, Date.now());
   });
-  const timeout = new Promise((resolveTimeout) => {
-    timer = setTimeout(() => {
-      budget.controller.abort(); // cancel even a click waiting for actionability
-      resolveTimeout("timeout");
-    }, MODEL_SELECT_TIMEOUT_MS);
-  });
+  // The watchdog aborts on silence (cancelling even a click waiting for
+  // actionability); progress inside selectModelInner keeps extending it.
+  let stopWatch;
+  const timeout = new Promise((resolveTimeout) => { stopWatch = watchBudget(budget, () => resolveTimeout("timeout")); });
   try {
     if (await Promise.race([inner, timeout]) === "timeout") {
       await Promise.race([inner, new Promise((resolveDrain) => { drainTimer = setTimeout(resolveDrain, 3000); })]);
@@ -1921,7 +2430,7 @@ async function selectModel(page, modelLabel) {
     }
   } finally {
     budget.controller.abort();
-    clearTimeout(timer);
+    stopWatch();
     clearTimeout(drainTimer);
   }
   // Cleanup gets its own small budget after the aborted selection is drained.
@@ -1941,15 +2450,28 @@ async function selectModel(page, modelLabel) {
     !["timeout", "menu_not_opened", "interaction_deadline", "selection_failed", "level_unavailable"].includes(result.reason) &&
     (!["pro_extended", "pro_standard"].includes(budget.picker.expectedEffort) || effortMetadata(result.observed) === budget.picker.expectedEffort);
   if (result.verified && !["timeout", "already_selected"].includes(result.reason)) result.reason = "selected";
-  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)}`);
+  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)} ${effortSliderDetail(budget.picker.slider)} family=${budget.picker.family || 'absent'}${budget.picker.pendingWaits ? ` pill_label_waits=${budget.picker.pendingWaits}` : ''}`);
   if (LOG_PICKER_LABELS && ["level_unavailable", "unverified", "menu_not_opened", "picker_unavailable"].includes(result.reason)) {
     log(formatPickerLabels(budget.picker.snapshot));
   }
-  return { ...result, recognizedLevels: !!budget.picker.recognizedLevels, recognizedObservation: !!budget.picker.recognizedObservation };
+  return { ...result, recognizedLevels: !!budget.picker.recognizedLevels, recognizedObservation: !!budget.picker.recognizedObservation,
+    family: budget.picker.family || 'absent' };
 }
 
 async function selectModelInner(page, targets, budget, result) {
-  const before = await pickerSnapshot(page, budget);
+  let before = await pickerSnapshot(page, budget);
+  // A pill with no label is still loading (or its menu is closing); give it
+  // up to PILL_LABEL_WAIT_MS inside the budget before calling the picker
+  // unavailable. No progress is credited while waiting.
+  const labelDeadline = Math.min(budget.deadline, Date.now() + PILL_LABEL_WAIT_MS);
+  let pendingWaits = 0;
+  while (pillLabelPending(before) && Date.now() < labelDeadline) {
+    if (pendingWaits === 0) await closeOpenMenus(page, budget);
+    pendingWaits += 1;
+    await budgetPause(budget, 100);
+    before = await pickerSnapshot(page, budget);
+  }
+  if (pendingWaits) budget.picker.pendingWaits = pendingWaits;
   interactionOptions(budget);
   result.observed = before.observed;
   if (pillShowsLevel(before.observed, targets) && (targets[0] !== "Pro" || effortMetadata(before.observed) !== "pro")) {
@@ -1964,11 +2486,26 @@ async function selectModelInner(page, targets, budget, result) {
   try {
     await page.locator("body").waitForFunction((_, id) => window.__nyx?.modelPickerMenus(id).length > 0,
       budget.picker.id, menuWait);
+    budget.progress();
   } catch (error) {
     interactionOptions(budget);
     if (error?.name !== "TimeoutError") throw error;
     result.reason = menuWait.timeout < 5000 ? "timeout" : "menu_not_opened";
     return;
+  }
+  // Prefer the ARIA slider; fall back to text matching on an older picker.
+  await budgetPause(budget, 100);
+  const slider = await effortSliderState(page, budget);
+  if (slider && (await selectEffortBySlider(page, targets, budget, result, slider))) {
+    if (result.reason !== "unverified") return;
+    const verifyUntil = Math.min(budget.deadline, Date.now() + 1000);
+    while (true) {
+      const after = await pickerSnapshot(page, budget);
+      interactionOptions(budget);
+      result.observed = after.observed;
+      if (pillShowsLevel(result.observed, targets) || Date.now() >= verifyUntil) return;
+      await budgetPause(budget, 100);
+    }
   }
   let clicked = await clickMatchingLevel(page, targets, budget);
   if (!clicked && (await pickerSnapshot(page, budget)).submenu) {
@@ -2013,6 +2550,31 @@ async function selectModelInner(page, targets, budget, result) {
   result.reason = "unverified";
 }
 
+// Dismiss ChatGPT's Temporary Chat onboarding modal (a native <dialog> that
+// intercepts every pointer event until Continue is pressed). Best-effort: if
+// it stays, ensureComposerUnobstructed fails the task pre-send as before.
+export async function dismissTemporaryChatOnboarding(page) {
+  const modal = page.locator(TEMPORARY_CHAT_ONBOARDING_SELECTOR).last();
+  try {
+    if (!(await modal.isVisible().catch(() => false))) return false;
+    const actions = [
+      modal.getByRole("button", { name: "Continue", exact: true }).last(),
+      modal.locator('button:not([data-testid="close-button"])').last(),
+      modal.locator('button[data-testid="close-button"]').last(),
+    ];
+    for (const action of actions) {
+      if (!(await action.isVisible().catch(() => false))) continue;
+      await action.click({ force: true, timeout: PRE_SEND_ACTION_MS });
+      await modal.waitFor({ state: "hidden", timeout: PRE_SEND_ACTION_MS });
+      log("temporary_chat onboarding dismissed");
+      return true;
+    }
+  } catch (error) {
+    if (stableErrorCode(error) === "page_crashed") throw error;
+  }
+  return false;
+}
+
 // Clear overlays before typing and again immediately before Send. Never force
 // a click through an obstruction: failure stays pre-send and enters the
 // existing browser recovery / infrastructure retry path.
@@ -2022,6 +2584,45 @@ async function selectModelInner(page, targets, budget, result) {
 // MODEL_SELECT_TIMEOUT_MS and the task fails as operation_timeout@selecting_model
 // on every subsequent pickup. The prompt is (re)typed after selection, so
 // clearing here is a no-op on a fresh composer and never drops real work.
+// Repair a tab that a failed task left behind, without waiting for the next
+// task to do it.
+//
+// The repair already exists and works - clearComposerDraft plus the marker
+// handling in readModelSwitcher/pickerSnapshot - but every one of those runs
+// only on the task path. A worker whose task died mid-flight keeps the prompt
+// in its composer and data-nyx-switcher stranded on the pill, which leaves
+// pickerSnapshot with no selectable candidate. It then sits there, healthy by
+// every heartbeat measure and unable to select a model, until it happens to be
+// given work again. On a lightly loaded pool that is unbounded: a tab observed
+// 2026-09-23 stayed stranded for over an hour while the rest of the pool served
+// around it, showing a stale last_error the whole time.
+//
+// Measured, on a deliberately stranded tab: 90s of heartbeats changed nothing
+// (markers=1 draft=19199 selectable=0); one task pickup repaired it completely
+// (markers=0 draft=0 selectable=1) and cost that task nothing - it answered on
+// the first attempt. So this is not new recovery logic, only a second trigger
+// for the recovery that already works.
+//
+// Only runs when the server says there is no work, the tab is logged in and not
+// hands-off, so it can never touch a task in flight or a login screen.
+async function tidyIdleTab(runtime, page) {
+  if (Date.now() - (runtime.lastTidyAt || 0) < IDLE_TIDY_MS) return;
+  runtime.lastTidyAt = Date.now();
+  if (!page || page.isClosed()) return;
+  try {
+    await clearComposerDraft(page);
+    const stranded = await page.locator("body").evaluate((body) => {
+      const marked = body.querySelectorAll("[data-nyx-switcher]");
+      marked.forEach((el) => el.removeAttribute("data-nyx-switcher"));
+      return marked.length;
+    });
+    if (stranded) log(`idle_tidy cleared_markers=${stranded}`);
+  } catch (error) {
+    if (stableErrorCode(error) === "page_crashed") throw error;
+    // Best-effort: tidying must never fail the worker loop.
+  }
+}
+
 async function clearComposerDraft(page) {
   const budget = interactionBudget(PRE_SEND_ACTION_MS);
   const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
@@ -2312,7 +2913,9 @@ async function submitPromptResult(
       response,
       images: downloadedImages.items,
       files: downloadedFiles.items,
-      chatgpt_url: page.url(),
+      // A Temporary Chat has no conversation URL worth storing; the bare
+      // ?temporary-chat=true address would only open an empty chat.
+      chatgpt_url: promptUsesTemporaryChat(task) && !convId(page.url()) ? null : page.url(),
       // Observations are canonical metadata, never raw picker labels.
       model: reportedPromptModel(task),
       observed_model_switcher: runtime.state.current_task?.observed_model_switcher,
@@ -2338,6 +2941,12 @@ async function handlePrompt(runtime, page, task, recovering) {
   const { task_id } = task;
   task.model ||= "chatgpt-6-pro";
   if (task.require_model_match === true && task.model === "unknown") throw new TaskFailure("model_unavailable");
+  // Fail closed before the composer is touched: an undeliverable prompt must
+  // not spend the fill allowance or leave a draft on this tab.
+  if (promptExceedsLimit(task.prompt?.length)) {
+    log(`prompt ${task_id} refused: ${task.prompt.length} chars exceeds NYXID_MAX_PROMPT_CHARS=${PROMPT_MAX_CHARS}`);
+    throw new TaskFailure("prompt_too_long");
+  }
   log(`prompt task ${task_id} (followup=${!!task.is_followup})`);
   await page.bringToFront().catch(() => {});
 
@@ -2346,6 +2955,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   // otherwise we'd type into the previous conversation.
   const persistedUrl = runtime.state.current_task?.conversation_url;
   const priorPhase = runtime.state.current_task?.phase || "claimed";
+  const temporaryChat = promptUsesTemporaryChat(task);
   const navigation = choosePromptNavigation({
     recovering,
     phase: priorPhase,
@@ -2354,6 +2964,7 @@ async function handlePrompt(runtime, page, task, recovering) {
     persistedUrl,
     taskConversationUrl: task.conversation_url,
     requiredProjectUrl: task.required_project_url,
+    temporaryChat,
   });
   if (navigation.error) throw new TaskFailure(navigation.error);
   const navTarget = navigation.target;
@@ -2361,7 +2972,11 @@ async function handlePrompt(runtime, page, task, recovering) {
     await page.goto(navTarget, { waitUntil: "domcontentloaded" });
     await installDomCore(page);
     await page.bringToFront().catch(() => {});
-    await sleep(2500);
+    // Hydration first, then a quiet DOM: replaces a flat 2.5s sleep that was
+    // both too short on a slow page and wasted on a fast one.
+    await waitForComposer(page, 15000);
+    await settleDom(page, { quietMs: 250, maxMs: 2500 });
+    if (temporaryChat) await dismissTemporaryChatOnboarding(page);
   }
 
   updateTaskState(runtime.state, {
@@ -2374,7 +2989,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   if (await recoverPreSendLogin(runtime)) throw new TaskRestart();
 
   if (recovering && !["claimed", "page_ready", "ready_to_send"].includes(priorPhase)) {
-    await sleep(1500);
+    await settleDom(page, { quietMs: 250, maxMs: 1500 });
     const snapshot = await transcriptSnapshot(page);
     if (snapshot.errorCode) {
       const answer = await recoverContentFailure(runtime, page, task, snapshot.assistantCount, snapshot.errorCode);
@@ -2426,7 +3041,8 @@ async function handlePrompt(runtime, page, task, recovering) {
     updateTaskState(runtime.state, { pre_send_reload_attempted: true });
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
     await installDomCore(page);
-    await sleep(STABLE_INTERVAL_MS);
+    await waitForComposer(page, 15000);
+    await settleDom(page, { quietMs: 250, maxMs: Math.max(1500, STABLE_INTERVAL_MS) });
     readyError = await page.evaluate(() => window.__nyx?.errorCode());
   }
   if (readyError === 'chatgpt_error_response') {
@@ -2439,13 +3055,20 @@ async function handlePrompt(runtime, page, task, recovering) {
     await failModelSelection(runtime, task, header.metadata, effortMetadata(pill.observed), 'model_unavailable');
   }
   if (readyError) throw new TaskFailure(readyError);
+  // The Temporary Chat onboarding modal can appear a few seconds after the
+  // composer renders; it intercepts every click until Continue is pressed.
+  if (temporaryChat) await dismissTemporaryChatOnboarding(page);
   // A stale draft from a prior attempt makes model selection time out; clear
   // it so each attempt selects the model against a light, empty composer.
   await clearComposerDraft(page);
   if (task.model && task.model !== "unknown") {
     if (await ack(runtime, task, "selecting_model")) throw new TaskFailure("cancelled");
     const headerSelection = await selectModelSwitcher(page, task.model);
-    if (task.require_model_match !== false && !headerSelection.verified) {
+    // The current composer shows the family only on the Pro pill ("6 Pro");
+    // parked on High or Instant it reads just the level, so no switcher can
+    // be found before the effort is selected. Defer the family check to the
+    // post-selection read-back instead of failing every task on such a tab.
+    if (task.require_model_match !== false && !headerSelection.verified && headerSelection.metadata !== "absent") {
       const pill = await pickerSnapshot(page, interactionBudget(PRE_SEND_ACTION_MS));
       await failModelSelection(runtime, task, headerSelection.metadata, effortMetadata(pill.observed), headerSelection.reason);
     }
@@ -2454,18 +3077,33 @@ async function handlePrompt(runtime, page, task, recovering) {
       if (stableErrorCode(error) === "page_crashed") throw error;
       return { text: null, metadata: "absent" };
     });
-    updateTaskState(runtime.state, { observed_model_switcher: observedSwitcher.metadata,
+    // Below Pro the pill shows only the level; the checked version radio read
+    // while the picker was open is then the family evidence.
+    const familyEvidenceAbsent = observedSwitcher.metadata === "absent" && selected.family === "absent";
+    const familyVerified = switcherMatches(observedSwitcher.text, task.model) ||
+      (observedSwitcher.metadata === "absent" && switcherMetadataMatches(selected.family, task.model)) ||
+      (familyEvidenceAbsent && familyUnverifiableButAcceptable(task.model, selected.observed));
+    const familyMetadata = observedSwitcher.metadata === "absent" && familyVerified ? selected.family : observedSwitcher.metadata;
+    updateTaskState(runtime.state, { observed_model_switcher: familyMetadata,
       observed_model_effort: effortMetadata(selected.observed), effort_levels_exposed: selected.recognizedLevels });
     // Re-read BOTH controls after selecting effort, since either may change the other.
-    if (task.require_model_match !== false && (!switcherMatches(observedSwitcher.text, task.model) ||
-        effortSelectionMismatch(selected, task.model))) {
-      await failModelSelection(runtime, task, observedSwitcher.metadata, effortMetadata(selected.observed),
-        !switcherMatches(observedSwitcher.text, task.model) ? 'switcher_unverified' : selected.reason);
+    if (task.require_model_match !== false && (!familyVerified || effortSelectionMismatch(selected, task.model))) {
+      await failModelSelection(runtime, task, familyMetadata, effortMetadata(selected.observed),
+        !familyVerified ? 'switcher_unverified' : selected.reason);
     }
     if (await ack(runtime, task, "selecting_model", modelSelectionDetail(selected))) {
       throw new TaskFailure("cancelled");
     }
   }
+
+  // Split the phase before typing. "ready_to_send" already separates the send
+  // step, but nothing separated model selection from the composer click, fill
+  // and readback - so a timeout in any of those reported
+  // operation_timeout@selecting_model, with the log line immediately above
+  // reading "already_selected selected=Pro". An 18-attempt trace of one task
+  // (2026-09-23) showed exactly that contradiction on every attempt, and
+  // ruling model selection out by hand cost two days.
+  if (await ack(runtime, task, "typing")) throw new TaskFailure("cancelled");
 
   // Type the prompt into the composer (native — more robust than the
   // userscript's execCommand fallbacks) and send.
@@ -2484,7 +3122,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   }
   await ensureComposerUnobstructed(page);
   await input.click({ timeout: PRE_SEND_ACTION_MS });
-  await input.fill(task.prompt, { timeout: PRE_SEND_ACTION_MS });
+  await input.fill(task.prompt, { timeout: promptFillTimeout(task.prompt?.length) });
   const typed = await input.evaluate(el => el.value ?? el.innerText);
   if (normalizePromptText(typed) !== normalizePromptText(task.prompt)) throw Object.assign(new Error('composer_readback_failed'), { code: 'composer_readback_failed' });
   await installDomCore(page);
@@ -2496,7 +3134,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   const baseline = before.baseline;
   updateTaskState(runtime.state, { phase: "ready_to_send", baseline_turn_count: baseline });
   if (await ack(runtime, task, "ready_to_send")) throw new TaskFailure("cancelled");
-  await sleep(300);
+  await settleDom(page, { quietMs: 100, maxMs: 300 });
   // Only attach a PDF on the FIRST turn of a conversation — never re-upload it
   // into an existing chat if the server ever resends pdf_base64 on a follow-up
   // (mirrors the userscript's `!is_followup && pdf_base64` guard).
@@ -2515,7 +3153,8 @@ async function handlePrompt(runtime, page, task, recovering) {
   await ensureComposerUnobstructed(page);
   // Resolve actionability while still pre-send. The actual click is the
   // only operation after the durable uncertainty fence.
-  try { await sendBtn.click({ trial: true, timeout: PRE_SEND_ACTION_MS }); }
+  const sendWait = sendReadyTimeout(!task.is_followup && !!(task.pdf_base64 || task.attachment_base64));
+  try { await sendBtn.click({ trial: true, timeout: sendWait }); }
   catch (error) {
     if (stableErrorCode(error) === 'page_crashed') throw error;
     throw Object.assign(new Error('send_button_not_found'), { code: 'send_button_not_found' });
@@ -2535,21 +3174,44 @@ async function handlePrompt(runtime, page, task, recovering) {
     const recognizedBefore = previousEffort && !['absent', 'unrecognized'].includes(previousEffort);
     const verifiedEffort = pillShowsLevel(pill.observed, modelLevelTargets(task.model)) &&
       (!['pro_extended', 'pro_standard'].includes(previousEffort) || previousEffort === observedEffort);
-    updateTaskState(runtime.state, { observed_model_switcher: header.metadata, observed_model_effort: observedEffort });
-    if (task.require_model_match !== false && (!switcherMatches(header.text, task.model) ||
+    // The family cannot change without the picker; when the pill hides it
+    // (every level below Pro) the family verified at selection still stands,
+    // provided the pill still shows the requested level.
+    const previousFamily = runtime.state.current_task?.observed_model_switcher;
+    // Mirror the selection-time rule. On a composer with neither a header
+    // switcher nor a version radio, previousFamily is the "absent" that
+    // selection recorded, so switcherMetadataMatches rejects it here too and
+    // the task dies presend_unverified after selection had already passed.
+    // Observed 2026-09-23: the first gate let the task through, it uploaded its
+    // attachment, and this one failed it 8s later.
+    const familyEvidenceAbsent = header.metadata === 'absent' &&
+      (!previousFamily || previousFamily === 'absent');
+    const familyVerified = switcherMatches(header.text, task.model) ||
+      (header.metadata === 'absent' && verifiedEffort && switcherMetadataMatches(previousFamily, task.model)) ||
+      (familyEvidenceAbsent && familyUnverifiableButAcceptable(task.model, pill.observed));
+    const familyMetadata = header.metadata === 'absent' && familyVerified ? previousFamily : header.metadata;
+    updateTaskState(runtime.state, { observed_model_switcher: familyMetadata, observed_model_effort: observedEffort });
+    if (task.require_model_match !== false && (!familyVerified ||
       effortSelectionMismatch({ observed: pill.observed, verified: verifiedEffort,
         recognizedLevels: runtime.state.current_task?.effort_levels_exposed || recognizedBefore }, task.model))) {
-      await failModelSelection(runtime, task, header.metadata, observedEffort, 'presend_unverified');
+      await failModelSelection(runtime, task, familyMetadata, observedEffort, 'presend_unverified');
     }
   }
-  updateTaskState(runtime.state, { phase: "send_attempted", baseline_turn_count: baseline });
-  await sendBtn.click({ timeout: PRE_SEND_ACTION_MS });
-  updateTaskState(runtime.state, { phase: "sent" });
-  await ack(runtime, task, "sent");
-  await pinCurrentConversation(runtime, page, task);
-
-  const { text, images, files } = await waitForResponse(runtime, page, task, beforeCount);
-  await submitPromptResult(runtime, page, task, text, images, files);
+  // Watch this page's own conversation POST so a server-side rejection of the
+  // message (HTTP 413) is named as such instead of surfacing as a stalled turn.
+  const rejection = observeSubmissionRejection(page);
+  let answer;
+  try {
+    updateTaskState(runtime.state, { phase: "send_attempted", baseline_turn_count: baseline });
+    await sendBtn.click({ timeout: PRE_SEND_ACTION_MS });
+    updateTaskState(runtime.state, { phase: "sent" });
+    await ack(runtime, task, "sent");
+    await pinCurrentConversation(runtime, page, task);
+    answer = await waitForResponse(runtime, page, task, beforeCount, rejection);
+  } finally {
+    rejection.stop();
+  }
+  await submitPromptResult(runtime, page, task, answer.text, answer.images, answer.files);
 }
 
 function convId(url) {
@@ -2559,7 +3221,7 @@ function convId(url) {
 
 // Returns the latest assistant turn's text plus on-page image and file sources.
 // Artifact-only turns are valid; the stability key spans all three outputs.
-async function waitForResponse(runtime, page, task, beforeCount) {
+async function waitForResponse(runtime, page, task, beforeCount, rejection = null) {
   updateTaskState(runtime.state, { phase: "waiting_response", last_phase: "waiting_response" });
   const start = Date.now();
   let lastHeartbeat = start;
@@ -2567,6 +3229,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
   let stable = 0;
   while (Date.now() - start < MAX_WAIT_MS) {
     await sleep(STABLE_INTERVAL_MS);
+    if (rejection?.code) throw new TaskFailure(rejection.code);
     if (Date.now() - lastHeartbeat >= HEARTBEAT_MS) {
       lastHeartbeat = Date.now();
       updateTaskState(runtime.state, { phase: "waiting_response", conversation_url: page.url() });
@@ -2592,7 +3255,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       window.__nyx?.version === version,
     ], DOM_CORE_VERSION);
     if (!helperReady) continue;
-    if (errorCode) return recoverContentFailure(runtime, page, task, beforeCount, errorCode);
+    if (errorCode) return recoverContentFailure(runtime, page, task, beforeCount, errorCode, rejection);
     const hasText = !!(text && text.length > 0);
     const hasImages = Array.isArray(images) && images.length > 0;
     const hasFiles = Array.isArray(files) && files.length > 0;
@@ -2602,7 +3265,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
     // there's no new answer yet — wedge guard bails if ChatGPT has stopped.
     if (count <= beforeCount && !hasImages && !hasFiles) {
       if (!generating && Date.now() - start >= NO_OUTPUT_IDLE_MS) {
-        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output");
+        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output", rejection);
       }
       continue;
     }
@@ -2614,7 +3277,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       // New turn settled but produced nothing extractable (e.g. an unrenderable
       // tool turn). Don't wedge — fail fast once the idle window elapses.
       if (Date.now() - start >= NO_OUTPUT_IDLE_MS) {
-        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output");
+        return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output", rejection);
       }
       stable = 0;
       continue;
@@ -2641,20 +3304,22 @@ async function waitForResponse(runtime, page, task, beforeCount) {
   throw new TaskFailure('response_timeout');
 }
 
-async function recoverContentFailure(runtime, page, task, beforeCount, code) {
-  if (['usage_limit_reached', 'model_unavailable'].includes(code)) throw new TaskFailure(code);
+async function recoverContentFailure(runtime, page, task, beforeCount, code, rejection = null) {
+  // A rejected message was never delivered; a reload cannot make it appear.
+  if (['usage_limit_reached', 'model_unavailable', 'prompt_too_long'].includes(code)) throw new TaskFailure(code);
   if (runtime.state.current_task?.content_reload_attempted) throw new TaskFailure(code);
   updateTaskState(runtime.state, { content_reload_attempted: true });
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await installDomCore(page);
-  await sleep(STABLE_INTERVAL_MS);
+  await waitForComposer(page, 15000);
+  await settleDom(page, { quietMs: 250, maxMs: Math.max(1500, STABLE_INTERVAL_MS) });
   const snapshot = await transcriptSnapshot(page);
   const decision = decidePromptResume({ phase: runtime.state.current_task?.phase, prompt: task.prompt,
     turns: snapshot.turns, generating: snapshot.generating, transcriptReady: snapshot.ready,
     baselineTurnCount: runtime.state.current_task?.baseline_turn_count || 0 });
   if (snapshot.errorCode) throw new TaskFailure(snapshot.errorCode);
   if (decision.action === 'complete') return { text: decision.response, images: snapshot.images, files: snapshot.files };
-  if (decision.action === 'wait') return waitForResponse(runtime, page, task, beforeCount);
+  if (decision.action === 'wait') return waitForResponse(runtime, page, task, beforeCount, rejection);
   throw new TaskFailure(code);
 }
 
@@ -2824,7 +3489,7 @@ async function loadFullTranscript(page) {
     if (renderedCount > 0) break;
     await sleep(700);
   }
-  await sleep(1500);
+  await settleDom(page, { quietMs: 250, maxMs: 1500 });
 
   await expandCollapsibles(page);
 
@@ -3543,6 +4208,7 @@ async function settleTaskFailure(runtime, task, code) {
     saveState(runtime.state);
   }
   log(`task_failure code=${code} detail=${detail} probe=${JSON.stringify(await failureProbe(runtime.page))}`);
+  await writeDiagnosticSnapshot(runtime, task, code, detail);
   await apiPost(
     "/result",
     taskIdentity(runtime, task, {
@@ -3596,6 +4262,7 @@ async function executeTask(runtime, task, recovering) {
       updateTaskState(runtime.state, { recovery_failures: failureCount, failure_detail: detail, shape_failures: shapeFailures });
       runtime.lastError = detail;
       log(`task ${task.task_id} browser failure ${failureCount}/${MAX_TASK_RECOVERY_FAILURES} (${runtime.lastError})`);
+      await writeDiagnosticSnapshot(runtime, task, cause, detail);
       const recovery = taskRecoveryDecision({
         kind: task.kind,
         phase: runtime.state.current_task?.phase,
@@ -3961,6 +4628,7 @@ async function main() {
       );
       if (response.status === "idle") {
         if (state.current_task) clearTaskState(state);
+        await tidyIdleTab(runtime, page);
         if (
           response.required_project_url &&
           !page.url().startsWith(response.required_project_url) &&

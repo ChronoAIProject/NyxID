@@ -36,6 +36,16 @@ export interface ChatMessage {
   readonly steps?: RuntimeStepInfo[];
   readonly thinking?: string | null;
   readonly toolCalls?: RuntimeToolCallInfo[];
+  /** Images a tool returned, fetched through the authenticated assistant client. */
+  readonly images?: readonly ChatImage[];
+}
+
+export interface ChatImage {
+  readonly id: string;
+  /** Assistant API endpoint, relative to the API root. */
+  readonly endpoint: string;
+  readonly contentType: string;
+  readonly label: string;
 }
 
 export interface ConversationRuntimeIdentity {

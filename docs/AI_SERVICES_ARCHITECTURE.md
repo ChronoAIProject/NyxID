@@ -249,8 +249,7 @@ the actor's own credentials. Org-shared service discovery uses `/keys` and
 `/user-services`; backing-resource detail reads enforce membership ACLs and key scope.
 
 All inventory writes and the entire NyxID `/api-keys` management router remain
-human-only for API keys. Service-account, relay, and scheduled-invocation tokens
-remain denied on inventory reads; delegated read parity is unchanged.
+human-only for API keys. Relay and scheduled-invocation tokens remain denied on inventory reads; delegated read parity is unchanged. CatalogEditor service accounts use standing global role permissions and token/live scopes for `/keys` catalog metadata across all existing and future services; responses use catalog UUIDs and `resource_type: "catalog_service"`, without private connection access or per-resource grants. General and legacy Curation service accounts have separate grant-filtered `GET /keys` and exact-UUID `GET /keys/{id}` metadata projections, requiring `user-services:read`, a live admin-issued key read grant, and current owner access. They perform no credential resolution or reconciliation; other inventory routes remain denied. See `SERVICE_ACCOUNTS.md` → Connection metadata reads.
 
 ### API contract for consumers
 

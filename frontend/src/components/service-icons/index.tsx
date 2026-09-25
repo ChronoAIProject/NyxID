@@ -33,6 +33,9 @@ import ApiGoogleWorkspaceIcon from "./api-google-workspace";
 import ApiGoogleCalendarIcon from "./api-google-calendar";
 import ApiGoogleDriveIcon from "./api-google-drive";
 import ApiGoogleGmailIcon from "./api-google-gmail";
+import ApiGoogleDocsIcon from "./api-google-docs";
+import ApiGoogleSheetsIcon from "./api-google-sheets";
+import ApiGoogleSlidesIcon from "./api-google-slides";
 import ApiNotionIcon from "./api-notion";
 import ApiGoogleCloudIcon from "./api-google-cloud";
 import ApiGithubIcon from "./api-github";
@@ -52,6 +55,7 @@ import ApiLarkBotIcon from "./api-lark-bot";
 import ApiFeishuIcon from "./api-feishu";
 import ApiFeishuBotIcon from "./api-feishu-bot";
 import ApiTelegramBotIcon from "./api-telegram-bot";
+import ApiSupabaseIcon from "./api-supabase";
 import ApiElevenLabsIcon from "./api-elevenlabs";
 import ApiTelnyxIcon from "./api-telnyx";
 import ApiTwilioIcon from "./api-twilio";
@@ -85,6 +89,9 @@ export const SPEC_CATALOG_SLUGS = [
   "api-google-calendar",
   "api-google-drive",
   "api-google-gmail",
+  "api-google-docs",
+  "api-google-sheets",
+  "api-google-slides",
   "api-google-cloud",
   "api-notion",
   "api-github",
@@ -104,6 +111,7 @@ export const SPEC_CATALOG_SLUGS = [
   "api-feishu",
   "api-feishu-bot",
   "api-telegram-bot",
+  "api-supabase",
   "api-elevenlabs",
   "api-telnyx",
   "api-twilio",
@@ -134,6 +142,9 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-google-calendar": ApiGoogleCalendarIcon,
   "api-google-drive": ApiGoogleDriveIcon,
   "api-google-gmail": ApiGoogleGmailIcon,
+  "api-google-docs": ApiGoogleDocsIcon,
+  "api-google-sheets": ApiGoogleSheetsIcon,
+  "api-google-slides": ApiGoogleSlidesIcon,
   "api-google-cloud": ApiGoogleCloudIcon,
   "api-notion": ApiNotionIcon,
   "api-github": ApiGithubIcon,
@@ -153,6 +164,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-feishu": ApiFeishuIcon,
   "api-feishu-bot": ApiFeishuBotIcon,
   "api-telegram-bot": ApiTelegramBotIcon,
+  "api-supabase": ApiSupabaseIcon,
   "api-elevenlabs": ApiElevenLabsIcon,
   "api-telnyx": ApiTelnyxIcon,
   telnyx: ApiTelnyxIcon,

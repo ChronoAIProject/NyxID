@@ -169,6 +169,7 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
     assert_eq!(status, StatusCode::OK, "{listing}");
     assert_eq!(listing["services"].as_array().unwrap().len(), 1);
     assert_eq!(listing["services"][0]["id"], f.service.id);
+    assert_eq!(listing["services"][0]["slug"], f.service.slug);
     let write = json!({"base_revision": 0, "request_id": Uuid::new_v4().to_string(), "recommended_skills": ["other-publisher/manual"]});
     let (status, result) = request(&f.state, "PUT", &path, &bearer, Some(write.clone())).await;
     assert_eq!(status, StatusCode::OK, "{result}");
@@ -309,6 +310,209 @@ async fn curation_router_scoped_discovery_history_and_route_confinement() {
 }
 
 #[tokio::test]
+async fn curation_openapi_contract_is_grant_scoped_and_read_only() {
+    let f = fixture("curation_openapi_contract", true).await;
+    f.state
+        .db
+        .collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &f.service.id},
+            doc! {"$set": {"slug": "api-firecrawl", "openapi_spec_url": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+
+    let bearer = token(&f, None).await;
+    let path = format!(
+        "/api/v1/catalog-curation/services/{}/openapi.json",
+        f.service.id
+    );
+    let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["openapi"], "3.1.0");
+    assert!(
+        body["paths"]
+            .as_object()
+            .is_some_and(|paths| !paths.is_empty())
+    );
+    f.state
+        .db
+        .collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &f.service.id},
+            doc! {"$set": {"openapi_spec_url": ""}},
+        )
+        .await
+        .unwrap();
+    let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["openapi"], "3.1.0");
+
+    let other = Uuid::new_v4();
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            &format!("/api/v1/catalog-curation/services/{other}/openapi.json"),
+            &bearer,
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(&f.state, "GET", &path, &f.human_token, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn curation_openapi_contract_honors_configuration_and_service_state() {
+    use crate::services::api_docs_service::{SpecCacheTestGuard, cache_test_spec};
+
+    let _cache_guard = SpecCacheTestGuard::acquire();
+    let f = fixture("curation_openapi_configuration", true).await;
+    let bearer = token(&f, None).await;
+    let path = format!(
+        "/api/v1/catalog-curation/services/{}/openapi.json",
+        f.service.id
+    );
+    // Use a public literal IP and a seeded cache entry so validation runs
+    // without depending on DNS or making a network request.
+    let custom_url = "https://8.8.8.8/curation-test-openapi.json";
+    cache_test_spec(custom_url, None, json!({"message": "not a contract"}));
+    for (changes, expected_status) in [
+        (
+            doc! {"openapi_spec_url": custom_url},
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            doc! {"openapi_spec_url": "http://127.0.0.1/openapi.json"},
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            doc! {"openapi_spec_url": "", "slug": "no-embedded-overlay"},
+            StatusCode::NOT_FOUND,
+        ),
+        (doc! {"is_active": false}, StatusCode::NOT_FOUND),
+        (doc! {"service_type": "ssh"}, StatusCode::NOT_FOUND),
+        (doc! {"openapi_spec_url": "  "}, StatusCode::OK),
+        (
+            doc! {"openapi_spec_url": "http://localhost:3001/api/v1/catalog-specs/api-firecrawl/openapi.json"},
+            StatusCode::OK,
+        ),
+        (doc! {}, StatusCode::OK),
+    ] {
+        let mut fields = doc! {
+            "slug": "api-firecrawl",
+            "is_active": true,
+            "service_type": "http",
+            "openapi_spec_url": "http://localhost:3001/api/v1/catalog-specs/lark-bot/openapi.json",
+        };
+        fields.extend(changes.clone());
+        f.state
+            .db
+            .collection::<Document>(SERVICES)
+            .update_one(doc! {"_id": &f.service.id}, doc! {"$set": fields})
+            .await
+            .unwrap();
+        let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+        assert_eq!(status, expected_status, "{changes:?}: {body}");
+        if status == StatusCode::OK {
+            let key = if changes.is_empty() {
+                "lark-bot"
+            } else {
+                "firecrawl"
+            };
+            let expected = crate::services::catalog_spec_registry::spec_for_key(key).unwrap();
+            assert_eq!(&body, expected.as_ref());
+        }
+    }
+
+    let source_contract = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Custom operation contract", "version": "1.0"},
+        "servers": [{"url": "https://upstream.example"}],
+        "paths": {"/ping": {
+            "servers": [{"url": "https://regional.example"}],
+            "get": {"responses": {"200": {"description": "OK"}}}
+        }}
+    });
+    cache_test_spec(custom_url, None, source_contract.clone());
+    f.state
+        .db
+        .collection::<Document>(SERVICES)
+        .update_one(
+            doc! {"_id": &f.service.id},
+            doc! {"$set": {"openapi_spec_url": custom_url}},
+        )
+        .await
+        .unwrap();
+    let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, source_contract);
+
+    let write_only = token(&f, Some("catalog:skills:write")).await;
+    assert_eq!(
+        request(&f.state, "GET", &path, &write_only, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn curation_actor_persists_and_reads_recommended_skill_refs() {
+    let f = fixture("curation_skill_refs", true).await;
+    let bearer = token(&f, None).await;
+    let path = format!("/api/v1/catalog-curation/services/{}/skills", f.service.id);
+    let reference = json!({
+        "source": "ornn",
+        "skill_id": "skill-123",
+        "name": "operations/manual",
+        "version": "1.5",
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "dependencies": []
+    });
+    let (status, body) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &bearer,
+        Some(json!({
+            "base_revision": 0,
+            "request_id": Uuid::new_v4().to_string(),
+            "recommended_skill_refs": [reference.clone()]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["skills_revision"], 1);
+    assert_eq!(body["recommended_skill_refs"][0], reference);
+
+    let (status, body) = request(&f.state, "GET", &path, &bearer, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["recommended_skills"][0], "operations/manual");
+    assert_eq!(body["recommended_skill_refs"][0]["skill_id"], "skill-123");
+
+    let (status, body) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &bearer,
+        Some(json!({
+            "base_revision": 1,
+            "request_id": Uuid::new_v4().to_string(),
+            "clear_refs": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["recommended_skill_refs"].is_null());
+}
+
+#[tokio::test]
 async fn curation_grant_platform_custody_and_revoked_account_management() {
     let f = fixture("curation_custody", false).await;
     let path = format!("/api/v1/admin/service-accounts/{}", f.sa.id);
@@ -421,7 +625,8 @@ async fn curation_grant_platform_custody_and_revoked_account_management() {
             None,
             None,
             None,
-            false
+            false,
+            None
         )
         .await
         .is_err()
@@ -578,9 +783,12 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         matchers::{header, method, path},
     };
     let mut f = fixture("curation_proxy_binding", true).await;
+    // Verify NyxID propagates the SA identity and Ornn request permissions.
+    // Ornn enforces ownership and sharing against that identity downstream.
     let permission_names = vec![
         "ornn:skill:read".to_string(),
-        "ornn:skill:publish".to_string(),
+        "ornn:skill:create".to_string(),
+        "ornn:skill:update".to_string(),
     ];
     let role = crate::services::role_service::create_role(
         &f.state.db,
@@ -625,7 +833,17 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         serde_json::from_value(json!({"rules":[
             {"method":"GET","path_template":"/packages"},
             {"method":"POST","path_template":"/api/v1/skills"},
-            {"method":"PUT","path_template":"/api/v1/skills/{id}"}
+            {"method":"POST","path_template":"/api/v1/skills/pull"},
+            {"method":"POST","path_template":"/api/v1/skill-format/validate"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}/permissions"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}/source"},
+            {"method":"POST","path_template":"/api/v1/skills/{id}/refresh"},
+            {"method":"PATCH","path_template":"/api/v1/skills/{id}/versions/{version}"},
+            {"method":"GET","path_template":"/api/v1/skills/{id}/dist-tags"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}/dist-tags/{tag}"},
+            {"method":"POST","path_template":"/api/v1/skills/{id}/transfer-ownership"},
+            {"method":"PUT","path_template":"/api/v1/skills/{id}/nyxid-service"}
         ]}))
         .unwrap(),
     );
@@ -762,12 +980,66 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         .collect();
     header_permissions.sort();
     assert_eq!(header_permissions, expected_permissions);
-    for (method, path) in [
-        ("POST", "/api/v1/skills"),
-        ("PUT", "/api/v1/skills/owned-skill"),
-    ] {
+    let allowed_operations = [
+        ("POST", "/api/v1/skills", json!({})),
+        ("POST", "/api/v1/skill-format/validate", json!({})),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill",
+            json!({"isPrivate":false}),
+        ),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill",
+            json!({"isPrivate":true}),
+        ),
+        (
+            "POST",
+            "/api/v1/skills/pull",
+            json!({"repo":"example/skills"}),
+        ),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill/permissions",
+            json!({"isPrivate":true,"grants":[]}),
+        ),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill/source",
+            json!({"githubUrl":null}),
+        ),
+        (
+            "POST",
+            "/api/v1/skills/owned-skill/refresh",
+            json!({"dryRun":true}),
+        ),
+        (
+            "PATCH",
+            "/api/v1/skills/owned-skill/versions/1.0",
+            json!({"isDeprecated":true}),
+        ),
+        ("GET", "/api/v1/skills/owned-skill/dist-tags", json!({})),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill/dist-tags/stable",
+            json!({"version":"1.0"}),
+        ),
+        (
+            "POST",
+            "/api/v1/skills/owned-skill/transfer-ownership",
+            json!({"newOwnerUserId":"known-owner"}),
+        ),
+        (
+            "PUT",
+            "/api/v1/skills/owned-skill/nyxid-service",
+            json!({"nyxidServiceId":null}),
+        ),
+    ];
+    let expected_request_count = 1 + allowed_operations.len();
+    for (method, path, payload) in allowed_operations {
         Mock::given(wiremock::matchers::method(method))
             .and(wiremock::matchers::path(path))
+            .and(wiremock::matchers::body_json(&payload))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
             .expect(1)
             .mount(&catalog)
@@ -778,7 +1050,7 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
                 method,
                 &format!("/api/v1/proxy/{}{path}", f.service.id),
                 &bearer,
-                Some(json!({}))
+                Some(payload)
             )
             .await
             .0,
@@ -786,12 +1058,13 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         );
     }
     let allowed_request_count = catalog.received_requests().await.unwrap().len();
-    assert_eq!(allowed_request_count, 3);
+    assert_eq!(allowed_request_count, expected_request_count);
     for (method, path) in [
         ("POST", "/api/v1/assistant/chat"),
         ("POST", "/api/v1/skills/owned-skill/audit"),
         ("DELETE", "/api/v1/skills/owned-skill/dist-tags/stable"),
         ("DELETE", "/api/v1/skills/owned-skill"),
+        ("DELETE", "/api/v1/skills/owned-skill/versions/1.0"),
         ("PATCH", "/api/v1/skills/owned-skill"),
     ] {
         let (status, body) = request(
@@ -980,7 +1253,10 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         request(&f.state, "GET", &route, &bearer, None).await.0,
         StatusCode::FORBIDDEN
     );
-    assert_eq!(catalog.received_requests().await.unwrap().len(), 4);
+    assert_eq!(
+        catalog.received_requests().await.unwrap().len(),
+        allowed_request_count + 1
+    );
     assert_eq!(owner_endpoint.received_requests().await.unwrap().len(), 0);
 }
 
@@ -1061,6 +1337,37 @@ async fn curation_human_mixed_retry_nullable_noop_and_postcommit_oidc_repair() {
         request(&f.state, "PUT", &route, &f.human_token, Some(body.clone())).await;
     assert_eq!(status, StatusCode::OK, "{response}");
     assert_eq!(response["skills_revision"], 1);
+    // A receipt written before destination fields existed must replay after upgrade.
+    let parsed: super::services::UpdateServiceRequest =
+        serde_json::from_value(body.clone()).unwrap();
+    let skill_update = catalog_skill_service::SkillUpdate {
+        recommended_skills: parsed.recommended_skills.clone(),
+        recommended_skill_refs: parsed.recommended_skill_refs.clone(),
+        clear_refs: parsed.clear_skill_refs,
+    };
+    let mut legacy_body = serde_json::to_value(&parsed).unwrap();
+    legacy_body
+        .as_object_mut()
+        .unwrap()
+        .remove("destination_targets");
+    use sha2::Digest;
+    let legacy_fingerprint = hex::encode(sha2::Sha256::digest(
+        serde_json::to_vec(&(&f.service.id, 0_i64, skill_update, legacy_body, None::<i64>))
+            .unwrap(),
+    ));
+    f.state
+        .db
+        .collection::<Document>(OPERATIONS)
+        .update_one(
+            doc! { "request_id": &request_id },
+            doc! { "$set": { "fingerprint": legacy_fingerprint } },
+        )
+        .await
+        .unwrap();
+    let (status, replay) =
+        request(&f.state, "PUT", &route, &f.human_token, Some(body.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["skills_revision"], 1);
     let mut different = body.clone();
     different["default_request_headers"] = Value::Null;
     assert_eq!(
@@ -1073,12 +1380,15 @@ async fn curation_human_mixed_retry_nullable_noop_and_postcommit_oidc_repair() {
     for field in [
         "inference",
         "proxy_operation_policy",
+        "destination_targets",
         "byok_pricing",
         "platform_key_pricing",
         "platform_charge_nyxid_credentials_only",
     ] {
         let mut different = body.clone();
-        if matches!(field, "inference" | "proxy_operation_policy") {
+        if field == "destination_targets" {
+            different[field] = json!({});
+        } else if matches!(field, "inference" | "proxy_operation_policy") {
             different[field] = Value::Null;
         } else {
             different["billing"][field] = if field == "platform_charge_nyxid_credentials_only" {
@@ -1418,6 +1728,34 @@ async fn curation_human_create_handler_converges_on_winner_and_late_slug_receipt
     assert_eq!(a.1["recommended_skills"], json!(["one"]));
     assert_eq!(a.1["skills_revision"], 1);
     assert_eq!(a.1["credential_configured"], false);
+    // Recreate the pre-destination create receipt and retry through the HTTP handler.
+    let parsed: super::services::CreateServiceRequest =
+        serde_json::from_value(input.clone()).unwrap();
+    let mut legacy_body = serde_json::to_value(&parsed).unwrap();
+    legacy_body
+        .as_object_mut()
+        .unwrap()
+        .remove("destination_targets");
+    let legacy_fingerprint = catalog_skill_service::create_fingerprint(&legacy_body).unwrap();
+    f.state
+        .db
+        .collection::<Document>(OPERATIONS)
+        .update_one(
+            doc! { "request_id": input["skills_request_id"].as_str().unwrap() },
+            doc! { "$set": { "fingerprint": legacy_fingerprint } },
+        )
+        .await
+        .unwrap();
+    let (status, replay) = request(
+        &f.state,
+        "POST",
+        "/api/v1/services",
+        &f.human_token,
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["id"], a.1["id"]);
     for collection in [HISTORY, OPERATIONS] {
         assert_eq!(
             f.state

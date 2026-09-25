@@ -527,6 +527,7 @@ mod tests {
         let mut node = node(node_id, "owner-1");
         let expired_at = Utc::now() - chrono::Duration::seconds(1);
         node.connection_owner = Some(crate::models::node::NodeConnectionOwner {
+            http_signature_v2: false,
             instance_name: "other-backend".to_string(),
             generation_id: "generation-b".to_string(),
             connection_id: "connection-b".to_string(),

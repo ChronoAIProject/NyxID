@@ -32,12 +32,38 @@ pub use metrics::NodeMetrics;
 pub use signing::ReplayGuard;
 
 pub fn no_auth_credentials(service_slug: &str, target_url: &str) -> error::Result<CredentialStore> {
+    test_credentials(service_slug, target_url, None)
+}
+
+pub fn bearer_credentials(
+    service_slug: &str,
+    target_url: &str,
+    token: &str,
+) -> error::Result<CredentialStore> {
+    test_credentials(service_slug, target_url, Some(token))
+}
+
+fn test_credentials(
+    service_slug: &str,
+    target_url: &str,
+    token: Option<&str>,
+) -> error::Result<CredentialStore> {
     let config_dir = tempfile::tempdir()?;
     let backend = secret_backend::SecretBackend::new("file", "test-node", config_dir.path())?;
     let mut credentials = std::collections::BTreeMap::new();
     credentials.insert(
         service_slug.to_string(),
-        config::CredentialConfig::new_no_auth(Some(target_url.to_string())),
+        match token {
+            Some(token) => config::CredentialConfig::new_header(
+                "Authorization".into(),
+                Some(
+                    encryption::LocalEncryption::load_or_generate(config_dir.path())?
+                        .encrypt(&format!("Bearer {token}"))?,
+                ),
+                Some(target_url.into()),
+            ),
+            None => config::CredentialConfig::new_no_auth(Some(target_url.to_string())),
+        },
     );
     let config = config::NodeConfig {
         server: config::ServerConfig {

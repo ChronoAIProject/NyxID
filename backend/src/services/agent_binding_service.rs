@@ -173,6 +173,12 @@ async fn create_binding_with_scope_authorization_inner(
                         .ok_or_else(|| {
                             AppError::NotFound("External credential not found".to_string())
                         })?;
+                super::destination_routing::validate_override_recipient(
+                    &db,
+                    &user_service_id,
+                    &credential,
+                )
+                .await?;
                 if credential.status != "active" {
                     return Err(AppError::ValidationError(format!(
                         "credential is not active (status: {})",
@@ -198,6 +204,20 @@ async fn create_binding_with_scope_authorization_inner(
                 #[cfg(test)]
                 if let Some(hook) = collision_hook.as_ref() {
                     hook.after_reads().await;
+                }
+
+                let fenced = crate::services::service_history::mutation::fence_backing_reference(
+                    &db,
+                    USER_API_KEYS,
+                    &user_api_key_id,
+                    &user_id,
+                    &mut *session,
+                )
+                .await?;
+                if !fenced {
+                    return Err(AppError::NotFound(
+                        "External credential not found".to_string(),
+                    ));
                 }
 
                 db.collection::<AgentServiceBinding>(AGENT_BINDINGS)

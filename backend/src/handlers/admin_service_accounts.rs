@@ -32,7 +32,7 @@ pub(crate) async fn require_admin_or_owning_org_admin(
     }
 
     if sa.platform_protected
-        || sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+        || sa.purpose != crate::models::service_account::ServiceAccountPurpose::General
     {
         return Err(AppError::Forbidden(
             "Protected service accounts require platform admin".into(),
@@ -74,7 +74,7 @@ async fn require_admin_read_or_owning_org_admin(
     }
 
     if sa.platform_protected
-        || sa.purpose == crate::models::service_account::ServiceAccountPurpose::Curation
+        || sa.purpose != crate::models::service_account::ServiceAccountPurpose::General
     {
         return Err(AppError::Forbidden(
             "Protected service accounts require platform administration".into(),
@@ -126,6 +126,7 @@ pub struct ServiceAccountListQuery {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateServiceAccountRequest {
+    pub expected_access: Option<service_account_service::ExpectedAccessState>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub allowed_scopes: Option<String>,
@@ -483,6 +484,7 @@ pub async fn update_service_account(
         body.rate_limit_override,
         body.is_active,
         require_admin(&state, &auth_user).await.is_ok(),
+        body.expected_access.as_ref(),
     )
     .await?;
 
@@ -928,6 +930,7 @@ mod tests {
         .expect("create");
 
         let update_body = UpdateServiceAccountRequest {
+            expected_access: None,
             name: Some("After Update".to_string()),
             description: Some("updated desc".to_string()),
             allowed_scopes: None,

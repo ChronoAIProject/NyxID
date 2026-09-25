@@ -49,6 +49,8 @@ pub struct CreateChannelBotRequest {
 #[derive(Deserialize)]
 pub struct UpdateChannelBotRequest {
     #[serde(default)]
+    pub x_events: Option<Vec<crate::models::channel_bot::XChannelEvent>>,
+    #[serde(default)]
     pub bot_token: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
@@ -64,11 +66,20 @@ pub struct UpdateChannelBotRequest {
 
 /// Query parameters for `GET /api/v1/channel-bots`. Pass `org_id` to
 /// list bots owned by an org (caller must be admin of the target org);
-/// omit for the caller's personal bots.
+/// use `scope=user` or omit both for personal bots. `scope=all` includes personal bots
+/// and bots owned by every org the caller administers.
 #[derive(Debug, Deserialize, Default)]
 pub struct ChannelBotListQuery {
     #[serde(default)]
     pub org_id: Option<String>,
+    pub scope: Option<ChannelBotListScope>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelBotListScope {
+    All,
+    User,
 }
 
 impl std::fmt::Debug for CreateChannelBotRequest {
@@ -366,6 +377,8 @@ impl CreateChannelBotResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelConnectionState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_events: Option<Vec<crate::models::channel_bot::XChannelEvent>>,
     pub webhook_ingestion: bool,
     pub connection_id: Option<String>,
     pub poll_cursor: Option<String>,
@@ -406,6 +419,8 @@ impl ChannelConnectionState {
             _ => None,
         };
         Self {
+            x_events: (bot.platform == "x")
+                .then(|| crate::services::channel_adapters::x::selected_events(bot).to_vec()),
             webhook_ingestion: adapter.registration().webhook_ingestion
                 && (bot.credential_source != "connection" || bot.webhook_registered),
             connection_id: bot.connection_id.clone(),
@@ -553,9 +568,27 @@ pub async fn create_bot(
     tele: TelemetryContext,
     Json(body): Json<CreateChannelBotRequest>,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
-    let actor = auth_user.user_id.to_string();
-
     let adapter = resolve_adapter(&body.platform, &state.token_exchange_cache)?;
+    create_bot_with_adapter(
+        &state,
+        auth_user,
+        tele,
+        body,
+        adapter.as_ref(),
+        &crate::services::telegram_new_api::TelegramApi::new(&state.http_client),
+    )
+    .await
+}
+
+pub(crate) async fn create_bot_with_adapter(
+    state: &AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    body: CreateChannelBotRequest,
+    adapter: &dyn PlatformAdapter,
+    telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
+    let actor = auth_user.user_id.to_string();
     let descriptor = adapter.registration();
     if descriptor.managed_only {
         return Err(AppError::ValidationError(
@@ -588,7 +621,7 @@ pub async fn create_bot(
     // Resolve the effective owner. When `target_org_id` is set the bot
     // is written under the org's user_id so every admin can manage it
     // and the org-delete blocker treats it as a live org resource.
-    let owner_id = resolve_create_owner(&state, &actor, body.target_org_id.as_deref()).await?;
+    let owner_id = resolve_create_owner(state, &actor, body.target_org_id.as_deref()).await?;
 
     // Create bot: verify token, encrypt, insert in pending status
     let create_result = channel_bot_service::create_bot(
@@ -596,7 +629,7 @@ pub async fn create_bot(
         &state.config,
         &state.encryption_keys,
         &state.http_client,
-        adapter.as_ref(),
+        adapter,
         &owner_id,
         label,
         &fields,
@@ -609,21 +642,34 @@ pub async fn create_bot(
     // Build the per-bot webhook URL (platform-specific path)
     let webhook_url = channel_bot_service::webhook_url(&state.config.base_url, &create_result.bot);
 
-    // Register the webhook with the platform
-    let reg_result = channel_bot_service::register_webhook(
-        &state.db,
-        &state.http_client,
-        adapter.as_ref(),
-        &bot_id,
-        &body.bot_token,
-        &webhook_url,
-        &webhook_secret,
-    )
-    .await;
+    let reg_result = if create_result.reused {
+        channel_bot_service::verify_telegram_bot(
+            &state.db,
+            &state.encryption_keys,
+            telegram_api,
+            adapter,
+            &bot_id,
+            &owner_id,
+            &state.config.base_url,
+        )
+        .await
+        .map(|_| ())
+    } else {
+        channel_bot_service::register_webhook_with_telegram_api(
+            &state.db,
+            telegram_api,
+            adapter,
+            &bot_id,
+            &body.bot_token,
+            &webhook_url,
+            &webhook_secret,
+        )
+        .await
+    };
 
     if let Err(e) = reg_result {
         // Webhook registration failed: mark the bot as failed and return error
-        if !adapter.serializes_lifecycle() {
+        if !create_result.reused && !adapter.serializes_lifecycle() {
             let _ = channel_bot_service::mark_bot_failed(&state.db, &bot_id).await;
         }
         return Err(AppError::BadRequest(format!(
@@ -631,31 +677,41 @@ pub async fn create_bot(
         )));
     }
 
-    emit_event(
-        state.telemetry.as_deref(),
-        &auth_user.user_id.to_string(),
-        auth_user.api_key_id.as_deref(),
-        &tele,
-        TelemetryEvent::ChannelBotRegistered {
-            platform: body.platform.clone(),
-        },
-    );
+    if !create_result.reused {
+        emit_event(
+            state.telemetry.as_deref(),
+            &auth_user.user_id.to_string(),
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::ChannelBotRegistered {
+                platform: body.platform.clone(),
+            },
+        );
+    }
 
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
-        "channel_bot_created",
+        if create_result.reused {
+            "channel_bot_verified"
+        } else {
+            "channel_bot_created"
+        },
         Some(serde_json::json!({
             "bot_id": &bot_id,
             "platform": &body.platform,
-            "label": label,
+            "label": &create_result.bot.label,
             "owner_user_id": &owner_id,
             "target_org_id": body.target_org_id,
         })),
     );
 
     Ok((
-        StatusCode::CREATED,
+        if create_result.reused {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
         Json(CreateChannelBotResponse::from_bot(
             create_result.bot,
             descriptor,
@@ -740,6 +796,7 @@ pub async fn update_bot(
         &bot_id,
         &owner_id,
         crate::services::channel_bot_service::UpdateBotParams {
+            x_events: body.x_events.as_deref(),
             bot_token: body.bot_token.as_deref().map(str::trim),
             label,
             verification_token,
@@ -750,15 +807,6 @@ pub async fn update_bot(
     )
     .await?;
 
-    let conversations_count = state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
-        .count_documents(mongodb::bson::doc! {
-            "channel_bot_id": &updated.id,
-            "is_active": true,
-        })
-        .await?;
-
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -767,8 +815,32 @@ pub async fn update_bot(
             "bot_id": &updated.id,
             "platform": &updated.platform,
             "owner_user_id": &owner_id,
+            "x_events": &updated.x_events,
         })),
     );
+
+    if body.x_events.is_some() {
+        crate::services::channel_connection_webhook_service::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &updated,
+            &state.config.base_url,
+        )
+        .await?;
+        updated = channel_bot_service::get_bot(&state.db, &bot_id).await?;
+    }
+
+    let conversations_count = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .count_documents(mongodb::bson::doc! {
+            "channel_bot_id": &updated.id,
+            "is_active": true,
+        })
+        .await?;
 
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&updated);
     channel_bot_service::apply_manager_configuration_status(
@@ -826,8 +898,23 @@ pub async fn list_bots(
     Query(query): Query<ChannelBotListQuery>,
 ) -> AppResult<Json<ChannelBotListResponse>> {
     let actor = auth_user.user_id.to_string();
-    let owner_id = resolve_list_owner(&state, &actor, query.org_id.as_deref()).await?;
-    let mut bots = channel_bot_service::list_bots(&state.db, &owner_id).await?;
+    if query.scope.is_some() && query.org_id.is_some() {
+        return Err(AppError::ValidationError(
+            "scope and org_id cannot be combined".to_string(),
+        ));
+    }
+    let mut bots = match query.scope {
+        Some(ChannelBotListScope::All) => {
+            channel_bot_service::list_all_bots(&state.db, &actor).await?
+        }
+        Some(ChannelBotListScope::User) => {
+            channel_bot_service::list_bots(&state.db, &actor).await?
+        }
+        None => {
+            let owner_id = resolve_list_owner(&state, &actor, query.org_id.as_deref()).await?;
+            channel_bot_service::list_bots(&state.db, &owner_id).await?
+        }
+    };
     channel_bot_service::apply_manager_configuration_status(&state.db, &mut bots).await?;
     let total = bots.len() as u64;
     let items = bots.iter().map(bot_to_item).collect();
@@ -1208,6 +1295,182 @@ mod tests {
     use super::*;
 
     #[test]
+    fn list_scope_query_accepts_all_and_user_and_rejects_unknown_scopes() {
+        let query = Query::<ChannelBotListQuery>::try_from_uri(
+            &"/api/v1/channel-bots?scope=all".parse().unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(query.scope, Some(ChannelBotListScope::All)));
+        let query = Query::<ChannelBotListQuery>::try_from_uri(
+            &"/api/v1/channel-bots?scope=user".parse().unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(query.scope, Some(ChannelBotListScope::User)));
+        assert!(
+            Query::<ChannelBotListQuery>::try_from_uri(
+                &"/api/v1/channel-bots?scope=everyone".parse().unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_all_scopes_preserves_owner_access_and_existing_lists() {
+        use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgRole};
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+        use crate::test_utils::{
+            connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+        };
+
+        let db = connect_test_database("channel_bot_all_scopes")
+            .await
+            .unwrap();
+        let actor = uuid::Uuid::new_v4().to_string();
+        for (owner, role) in [
+            ("admin-a", OrgRole::Admin),
+            ("admin-b", OrgRole::Admin),
+            ("member", OrgRole::Member),
+            ("viewer", OrgRole::Viewer),
+            ("revoked", OrgRole::Admin),
+            ("missing-org", OrgRole::Admin),
+            ("other-person", OrgRole::Admin),
+        ] {
+            if owner != "missing-org" {
+                let user_type = if owner == "other-person" {
+                    UserType::Person
+                } else {
+                    UserType::Org
+                };
+                db.collection(USERS)
+                    .insert_one(test_user(owner, user_type))
+                    .await
+                    .unwrap();
+            }
+            let mut membership = test_membership(owner, &actor, role, None);
+            if owner == "revoked" {
+                membership.revoked_at = Some(Utc::now());
+            }
+            db.collection(MEMBERSHIPS)
+                .insert_one(membership)
+                .await
+                .unwrap();
+        }
+        let bots = db.collection::<crate::models::channel_bot::ChannelBot>(
+            crate::models::channel_bot::COLLECTION_NAME,
+        );
+        let now = Utc::now();
+        for (index, owner) in [
+            actor.as_str(),
+            "admin-a",
+            "admin-b",
+            "member",
+            "viewer",
+            "revoked",
+            "missing-org",
+            "other-person",
+            "unrelated",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut bot = make_telegram_bot();
+            bot.user_id = owner.to_string();
+            bot.created_at = now + chrono::Duration::seconds(index as i64);
+            bots.insert_one(bot).await.unwrap();
+        }
+        let mut deleted = make_telegram_bot();
+        deleted.user_id = actor.clone();
+        deleted.is_active = false;
+        bots.insert_one(deleted).await.unwrap();
+
+        let state = test_app_state(db.clone());
+        let Json(response) = list_bots(
+            State(state.clone()),
+            test_auth_user(&actor),
+            Query(ChannelBotListQuery {
+                scope: Some(ChannelBotListScope::All),
+                org_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.total, 3);
+        assert_eq!(
+            response
+                .bots
+                .iter()
+                .map(|bot| bot.user_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["admin-b", "admin-a", actor.as_str()]
+        );
+
+        for (scope, org_id) in [
+            (None, None),
+            (Some(ChannelBotListScope::User), None),
+            (None, Some("admin-a")),
+        ] {
+            let Json(response) = list_bots(
+                State(state.clone()),
+                test_auth_user(&actor),
+                Query(ChannelBotListQuery {
+                    scope,
+                    org_id: org_id.map(str::to_string),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.total, 1);
+            assert_eq!(response.bots[0].user_id, org_id.unwrap_or(&actor));
+        }
+        assert!(matches!(
+            list_bots(
+                State(state.clone()),
+                test_auth_user(&actor),
+                Query(ChannelBotListQuery {
+                    scope: None,
+                    org_id: Some("member".to_string())
+                }),
+            )
+            .await,
+            Err(AppError::OrgRoleInsufficient(_))
+        ));
+        for scope in [ChannelBotListScope::All, ChannelBotListScope::User] {
+            assert!(matches!(
+                list_bots(
+                    State(state.clone()),
+                    test_auth_user(&actor),
+                    Query(ChannelBotListQuery {
+                        scope: Some(scope),
+                        org_id: Some("admin-a".to_string())
+                    }),
+                )
+                .await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+
+        db.collection::<bson::Document>(MEMBERSHIPS)
+            .update_many(
+                bson::doc! { "member_user_id": &actor },
+                bson::doc! { "$set": { "revoked_at": bson::DateTime::now() } },
+            )
+            .await
+            .unwrap();
+        let Json(response) = list_bots(
+            State(state),
+            test_auth_user(&actor),
+            Query(ChannelBotListQuery {
+                scope: Some(ChannelBotListScope::All),
+                org_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.total, 1);
+        assert_eq!(response.bots[0].user_id, actor);
+    }
+
+    #[test]
     fn create_response_only_exposes_dashboard_verification_secrets() {
         let cache = std::sync::Arc::new(
             crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
@@ -1237,6 +1500,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),
@@ -1312,6 +1576,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            x_events: None,
             last_verification: None,
             ownership_version: 0,
             id: uuid::Uuid::new_v4().to_string(),

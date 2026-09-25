@@ -59,10 +59,28 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
     }
 }
 #[derive(Serialize)]
+pub struct AttachmentResponse {
+    id: String,
+    content_type: String,
+    size: i64,
+    label: String,
+}
+impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentResponse {
+    fn from(row: crate::models::assistant_conversation::TurnAttachment) -> Self {
+        Self {
+            id: row.id,
+            content_type: row.content_type,
+            size: row.size,
+            label: row.label,
+        }
+    }
+}
+#[derive(Serialize)]
 pub struct ActiveTurnResponse {
     turn_id: String,
     started_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
+    attachments: Vec<AttachmentResponse>,
 }
 #[derive(Serialize)]
 pub struct ConversationResponse {
@@ -87,6 +105,12 @@ impl From<AssistantConversation> for ConversationResponse {
                 .iter()
                 .cloned()
                 .map(ActivityResponse::from)
+                .collect(),
+            attachments: turn
+                .attachments
+                .iter()
+                .cloned()
+                .map(AttachmentResponse::from)
                 .collect(),
         });
         Self {
@@ -114,6 +138,7 @@ pub struct MessageResponse {
     error_code: Option<String>,
     created_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
+    attachments: Vec<AttachmentResponse>,
 }
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
@@ -130,6 +155,11 @@ impl From<AssistantMessage> for MessageResponse {
                 .activities
                 .into_iter()
                 .map(ActivityResponse::from)
+                .collect(),
+            attachments: row
+                .attachments
+                .into_iter()
+                .map(AttachmentResponse::from)
                 .collect(),
         }
     }
@@ -260,6 +290,44 @@ pub async fn history(
         messages: rows.into_iter().map(Into::into).collect(),
         before_seq,
     }))
+}
+/// An image a tool returned during one of the owner's turns. Only verified
+/// raster types are ever stored, and they are served inline with nosniff.
+pub async fn attachment(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, attachment_id)): Path<(String, String)>,
+) -> AppResult<Response> {
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    if Uuid::parse_str(&attachment_id).is_err() {
+        return Err(AppError::NotFound("Attachment not found".into()));
+    }
+    let (content_type, bytes) = engine::read_attachment(
+        &state.db,
+        &state.encryption_keys,
+        &user_id,
+        &id,
+        &attachment_id,
+    )
+    .await?;
+    let mut response = bytes.into_response();
+    let headers = response.headers_mut();
+    for (name, value) in [
+        ("content-type", content_type.as_str()),
+        ("cache-control", "private, max-age=3600"),
+        ("x-content-type-options", "nosniff"),
+        ("content-disposition", "inline"),
+        ("content-security-policy", "default-src 'none'; sandbox"),
+    ] {
+        headers.insert(
+            name,
+            value
+                .parse()
+                .map_err(|_| AppError::Internal("Invalid attachment header".into()))?,
+        );
+    }
+    Ok(response)
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
@@ -859,13 +927,26 @@ async fn execute_turn(
     )
     .await
     .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    // Cards decided while an earlier turn was still running never reached the
+    // model: NyxAgent ends a turn on a card and answers repeats locally. Report
+    // decisions made since the previous user message; a lookup failure only
+    // omits the note.
+    let decisions = match history.iter().rev().find(|message| message.role == "user") {
+        Some(previous) => {
+            acknowledgements::decided_since(&state.db, &row.user_id, &row.id, previous.created_at)
+                .await
+                .map(|rows| acknowledgements::decisions_note(&rows))
+                .unwrap_or_default()
+        }
+        None => String::new(),
+    };
     let mut binding = row.nyxagent_session_id.clone();
     let mut prompt = if binding.is_none() && row.context_reset_reason.is_some() {
         events.notice();
         engine::instructions(&history)
     } else {
         engine::SYSTEM_PROMPT.into()
-    };
+    } + &decisions;
     let mut recovery = engine::Recovery::default();
     loop {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -916,7 +997,7 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     binding = None;
-                    prompt = engine::instructions(&history);
+                    prompt = engine::instructions(&history) + &decisions;
                     events.notice();
                 }
                 RecoveryAction::ReplaceCredential => {
@@ -930,7 +1011,7 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("agent_key_required"))?;
                     binding = None;
-                    prompt = engine::instructions(&history);
+                    prompt = engine::instructions(&history) + &decisions;
                     events.notice();
                 }
                 RecoveryAction::Backoff => {

@@ -85,7 +85,53 @@ pub fn verify_request_signature(
     let query = request["query"].as_str().unwrap_or("");
     let body = request["body"].as_str().unwrap_or("");
 
-    let message = format!("{timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body}");
+    let message = match request.get("signature_version") {
+        None if request
+            .get("target_id")
+            .is_none_or(serde_json::Value::is_null) =>
+        {
+            format!("{timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body}")
+        }
+        Some(version) if version.as_u64() == Some(2) => {
+            let fields = [
+                "service_id",
+                "service_slug",
+                "target_id",
+                "base_url",
+                "method",
+                "path",
+                "timestamp",
+                "nonce",
+            ];
+            if fields
+                .iter()
+                .any(|field| request[*field].as_str().is_none_or(str::is_empty))
+            {
+                return false;
+            }
+            let origin = request["base_url"].as_str().unwrap();
+            if url::Url::parse(origin).ok().is_none_or(|url| {
+                url.scheme() != "https" || url.origin().ascii_serialization() != origin
+            }) {
+                return false;
+            }
+            serde_json::json!([
+                "nyxid-node-http.v2",
+                timestamp,
+                nonce,
+                request["service_id"],
+                request["service_slug"],
+                request["target_id"],
+                origin,
+                method,
+                path,
+                query,
+                body,
+            ])
+            .to_string()
+        }
+        _ => return false,
+    };
     verify_signature(secret_hex, expected_signature, &message)
 }
 

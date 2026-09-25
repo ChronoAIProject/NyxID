@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
-import { decryptSessionEnvelope, effortMetadata, installDomCore, pickerSnapshot, readModelSwitcher, selectModelSwitcher, switcherMatches, replaceCrashedPage } from "./worker.mjs";
+import { DOM_CORE_VERSION, decryptSessionEnvelope, effortMetadata, installDomCore, pickerSnapshot, readModelSwitcher, selectModelSwitcher, switcherMatches, replaceCrashedPage } from "./worker.mjs";
 
 const chromeExecutable = process.env.NYXID_TEST_CHROME_EXECUTABLE
   || (process.env.NYXID_TEST_BROWSER === "1" ? chromium.executablePath() : undefined);
@@ -607,7 +607,7 @@ function reasoningPage(config) {
       background: white; border: 1px solid; padding: 10px; pointer-events: auto; z-index: 10; }
     [role=menuitemradio], [role=menuitem] { display: block; padding: 6px; }
     #sidebar { position: fixed; top: 0; left: 680px; }
-  </style><header><button id="header-model" ${config.headerTestId ? 'data-testid="model-switcher-dropdown-button"' : ''} aria-haspopup="menu">${config.headerLabel || "GPT-6 Pro"}</button></header>
+  </style>${config.noHeader ? "" : `<header><button id="header-model" ${config.headerTestId ? 'data-testid="model-switcher-dropdown-button"' : ''} aria-haspopup="menu">${config.headerLabel || "GPT-6 Pro"}</button></header>`}
   ${config.sidebar ? '<nav id="sidebar" role="listbox"><button role="option" id="sidebar-pro">Pro</button></nav>' : ''}
   <main><div id="turns"></div><${region}>
   ${config.contenteditable ? '<div id="prompt-textarea" contenteditable="true"></div>' : '<textarea id="prompt-textarea"></textarea>'}
@@ -657,7 +657,8 @@ function reasoningPage(config) {
       }
       document.body.append(menu);
     };
-    document.querySelector('#header-model').onclick = () => {
+    const headerModel = document.querySelector('#header-model');
+    if (headerModel) headerModel.onclick = () => {
       record('header'); closeMenu();
       const menu = document.createElement('div'); menu.setAttribute('role', 'menu'); menu.setAttribute('data-picker-menu', '');
       for (const label of config.headerItems || ['GPT-5 Pro', 'GPT-6', 'GPT-6 Pro']) {
@@ -850,6 +851,13 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
         setTimeout(() => { void cdp.send('Page.crash').catch(() => {}); }, 200);
       }
       if (body.phase === 'selecting_model') {
+        if (!body.phase_detail && config.pillDelay) {
+          await fixture.page.evaluate(delay => {
+            const pill = document.querySelector('#pill');
+            pill.style.display = 'none';
+            setTimeout(() => { pill.style.display = ''; }, delay);
+          }, config.pillDelay);
+        }
         if (!body.phase_detail && config.slowPickerClick) {
           await fixture.page.evaluate(() => setTimeout(() => document.querySelector('#picker-blocker').remove(), 1400));
         }
@@ -899,6 +907,7 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
   const process = workerProcess(fixture, [], {
     NYXID_BASE_URL: base, NYXID_WORKER_TOKEN: token,
     NYXID_MODEL_SELECT_TIMEOUT_MS: config.selectionTimeout || (config.blockPicker ? '350' : config.neverOpens ? '1500' : '5000'),
+    NYXID_PILL_LABEL_WAIT_MS: config.pillLabelWait || '1000',
     NYXID_MAX_TASK_RECOVERY_FAILURES: config.crashAfterSend ? '3' : '1',
     // Exercise final extraction after one short stability poll, leaving CI
     // time for the real browser actions and intentional failure waits.
@@ -919,7 +928,7 @@ async function assertReasoningDelivered(fixture, { model = 'GPT-6 Pro', detail =
   if (model !== 'chatgpt-6-pro') assert.equal(fixture.results[0].observed_model_effort, effortMetadata(model));
   assert.equal(fixture.results[0].error, undefined);
   const acks = fixture.acknowledgements;
-  assert.deepEqual(acks.map(body => body.phase), ['page_ready', 'selecting_model', 'selecting_model', 'ready_to_send', 'sent']);
+  assert.deepEqual(acks.map(body => body.phase), ['page_ready', 'selecting_model', 'selecting_model', 'typing', 'ready_to_send', 'sent']);
   assert.equal(acks[2].phase_detail, detail, fixture.process.output());
   assert.equal(acks.filter(body => body.phase === 'sent').length, 1);
   const events = await fixture.page.evaluate(() => window.clickLog);
@@ -937,6 +946,19 @@ async function assertReasoningDelivered(fixture, { model = 'GPT-6 Pro', detail =
   assert.ok(acks.every(body => body.page_url === undefined));
   return events;
 }
+
+test('reasoning: no header switcher and no version radio verifies on the pill\'s own level', options, async (t) => {
+  // Some older composers offer neither control: no header switcher, and a
+  // plain labelled button instead of a __composer-pill, so the picker's items
+  // carry no checked version radio either. Family evidence is then absent
+  // rather than contradictory, and rejecting "absent" made every task on such
+  // an account fail switcher_unverified while its pill read Pro. Observed
+  // 2026-09-23 on an account rendering button[aria-label="Select ChatGPT model"].
+  const fixture = await reasoningFixture(t, {
+    contenteditable: true, noHeader: true, fallback: true, initial: 'Pro',
+  });
+  await assertReasoningDelivered(fixture);
+});
 
 test('reasoning: unrecognized structural pill selects Pro and reports the observed pill', options, async (t) => {
   const fixture = await reasoningFixture(t, { contenteditable: true });
@@ -989,6 +1011,19 @@ test('reasoning: a matching header picker outside the composer is never clicked'
   const events = await assertReasoningDelivered(fixture, { model: 'chatgpt-6-pro', detail: 'picker_unavailable' });
   assert.deepEqual(events.map(item => item.event), ['typed', 'send']);
   assert.match(fixture.process.output(), /reason=picker_unavailable .*pill_source=none pill_level=unrecognized pill_text_length=0 items=0 recognized=\[\]/);
+});
+
+test('reasoning: a delayed composer pill is selected after it becomes visible', options, async (t) => {
+  const fixture = await reasoningFixture(t, { pillDelay: 1800, pillLabelWait: '3000', strict: true });
+  await assertReasoningDelivered(fixture);
+  assert.match(fixture.process.output(), /pill_label_waits=[1-9]\d*/);
+});
+
+test('reasoning: a missing pill cannot extend the selection deadline', options, async (t) => {
+  const fixture = await reasoningFixture(t, { noPill: true, selectionTimeout: '350' });
+  const events = await assertReasoningDelivered(fixture, { model: 'chatgpt-6-pro', detail: 'timeout' });
+  assert.deepEqual(events.map(item => item.event), ['typed', 'send']);
+  assert.match(fixture.process.output(), /reason=timeout .*pill_source=none/);
 });
 
 for (const noForm of [false, true]) {
@@ -1095,7 +1130,7 @@ test('reasoning: expired page-side reads carry a deadline code instead of a Type
   assert.ok(!fixture.process.output().includes('TypeError'));
   assert.ok(!fixture.process.output().includes('reason=selection_failed'));
   assert.equal(fixture.results[0].response, 'ERROR: browser_recovery_exhausted');
-  assert.ok(fixture.process.output().includes('task reasoning-task browser failure 1/1 (composer_unobstructed_failed@selecting_model)'));
+  assert.ok(fixture.process.output().includes('task reasoning-task browser failure 1/1 (composer_unobstructed_failed@typing)'));
   assert.ok(!fixture.process.output().includes('paused for browser recovery'));
 });
 
@@ -1199,7 +1234,7 @@ test('compact model switcher: whole-label form discovery preserves scope, unique
       // Reconnecting to an older injected core must install the new adapter.
       await fixture.page.evaluate(() => { window.__nyx.version = 3; delete window.__nyx.compactModelLabel; });
       await installDomCore(fixture.page);
-      assert.equal(await fixture.page.evaluate(() => window.__nyx.version), 4);
+      assert.equal(await fixture.page.evaluate(() => window.__nyx.version), DOM_CORE_VERSION);
     }
     const observed = await readModelSwitcher(fixture.page);
     assert.equal(observed.metadata, entry.expected || 'absent', entry.name);
@@ -1450,7 +1485,7 @@ test('DOM core reinstalls after navigation or helper deletion and ignores persis
   await fixture.page.goto('https://chatgpt.com/');
   await installDomCore(fixture.page);
   await fixture.page.goto('https://chatgpt.com/c/aaaaaa-bbbbbb');
-  assert.equal(await fixture.page.evaluate(() => window.__nyx?.version), 4);
+  assert.equal(await fixture.page.evaluate(() => window.__nyx?.version), DOM_CORE_VERSION);
   await fixture.page.evaluate(() => { delete window.__nyx; });
   await installDomCore(fixture.page);
   assert.deepEqual(await fixture.page.evaluate(() => {
@@ -1475,7 +1510,7 @@ test('an actual crashed Chromium page is replaced and the helper installed in th
   assert.notEqual(replacement, fixture.page);
   assert.equal(fixture.page.isClosed(), true);
   assert.equal(runtime.pageCrashed, false);
-  assert.equal(await replacement.evaluate(() => window.__nyx.version), 4);
+  assert.equal(await replacement.evaluate(() => window.__nyx.version), DOM_CORE_VERSION);
   assert.equal(fixture.context.pages().length, 1);
 });
 
@@ -1646,7 +1681,7 @@ test('DOM core upgrades a helper installed by an older worker bundle', options, 
   const fixture = await browserFixture(t);
   await fixture.page.evaluate(() => { window.__nyx = {version:2}; });
   await installDomCore(fixture.page);
-  assert.equal(await fixture.page.evaluate(() => window.__nyx.version), 4);
+  assert.equal(await fixture.page.evaluate(() => window.__nyx.version), DOM_CORE_VERSION);
   assert.equal(await fixture.page.evaluate(() => typeof window.__nyx.finishNestedModelPicker), 'function');
   for (const [label, loggedIn] of [['GPT-7 Pro', true], ['GPT-6.1 Pro', true], ['Try GPT-7 Pro', false]]) {
     await fixture.page.setContent(`<header><button aria-haspopup="menu">${label}</button></header>`);

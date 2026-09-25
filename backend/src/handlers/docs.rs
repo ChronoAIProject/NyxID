@@ -92,7 +92,7 @@ pub async fn asyncapi_json(
     get,
     path = "/api/v1/catalog-specs/{spec_key}/openapi.json",
     params(
-        ("spec_key" = String, Path, description = "Hosted catalog spec key, e.g. firecrawl or lark-bot")
+        ("spec_key" = String, Path, description = "Hosted catalog spec key or mapped service slug, e.g. firecrawl or api-firecrawl")
     ),
     responses(
         (status = 200, description = "NyxID-hosted OpenAPI overlay with Aevatar tool annotations", content_type = "application/json"),
@@ -101,7 +101,11 @@ pub async fn asyncapi_json(
     tag = "Catalog"
 )]
 pub async fn catalog_spec_json(Path(spec_key): Path<String>) -> AppResult<Json<serde_json::Value>> {
-    let spec = crate::services::catalog_spec_registry::spec_for_key(&spec_key)
+    // Accept both the documented hosted overlay key (for example `firecrawl`)
+    // and the corresponding catalog service slug (for example
+    // `api-firecrawl`). The registry is static, so this compatibility alias
+    // cannot expose arbitrary service or user-service data.
+    let spec = crate::services::catalog_spec_registry::spec_for_key_or_slug(&spec_key)
         .ok_or_else(|| AppError::NotFound("Catalog spec not found".to_string()))?;
     Ok(Json(spec.as_ref().clone()))
 }
@@ -212,10 +216,16 @@ pub async fn service_openapi_json(
                 ));
             };
 
-            // Serialize the shared `Arc<Value>` directly into bytes so we
-            // don't deep-clone the parsed spec tree on every cache hit.
-            let spec = api_docs_service::fetch_spec_json_scoped(spec_url, &owner_id).await?;
-            let body = serde_json::to_vec(spec.as_ref())
+            let cached = api_docs_service::fetch_spec_json_scoped(spec_url, &owner_id).await?;
+            let mut spec = std::sync::Arc::unwrap_or_clone(cached);
+            api_docs_service::rewrite_openapi_servers(
+                &mut spec,
+                &format!(
+                    "{}/api/v1/proxy/{service_id}/",
+                    state.config.base_url.trim_end_matches('/')
+                ),
+            );
+            let body = serde_json::to_vec(&spec)
                 .map_err(|err| AppError::Internal(format!("serialize openapi spec: {err}")))?;
             Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
         }
@@ -390,6 +400,28 @@ mod tests {
         assert!(value["components"]["schemas"]["ApiKeyScopePlanRequest"].is_object());
         assert!(value["components"]["schemas"]["EffectiveScopePlan"].is_object());
         assert_eq!(
+            value["paths"]["/api/v1/keys/{key_id}"]["get"]["responses"]["200"]["content"]["application/json"]
+                ["schema"]["$ref"],
+            "#/components/schemas/KeyReadResponse"
+        );
+        for schema in ["KeyReadResponse", "KeyResponse", "KeyMetadataResponse"] {
+            assert!(
+                value["components"]["schemas"][schema].is_object(),
+                "{schema}"
+            );
+        }
+        assert_eq!(
+            value["components"]["schemas"]["KeyMetadataResponse"]["additionalProperties"], false,
+            "The metadata branch must reject the extra fields of an ordinary key response"
+        );
+        assert_eq!(
+            value["components"]["schemas"]["KeyReadResponse"]["oneOf"],
+            serde_json::json!([
+                {"$ref": "#/components/schemas/KeyResponse"},
+                {"$ref": "#/components/schemas/KeyMetadataResponse"}
+            ])
+        );
+        assert_eq!(
             value["components"]["securitySchemes"]["bearer_auth"]["scheme"],
             "bearer"
         );
@@ -414,6 +446,15 @@ mod tests {
             value["paths"]["/v2/search"]["post"]["x-aevatar-tool"]["name"],
             "search"
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_spec_json_accepts_catalog_slug_alias() {
+        let axum::Json(value) = catalog_spec_json(Path("api-firecrawl".to_string()))
+            .await
+            .expect("catalog slug maps to hosted overlay");
+
+        assert_eq!(value["info"]["title"], "Firecrawl API");
     }
 
     #[tokio::test]
@@ -479,9 +520,18 @@ mod tests {
             .insert_one(user_service.clone())
             .await
             .unwrap();
-        cache_test_spec(SPEC_URL, Some(&caller_id), openapi_spec());
+        let mut instance_spec = openapi_spec();
+        let outside = serde_json::json!([{"url":"https://outside.test"}]);
+        instance_spec["paths"]["/ping"]["servers"] = outside.clone();
+        instance_spec["paths"]["/ping"]["get"]["servers"] = outside;
+        cache_test_spec(SPEC_URL, Some(&caller_id), instance_spec);
 
         let state = test_app_state(db);
+        let expected_proxy = format!(
+            "{}/api/v1/proxy/{}/",
+            state.config.base_url.trim_end_matches('/'),
+            user_service.id
+        );
         let response = service_openapi_json(
             State(state),
             test_auth_user(&caller_id),
@@ -502,6 +552,10 @@ mod tests {
 
         assert_eq!(spec["openapi"], "3.1.0");
         assert!(spec["paths"]["/ping"]["get"].is_object());
+        assert_eq!(spec["servers"][0]["url"], expected_proxy);
+        assert!(spec["paths"]["/ping"].get("servers").is_none());
+        assert!(spec["paths"]["/ping"]["get"].get("servers").is_none());
+        assert!(!spec.to_string().contains("outside.test"));
     }
 
     #[tokio::test]

@@ -774,6 +774,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let sa_admin_routes = Router::new()
         .route(
+            "/{sa_id}/key-read-grant",
+            get(handlers::service_account_key_reads::get_grant)
+                .put(handlers::service_account_key_reads::issue_grant)
+                .delete(handlers::service_account_key_reads::revoke_grant),
+        )
+        .route(
             "/{sa_id}/curation-grant",
             post(handlers::admin_service_accounts::issue_curation_grant)
                 .delete(handlers::admin_service_accounts::revoke_curation_grant),
@@ -1257,11 +1263,9 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::node_agent::decline_pending_credential),
         );
 
-    // Metadata reads retain the existing service-account restriction. Writes
-    // remain in the human-only router; Axum merges methods on shared paths.
+    // These inventory reads retain the service-account restriction. Key GETs
+    // below separately check SA scope and grants. Writes stay human-only.
     let service_inventory_read_routes = Router::new()
-        .route("/keys", get(handlers::keys::list_keys))
-        .route("/keys/{key_id}", get(handlers::keys::get_key))
         .route(
             "/keys/{key_id}/authorization",
             get(handlers::keys::get_key_authorization),
@@ -1796,6 +1800,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Shared management routes; individual groups retain service-account gates.
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
+        .route("/keys", get(handlers::service_account_key_reads::list_keys))
+        .route(
+            "/keys/{key_id}",
+            get(handlers::service_account_key_reads::get_key),
+        )
         .merge(service_inventory_read_routes)
         // General API keys may discover templates without proxy scope;
         // AuthUser still rejects scheduled keys. Unlike MCP discover_services,
@@ -1875,6 +1884,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",
             post(handlers::assistant_nyxagent::decide_acknowledgement),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/attachments/{attachment_id}",
+            get(handlers::assistant_nyxagent::attachment),
         )
         .route("/wire-logs/{id}", get(handlers::assistant::get_wire_log))
         .route(
@@ -2080,11 +2093,33 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_service_account_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
+    let ownership_routes = Router::new()
+        .route(
+            "/ownership/{kind}/{id}/authorization",
+            get(handlers::admin_ownership::authorization),
+        )
+        .route(
+            "/ownership/{kind}/{id}/destinations",
+            get(handlers::admin_ownership::destinations),
+        )
+        .route(
+            "/ownership/{kind}/{id}/preview",
+            post(handlers::admin_ownership::preview),
+        )
+        .route(
+            "/ownership/{kind}/{id}/transfer",
+            post(handlers::admin_ownership::transfer),
+        )
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
     let api_v1 = api_v1_public
         .nest("/catalog-curation", handlers::catalog_curation::router())
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
-        .merge(api_v1_human_only);
+        .merge(api_v1_human_only)
+        .merge(ownership_routes);
 
     let well_known_routes = Router::new()
         .route(

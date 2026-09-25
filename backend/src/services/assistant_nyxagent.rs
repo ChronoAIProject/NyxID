@@ -266,6 +266,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             false,
         ),
         (MESSAGES, doc! {"conversation_id": 1, "seq": 1}, true),
+        (
+            crate::models::assistant_attachment::COLLECTION_NAME,
+            doc! {"conversation_id": 1, "user_id": 1},
+            false,
+        ),
     ] {
         db.collection::<bson::Document>(collection)
             .create_index(
@@ -490,6 +495,7 @@ pub async fn begin_turn(
                         error_code: Some("turn_lost".into()),
                         created_at: now,
                         activities: Vec::new(),
+                        attachments: Vec::new(),
                     };
                     db.collection::<AssistantMessage>(MESSAGES)
                         .insert_one(message)
@@ -511,6 +517,7 @@ pub async fn begin_turn(
                     started_at: now,
                     stop_requested: false,
                     activities: Vec::new(),
+                    attachments: Vec::new(),
                 });
                 row.updated_at = now;
                 row.message_count += 1;
@@ -534,6 +541,7 @@ pub async fn begin_turn(
                     error_code: None,
                     created_at: now,
                     activities: Vec::new(),
+                    attachments: Vec::new(),
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -706,6 +714,11 @@ pub async fn finish_turn(
                         activity
                     })
                     .collect();
+                let attachments = current
+                    .active_turn
+                    .as_ref()
+                    .map(|turn| turn.attachments.clone())
+                    .unwrap_or_default();
                 let now = current.context_reset_at.map_or_else(Utc::now, |reset_at| {
                     Utc::now().max(reset_at + chrono::Duration::milliseconds(1))
                 });
@@ -759,6 +772,7 @@ pub async fn finish_turn(
                     error_code: error.as_ref().map(|e| e.code.into()),
                     created_at: now,
                     activities,
+                    attachments,
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -834,6 +848,110 @@ pub async fn pending_approvals(
             agent_key_prefix: key.key_prefix.clone(),
         })
         .collect())
+}
+
+pub const MAX_TURN_ATTACHMENTS: usize = 8;
+
+/// Store an image a chat-key tool call returned and link it to the live turn.
+/// Returns `None` when no turn is live or the turn already holds the maximum.
+pub async fn attach_image(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    user_id: &str,
+    conversation_id: &str,
+    label: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> AppResult<Option<crate::models::assistant_conversation::TurnAttachment>> {
+    use crate::models::{
+        assistant_attachment::{AssistantAttachment, COLLECTION_NAME as ATTACHMENTS},
+        assistant_conversation::TurnAttachment,
+    };
+    let meta = TurnAttachment {
+        id: Uuid::new_v4().to_string(),
+        content_type: content_type.to_owned(),
+        size: bytes.len() as i64,
+        label: label.chars().take(MAX_ACTIVITY_LABEL_CHARS).collect(),
+    };
+    let entry = bson::to_bson(&meta)
+        .map_err(|_| AppError::Internal("Failed to encode attachment".into()))?;
+    let mut filter = doc! {
+        "_id": conversation_id,
+        "user_id": user_id,
+        "active_turn.turn_id": {"$exists": true},
+    };
+    // The last permitted index must still be free.
+    filter.insert(
+        format!("active_turn.attachments.{}", MAX_TURN_ATTACHMENTS - 1),
+        doc! {"$exists": false},
+    );
+    // Claim a slot first so nothing is encrypted or stored without a live turn.
+    let claimed = db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find_one_and_update(filter, doc! {"$push": {"active_turn.attachments": entry}})
+        .projection(doc! {"active_turn.turn_id": 1})
+        .await?;
+    let Some(turn_id) = claimed.as_ref().and_then(|row| {
+        row.get_document("active_turn")
+            .ok()
+            .and_then(|turn| turn.get_str("turn_id").ok())
+            .map(str::to_owned)
+    }) else {
+        return Ok(None);
+    };
+    let stored = async {
+        let data_encrypted = keys.encrypt(bytes).await?;
+        db.collection::<AssistantAttachment>(ATTACHMENTS)
+            .insert_one(AssistantAttachment {
+                id: meta.id.clone(),
+                user_id: user_id.to_owned(),
+                conversation_id: conversation_id.to_owned(),
+                turn_id,
+                content_type: meta.content_type.clone(),
+                size: meta.size,
+                data_encrypted,
+                created_at: Utc::now(),
+            })
+            .await?;
+        AppResult::Ok(())
+    }
+    .await;
+    if let Err(error) = stored {
+        let _ = db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id": conversation_id, "user_id": user_id},
+                doc! {"$pull": {"active_turn.attachments": {"id": &meta.id}}},
+            )
+            .await;
+        return Err(error);
+    }
+    Ok(Some(meta))
+}
+
+/// Decrypt an attachment for its owner. Other owners and conversations are not found.
+pub async fn read_attachment(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    user_id: &str,
+    conversation_id: &str,
+    attachment_id: &str,
+) -> AppResult<(String, Vec<u8>)> {
+    use crate::models::assistant_attachment::{
+        AssistantAttachment, COLLECTION_NAME as ATTACHMENTS,
+    };
+    get(db, user_id, conversation_id).await?;
+    let row = db
+        .collection::<AssistantAttachment>(ATTACHMENTS)
+        .find_one(doc! {
+            "_id": attachment_id,
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+        })
+        .await?
+        .ok_or_else(not_found)?;
+    let bytes = keys.decrypt(&row.data_encrypted).await?;
+    Ok((row.content_type, bytes))
 }
 
 pub const MAX_TURN_ACTIVITIES: i64 = 40;
@@ -988,6 +1106,12 @@ pub async fn delete(db: &Database, user_id: &str, id: &str) -> AppResult<Assista
                 };
                 db.collection::<bson::Document>(
                     crate::models::assistant_acknowledgement::COLLECTION_NAME,
+                )
+                .delete_many(doc! {"conversation_id": id, "user_id": user_id})
+                .session(&mut *session)
+                .await?;
+                db.collection::<bson::Document>(
+                    crate::models::assistant_attachment::COLLECTION_NAME,
                 )
                 .delete_many(doc! {"conversation_id": id, "user_id": user_id})
                 .session(&mut *session)

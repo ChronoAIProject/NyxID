@@ -151,6 +151,8 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
     service.inject_delegation_token = false;
 
     proxy_service::ProxyTarget {
+        workspace_destinations_pending: false,
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method: "none".to_string(),
         auth_key_name: String::new(),
@@ -277,6 +279,7 @@ mod tests {
 
     fn service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             owner_user_id: None,
             recommended_skill_refs: None,
             skills_revision: 0,
@@ -413,6 +416,7 @@ mod tests {
         /// single enabled `GET /public/**` anonymous rule with `daily_quota`.
         fn public_service(slug: &str, base_url: &str, daily_quota: u32) -> DownstreamService {
             DownstreamService {
+                destination_targets: Default::default(),
                 owner_user_id: None,
                 recommended_skill_refs: None,
                 skills_revision: 0,
