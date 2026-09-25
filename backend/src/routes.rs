@@ -966,6 +966,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
         .route("/usage", get(handlers::admin_usage::get_usage))
+        .route(
+            "/usage/analytics",
+            get(handlers::admin_usage::get_analytics),
+        )
+        .route(
+            "/usage/workspace",
+            get(handlers::admin_usage::get_workspace).put(handlers::admin_usage::save_workspace),
+        )
         .route("/audit-log/verify", get(handlers::admin::verify_audit_log))
         .route(
             "/billing-ledger/verify",
