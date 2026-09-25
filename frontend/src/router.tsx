@@ -22,6 +22,7 @@ import { AppRouteError } from "@/components/shared/app-route-error";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
+import { billingSearchSchema } from "@/schemas/billing";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite, hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
@@ -723,6 +724,7 @@ const keysRoute = createRoute({
 const billingRoute = createRoute({
   path: "/billing",
   getParentRoute: () => dashboardLayout,
+  validateSearch: (search: Record<string, unknown>) => billingSearchSchema.parse(search),
   beforeLoad: () => {
     const { isLoading, user } = useAuthStore.getState();
     if (shouldRedirectFromBilling({ isLoading, user })) {

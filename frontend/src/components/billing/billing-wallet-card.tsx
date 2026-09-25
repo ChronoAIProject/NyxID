@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   ChevronDown,
   ExternalLink,
@@ -33,6 +33,7 @@ const DEFAULT_TOP_UP_CREDITS = 100;
 const TOP_UP_PRESETS = [100, 500, 1_000, 5_000] as const;
 
 interface BillingWalletCardProps {
+  readonly titleHelp?: ReactNode;
   readonly wallet: BillingWalletResponse | undefined;
   readonly loading: boolean;
   readonly unavailable: boolean;
@@ -46,6 +47,7 @@ interface BillingWalletCardProps {
 }
 
 export function BillingWalletCard({
+  titleHelp,
   wallet,
   loading,
   unavailable,
@@ -101,7 +103,9 @@ export function BillingWalletCard({
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
-        <CardTitle>Wallet</CardTitle>
+        <CardTitle className="flex items-center gap-1.5">
+          Wallet{titleHelp}
+        </CardTitle>
         {wallet.suspended && <Badge variant="destructive">Suspended</Badge>}
       </CardHeader>
       <CardContent>
@@ -111,24 +115,26 @@ export function BillingWalletCard({
               <span className="text-[11px] text-muted-foreground">
                 Available
               </span>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label="What available credits means"
-                    className="text-text-tertiary transition-colors hover:text-foreground"
+              {!titleHelp && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label="What available credits means"
+                      className="text-text-tertiary transition-colors hover:text-foreground"
+                    >
+                      <Info className="h-3 w-3" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="top"
+                    className="max-w-[260px] leading-relaxed"
                   >
-                    <Info className="h-3 w-3" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent
-                  side="top"
-                  className="max-w-[260px] leading-relaxed"
-                >
-                  Credits spendable now after in-flight requests, unsettled
-                  usage, and purchased-credit expiry holds. 1 credit is 1 USD.
-                </TooltipContent>
-              </Tooltip>
+                    Credits spendable now after in-flight requests, unsettled
+                    usage, and purchased-credit expiry holds. 1 credit is 1 USD.
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </div>
             <div className="mt-1 truncate text-[28px] font-semibold leading-tight">
               {formatCredits(wallet.available_credits)}
