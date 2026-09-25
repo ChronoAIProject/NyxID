@@ -8,7 +8,7 @@ on:
     # `main` is intentionally not listed here -- pushes to main are gated
     # through publish-images.yml, which calls this workflow via workflow_call.
     # Listing main twice would cause CI to run on every merge commit twice.
-    branches: [dev]
+    branches: [dev, 'rollup-*']
   # Allow other workflows (publish-images, release) to reuse this one as a
   # gate via `uses: ./.github/workflows/ci.yml`. Callers should pass
   # `force-all: true` to skip path filtering and run the full suite as a
