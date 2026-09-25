@@ -14,6 +14,7 @@ export function OrgServiceAccountDetailPage() {
       saId={saId}
       backTo={{ to: orgPath, label: orgLabel }}
       showProviderSections={false}
+      showKeyReadGrantSection
     />
   );
 }

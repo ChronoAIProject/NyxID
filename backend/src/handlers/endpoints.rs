@@ -11,7 +11,7 @@ use crate::mw::auth::AuthUser;
 use crate::services::service_endpoint_service::{
     EndpointInput, EndpointUpdate, validate_request_content_type, validate_response_contract,
 };
-use crate::services::{catalog_spec_sync, openapi_parser, service_endpoint_service};
+use crate::services::{openapi_parser, service_endpoint_service};
 
 use super::services_helpers::{fetch_service, require_admin_or_creator, require_http_service};
 
@@ -19,6 +19,7 @@ use super::services_helpers::{fetch_service, require_admin_or_creator, require_h
 
 #[derive(Debug, Deserialize)]
 pub struct CreateEndpointRequest {
+    pub target_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub method: String,
@@ -35,16 +36,45 @@ pub struct CreateEndpointRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateEndpointRequest {
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub target_id: Option<Option<String>>,
     pub name: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub description: Option<Option<String>>,
     pub method: Option<String>,
     pub path: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub parameters: Option<Option<serde_json::Value>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub request_body_schema: Option<Option<serde_json::Value>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub request_content_type: Option<Option<String>>,
     pub request_body_required: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub response_description: Option<Option<String>>,
     pub response: Option<OperationResponseContract>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
     pub risk: Option<Option<EndpointRisk>>,
     pub supports_idempotency_key: Option<bool>,
     pub is_active: Option<bool>,
@@ -52,6 +82,8 @@ pub struct UpdateEndpointRequest {
 
 #[derive(Debug, Serialize)]
 pub struct EndpointResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
     pub id: String,
     pub service_id: String,
     pub name: String,
@@ -144,6 +176,7 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
     let request_body_required = e.effective_request_body_required();
 
     EndpointResponse {
+        target_id: e.target_id,
         id: e.id,
         service_id: e.service_id,
         name: e.name,
@@ -195,12 +228,7 @@ pub async fn create_endpoint(
 ) -> AppResult<Json<EndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
-    if catalog_spec_sync::is_platform_vendor_service(&service) {
-        return Err(AppError::BadRequest(
-            "Platform vendor rows cannot publish endpoint tools".to_string(),
-        ));
-    }
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     validate_endpoint_name(&body.name)?;
     validate_method(&body.method)?;
@@ -213,6 +241,7 @@ pub async fn create_endpoint(
     }
 
     let input = EndpointInput {
+        target_id: body.target_id,
         request_body_required: body
             .request_body_required
             .unwrap_or(body.request_body_schema.is_some() || body.request_content_type.is_some()),
@@ -252,12 +281,7 @@ pub async fn update_endpoint(
 ) -> AppResult<Json<serde_json::Value>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
-    if catalog_spec_sync::is_platform_vendor_service(&service) {
-        return Err(AppError::BadRequest(
-            "Platform vendor rows cannot publish endpoint tools".to_string(),
-        ));
-    }
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     if let Some(ref name) = body.name {
         validate_endpoint_name(name)?;
@@ -276,6 +300,7 @@ pub async fn update_endpoint(
     }
 
     let updates = EndpointUpdate {
+        target_id: body.target_id,
         name: body.name,
         description: body.description,
         method: body.method,
@@ -314,7 +339,7 @@ pub async fn delete_endpoint(
 ) -> AppResult<Json<DeleteEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     service_endpoint_service::delete_endpoint(&state.db, &service_id, &endpoint_id).await?;
 
@@ -341,12 +366,7 @@ pub async fn discover_endpoints(
 ) -> AppResult<Json<DiscoverEndpointsResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
-    if catalog_spec_sync::is_platform_vendor_service(&service) {
-        return Err(AppError::BadRequest(
-            "Platform vendor rows cannot publish endpoint tools".to_string(),
-        ));
-    }
+    require_admin_or_creator(&state, &auth_user, &service).await?;
 
     let api_spec_url = service.openapi_spec_url.ok_or_else(|| {
         AppError::BadRequest("Service has no openapi_spec_url configured".to_string())
@@ -364,6 +384,7 @@ pub async fn discover_endpoints(
     let inputs: Vec<EndpointInput> = parsed
         .into_iter()
         .map(|p| EndpointInput {
+            target_id: None,
             name: p.name,
             description: p.description,
             method: p.method,
@@ -411,6 +432,25 @@ mod tests {
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
 
     #[test]
+    fn endpoint_update_distinguishes_omitted_and_cleared_fields() {
+        let unchanged: UpdateEndpointRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(unchanged.description.is_none());
+        assert!(unchanged.parameters.is_none());
+        let cleared: UpdateEndpointRequest = serde_json::from_value(serde_json::json!({
+            "description": null, "parameters": null, "request_body_schema": null,
+            "request_content_type": null, "response_description": null, "risk": null
+        }))
+        .unwrap();
+        assert_eq!(cleared.description, Some(None));
+        assert_eq!(cleared.parameters, Some(None));
+        assert_eq!(cleared.request_body_schema, Some(None));
+        assert_eq!(cleared.request_content_type, Some(None));
+        assert_eq!(cleared.response_description, Some(None));
+        assert!(matches!(cleared.risk, Some(None)));
+    }
+
+    #[test]
     fn validate_request_content_type_accepts_valid_values() {
         validate_request_content_type("application/zip").expect("zip should be valid");
         validate_request_content_type("application/json; charset=utf-8")
@@ -445,6 +485,7 @@ mod tests {
     #[test]
     fn endpoint_to_response_uses_effective_request_body_required() {
         let endpoint = ServiceEndpoint {
+            target_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
             name: "list_users".to_string(),
@@ -488,6 +529,7 @@ mod tests {
             &db,
             &other_service_id,
             EndpointInput {
+                target_id: None,
                 name: "other_endpoint".to_string(),
                 description: None,
                 method: "GET".to_string(),
@@ -511,6 +553,7 @@ mod tests {
             test_auth_user(&owner_id),
             Path((route_service.id.clone(), endpoint.id.clone())),
             Json(UpdateEndpointRequest {
+                target_id: None,
                 name: None,
                 description: None,
                 method: None,

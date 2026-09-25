@@ -18,6 +18,19 @@ const BASE: ChatMessage = {
 describe("canonical chat presentation", () => {
   afterEach(() => vi.useRealTimers());
 
+  it("renders an inline context reset as a system note without assistant controls", () => {
+    const content = "Conversation context was reset; the assistant was given a recap of this chat.";
+    render(<ChatMessageEntry message={{
+      ...BASE,
+      id: "nyxagent-context-reset:conversation",
+      role: "system",
+      content,
+    }} />);
+    expect(screen.getByRole("note", { name: "Conversation context reset" }))
+      .toHaveTextContent(content);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+
   it("composes reasoning, actions, sanitized Markdown, and an error", () => {
     const { container } = render(
       <ChatMessageBubble
@@ -71,6 +84,62 @@ describe("canonical chat presentation", () => {
     expect(container.querySelector("[data-assistant-halo]")).toBeNull();
     expect(container.querySelector("[data-streaming-dots]")).toBeNull();
     expect(container.querySelector("[data-streaming-caret]")).not.toBeNull();
+  });
+
+  it("names the running tool beside the streaming dots until text arrives", () => {
+    const running = {
+      ...BASE,
+      content: "",
+      status: "streaming",
+      toolCalls: [
+        { id: "t1", name: "nyx__search_tools", status: "done" as const, startedAt: 1, finishedAt: 2 },
+        { id: "t2", name: "github__list_issues", status: "running" as const, startedAt: 2 },
+      ],
+    };
+    const { container, rerender } = render(<ChatMessageBubble message={running} />);
+    expect(container.querySelector("[data-running-tool]")).toHaveTextContent("github__list_issues");
+    expect(screen.getByRole("button", { name: /2 actions/i })).toBeVisible();
+    rerender(<ChatMessageBubble message={{ ...running, content: "Found 3 issues" }} />);
+    expect(container.querySelector("[data-running-tool]")).toBeNull();
+    rerender(<ChatMessageBubble message={{ ...running, status: "complete" }} />);
+    expect(container.querySelector("[data-running-tool]")).toBeNull();
+  });
+
+  it("renders tool images from the authenticated client and reports failures", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const seen: string[] = [];
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      seen.push(endpoint);
+      return endpoint.endsWith("/missing")
+        ? new Response(JSON.stringify({ message: "Attachment not found" }), { status: 404 })
+        : new Response(png, { headers: { "content-type": "image/png" } });
+    };
+    const createObjectURL = vi.fn(() => "blob:tool-image");
+    const revokeObjectURL = vi.fn();
+    const original = { createObjectURL: URL.createObjectURL, revokeObjectURL: URL.revokeObjectURL };
+    Object.assign(URL, { createObjectURL, revokeObjectURL });
+    const image = (id: string) => ({
+      id,
+      endpoint: `/assistant/nyxagent/conversations/c/attachments/${id}`,
+      contentType: "image/png",
+      label: "lobby-camera__snapshot",
+    });
+    const { unmount } = render(
+      <ChatMessageBubble
+        message={{ ...BASE, content: "Here is the lobby.", images: [image("ok"), image("missing")] }}
+      />,
+    );
+    const img = await screen.findByRole("img", { name: "Image from lobby-camera__snapshot" });
+    expect(img).toHaveAttribute("src", "blob:tool-image");
+    expect(await screen.findByText("Image unavailable")).toBeVisible();
+    expect(seen).toEqual([
+      "/assistant/nyxagent/conversations/c/attachments/ok",
+      "/assistant/nyxagent/conversations/c/attachments/missing",
+    ]);
+    unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:tool-image");
+    Object.assign(URL, original);
+    globalThis.__nyxidAssistantHttpMock = undefined;
   });
 
   it("does not render accumulator approval or workflow intervention cards", () => {

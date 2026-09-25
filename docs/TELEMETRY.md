@@ -600,6 +600,8 @@ async fn main() -> ExitCode {
 
 ### 6.5 Part 2 Leftovers
 
+`channel.reply_sent` also covers agent-initiated messages from `POST /api/v1/channel-relay/send`, with `reply_mode: "initiated"` (anchored replies retain `"async"`). Both use `should_sample_event` at 10%, keyed by `hash_conversation_id`; `agent_api_key_id` is hashed. A replayed idempotency receipt emits no second send event. Events represent platform acceptance, not recipient delivery or reading, and never include text or platform metadata bodies.
+
 Events and sites defined in the §6 schema that Part 2 could not deliver
 cleanly without modifying production code paths beyond telemetry. Kept
 here as a punch list for follow-up work. Each follow-up lands in its own

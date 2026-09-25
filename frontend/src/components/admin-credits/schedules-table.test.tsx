@@ -95,3 +95,31 @@ describe("SchedulesTable", () => {
     expect(screen.getByText("2 skipped periods")).toBeInTheDocument();
   });
 });
+
+it.each([
+  [
+    "org_members",
+    "3 organizations · members",
+    { target_org_ids: ["a", "b", "c"] },
+  ],
+  ["groups", "2 groups · members", { target_group_ids: ["a", "b"] }],
+] as const)("labels %s schedule recipients", (kind, label, targets) => {
+  render(
+    <SchedulesTable
+      schedules={[
+        schedule({
+          target_kind: kind,
+          target_org_ids:
+            "target_org_ids" in targets ? [...targets.target_org_ids] : [],
+          target_group_ids:
+            "target_group_ids" in targets ? [...targets.target_group_ids] : [],
+        }),
+      ]}
+      canWrite={false}
+      updatePending={false}
+      onEdit={vi.fn()}
+      onToggle={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(label)).toBeInTheDocument();
+});

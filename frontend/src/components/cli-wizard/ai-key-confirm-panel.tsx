@@ -561,12 +561,15 @@ type CustomAuthMethod =
   | "basic"
   | "body"
   | "bot_bearer"
+  | "ifttt_webhook"
   | "none";
 
 /** Sensible default auth-key-name per method. Mirrors the CLI's
  *  `default_auth_key_name` in `cli/src/commands/service.rs:1437`. */
 function defaultAuthKeyName(method: CustomAuthMethod): string {
   switch (method) {
+    case "ifttt_webhook":
+      return "";
     case "header":
       return "X-API-Key";
     case "query":
@@ -591,6 +594,7 @@ function coerceAuthMethod(raw: string | undefined): CustomAuthMethod {
     case "path":
     case "basic":
     case "body":
+    case "ifttt_webhook":
     case "bot_bearer":
     case "none":
       return raw;
@@ -807,6 +811,7 @@ function CustomServiceForm({
             <option value="header">header (custom header)</option>
             <option value="query">query (?key=…)</option>
             <option value="path">path (path-prefix injection)</option>
+            <option value="ifttt_webhook">IFTTT Webhooks (raw key)</option>
             <option value="basic">basic (Authorization: Basic …)</option>
             <option value="body">body (JSON-body field injection)</option>
             <option value="none">none (no auth injection)</option>
@@ -1193,6 +1198,7 @@ function CatalogConfirmForm({
   }
 
   const needsCredentialInput = shape === "api-key" && entry.requires_credential;
+  const isSupabase = entry.slug === "api-supabase";
   const submitLabel = (() => {
     if (loading) return "Creating...";
     if (viaNode) return "Connect via node";
@@ -1263,20 +1269,30 @@ function CatalogConfirmForm({
         </Field>
 
         {!usePlatformKey && entry.requires_gateway_url ? (
-          <Field label="Instance URL" htmlFor="pair-aikey-url">
+          <Field
+            label={isSupabase ? "Supabase Project URL" : "Instance URL"}
+            htmlFor="pair-aikey-url"
+          >
             <Input
               id="pair-aikey-url"
               value={endpointUrl}
               onChange={(e) => {
                 setEndpointUrl(e.target.value);
               }}
-              placeholder="https://your-instance.example.com"
+              placeholder={
+                isSupabase
+                  ? "https://project-ref.supabase.co"
+                  : "https://your-instance.example.com"
+              }
             />
           </Field>
         ) : null}
 
         {needsCredentialInput && !viaNode ? (
-          <Field label="API key" htmlFor="pair-aikey-credential">
+          <Field
+            label={isSupabase ? "Supabase API key" : "API key"}
+            htmlFor="pair-aikey-credential"
+          >
             <Input
               id="pair-aikey-credential"
               type="password"
@@ -1285,7 +1301,9 @@ function CatalogConfirmForm({
               onChange={(e) => {
                 setCredential(e.target.value);
               }}
-              placeholder="sk-..."
+              placeholder={
+                isSupabase ? "sb_secret_... or sb_publishable_..." : "sk-..."
+              }
             />
             {entry.api_key_url ? (
               <a

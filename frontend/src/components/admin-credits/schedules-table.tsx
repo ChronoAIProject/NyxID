@@ -1,3 +1,4 @@
+import { billingTargetLabel } from "@/lib/billing-targets";
 import { AlertTriangle, Pencil } from "lucide-react";
 import type {
   CreditExpiryPolicy,
@@ -60,11 +61,7 @@ export function SchedulesTable({
               </TableCell>
               <TableCell>{expiryLabel(schedule.expiry)}</TableCell>
               <TableCell>
-                <div>
-                  {schedule.target_kind === "all_users"
-                    ? "All owners"
-                    : `${String(schedule.target_user_ids.length)} selected`}
-                </div>
+                <div>{billingTargetLabel(schedule)}</div>
                 <RolloutSummary schedule={schedule} />
               </TableCell>
               <TableCell>

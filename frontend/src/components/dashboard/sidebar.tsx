@@ -17,6 +17,7 @@ import {
   WalletCards,
   Coins,
   ClipboardList,
+  ChartNoAxesCombined,
   Lock,
   Sparkles,
   Building2,
@@ -30,7 +31,6 @@ import {
   Circle,
   QrCode,
   Webhook,
-  WandSparkles,
 } from "lucide-react";
 import {
   Popover,
@@ -78,18 +78,15 @@ export const ADMIN_NAV = [
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
   { to: "/admin/platform-credentials", icon: KeyRound, label: "Platform Credentials" },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
+  { to: "/admin/usage", icon: ChartNoAxesCombined, label: "Usage" },
   { to: "/admin/integrity", icon: ShieldCheck, label: "Integrity" },
-  {
-    to: "/admin/platform-ops",
-    icon: WandSparkles,
-    label: "Platform Operations",
-  },
   { to: "/admin/credits", icon: Coins, label: "Credits" },
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/oauth-clients", icon: KeyRound, label: "OAuth Clients" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
   { to: "/admin/groups", icon: Layers, label: "Groups" },
   { to: "/admin/nodes", icon: HardDrive, label: "Node Registry" },
+  { to: "/admin/ownership", icon: Server, label: "Ownership transfers" },
   { to: "/services", icon: Server, label: "Services" },
   { to: "/providers", icon: Plug, label: "Providers" },
 ] as const;
@@ -113,7 +110,7 @@ function getVisibleAdminNav(
 ): readonly NavItemDef[] {
   return ADMIN_NAV.filter(
     (item) =>
-      !["/admin/platform-ops", "/admin/platform-credentials"].includes(item.to) || canAdminWrite(user),
+      !["/admin/platform-credentials", "/admin/ownership"].includes(item.to) || canAdminWrite(user),
   );
 }
 

@@ -167,10 +167,22 @@ pub struct ProxyOperationPolicy {
     pub rules: Vec<ProxyOperationRule>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ProxyOperationRule {
     pub method: String,
     pub path_template: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    /// Explicit value grammars for parameters that contain path punctuation.
+    /// Omit empty maps to preserve existing policy and approval digest bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub path_parameter_constraints: std::collections::BTreeMap<String, ProxyPathConstraint>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyPathConstraint {
+    SheetsA1Range,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -205,6 +217,8 @@ pub struct DownstreamService {
     /// Base URL of the downstream service.
     /// For SSH services this is derived as `ssh://host:port`.
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub destination_targets: std::collections::BTreeMap<String, String>,
     /// "http" | "ssh"
     #[serde(default = "default_service_type")]
     pub service_type: String,
@@ -273,6 +287,10 @@ pub struct DownstreamService {
 
     pub is_active: bool,
     pub created_by: String,
+    /// Current catalog owner after an administrative transfer. Legacy rows use
+    /// `created_by`; creator attribution is never rewritten by a transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
 
     // --- Identity propagation config ---
     /// "none" | "headers" | "jwt" | "both"
@@ -343,6 +361,11 @@ pub struct DownstreamService {
     /// Relevant skill names/paths for AI tools (e.g., "nyxid/ornn", "ornn/authoring")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
+
+    #[serde(default)]
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    #[serde(default)]
+    pub skills_revision: i64,
 
     /// Custom User-Agent header to send to the downstream service.
     /// When set, overrides the client's User-Agent instead of forwarding it.
@@ -460,6 +483,10 @@ pub mod test_helpers {
     /// valid struct but don't care about specific field values.
     pub fn dummy_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "test-id".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),
@@ -561,6 +588,10 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = DownstreamService {
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Test Service".to_string(),
             slug: "test-service".to_string(),
@@ -645,6 +676,10 @@ mod tests {
         // Serialize a full struct, then remove default fields from the doc,
         // and verify they get their defaults on deserialization.
         let svc = DownstreamService {
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "test-id".to_string(),
             name: "Svc".to_string(),
             slug: "svc".to_string(),

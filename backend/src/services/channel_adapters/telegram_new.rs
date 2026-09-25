@@ -1,16 +1,30 @@
 use super::telegram::TelegramAdapter;
+use crate::services::channel_platform::{FetchedMedia, MediaCapabilities};
+
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_managed::{PlatformCredentialDescriptor, PlatformCredentialField};
 use crate::services::channel_platform::{
-    BotCredentials, BotIdentity, InboundMessage, OutboundReply, PlatformAdapter,
+    BotCredentials, BotIdentity, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
     PlatformVerifySecrets, RegistrationDescriptor, RegistrationValues,
 };
 
 pub const PLATFORM: &str = "telegram-new";
 pub const MANAGER_TOKEN: &str = "manager_bot_token";
 
-pub struct TelegramNewAdapter;
+#[derive(Default)]
+pub struct TelegramNewAdapter {
+    transport: TelegramAdapter,
+}
+
+impl TelegramNewAdapter {
+    #[cfg(test)]
+    pub(super) fn media_test_adapter(base: &str) -> Self {
+        Self {
+            transport: TelegramAdapter::media_test_adapter(base),
+        }
+    }
+}
 
 pub fn credential_descriptor() -> PlatformCredentialDescriptor {
     PlatformCredentialDescriptor {
@@ -36,6 +50,17 @@ pub fn credential_descriptor() -> PlatformCredentialDescriptor {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for TelegramNewAdapter {
+    fn display_name(&self) -> &str {
+        "Telegram"
+    }
+    fn media_capabilities(&self) -> MediaCapabilities {
+        MediaCapabilities::ALL
+    }
+    /// Delegates message_thread_id and reply handling to the Telegram transport.
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        self.transport.outbound_capabilities()
+    }
+
     fn platform_id(&self) -> &str {
         PLATFORM
     }
@@ -46,6 +71,9 @@ impl PlatformAdapter for TelegramNewAdapter {
 
     fn registration(&self) -> RegistrationDescriptor {
         RegistrationDescriptor {
+            documentation_url: Some("https://core.telegram.org/api/bots/managed-bots"),
+            managed_only: true,
+            managed_only_message: "Use Telegram's browser creation flow at /channel-bots/telegram-new",
             fields: &[],
             token_fields: &[],
             extra_fields: &[],
@@ -72,7 +100,7 @@ impl PlatformAdapter for TelegramNewAdapter {
         created: chrono::DateTime<chrono::Utc>,
         metadata: &mut Option<serde_json::Value>,
     ) {
-        TelegramAdapter.reply_context(thread, created, metadata);
+        self.transport.reply_context(thread, created, metadata);
     }
 
     async fn verify_webhook(
@@ -82,13 +110,25 @@ impl PlatformAdapter for TelegramNewAdapter {
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> AppResult<()> {
-        TelegramAdapter
+        self.transport
             .verify_webhook(bot, secrets, headers, body)
             .await
     }
 
     async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>> {
-        TelegramAdapter.parse_inbound(body).await
+        self.transport.parse_inbound(body).await
+    }
+
+    async fn fetch_attachment(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        attachment: &crate::services::channel_platform::InboundAttachment,
+        max_bytes: u64,
+    ) -> AppResult<FetchedMedia> {
+        self.transport
+            .fetch_attachment(http, credentials, attachment, max_bytes)
+            .await
     }
 
     async fn send_reply(
@@ -98,8 +138,27 @@ impl PlatformAdapter for TelegramNewAdapter {
         conversation: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
-        TelegramAdapter
+        self.transport
             .send_reply(http, credentials, conversation, reply)
+            .await
+    }
+
+    async fn edit_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        platform_message_id: &str,
+        edit: &OutboundEdit,
+    ) -> AppResult<()> {
+        self.transport
+            .edit_reply(
+                http,
+                credentials,
+                conversation_id,
+                platform_message_id,
+                edit,
+            )
             .await
     }
 
@@ -110,7 +169,7 @@ impl PlatformAdapter for TelegramNewAdapter {
         url: &str,
         secret: &str,
     ) -> AppResult<()> {
-        TelegramAdapter
+        self.transport
             .register_webhook(http, token, url, secret)
             .await
     }
@@ -120,6 +179,6 @@ impl PlatformAdapter for TelegramNewAdapter {
         http: &reqwest::Client,
         credentials: &BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
-        TelegramAdapter.verify_bot_token(http, credentials).await
+        self.transport.verify_bot_token(http, credentials).await
     }
 }

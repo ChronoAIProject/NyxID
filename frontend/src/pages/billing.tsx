@@ -1,3 +1,6 @@
+import { MetricBlock } from "@/components/shared/metric-block";
+import { formatCredits, formatNumber, formatEstimatedCredits } from "@/lib/billing-format";
+import { billingMetricLabel } from "@/lib/billing-units";
 import { Fragment, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { ChevronRight } from "lucide-react";
@@ -5,9 +8,9 @@ import { ApiError } from "@/lib/api-client";
 import { openExternal } from "@/lib/navigation";
 import {
   BILLING_USAGE_PERIODS,
-  type BillingMetric,
   type BillingUsagePeriod,
   type BillingUsageRow,
+  type BillingUsageTotals,
 } from "@/schemas/billing";
 import {
   useBillingUsage,
@@ -316,15 +319,7 @@ function UsageSummary({
   loading,
 }: {
   readonly rows: readonly BillingUsageRow[];
-  readonly totals:
-    | {
-        readonly quantity: number;
-        readonly requests: number;
-        readonly bytes: number;
-        readonly events: number;
-        readonly estimated_credits_micros?: number | null;
-      }
-    | undefined;
+  readonly totals: BillingUsageTotals | undefined;
   readonly loading: boolean;
 }) {
   const services = useMemo(() => groupByService(rows), [rows]);
@@ -349,8 +344,9 @@ function UsageSummary({
         <CardTitle>Usage</CardTitle>
         <p className="mt-1 text-[12px] text-muted-foreground">
           Estimated cost per service. Expand a row for the model, agent, and
-          layer behind it. Platform costs use the service price for your selected
-          key; your own key can be free or billed. Resale fees are separate.
+          layer behind it. Platform costs use the service price for your
+          selected key; your own key can be free or billed. Resale fees are
+          separate.
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -361,14 +357,29 @@ function UsageSummary({
           />
           <MetricBlock
             label="Tokens"
-            value={formatNumber(metricTotals.tokens)}
+            value={formatNumber(metricTotals.tokens ?? 0)}
           />
           <MetricBlock
             label="Requests"
-            value={formatNumber(metricTotals.requests)}
+            value={formatNumber(metricTotals.requests ?? 0)}
           />
-          <MetricBlock label="Bytes" value={formatNumber(metricTotals.bytes)} />
+          <MetricBlock
+            label="Bytes"
+            value={formatNumber(metricTotals.bytes ?? 0)}
+          />
+          {Object.entries(metricTotals)
+            .filter(
+              ([metric]) => !["tokens", "requests", "bytes"].includes(metric),
+            )
+            .map(([metric, quantity]) => (
+              <MetricBlock
+                key={metric}
+                label={billingMetricLabel(metric)}
+                value={formatNumber(quantity)}
+              />
+            ))}
         </div>
+        {totals && <FundingSplit funding={totals} totals />}
         <div className="overflow-hidden rounded-lg border border-border">
           <Table>
             <TableHeader>
@@ -421,13 +432,29 @@ function UsageSummary({
                           {describeUsage(service)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
-                          {formatEstimatedCredits(service.costMicros)}
+                          {service.billable
+                            ? formatEstimatedCredits(service.costMicros)
+                            : "—"}
+                          <FundingSplit
+                            funding={service}
+                            metric={
+                              service.metrics.length === 1
+                                ? service.metrics[0]
+                                : undefined
+                            }
+                          />
                         </TableCell>
                         <TableCell>
                           <UsageStatusBadge
                             billable={service.billable}
                             acked={service.allAcked}
                           />
+                          {service.billable &&
+                            service.rows.some((row) => !row.billable) && (
+                              <span className="ml-1.5 text-[11px] text-text-tertiary">
+                                Includes free usage
+                              </span>
+                            )}
                         </TableCell>
                       </TableRow>
                       {isOpen &&
@@ -453,7 +480,8 @@ function UsageSummary({
                               </div>
                             </TableCell>
                             <TableCell className="py-2 align-top text-[12px] text-muted-foreground">
-                              {formatNumber(row.quantity)} {row.metric}
+                              {formatNumber(row.quantity)}{" "}
+                              {billingMetricLabel(row.metric)}
                               {row.token_breakdown ? (
                                 <div className="mt-0.5 text-[11px] text-text-tertiary">
                                   {formatTokenBreakdown(row.token_breakdown)}
@@ -466,6 +494,12 @@ function UsageSummary({
                                 : formatEstimatedCredits(
                                     row.estimated_credits_micros,
                                   )}
+                              {row.billable && (
+                                <FundingSplit
+                                  funding={row}
+                                  metric={billingMetricLabel(row.metric)}
+                                />
+                              )}
                             </TableCell>
                             <TableCell className="py-2 align-top">
                               <UsageStatusBadge
@@ -504,12 +538,20 @@ function UsageStatusBadge({
   );
 }
 
-type ServiceGroup = {
+type FundingBreakdown = Pick<
+  BillingUsageTotals,
+  | "wallet_credits_micros"
+  | "grant_credits_micros"
+  | "allowance_credits_micros"
+  | "allowance_quantity"
+>;
+
+type ServiceGroup = FundingBreakdown & {
   readonly key: string;
   readonly label: string;
   readonly rows: readonly BillingUsageRow[];
   readonly costMicros: number | null;
-  readonly metrics: readonly BillingMetric[];
+  readonly metrics: readonly string[];
   readonly quantity: number;
   readonly allAcked: boolean;
   readonly billable: boolean;
@@ -538,35 +580,97 @@ function groupByService(
   }
 
   return [...groups.entries()].map(([key, groupRows]) => {
-    const costs = groupRows
-      .map((row) => row.estimated_credits_micros)
-      .filter((value): value is number => typeof value === "number");
     const metrics = [...new Set(groupRows.map((row) => row.metric))];
     return {
       key,
       label:
         groupRows[0]?.service_slug ?? groupRows[0]?.service_id ?? "Unknown",
       rows: groupRows,
-      costMicros: costs.length > 0 ? costs.reduce((a, b) => a + b, 0) : null,
+      costMicros: sumOptional(
+        groupRows.map((row) => row.estimated_credits_micros),
+      ),
       metrics,
       quantity: groupRows.reduce((total, row) => total + row.quantity, 0),
-      allAcked: groupRows.every((row) => row.lago_acked),
+      wallet_credits_micros: sumOptional(
+        groupRows.map((row) => row.wallet_credits_micros),
+      ),
+      grant_credits_micros: sumOptional(
+        groupRows.map((row) => row.grant_credits_micros),
+      ),
+      allowance_credits_micros: sumOptional(
+        groupRows.map((row) => row.allowance_credits_micros),
+      ),
+      allowance_quantity: groupRows.reduce(
+        (total, row) => total + (row.allowance_quantity ?? 0),
+        0,
+      ),
+      allAcked: groupRows.every(
+        (row) => row.billable === false || row.lago_acked,
+      ),
       billable: groupRows.some((row) => row.billable !== false),
     };
   });
 }
 
+function sumOptional(
+  values: readonly (number | null | undefined)[],
+): number | null {
+  const known = values.filter(
+    (value): value is number => typeof value === "number",
+  );
+  return known.length ? known.reduce((a, b) => a + b, 0) : null;
+}
+
+function FundingSplit({
+  funding,
+  metric,
+  totals = false,
+}: {
+  readonly funding: FundingBreakdown;
+  readonly metric?: string;
+  readonly totals?: boolean;
+}) {
+  if (
+    !funding.grant_credits_micros &&
+    !funding.allowance_credits_micros &&
+    !funding.allowance_quantity
+  ) {
+    return null;
+  }
+  const parts: string[] = [];
+  if (funding.grant_credits_micros) {
+    parts.push(
+      `${totals ? "Funded by grants" : "grants"} ${formatEstimatedCredits(funding.grant_credits_micros)}`,
+    );
+  }
+  if (funding.allowance_quantity || funding.allowance_credits_micros) {
+    const units =
+      metric && funding.allowance_quantity
+        ? ` (${formatNumber(funding.allowance_quantity)} ${billingMetricLabel(metric)})`
+        : "";
+    parts.push(
+      `${totals ? "Funded by allowances" : "allowance"} ${formatEstimatedCredits(funding.allowance_credits_micros)}${units}`,
+    );
+  }
+  parts.push(
+    `${totals ? "Charged to wallet" : "wallet"} ${formatEstimatedCredits(funding.wallet_credits_micros)}`,
+  );
+  return (
+    <div className="mt-0.5 text-[11px] text-text-tertiary">
+      {parts.join(" · ")}
+    </div>
+  );
+}
+
 /** Per-metric totals, so unlike units are never added into one number. */
-function sumByMetric(
-  rows: readonly BillingUsageRow[],
-): Record<BillingMetric, number> {
-  const totals: Record<BillingMetric, number> = {
+function sumByMetric(rows: readonly BillingUsageRow[]): Record<string, number> {
+  const totals: Record<string, number> = {
     tokens: 0,
     requests: 0,
     bytes: 0,
   };
   for (const row of rows) {
-    totals[row.metric] += row.quantity;
+    totals[row.metric] = (totals[row.metric] ?? 0) + row.quantity;
   }
   return totals;
 }
@@ -574,7 +678,7 @@ function sumByMetric(
 function describeUsage(service: ServiceGroup): string {
   const [metric] = service.metrics;
   if (service.metrics.length === 1 && metric) {
-    return `${formatNumber(service.quantity)} ${metric}`;
+    return `${formatNumber(service.quantity)} ${billingMetricLabel(metric)}`;
   }
   return `${String(service.metrics.length)} metrics`;
 }
@@ -589,23 +693,6 @@ function describeAgent(row: BillingUsageRow): string {
   if (row.api_key_name) return row.api_key_name;
   if (row.api_key_id) return "Unnamed key";
   return "No agent key";
-}
-
-function MetricBlock({
-  label,
-  value,
-}: {
-  readonly label: string;
-  readonly value: string;
-}) {
-  return (
-    <div className="rounded-lg border border-border/70 bg-overlay px-3 py-3">
-      <div className="text-[11px] text-muted-foreground">{label}</div>
-      <div className="mt-1 truncate text-[20px] font-semibold leading-tight">
-        {value}
-      </div>
-    </div>
-  );
 }
 
 function formatTokenBreakdown(
@@ -645,23 +732,6 @@ function labelize(value: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
-}
-
-function formatCredits(value: number): string {
-  return `${formatNumber(value)} credits`;
-}
-
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat().format(value);
-}
-
-function formatEstimatedCredits(value: number | null | undefined): string {
-  if (value === null || value === undefined) {
-    return "-";
-  }
-  return `${new Intl.NumberFormat(undefined, {
-    maximumFractionDigits: 6,
-  }).format(value / 1_000_000)} credits`;
 }
 
 function isBillingNotConfigured(error: unknown): boolean {

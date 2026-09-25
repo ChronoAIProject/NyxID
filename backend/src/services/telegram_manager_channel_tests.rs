@@ -1,0 +1,1357 @@
+use super::*;
+use crate::errors::AppResult;
+use crate::services::channel_adapters::telegram::TelegramAdapter;
+use crate::services::channel_adapters::telegram_new::credential_descriptor;
+use crate::services::channel_bot_service as bots;
+use crate::services::channel_platform::{PlatformAdapter, RegistrationValues};
+
+const UPDATES: [&str; 5] = [
+    "message",
+    "edited_message",
+    "channel_post",
+    "callback_query",
+    "managed_bot",
+];
+
+pub(super) async fn submit_manager_channel(
+    state: &crate::AppState,
+    actor: &str,
+    server: &MockServer,
+) -> AppResult<(
+    axum::http::StatusCode,
+    axum::Json<crate::handlers::channel_bots::CreateChannelBotResponse>,
+)> {
+    let base = server.uri();
+    crate::handlers::channel_bots::create_bot_with_adapter(
+        state,
+        crate::test_utils::test_auth_user(actor),
+        crate::telemetry::TelemetryContext::default(),
+        serde_json::from_value(json!({
+            "platform": "telegram", "bot_token": MANAGER, "label": "Retry manager",
+        }))
+        .unwrap(),
+        &TelegramAdapter::media_test_adapter(&base),
+        &TelegramApi {
+            http: &state.http_client,
+            base_url: &base,
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn telegram_manager_channel_registration_retries_saved_failure_at_capacity() {
+    let (mut state, actor, server) = fixture().await;
+    state.config.channel_relay_max_bots_per_user = 1;
+    server.reset().await;
+    bot_identity_api(&server, MANAGER).await;
+    webhook_info(
+        &server,
+        MANAGER,
+        json!({"url": "", "allowed_updates": UPDATES}),
+    )
+    .await;
+    assert!(
+        submit_manager_channel(&state, &actor, &server)
+            .await
+            .is_err()
+    );
+    let saved = bots::list_bots(&state.db, &actor).await.unwrap();
+    assert_eq!(saved.len(), 1);
+    let original = &saved[0];
+    assert_eq!(original.status, "failed");
+    assert_eq!(original.credential_source, "telegram_manager");
+
+    // Retrying while the shared webhook is broken must still fail.
+    assert!(
+        submit_manager_channel(&state, &actor, &server)
+            .await
+            .is_err()
+    );
+    assert_eq!(bots::list_bots(&state.db, &actor).await.unwrap().len(), 1);
+    server.reset().await;
+    bot_identity_api(&server, MANAGER).await;
+    webhook_info(
+        &server,
+        MANAGER,
+        json!({
+            "url": bots::webhook_url(&state.config.base_url, original), "allowed_updates": UPDATES,
+        }),
+    )
+    .await;
+
+    for status in ["failed", "pending", "active"] {
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(
+                doc! {"_id": &original.id},
+                doc! {"$set": {"status": status, "label": "Keep this label"}},
+            )
+            .await
+            .unwrap();
+        let (status, response) = submit_manager_channel(&state, &actor, &server)
+            .await
+            .unwrap();
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(response.id, original.id);
+        assert_eq!(response.status, "active");
+        assert!(response.webhook_secret.is_none());
+        let bots = bots::list_bots(&state.db, &actor).await.unwrap();
+        assert_eq!(bots.len(), 1);
+        assert_eq!(bots[0].label, "Keep this label");
+        assert_eq!(bots[0].status, "active");
+        assert!(bots[0].webhook_registered);
+        assert!(bots[0].bot_token_encrypted.is_empty());
+        assert!(bots[0].webhook_secret_hash.is_empty());
+    }
+    assert_only_telegram_reads(&server, 3, 6).await;
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_manager_channel_registration_retry_preserves_ownership_and_configuration_gates() {
+    let (state, actor, server) = fixture().await;
+    bot_identity_api(&server, MANAGER).await;
+    let (status, response) = submit_manager_channel(&state, &actor, &server)
+        .await
+        .unwrap();
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    let original = bots::get_bot(&state.db, &response.id).await.unwrap();
+    let outsider = uuid::Uuid::new_v4().to_string();
+    let error = submit_manager_channel(&state, &outsider, &server)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, crate::errors::AppError::Conflict(_)));
+    assert_eq!(
+        bson::to_document(&bots::get_bot(&state.db, &original.id).await.unwrap()).unwrap(),
+        bson::to_document(&original).unwrap(),
+    );
+
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! {"_id": &original.id},
+            doc! {"$set": {"credential_source": "user"}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        submit_manager_channel(&state, &actor, &server).await,
+        Err(crate::errors::AppError::Conflict(_)),
+    ));
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! {"_id": &original.id},
+            doc! {"$set": {"credential_source": "telegram_manager"}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<PlatformCredential>(CREDENTIALS)
+        .update_one(
+            doc! {"provider": "telegram-new"},
+            doc! {"$set": {"fields.webhook_ready": "false"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        submit_manager_channel(&state, &actor, &server)
+            .await
+            .is_err()
+    );
+    let saved = bots::get_bot(&state.db, &original.id).await.unwrap();
+    assert_eq!(saved.status, "failed");
+    assert!(!saved.webhook_registered);
+    assert_only_telegram_reads(&server, 1, 4).await;
+    state.db.drop().await.unwrap();
+}
+
+async fn pending_channel(
+    state: &crate::AppState,
+    actor: &str,
+    server: &MockServer,
+) -> bots::CreateBotResult {
+    bot_identity_api(server, MANAGER).await;
+    bots::create_bot(
+        &state.db,
+        &state.config,
+        &state.encryption_keys,
+        &state.http_client,
+        &TelegramAdapter::media_test_adapter(&server.uri()),
+        actor,
+        "Manager channel",
+        &RegistrationValues([("bot_token", MANAGER)].into()),
+    )
+    .await
+    .unwrap()
+}
+
+pub(super) async fn bot_identity_api(server: &MockServer, token: &str) {
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{token}/getMe")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true, "result": {"id": 100, "username": "NyxSetupBot", "is_bot": true}
+        })))
+        .mount(server)
+        .await;
+}
+
+async fn verify_channel(
+    state: &crate::AppState,
+    server: &MockServer,
+    channel: &ChannelBot,
+) -> AppResult<axum::Json<crate::handlers::channel_bots::VerifyBotResponse>> {
+    let base = server.uri();
+    crate::handlers::channel_bots::verify_bot_with_adapter(
+        state,
+        channel.clone(),
+        &TelegramAdapter::media_test_adapter(&base),
+        &TelegramApi {
+            http: &state.http_client,
+            base_url: &base,
+        },
+        None,
+    )
+    .await
+}
+
+async fn check_channel(
+    state: &crate::AppState,
+    server: &MockServer,
+    channel: &ChannelBot,
+    token: &str,
+) -> AppResult<()> {
+    let base = server.uri();
+    bots::register_webhook_with_telegram_api(
+        &state.db,
+        &TelegramApi {
+            http: &state.http_client,
+            base_url: &base,
+        },
+        &TelegramAdapter::media_test_adapter(&base),
+        &channel.id,
+        token,
+        &bots::webhook_url(&state.config.base_url, channel),
+        "",
+    )
+    .await
+}
+
+async fn webhook_info(server: &MockServer, token: &str, info: Value) {
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{token}/getWebhookInfo")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true, "result": info,
+        })))
+        .mount(server)
+        .await;
+}
+
+async fn assert_only_telegram_reads(server: &MockServer, webhooks: usize, identities: usize) {
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), webhooks + identities);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("/getWebhookInfo"))
+            .count(),
+        webhooks
+    );
+    for request in requests {
+        if request.url.path().ends_with("/getWebhookInfo") {
+            assert_eq!(request.body_json::<Value>().unwrap(), json!({}));
+        } else {
+            assert!(request.url.path().ends_with("/getMe"));
+        }
+    }
+}
+
+async fn assert_invalid_webhook(state: &crate::AppState, server: &MockServer, info: Value) {
+    let channel = state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(doc! {"credential_source": "telegram_manager"})
+        .await
+        .unwrap()
+        .unwrap();
+    let before = credentials::load(&state.db, &credential_descriptor())
+        .await
+        .unwrap()
+        .unwrap();
+    for registered in [false, true] {
+        state.db.collection::<ChannelBot>(BOTS).update_one(
+            doc! {"_id": &channel.id},
+            doc! {"$set": {"status": if registered {"active"} else {"pending_webhook"}, "webhook_registered": registered}},
+        ).await.unwrap();
+        server.reset().await;
+        webhook_info(server, MANAGER, info.clone()).await;
+        if registered {
+            bot_identity_api(server, MANAGER).await;
+            assert!(verify_channel(state, server, &channel).await.is_err());
+        } else {
+            assert!(
+                check_channel(state, server, &channel, MANAGER)
+                    .await
+                    .is_err()
+            );
+        }
+        let saved = bots::get_bot(&state.db, &channel.id).await.unwrap();
+        assert_eq!(saved.status, "failed");
+        assert!(!saved.webhook_registered);
+        assert!(
+            saved
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("Platform Credentials")
+        );
+        assert_only_telegram_reads(server, 1, usize::from(registered)).await;
+        let after = credentials::load(&state.db, &credential_descriptor())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bson::to_document(&before).unwrap(),
+            bson::to_document(&after).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn telegram_manager_channel_rejects_removed_and_repointed_webhooks() {
+    let (state, actor, server) = fixture().await;
+    pending_channel(&state, &actor, &server).await;
+    for url in [
+        "",
+        "https://another.example/secret-hook",
+        "https://api.nyxid.test/api/v1/webhooks/channel/telegram/per-bot",
+    ] {
+        assert_invalid_webhook(
+            &state,
+            &server,
+            json!({"url": url, "allowed_updates": UPDATES}),
+        )
+        .await;
+    }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_manager_channel_registration_and_verify_require_all_five_updates() {
+    let (state, actor, server) = fixture().await;
+    let channel = pending_channel(&state, &actor, &server).await.bot;
+    let callback = bots::webhook_url(&state.config.base_url, &channel);
+    for missing in UPDATES {
+        let updates: Vec<_> = UPDATES
+            .into_iter()
+            .filter(|kind| *kind != missing)
+            .collect();
+        assert_invalid_webhook(
+            &state,
+            &server,
+            json!({"url": callback, "allowed_updates": updates}),
+        )
+        .await;
+    }
+    for updates in [Value::Null, json!([]), json!("message")] {
+        assert_invalid_webhook(
+            &state,
+            &server,
+            json!({"url": callback, "allowed_updates": updates}),
+        )
+        .await;
+    }
+    assert_invalid_webhook(&state, &server, json!({"url": callback})).await;
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_manager_channel_checks_complete_webhook_without_mutation_or_secret_exposure() {
+    let (state, actor, server) = fixture().await;
+    let created = pending_channel(&state, &actor, &server).await;
+    let channel = created.bot.clone();
+    assert!(created.webhook_secret.is_empty());
+    assert!(channel.bot_token_encrypted.is_empty());
+    assert!(channel.webhook_secret_hash.is_empty());
+    let secret_before = headers(&state).await;
+    let callback = bots::webhook_url(&state.config.base_url, &channel);
+    let response = crate::handlers::channel_bots::CreateChannelBotResponse::from_bot(
+        created.bot,
+        TelegramAdapter::default().registration(),
+        callback.clone(),
+        created.webhook_secret,
+    )
+    .unwrap();
+    let response = serde_json::to_value(response).unwrap();
+    assert_eq!(response["credential_source"], "telegram_manager");
+    assert_eq!(response["webhook_url"], callback);
+    assert!(response.get("webhook_secret").is_none());
+    assert_eq!(response["setup_instructions"], json!([]));
+    server.reset().await;
+    webhook_info(&server, MANAGER, json!({"url": callback, "allowed_updates": ["managed_bot", "callback_query", "channel_post", "edited_message", "message", "poll"]})).await;
+    for verify in [false, true] {
+        if verify {
+            bot_identity_api(&server, MANAGER).await;
+            let result = verify_channel(&state, &server, &channel).await.unwrap().0;
+            assert_eq!(result.status, "active");
+            assert!(result.webhook_registered);
+        } else {
+            check_channel(&state, &server, &channel, MANAGER)
+                .await
+                .unwrap();
+        }
+        let saved = bots::get_bot(&state.db, &channel.id).await.unwrap();
+        assert_eq!(saved.status, "active");
+        assert!(saved.webhook_registered);
+        assert!(saved.error.is_none());
+    }
+    assert_eq!(headers(&state).await, secret_before);
+    assert_only_telegram_reads(&server, 2, 1).await;
+    server.reset().await;
+    bots::delete_bot(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        &state.encryption_keys,
+        &TelegramAdapter::media_test_adapter(&server.uri()),
+        &channel.id,
+        &actor,
+    )
+    .await
+    .unwrap();
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(headers(&state).await, secret_before);
+    state.db.drop().await.unwrap();
+}
+
+async fn manager_setup_api(server: &MockServer, token: &str, callback: &str, updates: Vec<&str>) {
+    for (endpoint, result) in [
+        (
+            "getMe",
+            json!({"id": 100, "username": "NyxSetupBot", "is_bot": true, "can_manage_bots": true}),
+        ),
+        ("setWebhook", json!(true)),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{token}/{endpoint}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": result})),
+            )
+            .mount(server)
+            .await;
+    }
+    webhook_info(
+        server,
+        token,
+        json!({"url": callback, "allowed_updates": updates}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn telegram_manager_save_requires_all_five_confirmed_subscriptions() {
+    let (state, actor, server) = fixture().await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let secret = headers(&state).await;
+    for missing in UPDATES {
+        server.reset().await;
+        manager_setup_api(
+            &server,
+            MANAGER,
+            &service.manager_callback(),
+            UPDATES
+                .into_iter()
+                .filter(|kind| *kind != missing)
+                .collect(),
+        )
+        .await;
+        assert!(
+            service
+                .configure_manager(&actor, &Default::default(), false)
+                .await
+                .is_err()
+        );
+        let saved = credentials::load(&state.db, &credential_descriptor())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.fields.get("webhook_ready").unwrap(), "false");
+        assert_eq!(headers(&state).await, secret);
+        let requests = server.received_requests().await.unwrap();
+        let sets: Vec<_> = requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("/setWebhook"))
+            .collect();
+        assert_eq!(sets.len(), 1);
+        assert_eq!(
+            sets[0].body_json::<Value>().unwrap()["allowed_updates"],
+            json!(UPDATES)
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.url.path().ends_with("/deleteWebhook"))
+        );
+    }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_manager_channel_configure_first_and_verify_rotated_live_credentials() {
+    let (state, actor, server) = fixture().await;
+    credentials::delete(&state.db, &credential_descriptor())
+        .await
+        .unwrap();
+    server.reset().await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    manager_setup_api(
+        &server,
+        MANAGER,
+        &service.manager_callback(),
+        UPDATES.to_vec(),
+    )
+    .await;
+    service
+        .configure_manager(
+            &actor,
+            &[(
+                "manager_bot_token".into(),
+                Some(Zeroizing::new(MANAGER.into())),
+            )]
+            .into(),
+            false,
+        )
+        .await
+        .unwrap();
+    let channel = pending_channel(&state, &actor, &server).await.bot;
+    check_channel(&state, &server, &channel, MANAGER)
+        .await
+        .unwrap();
+    let secret = headers(&state).await;
+    let rotated = "100:rotated-test-secret";
+    server.reset().await;
+    manager_setup_api(
+        &server,
+        rotated,
+        &service.manager_callback(),
+        UPDATES.to_vec(),
+    )
+    .await;
+    service
+        .configure_manager(
+            &actor,
+            &[(
+                "manager_bot_token".into(),
+                Some(Zeroizing::new(rotated.into())),
+            )]
+            .into(),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(headers(&state).await, secret);
+    server.reset().await;
+    webhook_info(
+        &server,
+        rotated,
+        json!({"url": service.manager_callback(), "allowed_updates": UPDATES}),
+    )
+    .await;
+    let token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        &TelegramAdapter::default(),
+        &channel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(token.as_str(), rotated);
+    bot_identity_api(&server, rotated).await;
+    let verified = verify_channel(&state, &server, &channel).await.unwrap().0;
+    assert_eq!(verified.status, "active");
+    assert!(verified.webhook_registered);
+    assert_only_telegram_reads(&server, 1, 1).await;
+    let saved = bots::get_bot(&state.db, &channel.id).await.unwrap();
+    assert!(saved.bot_token_encrypted.is_empty());
+    assert!(saved.webhook_secret_hash.is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_manager_channel_unready_configuration_is_projected_without_lifecycle_writes() {
+    use crate::handlers::channel_bots;
+    use crate::test_utils::test_auth_user;
+    use axum::extract::{Path, Query, State};
+    let (state, actor, server) = fixture().await;
+    let channel = register_manager_channel(&state, &actor, &server).await;
+    let original = credentials::load(&state.db, &credential_descriptor())
+        .await
+        .unwrap()
+        .unwrap();
+    server.reset().await;
+    for change in [
+        doc! {"$set": {"fields.webhook_ready": "false"}},
+        doc! {"$unset": {"fields.webhook_ready": ""}},
+        doc! {"$set": {"fields.manager_bot_id": "200", "fields.webhook_ready": "true"}},
+        doc! {"$unset": {"fields.manager_bot_id": ""}},
+    ] {
+        state
+            .db
+            .collection::<PlatformCredential>(CREDENTIALS)
+            .replace_one(doc! {"_id": &original.id}, &original)
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<PlatformCredential>(CREDENTIALS)
+            .update_one(doc! {"provider": "telegram-new"}, change)
+            .await
+            .unwrap();
+        let before = bots::get_bot(&state.db, &channel.id).await.unwrap();
+        let listed = channel_bots::list_bots(
+            State(state.clone()),
+            test_auth_user(&actor),
+            Query(Default::default()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(listed.bots.len(), 1);
+        assert_eq!(listed.bots[0].status, "failed");
+        assert!(!listed.bots[0].webhook_registered);
+        let detail = channel_bots::get_bot(
+            State(state.clone()),
+            test_auth_user(&actor),
+            Path(channel.id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(detail.status, "failed");
+        assert!(!detail.webhook_registered);
+        assert!(
+            detail
+                .connection
+                .error
+                .unwrap()
+                .contains("Platform Credentials")
+        );
+        let saved = bots::get_bot(&state.db, &channel.id).await.unwrap();
+        assert_eq!(
+            bson::to_document(&before).unwrap(),
+            bson::to_document(&saved).unwrap()
+        );
+        let update = channel_bots::update_bot(
+            State(state.clone()),
+            test_auth_user(&actor),
+            Path(channel.id.clone()),
+            axum::Json(serde_json::from_value(json!({"label": "Renamed manager"})).unwrap()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(update.status, "failed");
+        assert!(!update.webhook_registered);
+        assert!(
+            update
+                .connection
+                .error
+                .unwrap()
+                .contains("Platform Credentials")
+        );
+        let saved = bots::get_bot(&state.db, &channel.id).await.unwrap();
+        assert_eq!(saved.status, "active");
+        assert!(saved.webhook_registered);
+        assert!(saved.is_active);
+        assert!(saved.error.is_none());
+        assert_eq!(saved.label, "Renamed manager");
+    }
+    credentials::delete(&state.db, &credential_descriptor())
+        .await
+        .unwrap();
+    let detail = channel_bots::get_bot(
+        State(state.clone()),
+        test_auth_user(&actor),
+        Path(channel.id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(detail.status, "failed");
+    assert!(detail.connection.error.is_some());
+    assert_eq!(
+        bots::get_bot(&state.db, &channel.id).await.unwrap().status,
+        "active"
+    );
+    state
+        .db
+        .collection::<PlatformCredential>(CREDENTIALS)
+        .insert_one(&original)
+        .await
+        .unwrap();
+    let detail = channel_bots::get_bot(
+        State(state.clone()),
+        test_auth_user(&actor),
+        Path(channel.id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(detail.status, "active");
+    assert!(detail.webhook_registered);
+    assert!(detail.connection.error.is_none());
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_manager_channel_saved_unready_configuration_blocks_verification() {
+    let (state, actor, server) = fixture().await;
+    let channel = register_manager_channel(&state, &actor, &server).await;
+    server.reset().await;
+    for change in [
+        doc! {"$set": {"fields.webhook_ready": "false"}},
+        doc! {"$unset": {"fields.webhook_ready": ""}},
+        doc! {"$set": {"fields.manager_bot_id": "200", "fields.webhook_ready": "true"}},
+    ] {
+        state
+            .db
+            .collection::<PlatformCredential>(CREDENTIALS)
+            .update_one(doc! {"provider": "telegram-new"}, change)
+            .await
+            .unwrap();
+        state.db.collection::<ChannelBot>(BOTS).update_one(
+            doc! {"_id": &channel.id},
+            doc! {"$set": {"status": "active", "webhook_registered": true, "error": bson::Bson::Null}},
+        ).await.unwrap();
+        assert!(verify_channel(&state, &server, &channel).await.is_err());
+        let saved = bots::get_bot(&state.db, &channel.id).await.unwrap();
+        assert_eq!(saved.status, "failed");
+        assert!(!saved.webhook_registered);
+        assert!(saved.error.unwrap().contains("Platform Credentials"));
+        assert!(
+            check_channel(&state, &server, &channel, MANAGER)
+                .await
+                .is_err()
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+    credentials::delete(&state.db, &credential_descriptor())
+        .await
+        .unwrap();
+    assert!(verify_channel(&state, &server, &channel).await.is_err());
+    assert!(
+        check_channel(&state, &server, &channel, MANAGER)
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_manager_channel_get_me_failure_persists_safe_status_and_verify_recovers() {
+    use crate::handlers::channel_bots;
+    use crate::test_utils::test_auth_user;
+    use axum::extract::{Path, Query, State};
+
+    let (state, actor, server) = fixture().await;
+    let channel = register_manager_channel(&state, &actor, &server).await;
+    let manager_before = credentials::load(&state.db, &credential_descriptor())
+        .await
+        .unwrap()
+        .unwrap();
+    let secret_before = headers(&state).await;
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{MANAGER}/getMe")))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "ok": false, "description": "Unauthorized: revoked provider credential",
+        })))
+        .mount(&server)
+        .await;
+
+    assert!(verify_channel(&state, &server, &channel).await.is_err());
+    let saved = bots::get_bot(&state.db, &channel.id).await.unwrap();
+    assert_eq!(saved.status, "failed");
+    assert!(!saved.webhook_registered);
+    assert!(saved.is_active);
+    assert_eq!(
+        saved.error.as_deref(),
+        Some(crate::services::telegram_new_admin::MANAGER_WEBHOOK_ERROR)
+    );
+    assert_only_telegram_reads(&server, 0, 1).await;
+
+    let listed = channel_bots::list_bots(
+        State(state.clone()),
+        test_auth_user(&actor),
+        Query(Default::default()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(listed.bots[0].status, "failed");
+    assert!(!listed.bots[0].webhook_registered);
+    let detail = channel_bots::get_bot(
+        State(state.clone()),
+        test_auth_user(&actor),
+        Path(channel.id.clone()),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(detail.status, "failed");
+    assert!(!detail.webhook_registered);
+    assert_eq!(detail.connection.error, saved.error);
+
+    server.reset().await;
+    bot_identity_api(&server, MANAGER).await;
+    webhook_info(
+        &server,
+        MANAGER,
+        json!({
+            "url": bots::webhook_url(&state.config.base_url, &channel), "allowed_updates": UPDATES,
+        }),
+    )
+    .await;
+    let verified = verify_channel(&state, &server, &saved).await.unwrap().0;
+    assert_eq!(verified.status, "active");
+    assert!(verified.webhook_registered);
+    let recovered = bots::get_bot(&state.db, &channel.id).await.unwrap();
+    assert_eq!(recovered.status, "active");
+    assert!(recovered.webhook_registered);
+    assert!(recovered.error.is_none());
+    assert_eq!(headers(&state).await, secret_before);
+    let manager_after = credentials::load(&state.db, &credential_descriptor())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        bson::to_document(&manager_before).unwrap(),
+        bson::to_document(&manager_after).unwrap()
+    );
+    assert_only_telegram_reads(&server, 1, 1).await;
+
+    server.reset().await;
+    credentials::delete(&state.db, &credential_descriptor())
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! {"_id": &channel.id},
+            doc! {"$set": {
+                "credential_source": "user",
+                "bot_token_encrypted": bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes: state.encryption_keys.encrypt(MANAGER.as_bytes()).await.unwrap(),
+                },
+            }},
+        )
+        .await
+        .unwrap();
+    let ordinary = bots::get_bot(&state.db, &channel.id).await.unwrap();
+    Mock::given(method("GET"))
+        .and(path(format!("/bot{MANAGER}/getMe")))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "ok": false, "description": "Unauthorized",
+        })))
+        .mount(&server)
+        .await;
+    assert!(verify_channel(&state, &server, &ordinary).await.is_err());
+    let unchanged = bots::get_bot(&state.db, &channel.id).await.unwrap();
+    assert_eq!(
+        bson::to_document(&ordinary).unwrap(),
+        bson::to_document(&unchanged).unwrap()
+    );
+    assert_only_telegram_reads(&server, 0, 1).await;
+    state.db.drop().await.unwrap();
+}
+
+mod migration {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Semaphore;
+
+    struct ProviderState {
+        webhook: Mutex<Value>,
+        calls: Mutex<Vec<String>>,
+        pause: Mutex<Option<&'static str>>,
+        entered: Semaphore,
+        resume: Semaphore,
+    }
+
+    struct Provider {
+        base: String,
+        state: Arc<ProviderState>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for Provider {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl Provider {
+        async fn start() -> Self {
+            let state = Arc::new(ProviderState {
+                webhook: Mutex::new(json!({"url": "", "allowed_updates": []})),
+                calls: Mutex::new(Vec::new()),
+                pause: Mutex::new(None),
+                entered: Semaphore::new(0),
+                resume: Semaphore::new(0),
+            });
+            let app = axum::Router::new()
+                .route("/{bot}/{method}", axum::routing::any(provider_call))
+                .with_state(state.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            Self { base, state, task }
+        }
+
+        fn api<'a>(&'a self, state: &'a crate::AppState) -> TelegramApi<'a> {
+            TelegramApi {
+                http: &state.http_client,
+                base_url: &self.base,
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.state.calls.lock().unwrap().clone()
+        }
+
+        fn webhook(&self) -> Value {
+            self.state.webhook.lock().unwrap().clone()
+        }
+
+        fn pause(&self, method: &'static str) {
+            *self.state.pause.lock().unwrap() = Some(method);
+        }
+
+        async fn wait_until_paused(&self) {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                self.state.entered.acquire(),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        }
+
+        fn release(&self) {
+            self.state.resume.add_permits(1);
+        }
+    }
+
+    async fn provider_call(
+        axum::extract::State(state): axum::extract::State<Arc<ProviderState>>,
+        axum::extract::Path((bot, method)): axum::extract::Path<(String, String)>,
+        body: axum::body::Bytes,
+    ) -> axum::Json<Value> {
+        state.calls.lock().unwrap().push(method.clone());
+        let pause = {
+            let mut selected = state.pause.lock().unwrap();
+            if selected.as_deref() == Some(method.as_str()) {
+                selected.take();
+                true
+            } else {
+                false
+            }
+        };
+        if pause {
+            state.entered.add_permits(1);
+            state.resume.acquire().await.unwrap().forget();
+        }
+        let input: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+        let result = match method.as_str() {
+            "getMe" => {
+                json!({"id": if bot.starts_with("bot900:") {900} else {100}, "is_bot": true, "username": "NyxSetupBot", "can_manage_bots": true})
+            }
+            "getWebhookInfo" => state.webhook.lock().unwrap().clone(),
+            "setWebhook" => {
+                *state.webhook.lock().unwrap() = input;
+                json!(true)
+            }
+            "deleteWebhook" => {
+                *state.webhook.lock().unwrap() = json!({"url": ""});
+                json!(true)
+            }
+            _ => panic!("unexpected simulated Telegram method {method}"),
+        };
+        axum::Json(json!({"ok": true, "result": result}))
+    }
+
+    async fn ordinary_channel(
+        state: &crate::AppState,
+        actor: &str,
+        provider: &Provider,
+    ) -> ChannelBot {
+        credentials::delete(&state.db, &credential_descriptor())
+            .await
+            .unwrap();
+        let adapter = TelegramAdapter::media_test_adapter(&provider.base);
+        let created = bots::create_bot(
+            &state.db,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            actor,
+            "Ordinary Telegram",
+            &RegistrationValues([("bot_token", MANAGER)].into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.bot.credential_source, "user");
+        bots::mark_bot_failed(&state.db, &created.bot.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            bots::get_bot(&state.db, &created.bot.id)
+                .await
+                .unwrap()
+                .status,
+            "failed"
+        );
+        bots::register_webhook_with_telegram_api(
+            &state.db,
+            &provider.api(state),
+            &adapter,
+            &created.bot.id,
+            MANAGER,
+            &bots::webhook_url(&state.config.base_url, &created.bot),
+            &created.webhook_secret,
+        )
+        .await
+        .unwrap();
+        bots::get_bot(&state.db, &created.bot.id).await.unwrap()
+    }
+
+    async fn verify(
+        state: &crate::AppState,
+        provider: &Provider,
+        bot: &ChannelBot,
+    ) -> AppResult<axum::Json<crate::handlers::channel_bots::VerifyBotResponse>> {
+        crate::handlers::channel_bots::verify_bot_with_adapter(
+            state,
+            bot.clone(),
+            &TelegramAdapter::media_test_adapter(&provider.base),
+            &provider.api(state),
+            None,
+        )
+        .await
+    }
+
+    async fn delete(
+        state: &crate::AppState,
+        provider: &Provider,
+        bot: &ChannelBot,
+    ) -> AppResult<Option<&'static str>> {
+        bots::delete_bot(
+            &state.db,
+            &state.config,
+            &state.http_client,
+            &state.encryption_keys,
+            &TelegramAdapter::media_test_adapter(&provider.base),
+            &bot.id,
+            &bot.user_id,
+        )
+        .await
+    }
+
+    async fn configure_manager(
+        state: &crate::AppState,
+        actor: &str,
+        provider: &Provider,
+    ) -> AppResult<()> {
+        service(state, &provider.base)
+            .configure_manager(
+                actor,
+                &[(
+                    "manager_bot_token".into(),
+                    Some(Zeroizing::new(MANAGER.into())),
+                )]
+                .into(),
+                false,
+            )
+            .await
+    }
+
+    async fn assert_stale_operations_are_inert(
+        state: &crate::AppState,
+        provider: &Provider,
+        old: &ChannelBot,
+    ) {
+        let before = provider.webhook();
+        let count = provider.calls().len();
+        assert!(verify(state, provider, old).await.is_err());
+        assert!(
+            bots::register_webhook_with_telegram_api(
+                &state.db,
+                &provider.api(state),
+                &TelegramAdapter::media_test_adapter(&provider.base),
+                &old.id,
+                MANAGER,
+                &bots::webhook_url(&state.config.base_url, old),
+                "stale-secret"
+            )
+            .await
+            .is_err()
+        );
+        delete(state, provider, old).await.unwrap();
+        assert_eq!(provider.calls().len(), count);
+        assert_eq!(provider.webhook(), before);
+        let saved = bots::get_bot(&state.db, &old.id).await.unwrap();
+        assert!(!saved.is_active);
+        assert_eq!(saved.status, "inactive");
+        assert!(!saved.webhook_registered);
+    }
+
+    #[tokio::test]
+    async fn telegram_manager_migration_deleted_verify_registration_and_delete_preserve_webhook() {
+        let (state, actor, _server) = fixture().await;
+        let provider = Provider::start().await;
+        let old = ordinary_channel(&state, &actor, &provider).await;
+        delete(&state, &provider, &old).await.unwrap();
+        configure_manager(&state, &actor, &provider).await.unwrap();
+        assert_eq!(
+            provider.webhook()["url"],
+            service(&state, &provider.base).manager_callback()
+        );
+        assert_eq!(provider.webhook()["allowed_updates"], json!(UPDATES));
+        // Model a partial old deletion: webhook flag stale, routes not cleaned yet.
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(
+                doc! {"_id": &old.id},
+                doc! {"$set": {"webhook_registered": true}},
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .insert_one(doc! {"_id": "stale-route", "channel_bot_id": &old.id, "is_active": true})
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": "foreign-route",
+                "channel_bot_id": &old.id,
+                "user_id": "other-owner",
+                "is_active": true,
+            })
+            .await
+            .unwrap();
+        assert_stale_operations_are_inert(&state, &provider, &old).await;
+        let route = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id": "stale-route"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!route.get_bool("is_active").unwrap());
+        let foreign_route = state
+            .db
+            .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(doc! { "_id": "foreign-route" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(foreign_route.get_bool("is_active").unwrap());
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_manager_migration_serializes_paused_verify_and_registration_with_delete_and_configure()
+     {
+        for verify_operation in [true, false] {
+            let (state, actor, _server) = fixture().await;
+            let provider = Arc::new(Provider::start().await);
+            let old = ordinary_channel(&state, &actor, &provider).await;
+            // Legacy ordinary rows predate the explicit credential source.
+            state
+                .db
+                .collection::<ChannelBot>(BOTS)
+                .update_one(
+                    doc! {"_id": &old.id},
+                    doc! {"$unset": {"credential_source": ""}},
+                )
+                .await
+                .unwrap();
+            provider.pause(if verify_operation {
+                "getMe"
+            } else {
+                "setWebhook"
+            });
+            let task_state = state.clone();
+            let task_provider = provider.clone();
+            let task_bot = old.clone();
+            let operation = tokio::spawn(async move {
+                if verify_operation {
+                    verify(&task_state, &task_provider, &task_bot)
+                        .await
+                        .map(|_| ())
+                } else {
+                    bots::register_webhook_with_telegram_api(
+                        &task_state.db,
+                        &task_provider.api(&task_state),
+                        &TelegramAdapter::media_test_adapter(&task_provider.base),
+                        &task_bot.id,
+                        MANAGER,
+                        &bots::webhook_url(&task_state.config.base_url, &task_bot),
+                        "registration-secret",
+                    )
+                    .await
+                }
+            });
+            provider.wait_until_paused().await;
+            assert!(matches!(
+                verify(&state, &provider, &old).await,
+                Err(crate::errors::AppError::Conflict(_))
+            ));
+            assert!(matches!(
+                delete(&state, &provider, &old).await,
+                Err(crate::errors::AppError::Conflict(_))
+            ));
+            assert!(matches!(
+                configure_manager(&state, &actor, &provider).await,
+                Err(crate::errors::AppError::Conflict(_))
+            ));
+            assert!(bots::get_bot(&state.db, &old.id).await.unwrap().is_active);
+            assert!(
+                credentials::load(&state.db, &credential_descriptor())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(!operation.is_finished());
+            provider.release();
+            operation.await.unwrap().unwrap();
+            // The original create request may report its earlier registration
+            // failure after this successful retry has installed the webhook.
+            bots::mark_bot_failed(&state.db, &old.id).await.unwrap();
+            let saved = bots::get_bot(&state.db, &old.id).await.unwrap();
+            assert_eq!(saved.status, "active");
+            assert!(saved.webhook_registered);
+            let live_secret = provider.webhook()["secret_token"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(
+                saved.webhook_secret_hash,
+                telegram_new_service::hash(&live_secret)
+            );
+            delete(&state, &provider, &old).await.unwrap();
+            configure_manager(&state, &actor, &provider).await.unwrap();
+            assert_stale_operations_are_inert(&state, &provider, &old).await;
+            state.db.drop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_manager_migration_rejects_mismatched_stored_identity_without_webhook_mutation()
+     {
+        let (state, actor, _server) = fixture().await;
+        let provider = Provider::start().await;
+        let mut old = ordinary_channel(&state, &actor, &provider).await;
+        // A historical row identifies bot 900 but still carries manager bot 100's token.
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(
+                doc! {"_id": &old.id},
+                doc! {"$set": {"platform_bot_id": "900"}},
+            )
+            .await
+            .unwrap();
+        old.platform_bot_id = "900".into();
+        *provider.state.webhook.lock().unwrap() = json!({"url": ""});
+        configure_manager(&state, &actor, &provider).await.unwrap();
+        let webhook = provider.webhook();
+        let count = provider.calls().len();
+        assert!(verify(&state, &provider, &old).await.is_err());
+        assert!(
+            bots::register_webhook_with_telegram_api(
+                &state.db,
+                &provider.api(&state),
+                &TelegramAdapter::media_test_adapter(&provider.base),
+                &old.id,
+                MANAGER,
+                &bots::webhook_url(&state.config.base_url, &old),
+                "wrong-identity-secret"
+            )
+            .await
+            .is_err()
+        );
+        delete(&state, &provider, &old).await.unwrap();
+        assert_eq!(&provider.calls()[count..], &["getMe", "getMe", "getMe"]);
+        assert_eq!(provider.webhook(), webhook);
+        assert!(!bots::get_bot(&state.db, &old.id).await.unwrap().is_active);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_manager_migration_rejects_live_ordinary_row_for_unready_manager_identity() {
+        let (state, actor, _server) = fixture().await;
+        let provider = Provider::start().await;
+        let old = ordinary_channel(&state, &actor, &provider).await;
+        delete(&state, &provider, &old).await.unwrap();
+        configure_manager(&state, &actor, &provider).await.unwrap();
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .update_one(
+                doc! {"_id": &old.id},
+                doc! {"$set": {"is_active": true, "webhook_registered": true}},
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<PlatformCredential>(CREDENTIALS)
+            .update_one(
+                doc! {"provider": "telegram-new"},
+                doc! {"$set": {"fields.webhook_ready": "false"}},
+            )
+            .await
+            .unwrap();
+        let before = provider.webhook();
+        let count = provider.calls().len();
+        assert!(verify(&state, &provider, &old).await.is_err());
+        assert!(
+            bots::register_webhook_with_telegram_api(
+                &state.db,
+                &provider.api(&state),
+                &TelegramAdapter::media_test_adapter(&provider.base),
+                &old.id,
+                MANAGER,
+                &bots::webhook_url(&state.config.base_url, &old),
+                "wrong-secret"
+            )
+            .await
+            .is_err()
+        );
+        delete(&state, &provider, &old).await.unwrap();
+        assert_eq!(provider.calls().len(), count);
+        assert_eq!(provider.webhook(), before);
+        state.db.drop().await.unwrap();
+    }
+}

@@ -1,0 +1,220 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "IFTTT Webhooks",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID adapter for preconfigured Webhooks Applets. Paths omit the secret suffix; NyxID injects the encrypted per-user key at egress. IFTTT Pro or Pro+ required. No Applet authoring or completion polling."
+  },
+  "servers": [
+    {
+      "url": "https://maker.ifttt.com",
+      "description": "IFTTT Webhooks, using NyxID credential-free adapter paths"
+    }
+  ],
+  "externalDocs": {
+    "url": "https://ifttt.com/explore/what-are-webhooks"
+  },
+  "paths": {
+    "/trigger/{event}": {
+      "post": {
+        "operationId": "trigger_event",
+        "summary": "Trigger an IFTTT event",
+        "description": "Trigger an enabled IFTTT Applet configured with Receive a web request. For MCP, supply optional body: {value1, value2, value3} with string ingredients; omit body for an event without ingredients. Event names contain only ASCII letters, numbers, and underscores. Side effects depend on the Applet; more than one Applet may match. Accepted means event receipt, not completion. No idempotency guarantee; check IFTTT Activity before retrying an uncertain call.",
+        "x-aevatar-tool": {
+          "name": "trigger_event",
+          "description": "Trigger an enabled IFTTT Applet configured with Receive a web request. For MCP, supply optional body: {value1, value2, value3} with string ingredients; omit body for an event without ingredients. Event names contain only ASCII letters, numbers, and underscores. Side effects depend on the Applet; more than one Applet may match. Accepted means event receipt, not completion. No idempotency guarantee; check IFTTT Activity before retrying an uncertain call.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "event",
+            "in": "path",
+            "required": true,
+            "description": "The configured IFTTT event name: ASCII letters, numbers, and underscores only. Case-sensitive. Do not include a URL or key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "value1": {
+                    "type": "string",
+                    "description": "Value1 ingredient for the Applet."
+                  },
+                  "value2": {
+                    "type": "string",
+                    "description": "Value2 ingredient for the Applet."
+                  },
+                  "value3": {
+                    "type": "string",
+                    "description": "Value3 ingredient for the Applet."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sanitized NyxID receipt for IFTTT acceptance; not Applet completion.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "accepted",
+                    "upstream_status",
+                    "message"
+                  ],
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean",
+                      "description": "True only when IFTTT returned 2xx; does not confirm an Applet exists or completed."
+                    },
+                    "upstream_status": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Sanitized NyxID receipt on upstream rejection; validation and transport failures use NyxID errors. Redirects return 502 with the upstream status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "accepted",
+                    "upstream_status",
+                    "message"
+                  ],
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean",
+                      "description": "True only when IFTTT returned 2xx; does not confirm an Applet exists or completed."
+                    },
+                    "upstream_status": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/trigger/{event}/json": {
+      "post": {
+        "operationId": "trigger_json_event",
+        "summary": "Trigger an IFTTT JSON event",
+        "description": "Trigger an enabled IFTTT Applet configured with Receive a web request with a JSON payload. Supply arbitrary JSON under body. Event names contain only ASCII letters, numbers, and underscores. Side effects depend on the Applet; more than one Applet may match. Accepted means event receipt, not completion. No idempotency guarantee; check IFTTT Activity before retrying an uncertain call.",
+        "x-aevatar-tool": {
+          "name": "trigger_json_event",
+          "description": "Trigger an enabled IFTTT Applet configured with Receive a web request with a JSON payload. Supply arbitrary JSON under body. Event names contain only ASCII letters, numbers, and underscores. Side effects depend on the Applet; more than one Applet may match. Accepted means event receipt, not completion. No idempotency guarantee; check IFTTT Activity before retrying an uncertain call.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "event",
+            "in": "path",
+            "required": true,
+            "description": "The configured IFTTT event name: ASCII letters, numbers, and underscores only. Case-sensitive. Do not include a URL or key.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "The complete JSON payload, passed unchanged. In MCP, supply it under body. Payload keys do not replace the path event argument."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sanitized NyxID receipt for IFTTT acceptance; not Applet completion.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "accepted",
+                    "upstream_status",
+                    "message"
+                  ],
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean",
+                      "description": "True only when IFTTT returned 2xx; does not confirm an Applet exists or completed."
+                    },
+                    "upstream_status": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Sanitized NyxID receipt on upstream rejection; validation and transport failures use NyxID errors. Redirects return 502 with the upstream status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "accepted",
+                    "upstream_status",
+                    "message"
+                  ],
+                  "properties": {
+                    "accepted": {
+                      "type": "boolean",
+                      "description": "True only when IFTTT returned 2xx; does not confirm an Applet exists or completed."
+                    },
+                    "upstream_status": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

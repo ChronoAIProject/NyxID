@@ -110,6 +110,33 @@ describe("AssistantKeyRotateDialog", () => {
     );
   }, 15_000);
 
+  it("verifies a managed successor without requiring a secret-copy acknowledgement", async () => {
+    mockPost.mockResolvedValue(createdEffect({ fullKey: "" }));
+    mockGet.mockResolvedValue(replacementSnapshot({ platform: "nyxid-assistant" }));
+    const { onComplete } = renderDialog();
+
+    await userEvent.click(screen.getByRole("button", { name: "Rotate key" }));
+    expect(await screen.findByText("Exact rotation lineage verified.")).toBeInTheDocument();
+    expect(screen.getByText("Assistant key rotated")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy replacement API key" }))
+      .not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Report replacement key" }));
+    expect(onComplete).toHaveBeenCalledExactlyOnceWith(REPLACEMENT_ID);
+  });
+
+  it("rejects an empty replacement secret for an ordinary key", async () => {
+    mockPost.mockResolvedValue(createdEffect({ fullKey: "" }));
+    mockGet.mockResolvedValue(replacementSnapshot());
+    const { onComplete } = renderDialog();
+
+    await userEvent.click(screen.getByRole("button", { name: "Rotate key" }));
+    expect(await screen.findByRole("alert"))
+      .toHaveTextContent("NyxID did not return the replacement key.");
+    expect(screen.getByRole("button", { name: "Report replacement key" })).toBeDisabled();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("replays the same verified replacement without replaying secret material", async () => {
     mockPost.mockResolvedValue({
       resource: { keyId: REPLACEMENT_ID },

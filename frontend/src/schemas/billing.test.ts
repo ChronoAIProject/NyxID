@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BILLING_USAGE_PERIODS,
+  billingUsageTotalsSchema,
   billingReadOnlyBlockSchema,
   billingWalletResponseSchema,
   topUpBillingRequestSchema,
@@ -145,5 +146,40 @@ describe("billing token breakdown", () => {
       lago_acked: true,
     });
     expect(row.token_breakdown).toBeUndefined();
+  });
+});
+
+describe("billing funding", () => {
+  it("preserves zero and exact microcredit funding on rows and totals", () => {
+    const funding = {
+      wallet_credits_micros: 0,
+      grant_credits_micros: 2440,
+      allowance_credits_micros: 1200,
+      allowance_quantity: 1200,
+    };
+    const parsed = billingUsageTotalsSchema.parse({
+      quantity: 3640,
+      requests: 0,
+      bytes: 0,
+      events: 1,
+      estimated_credits_micros: 3640,
+      ...funding,
+    });
+    expect(parsed).toMatchObject(funding);
+    expect(
+      billingUsageRowSchema.parse({
+        ...parsed,
+        metric: "tokens",
+        lago_metric_code: "tokens",
+        layer: "platform",
+        lago_acked: true,
+      }),
+    ).toMatchObject(funding);
+    expect(
+      billingUsageTotalsSchema.safeParse({
+        ...parsed,
+        grant_credits_micros: -1,
+      }).success,
+    ).toBe(false);
   });
 });

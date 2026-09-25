@@ -15,7 +15,7 @@ const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const DEAD_SESSION_CODES = new Set([1001, 2000, 2001, 2002]);
 const responseWireLogExchangeIds = new WeakMap<Response, string>();
 
-type AssistantMethod = "GET" | "POST" | "DELETE";
+type AssistantMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
 export interface AssistantHttpRequest {
   readonly apiBaseUrl?: string;
@@ -60,6 +60,7 @@ function conversationIdFromEndpoint(endpoint: string): string | null {
 
 function suppressWireLog(endpoint: string): boolean {
   return (
+    endpoint.startsWith("/assistant/nyxagent/") ||
     endpoint === "/assistant/conversations" ||
     endpoint.startsWith("/assistant/wire-logs/")
   );

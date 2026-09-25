@@ -154,28 +154,36 @@ impl BillingReconciler {
             return Ok(());
         }
 
-        let mut by_code: BTreeMap<String, i64> = rates
+        let mut by_code: BTreeMap<String, (i64, Option<i64>)> = rates
             .into_iter()
-            .map(|rate| (rate.lago_metric_code, rate.credits_per_unit_micros))
+            .map(|rate| {
+                (
+                    rate.lago_metric_code,
+                    (rate.credits_per_unit_micros, rate.credits_per_unit_pico),
+                )
+            })
             .collect();
         for metric_code in [
             super::meter::PLATFORM_REQUESTS_METRIC_CODE,
             super::meter::PLATFORM_BYTES_METRIC_CODE,
             super::meter::PLATFORM_TOKENS_METRIC_CODE,
         ] {
-            by_code.entry(metric_code.to_string()).or_insert(0);
+            by_code
+                .entry(metric_code.to_string())
+                .or_insert((0, Some(0)));
         }
 
         let now = Utc::now();
         let collection = self
             .db
             .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
-        for (metric_code, credits_per_unit_micros) in by_code {
+        for (metric_code, (credits_per_unit_micros, credits_per_unit_pico)) in by_code {
             let row = BillingRateCache {
                 id: BillingRateCache::cache_id(&metric_code, None),
                 lago_metric_code: metric_code,
                 model: None,
                 credits_per_unit_micros,
+                credits_per_unit_pico,
                 synced_at: now,
             };
             collection
@@ -659,6 +667,7 @@ mod tests {
     fn finalized_row(transaction_id: &str) -> UsageMeterRow {
         let now = Utc::now() - Duration::seconds(120);
         UsageMeterRow {
+            rollup_pending: true,
             id: Uuid::new_v4().to_string(),
             transaction_id: transaction_id.to_string(),
             billing_request_id: format!("{transaction_id}-request"),
@@ -679,6 +688,7 @@ mod tests {
             funding: None,
             quantity: Some(1),
             pending_resale_quantity: None,
+            pending_platform_usage: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: true,
@@ -1120,10 +1130,18 @@ mod tests {
         let reconciler = BillingReconciler::new(
             db.clone(),
             Some(std::sync::Arc::new(RatesLago {
-                rates: vec![super::super::lago_client::PlanRate {
-                    lago_metric_code: "platform_tokens".to_string(),
-                    credits_per_unit_micros: 5,
-                }],
+                rates: vec![
+                    super::super::lago_client::PlanRate {
+                        lago_metric_code: "platform_tokens".to_string(),
+                        credits_per_unit_micros: 5,
+                        credits_per_unit_pico: None,
+                    },
+                    super::super::lago_client::PlanRate {
+                        lago_metric_code: "platform_svc_example_byok_cache_read_tokens".into(),
+                        credits_per_unit_micros: 0,
+                        credits_per_unit_pico: Some(250001),
+                    },
+                ],
             })),
             std::sync::Arc::new(billing_enabled_config()),
         );
@@ -1143,7 +1161,14 @@ mod tests {
             .expect("query requests rate")
             .expect("unpriced platform metric zero-fills");
 
-        assert_eq!(stats.rate_cache_refreshes, 3);
+        let precise = collection
+            .find_one(doc! { "lago_metric_code": "platform_svc_example_byok_cache_read_tokens" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(precise.credits_per_unit_pico, Some(250001));
+        assert_eq!(precise.credits_per_unit_micros, 0);
+        assert_eq!(stats.rate_cache_refreshes, 4);
         assert_eq!(tokens.credits_per_unit_micros, 5);
         assert_eq!(requests.credits_per_unit_micros, 0);
     }
@@ -1161,6 +1186,7 @@ mod tests {
                 lago_metric_code: "platform_tokens".to_string(),
                 model: None,
                 credits_per_unit_micros: 7,
+                credits_per_unit_pico: None,
                 synced_at: Utc::now(),
             })
             .await

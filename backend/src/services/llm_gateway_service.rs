@@ -342,8 +342,7 @@ async fn lookup_user_service_status(
         // No-auth services have no api_key but are always reachable.
         return Ok(LlmStatusRank::Ready);
     };
-    let Some(ak) = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let Some(ak) = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": api_key_id, "user_id": owner.user_id() })
         .await?
     else {

@@ -11,7 +11,7 @@ const MOCK_USER = {
   created_at: "2025-11-20T08:00:00Z",
   capabilities: {
     billing_available: true,
-    enabled_features: ["experimental:ai-assistant"],
+    enabled_features: ["experimental:ai-assistant", ...(globalThis.__nyxidAssistantHttpFaults?.nyxagentEnabled ? ["assistant:nyxagent-engine"] : [])],
   },
 };
 
@@ -294,16 +294,16 @@ const MOCK_KEYS = [
     id: "key-0005",
     label: "Supabase",
     slug: "supabase",
-    endpoint_url: "https://xyzproject.supabase.co",
+    endpoint_url: "https://xyzproject.supabase.co/rest/v1",
     endpoint_id: "ep-0005",
     api_key_id: "eak-0005",
     credential_type: "api_key",
-    auth_method: "bearer",
-    auth_key_name: "Authorization",
+    auth_method: "header",
+    auth_key_name: "apikey",
     status: "active",
-    catalog_service_id: null,
-    catalog_service_slug: null,
-    catalog_service_name: null,
+    catalog_service_id: "cs-supabase",
+    catalog_service_slug: "api-supabase",
+    catalog_service_name: "Supabase Data API",
     node_id: null,
     node_priority: 0,
     is_active: true,
@@ -433,7 +433,7 @@ const MOCK_EXTERNAL_API_KEYS = [
   { id: "eak-0002", label: "Claude API Key", credential_type: "api_key", auth_method: "header", auth_key_name: "x-api-key", created_at: "2026-01-20T10:00:00Z", last_used_at: "2026-05-05T10:15:00Z", service_count: 1 },
   { id: "eak-0003", label: "GitHub Token", credential_type: "api_key", auth_method: "bearer", auth_key_name: "Authorization", created_at: "2026-02-01T11:00:00Z", last_used_at: "2026-05-04T16:30:00Z", service_count: 1 },
   { id: "eak-0004", label: "Stripe Secret Key", credential_type: "api_key", auth_method: "bearer", auth_key_name: "Authorization", created_at: "2026-03-10T14:00:00Z", last_used_at: null, service_count: 1 },
-  { id: "eak-0005", label: "Supabase Anon Key", credential_type: "api_key", auth_method: "bearer", auth_key_name: "Authorization", created_at: "2026-03-25T09:00:00Z", last_used_at: "2026-05-06T08:00:00Z", service_count: 1 },
+  { id: "eak-0005", label: "Supabase API Key", credential_type: "api_key", auth_method: "header", auth_key_name: "apikey", created_at: "2026-03-25T09:00:00Z", last_used_at: "2026-05-06T08:00:00Z", service_count: 1 },
   { id: "eak-0006", label: "Vercel Token", credential_type: "api_key", auth_method: "bearer", auth_key_name: "Authorization", created_at: "2026-04-10T10:00:00Z", last_used_at: null, service_count: 1 },
 ];
 
@@ -795,6 +795,24 @@ const MOCK_PUSH_DEVICES = {
 
 // ── Catalog ──
 const MOCK_CATALOG = [
+  {
+    slug: "api-supabase", name: "Supabase Data API", description: "Read and write a Supabase project's tables through its Data API.",
+    base_url: "https://project-ref.supabase.co/rest/v1", auth_method: "header", auth_key_name: "apikey",
+    provider_config_id: "provider-supabase", provider_type: "api_key", requires_gateway_url: true,
+    credential_mode: "admin",
+    api_key_instructions: "Enter your project URL and Supabase API key. Secret keys bypass Row Level Security; publishable keys use your anonymous role's policies.",
+    api_key_url: "https://supabase.com/dashboard/project/_/settings/api-keys",
+    icon_url: null, documentation_url: "https://supabase.com/docs/guides/api",
+    service_type: "http",
+    ssh_host: null, ssh_port: null, ssh_ca_public_key: null, ssh_allowed_principals: null, ssh_certificate_ttl_minutes: null,
+    authorization_url: null, token_url: null, device_code_url: null,
+    default_scopes: null, supports_pkce: null, device_code_format: null,
+    oauth_client_id: null, client_id_param_name: null,
+    requires_credential: true, token_exchange_credential_fields: null, default_request_headers: null,
+    homepage_url: "https://supabase.com", repository_url: null, issues_url: null,
+    capabilities: { supports_proxy_read: true, supports_proxy_write: true, supports_proxy_binary_upload: false, supports_direct_downstream_auth: true, supports_authoring_via_nyx: false, supports_websocket: false, supports_streaming: false },
+    auth_notes: "NyxID sends the stored key in the apikey header.", known_limitations: "Data API only; no PostgreSQL sessions, Storage, Edge Functions, or Realtime.", required_permissions: [],
+  },
   {
     slug: "openai", name: "OpenAI", description: "OpenAI API — GPT-4o, DALL-E, Whisper",
     base_url: "https://api.openai.com/v1", auth_method: "bearer", auth_key_name: "Authorization",

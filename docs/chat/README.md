@@ -1,36 +1,38 @@
 # Assistant Chat
 
-Last verified against Aevatar console and SDK commit `e7ba2e6eb` (2026-08-25).
+NyxAgent verified against NxyAgent commit `58f647e4` (2026-09-17); retained
+Aevatar console and SDK contract verified at `e7ba2e6eb` (2026-08-25).
 
-This directory is the canonical specification for the browser assistant chat surface. It describes the contract implemented by NyxID's `/api/v1/assistant/**` routes, the React assistant client, and the upstream chat endpoints those routes call. The default surface uses Aevatar's durable typed actor. A default-off feature flag can instead select the implemented stateless Direct Chrono-LLM engine for internal testing.
+This directory is the canonical specification for the browser assistant chat surface. It describes the contract implemented by NyxID's `/api/v1/assistant/**` routes, the React assistant client, and the upstream chat endpoints those routes call. New chats default to NyxAgent behind the default-on `assistant:nyxagent-engine` flag. With that flag off, the default-off Direct Chrono-LLM flag takes precedence over the retained Aevatar typed actor. Existing conversation IDs retain their engine.
 
-The live Aevatar contract wins over prose. If the deployed or pinned upstream contract and these documents disagree, fix the code or fix the document; never preserve two competing contracts.
+Each verified upstream contract wins over prose. If the deployed or pinned upstream contract and these documents disagree, fix the code or fix the document; never preserve two competing contracts.
 
 ## Reading order
 
-1. [Architecture](01-architecture.md) defines the default typed `NyxIdChat` engine, flag-gated stateless Direct engine, legacy history-only compatibility, ownership, authentication, and the Aevatar cutover gate.
-2. [Wire contract](02-wire-contract.md) specifies every browser call for both implemented engines, strict bodies, legacy read/delete resources, actor `/state`, fences, and retries.
-3. [Direct Chrono-LLM spec](direct-chronollm-spec.md) is the detailed v3.2 contract implemented by the default-off `experimental:direct-chat-engine` surface.
-4. [Endpoint selector addendum](direct-chronollm-endpoints-addendum.md) is a proposed spec v4 follow-up. Its consolidated flag, typed endpoint configuration, `chat-config` API, and gear panel are not implemented by the current branch.
-5. [Stream protocol](03-stream-protocol.md) specifies SSE decoding, typed identity adoption, actor-projection convergence, terminal settlement, and transcript boundaries.
-6. [Action cards](04-action-cards.md) specifies the v4 action envelope and `service.connect` lifecycle.
-7. [Frontend UI](05-frontend-ui.md) specifies rendering, composer, navigation, loading, error, and accessibility behavior.
-8. [Actions registry](06-actions-registry.md) specifies the public action manifest consumed by Aevatar composition.
-9. [Testing and gaps](07-testing-and-gaps.md) identifies executable coverage, fault-injection controls, and current operational gaps.
-10. [Mock scenario interception](mock-scenario-intercept-spec.md) preserves the design record of the superseded scripted-flow interceptor; assistant mocks now live at the HTTP boundary.
-11. [Mock scenario implementation plan](mock-scenario-intercept-plan.md) preserves the superseded implementation record and its review findings.
-12. [Smooth text streaming](smooth-streaming.md) specifies the implemented text-reveal pipeline: the PR #1390 pacing controller, stable-prefix Markdown split and streaming caret, plus boundary-safe cuts and adaptive cadence spreading. It consolidates and supersedes the earlier exploratory plan and its adversarial review.
+1. [Architecture](01-architecture.md) defines default NyxAgent, retained typed `NyxIdChat`, flag-gated stateless Direct, legacy history-only compatibility, ownership, authentication, and the Aevatar cutover gate.
+2. [Wire contract](02-wire-contract.md) specifies every browser call for all implemented engines, strict bodies, legacy read/delete resources, actor `/state`, fences, and retries.
+3. [NyxAgent engine](08-nyxagent-engine.md) is the normative request, persistence, credential, recovery, and Stop contract, verified against NxyAgent `58f647e4`.
+4. [Direct Chrono-LLM spec](direct-chronollm-spec.md) is the detailed v3.2 contract implemented by the default-off `experimental:direct-chat-engine` surface.
+5. [Endpoint selector addendum](direct-chronollm-endpoints-addendum.md) is a proposed spec v4 follow-up. Its consolidated flag, typed endpoint configuration, `chat-config` API, and gear panel are not implemented by the current branch.
+6. [Stream protocol](03-stream-protocol.md) specifies SSE decoding, typed identity adoption, actor-projection convergence, terminal settlement, and transcript boundaries.
+7. [Action cards](04-action-cards.md) specifies the v4 action envelope and `service.connect` lifecycle.
+8. [Frontend UI](05-frontend-ui.md) specifies rendering, composer, navigation, loading, error, and accessibility behavior.
+9. [Actions registry](06-actions-registry.md) specifies the public action manifest consumed by Aevatar composition.
+10. [Testing and gaps](07-testing-and-gaps.md) identifies executable coverage, fault-injection controls, and current operational gaps.
+11. [Mock scenario interception](mock-scenario-intercept-spec.md) preserves the design record of the superseded scripted-flow interceptor; assistant mocks now live at the HTTP boundary.
+12. [Mock scenario implementation plan](mock-scenario-intercept-plan.md) preserves the superseded implementation record and its review findings.
+13. [Smooth text streaming](smooth-streaming.md) specifies the implemented text-reveal pipeline: the PR #1390 pacing controller, stable-prefix Markdown split and streaming caret, plus boundary-safe cuts and adaptive cadence spreading. It consolidates and supersedes the earlier exploratory plan and its adversarial review.
 
 ## Scope
 
 The assistant chat surface is the authenticated browser experience at
-`/assistant`. A human session calls NyxID. With the default-off direct flag
-disabled, NyxID selects the platform-managed `aevatar` service and Aevatar owns
-typed actor execution and persistent conversation history. With the flag
-enabled for that user, new drafts and `direct-*` IDs select the stateless Direct
-engine and NyxID calls the platform-managed `chrono-llm-public` service instead.
-Existing `nyxid-chat-*` and `chatc-*` routes remain on the canonical history
-reader even while the flag is enabled.
+`/assistant`. A human session calls NyxID. New draft precedence is NyxAgent
+(default on) > Direct (default off) > Aevatar. NyxID stores NyxAgent transcripts
+in MongoDB and authenticates to the catalog `llm-nyx` row with an encrypted,
+system-managed Agent Key. NyxAgent owns replaceable live context; a browser
+reload never resends the user message. Existing `nyxid-chat-*` and `chatc-*` IDs
+retain the Aevatar reader; `direct-*` stays in the enabled Direct surface.
+No engine is a runtime fallback for another engine's failure.
 Existing `chatc-*` rows are historical read/delete compatibility, never an
 alternate send, stream, recovery, or control path.
 
@@ -47,6 +49,8 @@ The assistant backend uses shared proxy machinery for identity and delegation in
 
 The normative implementation anchors are:
 
+- `backend/src/handlers/assistant_nyxagent.rs`, `services/assistant_nyxagent.rs`, and `services/assistant_agent_credential_service.rs`: NyxAgent adapter, durable transcript, recovery, and encrypted credential lifecycle.
+- `frontend/src/lib/assistant/nyxagent-transport.ts` and `hooks/use-assistant-nyxagent.ts`: server-backed history, turn subscription, and reload polling.
 - `backend/src/routes.rs`: route placement and authentication policy.
 - `backend/src/handlers/assistant.rs`: upstream selection, history multiplexing, request forwarding, and response normalization.
 - `backend/src/handlers/assistant_direct.rs`: direct-route flag enforcement, strict body rebuild, rate-limit lifetime, and Chrono-LLM forwarding.
@@ -64,12 +68,13 @@ The normative implementation anchors are:
 - `frontend/src/hooks/use-assistant-chat.ts`: per-conversation session ownership, switching, history restore, and controls.
 - `frontend/src/components/assistant/chat-message.tsx`: canonical message composition and tail following.
 - `frontend/src/lib/assistant/direct-transport.ts` and `frontend/src/hooks/use-assistant-direct.ts`: the memory-only Direct seam.
-- `frontend/src/lib/assistant/conversation-ids.ts`: legacy, typed, and Direct prefix routing.
+- `frontend/src/lib/assistant/conversation-ids.ts`: legacy, typed, Direct, and NyxAgent prefix routing.
 - `frontend/src/components/assistant/**`: visible behavior and accessibility semantics.
 - `frontend/e2e/**` and assistant unit tests: executable browser and transport contracts.
 
-Upstream claims in this set are verified against Aevatar commit `e7ba2e6eb`.
-The primary anchors are the console's chat page/API, SSE normalizer, runtime
+NyxAgent claims and quoted source lines are recorded in
+[08-nyxagent-engine.md](08-nyxagent-engine.md). Retained actor claims are verified
+against Aevatar commit `e7ba2e6eb`. Its primary anchors are the console's chat page/API, SSE normalizer, runtime
 event accumulator, actor-state reducer, history decoders, and the typed actor's
 `NyxIdChatSseWriter`, `NyxIdChatProjectionSession`, and
 `NyxIdChatCompletionAguiFrameBuilder`.

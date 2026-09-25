@@ -3,20 +3,40 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "channel_messages";
 
+/// Provider handles and descriptive metadata only; never media bytes or captions.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct StoredAttachment {
+    pub content_type: String,
+    #[serde(default)]
+    pub provider_ref: String,
+    pub platform_message_id: Option<String>,
+    pub file_key: Option<String>,
+    pub image_key: Option<String>,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<u64>,
+}
+impl std::fmt::Debug for StoredAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StoredAttachment([REDACTED])")
+    }
+}
+
 /// A metadata-only record of a message flowing through the channel bot
 /// relay pipeline.
 ///
 /// **Per ADR-013 (NyxID Pure Passthrough) this record does not store message
-/// content.** Historical deployments may still have `text`, `attachments`, or
-/// `raw_platform_data` fields on existing documents; a startup migration in
-/// `db::ensure_indexes` unsets them on first run. Serde's default behavior of
-/// ignoring unknown fields keeps old documents readable during the rollout
-/// window.
+/// content.** Inbound attachments retain only provider routing handles and
+/// descriptive metadata so authorized agents can download ephemeral bytes.
+/// The startup migration removes legacy content fields and attachment objects
+/// without provider_ref, while retaining the current metadata shape.
 ///
 /// Message *content* now lives exclusively in the downstream agent (Aevatar
 /// grain state, or wherever the agent persists its conversation history).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    #[serde(default)]
+    pub platform_send: Option<super::channel_delivery::PlatformSendRecord>,
     #[serde(rename = "_id")]
     pub id: String,
     /// The bot that hosts this message's conversation. `None` for messages on
@@ -45,6 +65,8 @@ pub struct ChannelMessage {
     pub sender_display_name: Option<String>,
     /// Content type: "text", "image", "file", "audio", "video", "unknown"
     pub content_type: String,
+    #[serde(default)]
+    pub attachments: Vec<StoredAttachment>,
     /// Platform-specific routing metadata: Telegram `message_thread_id`,
     /// Discord deferred-interaction token (`interaction:{app}:{token}`),
     /// Lark `thread_id`, etc. **This is routing metadata, not message
@@ -72,6 +94,15 @@ pub struct ChannelMessage {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+impl std::fmt::Debug for ChannelMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelMessage")
+            .field("id", &self.id)
+            .field("platform", &self.platform)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +114,8 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            platform_send: None,
+            attachments: vec![],
             id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
             conversation_id: uuid::Uuid::new_v4().to_string(),
@@ -121,7 +154,7 @@ mod tests {
         let msg = make_message();
         let doc = bson::to_document(&msg).expect("serialize");
         assert!(!doc.contains_key("text"));
-        assert!(!doc.contains_key("attachments"));
+        assert!(doc.get_array("attachments").unwrap().is_empty());
         assert!(!doc.contains_key("raw_platform_data"));
         assert!(!doc.contains_key("body"));
         assert!(!doc.contains_key("content"));
@@ -172,10 +205,12 @@ mod tests {
         doc.remove("reply_to_message_id");
         doc.remove("platform_reply_message_id");
         doc.remove("updated_at");
+        doc.remove("attachments");
         let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.platform_message_id, None);
         assert_eq!(restored.callback_status, None);
         assert_eq!(restored.updated_at, None);
+        assert!(restored.attachments.is_empty());
     }
 
     #[test]

@@ -7,19 +7,23 @@ import {
   useAdminCreditGrants,
   useAdminCreditSchedules,
   useCreateCreditSchedule,
+  useCreateAllowance,
+  useCreateAllowanceBundle,
+  useReplaceAllowanceBundle,
   useCurrentAllowances,
   useIssueCreditGrant,
   useUpdateCreditSchedule,
 } from "./use-billing-credits";
 
-const { mockGet, mockPost, mockPatch } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockPatch, mockPut } = vi.hoisted(() => ({
   mockGet: vi.fn(),
   mockPost: vi.fn(),
   mockPatch: vi.fn(),
+  mockPut: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
-  api: { get: mockGet, post: mockPost, patch: mockPatch },
+  api: { get: mockGet, post: mockPost, patch: mockPatch, put: mockPut },
 }));
 
 function wrapperFactory() {
@@ -46,7 +50,7 @@ describe("billing credit hooks", () => {
     );
   });
 
-  it("normalizes all-owner and all-service grant payloads", async () => {
+  it("normalizes all-service grant payloads and empty target lists", async () => {
     mockPost.mockResolvedValue({
       batch_id: "batch-1",
       created_count: 3,
@@ -67,7 +71,9 @@ describe("billing credit hooks", () => {
     result.current.mutate({
       amount_credits: 100,
       target_kind: "all_users",
-      target_user_ids: ["ignored-user"],
+      target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       all_services: true,
       service_refs: ["ignored-service"],
       expires_at: "",
@@ -79,6 +85,8 @@ describe("billing credit hooks", () => {
       amount_credits: 100,
       target_kind: "all_users",
       target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       all_services: true,
       service_refs: [],
       expires_at: null,
@@ -146,6 +154,8 @@ describe("billing credit hooks", () => {
       expiry: { kind: "end_of_period" },
       target_kind: "all_users",
       target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       scope: { all_services: true, service_ids: [], service_slugs: [] },
       is_active: true,
       created_by: "admin-1",
@@ -163,6 +173,8 @@ describe("billing credit hooks", () => {
       expiry: { kind: "end_of_period" },
       target_kind: "all_users",
       target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       all_services: true,
       service_refs: [],
       reason: "",
@@ -174,6 +186,8 @@ describe("billing credit hooks", () => {
       expiry: { kind: "end_of_period" },
       target_kind: "all_users",
       target_user_ids: [],
+      target_org_ids: [],
+      target_group_ids: [],
       all_services: true,
       service_refs: [],
       reason: null,
@@ -193,4 +207,115 @@ describe("billing credit hooks", () => {
       { is_active: false },
     );
   });
+});
+
+it.each(["org_members", "groups"] as const)(
+  "sends %s targets through grant, schedule and allowance hooks",
+  async (kind) => {
+    const targets = {
+      target_kind: kind,
+      target_user_ids: [],
+      target_org_ids: kind === "org_members" ? ["org"] : [],
+      target_group_ids: kind === "groups" ? ["group"] : [],
+    };
+    const commonResponse = {
+      ...targets,
+      id: "benefit",
+      amount_credits: 10,
+      amount_micros: 10_000_000,
+      recurrence: "monthly",
+      expiry: { kind: "never" },
+      scope: { all_services: true, service_ids: [], service_slugs: [] },
+      created_by: "admin",
+      created_at: "2026-09-01T00:00:00Z",
+      updated_at: "2026-09-01T00:00:00Z",
+      is_active: true,
+      skipped_periods: 0,
+      batch_id: "batch",
+      created_count: 1,
+      activated_count: 1,
+      pending_activation_count: 0,
+      recipients: [],
+      service_id: "service",
+      service_slug: "service",
+      metric: "requests",
+      quantity: 100,
+    };
+    mockPost.mockResolvedValue(commonResponse);
+    const grant = renderHook(() => useIssueCreditGrant(), {
+      wrapper: wrapperFactory(),
+    });
+    const schedule = renderHook(() => useCreateCreditSchedule(), {
+      wrapper: wrapperFactory(),
+    });
+    const allowance = renderHook(() => useCreateAllowance(), {
+      wrapper: wrapperFactory(),
+    });
+    const grantForm = {
+      ...targets,
+      amount_credits: 10,
+      all_services: true,
+      service_refs: [],
+      expires_at: "",
+      reason: "",
+    };
+    await grant.result.current.mutateAsync(grantForm);
+    await schedule.result.current.mutateAsync({
+      ...grantForm,
+      recurrence: "monthly",
+      expiry: { kind: "never" },
+    });
+    await allowance.result.current.mutateAsync({
+      ...targets,
+      service_ref: "service",
+      quantity: 100,
+      recurrence: "monthly",
+    });
+    for (const path of ["grants", "schedules", "allowances"]) {
+      expect(mockPost).toHaveBeenCalledWith(
+        `/admin/credits/${path}`,
+        expect.objectContaining(targets),
+      );
+    }
+  },
+);
+
+it("normalizes stale target lists at both bundle hook boundaries", async () => {
+  const body = {
+    service_ref: "service",
+    target_kind: "all_users" as const,
+    target_user_ids: ["stale-user"],
+    target_org_ids: ["stale-org"],
+    target_group_ids: ["stale-group"],
+    units: [
+      { metric: "tokens" as const, quantity: 10, recurrence: "daily" as const },
+    ],
+  };
+  const response = { bundle_id: "bundle", allowances: [] };
+  mockPost.mockResolvedValue(response);
+  mockPut.mockResolvedValue(response);
+  const create = renderHook(() => useCreateAllowanceBundle(), {
+    wrapper: wrapperFactory(),
+  });
+  const replace = renderHook(() => useReplaceAllowanceBundle(), {
+    wrapper: wrapperFactory(),
+  });
+  create.result.current.mutate(body);
+  replace.result.current.mutate({ id: "bundle", body });
+  await waitFor(() => expect(create.result.current.isSuccess).toBe(true));
+  await waitFor(() => expect(replace.result.current.isSuccess).toBe(true));
+  const normalized = {
+    ...body,
+    target_user_ids: [],
+    target_org_ids: [],
+    target_group_ids: [],
+  };
+  expect(mockPost).toHaveBeenCalledWith(
+    "/admin/credits/allowances",
+    normalized,
+  );
+  expect(mockPut).toHaveBeenCalledWith(
+    "/admin/credits/allowances/bundles/bundle",
+    normalized,
+  );
 });

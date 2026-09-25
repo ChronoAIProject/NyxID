@@ -22,6 +22,7 @@ use crate::services::{
 fn llm_credential_class(
     resolved_via_user_service: bool,
     master_credential: bool,
+    credential_source: Option<&str>,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if target.auth_method == "none" && target.credential.is_empty() {
@@ -31,6 +32,8 @@ fn llm_credential_class(
         // catalog master credential; classify by whose key was used.
         if master_credential {
             CredentialClass::NyxidManagedMaster
+        } else if credential_source == Some("platform") {
+            CredentialClass::NyxidPlatformOauthApp
         } else {
             CredentialClass::UserOwned
         }
@@ -59,6 +62,7 @@ fn resale_usage_from_optional_reported(
             metric,
             quantity: fallback_bytes.max(0),
         }),
+        _ => None,
     }
 }
 
@@ -66,11 +70,7 @@ pub(crate) fn llm_platform_usage(
     usage: Option<&llm_usage_service::ReportedLlmUsage>,
     fallback_bytes: i64,
 ) -> PlatformUsage {
-    PlatformUsage::llm_completion(
-        fallback_bytes,
-        llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
-    )
-    .with_token_breakdown(usage.map(llm_usage_service::ReportedLlmUsage::token_breakdown))
+    llm_usage_service::platform_usage(usage, fallback_bytes, true)
 }
 
 pub(crate) fn enforce_llm_billing_classification(
@@ -289,6 +289,7 @@ pub async fn llm_proxy_request(
     // with the "Provider ... connection required" error, even though the
     // user has a perfectly valid UserService linked by catalog_service_id.
     let mut is_auto_connected_for_approval = false;
+    let mut credential_source = None;
     let (target, resolved_via_user_service, master_credential, owner_for_approval) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
@@ -305,6 +306,7 @@ pub async fn llm_proxy_request(
         .await?
         {
             Some(resolution) => {
+                credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
                 let effective_owner = resolution
                     .org_routing
@@ -364,10 +366,20 @@ pub async fn llm_proxy_request(
     let billing_resource_owner_id = owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmProvider,
@@ -380,11 +392,12 @@ pub async fn llm_proxy_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(resolved_via_user_service, master_credential, &target),
+        credential_class,
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
+    let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
     let metered = state.billing.open(&billing_ctx).await?;
 
     // Resolve credentials for injection. The new UserService path bakes the
@@ -660,6 +673,7 @@ pub async fn gateway_request(
     // See `llm_proxy_request` for why we pass `None` as the slug here
     // instead of `provider_slug` -- the URL's provider slug does not
     // match UserService.slug, which is user-chosen at provision time.
+    let mut credential_source = None;
     let (target, resolved_via_user_service, master_credential) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
@@ -676,6 +690,7 @@ pub async fn gateway_request(
         .await?
         {
             Some(resolution) => {
+                credential_source = resolution.credential_source;
                 is_auto_connected_for_approval = resolution.is_auto_connected;
                 effective_owner_for_approval = Some(
                     resolution
@@ -788,10 +803,20 @@ pub async fn gateway_request(
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
         .unwrap_or(&billing_resolution_user_id);
+    let credential_class = llm_credential_class(
+        resolved_via_user_service,
+        master_credential,
+        credential_source.as_deref(),
+        &target,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, billing_resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            billing_resource_owner_id,
+            credential_class,
+        )
         .await?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmGateway,
@@ -804,11 +829,12 @@ pub async fn gateway_request(
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
         target.auth_method.clone(),
-        llm_credential_class(resolved_via_user_service, master_credential, &target),
+        credential_class,
         BillingMetric::Tokens,
         target.service.billing.as_ref().or(service.billing.as_ref()),
         state.billing.resale_enabled(),
     );
+    let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
     let metered = state.billing.open(&billing_ctx).await?;
 
     // Resolve delegated credentials. When the target came from the new
@@ -867,6 +893,8 @@ pub async fn gateway_request(
         // M-5: Google AI uses OpenAI-compatible format but at a different base URL.
         // No body translation needed, but the base URL must be overridden.
         Some(base) => proxy_service::ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base.to_string(),
             auth_method: target.auth_method,
             auth_key_name: target.auth_key_name,
@@ -1247,12 +1275,15 @@ async fn build_filtered_response(
                             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                             while let Some(event) = parse_next_sse_event(&mut buffer) {
-                                if let Some((usage, mode)) =
+                                if let Some((mut usage, mode)) =
                                     llm_usage_service::extract_reported_usage_from_sse_event(
                                         event.event_type.as_deref(),
                                         &event.data,
                                     )
                                 {
+                                    if !status.is_success() {
+                                        usage.images = 0;
+                                    }
                                     accumulator.observe(usage, mode);
                                 }
                             }
@@ -1342,7 +1373,11 @@ async fn build_filtered_response(
         let mut model = None;
         if let Some(context) = usage_context
             && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&response_body)
-            && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+            && let Some(usage) = llm_usage_service::extract_reported_usage_for_path(
+                &json,
+                &context.path,
+                status.is_success(),
+            )
         {
             model = context.model.clone();
             llm_usage_service::log_reported_usage_async(context, usage.clone());
@@ -1913,6 +1948,45 @@ mod tests {
     }
 
     #[test]
+    fn shared_oauth_app_is_classified_for_platform_charging() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.requires_user_credential = true;
+        let target = crate::services::proxy_service::ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
+            base_url: service.base_url.clone(),
+            auth_method: "bearer".into(),
+            auth_key_name: "Authorization".into(),
+            credential: "test-token".into(),
+            service,
+            catalog_default_headers: Vec::new(),
+            user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
+            connection_id: None,
+        };
+        for (source, expected) in [
+            (
+                Some("platform"),
+                crate::models::usage_meter::CredentialClass::NyxidPlatformOauthApp,
+            ),
+            (
+                Some("byo"),
+                crate::models::usage_meter::CredentialClass::UserOwned,
+            ),
+            (None, crate::models::usage_meter::CredentialClass::UserOwned),
+        ] {
+            assert_eq!(
+                super::llm_credential_class(true, false, source, &target),
+                expected
+            );
+            assert_eq!(
+                super::llm_credential_class(true, true, source, &target),
+                crate::models::usage_meter::CredentialClass::NyxidManagedMaster
+            );
+        }
+    }
+
+    #[test]
     fn bypasses_when_approval_is_disabled() {
         assert!(should_bypass_approval_flow(false, &AuthMethod::Session));
         assert!(should_bypass_approval_flow(false, &AuthMethod::ApiKey));
@@ -1948,6 +2022,7 @@ mod tests {
             cached_tokens: 3,
             cache_creation_tokens: 0,
             reported_cost: None,
+            ..Default::default()
         };
 
         let platform = llm_platform_usage(Some(&usage), 10_000);

@@ -2,7 +2,7 @@ use axum::{Json, extract::State};
 use serde::Serialize;
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::mcp_service;
 
@@ -12,6 +12,7 @@ use crate::services::mcp_service;
 pub struct McpConfigResponse {
     pub contract_version: &'static str,
     pub catalog_digest: String,
+    pub skills_manifest_digest: String,
     pub user_id: String,
     pub proxy_base_url: String,
     pub schema_contract: McpSchemaContract,
@@ -59,6 +60,8 @@ pub struct McpServiceConfig {
     /// service. Empty when none are recorded.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub recommended_skills: Vec<String>,
+    pub recommended_skill_refs: Option<Vec<crate::models::catalog_skill_revision::SkillReference>>,
+    pub skills_revision: Option<i64>,
     pub endpoints: Vec<McpEndpointConfig>,
 }
 
@@ -104,7 +107,22 @@ pub async fn get_mcp_config(
         mcp_service::NodeScope::Allowed(auth_user.allowed_node_ids.as_slice())
     };
 
-    let service_scope = if auth_user.allow_all_services {
+    let chat = crate::services::assistant_acknowledgement_service::for_key(
+        &state.db,
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+    )
+    .await
+    .map_err(|error| match error {
+        AppError::NotFound(_) => {
+            AppError::Unauthorized("Invalid authentication credentials".to_string())
+        }
+        error => error,
+    })?;
+    // Match MCP tools/list: chat keys discover services before acknowledgement.
+    // allowed_platform_service_ids and account_acknowledged gate execution,
+    // not this catalog. MCP-only account/meta-tools are added by the transport.
+    let service_scope = if chat.is_some() || auth_user.allow_all_services {
         mcp_service::ServiceScope::Unrestricted
     } else {
         mcp_service::ServiceScope::Allowed(auth_user.allowed_service_ids.as_slice())
@@ -127,6 +145,7 @@ pub async fn get_mcp_config(
     Ok(Json(McpConfigResponse {
         contract_version: "1.0",
         catalog_digest,
+        skills_manifest_digest: mcp_service::skills_manifest_digest(&catalog.services),
         user_id,
         proxy_base_url: build_proxy_base_url(&state.config.base_url),
         schema_contract: McpSchemaContract {
@@ -203,6 +222,8 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
                 is_user_service: svc.source.is_user_service(),
                 is_generic_proxy: svc.is_generic_proxy,
                 recommended_skills: svc.recommended_skills.clone(),
+                recommended_skill_refs: svc.recommended_skill_refs.clone(),
+                skills_revision: svc.skills_revision,
                 endpoints,
             }
         })
@@ -237,6 +258,8 @@ mod tests {
 
     fn service_with_schema(schema: serde_json::Value) -> McpServiceConfig {
         McpServiceConfig {
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: "service-1".to_string(),
             service_name: "Example".to_string(),
             service_slug: "example".to_string(),
@@ -285,6 +308,9 @@ mod tests {
     #[test]
     fn rest_and_mcp_tool_generation_share_the_same_operation_set() {
         let services = vec![McpToolService {
+            workspace_destinations_pending: false,
+            recommended_skill_refs: None,
+            skills_revision: None,
             service_id: "user-service-1".to_string(),
             service_name: "Example".to_string(),
             service_slug: "example".to_string(),
@@ -292,6 +318,7 @@ mod tests {
             service_category: "user_service".to_string(),
             recommended_skills: Vec::new(),
             endpoints: vec![McpToolEndpoint {
+                target_id: None,
                 endpoint_id: "endpoint-1".to_string(),
                 name: "get_item".to_string(),
                 description: None,
@@ -322,12 +349,11 @@ mod tests {
                     .map(move |endpoint| format!("{}__{}", service.service_slug, endpoint.name))
             })
             .collect();
-        let mcp_operations: Vec<String> =
-            mcp_service::generate_tool_definitions(&services, None, &[])
-                .into_iter()
-                .filter(|tool| !tool.name.starts_with("nyx__"))
-                .map(|tool| tool.name)
-                .collect();
+        let mcp_operations: Vec<String> = mcp_service::generate_tool_definitions(&services, None)
+            .into_iter()
+            .filter(|tool| !tool.name.starts_with("nyx__"))
+            .map(|tool| tool.name)
+            .collect();
 
         assert_eq!(rest_operations, mcp_operations);
     }

@@ -92,7 +92,11 @@ pub async fn bootstrap(
         } = adapter.credential_resolution()
         {
             response.provider_slug = Some(provider_slug);
-            response.required_scopes = required_scopes;
+            response.required_scopes = if platform == "x" {
+                crate::services::channel_adapters::x::PUBLIC_SCOPES
+            } else {
+                required_scopes
+            };
             let provider = state
                 .db
                 .collection::<crate::models::provider_config::ProviderConfig>(
@@ -275,6 +279,7 @@ pub(crate) async fn complete_inner(
     .await?;
     let created = channel_bot_service::create_managed_bot(
         &state.db,
+        &state.billing,
         &state.config,
         &state.encryption_keys,
         &state.http_client,
@@ -350,11 +355,23 @@ pub async fn reconnect(
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
     channel_bot_service::reconnect_bot(
         &state.db,
+        &state.billing,
         &state.encryption_keys,
         &state.http_client,
         adapter.as_ref(),
         &bot,
         &body.connection_id,
+    )
+    .await?;
+    let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    crate::services::channel_connection_webhook_service::configure(
+        &state.db,
+        &state.billing,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter.as_ref(),
+        &current,
+        &state.config.base_url,
     )
     .await?;
     audit_service::log_for_user(

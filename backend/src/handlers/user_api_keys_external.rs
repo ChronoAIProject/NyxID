@@ -30,10 +30,9 @@ async fn load_readable_api_key(
     state: &AppState,
     actor: &str,
     key_id: &str,
+    api_key_scope: Option<&[String]>,
 ) -> AppResult<UserApiKey> {
-    let key = state
-        .db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let key = crate::services::service_history::collection::<UserApiKey>(&state.db, USER_API_KEYS)
         .find_one(doc! { "_id": key_id })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
@@ -42,12 +41,21 @@ async fn load_readable_api_key(
     if !access.can_read() {
         return Err(AppError::NotFound("API key not found".to_string()));
     }
-    let backing_service_ids =
+    let mut backing_service_ids =
         user_service_service::user_service_ids_for_api_key(&state.db, &key.user_id, &key.id)
             .await?;
     if !access.allows_any_resource(&backing_service_ids) {
         return Err(AppError::NotFound("API key not found".to_string()));
     }
+    // Both authorities must cover the same backing service; separate matches
+    // on a shared endpoint/credential must not combine disjoint scopes.
+    if api_key_scope.is_some() {
+        backing_service_ids.retain(|id| access.allows_resource(id));
+    }
+    crate::services::key_service::ensure_api_key_service_scope(
+        api_key_scope,
+        &backing_service_ids,
+    )?;
     Ok(key)
 }
 
@@ -60,7 +68,7 @@ pub(crate) async fn resolve_api_key_write_target(
     actor: &str,
     key_id: &str,
 ) -> AppResult<UserApiKey> {
-    let key = load_readable_api_key(state, actor, key_id).await?;
+    let key = load_readable_api_key(state, actor, key_id, None).await?;
     let access = org_service::resolve_owner_access(&state.db, actor, &key.user_id).await?;
     if !access.can_write() {
         return Err(AppError::OrgRoleInsufficient(
@@ -399,12 +407,20 @@ pub(crate) async fn create_gcp_service_account_key_with_id(
     tag = "External API Keys"
 )]
 /// GET /api/v1/api-keys/external
+/// API-key readable credential metadata, filtered to allowed backing services.
+/// Org-owned keys list their own credentials. No provisioning or reconciliation.
 pub async fn list_external_api_keys(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<ExternalApiKeyListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let keys = user_api_key_service::list_api_keys(&state.db, &user_id_str).await?;
+    let mut keys = user_api_key_service::list_api_keys(&state.db, &user_id_str).await?;
+    if let Some(scope) = auth_user.api_key_service_scope() {
+        let references =
+            user_service_service::inventory_references_for_services(&state.db, &user_id_str, scope)
+                .await?;
+        keys.retain(|key| references.api_key_ids.contains(&key.id));
+    }
     let items = keys.into_iter().map(external_api_key_response).collect();
     Ok(Json(ExternalApiKeyListResponse { api_keys: items }))
 }
@@ -447,19 +463,18 @@ pub async fn update_external_api_key(
     if rotating_credential {
         use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
         use futures::TryStreamExt;
-        let routed_services: Vec<UserService> = state
-            .db
-            .collection::<UserService>(USER_SERVICES)
-            .find(doc! {
-                "user_id": &owner_id,
-                "api_key_id": &key_id,
-                "node_id": { "$ne": null },
-                "is_active": true,
-                "auth_method": { "$ne": "none" },
-            })
-            .await?
-            .try_collect()
-            .await?;
+        let routed_services: Vec<UserService> =
+            crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+                .find(doc! {
+                    "user_id": &owner_id,
+                    "api_key_id": &key_id,
+                    "node_id": { "$ne": null },
+                    "is_active": true,
+                    "auth_method": { "$ne": "none" },
+                })
+                .await?
+                .try_collect()
+                .await?;
         for svc in &routed_services {
             if !auth_user.allow_all_services && !auth_user.allowed_service_ids.contains(&svc.id) {
                 return Err(AppError::ApiKeyScopeForbidden(format!(
@@ -638,8 +653,9 @@ pub async fn delete_external_api_key(
 )]
 /// GET /api/v1/api-keys/external/{key_id}/authorization
 ///
-/// Same ACL as the external-key write sibling, projected to the properties
-/// an assistant-action postcondition reader consumes. Delete-shaped verbs
+/// API-key readable under owner/membership ACLs and backing-service scope;
+/// org-owned keys read their own credentials directly. Read-only projection
+/// of the properties an assistant-action postcondition reader consumes. Delete-shaped verbs
 /// prove absence through this route returning 404.
 pub async fn get_external_api_key_authorization(
     State(state): State<AppState>,
@@ -647,7 +663,8 @@ pub async fn get_external_api_key_authorization(
     Path(key_id): Path<String>,
 ) -> AppResult<Json<ExternalApiKeyAuthorizationEvidenceResponse>> {
     let actor = auth_user.user_id.to_string();
-    let key = load_readable_api_key(&state, &actor, &key_id).await?;
+    let key =
+        load_readable_api_key(&state, &actor, &key_id, auth_user.api_key_service_scope()).await?;
     Ok(Json(
         ExternalApiKeyAuthorizationEvidenceResponse::from_external_api_key_response(
             external_api_key_response(key),

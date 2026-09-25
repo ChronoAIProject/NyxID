@@ -121,7 +121,7 @@ fn hash_canonical(value: &Value) -> String {
 
 pub fn endpoint_contract_digest(endpoint: &ServiceEndpoint) -> AppResult<String> {
     let normalized_path = normalize_path(&endpoint.path)?;
-    Ok(hash_canonical(&serde_json::json!({
+    let mut contract = serde_json::json!({
         "authority": "nyxid",
         "contract_version": DURABLE_GRANT_CONTRACT_VERSION,
         "endpoint_id": endpoint.id,
@@ -134,7 +134,11 @@ pub fn endpoint_contract_digest(endpoint: &ServiceEndpoint) -> AppResult<String>
         "request_body_required": endpoint.effective_request_body_required(),
         "risk": endpoint.risk,
         "supports_idempotency_key": endpoint.supports_idempotency_key,
-    })))
+    });
+    if let Some(target_id) = &endpoint.target_id {
+        contract["target_id"] = target_id.clone().into();
+    }
+    Ok(hash_canonical(&contract))
 }
 
 async fn load_active_published_endpoint(
@@ -145,17 +149,17 @@ async fn load_active_published_endpoint(
     allowed_node_ids: &[String],
     endpoint_id: &str,
 ) -> AppResult<Option<ServiceEndpoint>> {
-    let catalog_backed = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! {
-            "_id": user_service_id,
-            "user_id": owner_user_id,
-            "is_active": true,
-            "service_type": "http",
-            "catalog_service_id": { "$type": "string", "$ne": "" },
-        })
-        .await?
-        .is_some();
+    let catalog_backed =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find_one(doc! {
+                "_id": user_service_id,
+                "user_id": owner_user_id,
+                "is_active": true,
+                "service_type": "http",
+                "catalog_service_id": { "$type": "string", "$ne": "" },
+            })
+            .await?
+            .is_some();
     if !catalog_backed {
         return Ok(None);
     }
@@ -188,6 +192,7 @@ async fn load_active_published_endpoint(
     };
     let now = Utc::now();
     Ok(Some(ServiceEndpoint {
+        target_id: endpoint.target_id,
         id: endpoint.endpoint_id,
         service_id: user_service_id.to_string(),
         name: endpoint.name,
@@ -1530,6 +1535,7 @@ mod tests {
     fn endpoint() -> ServiceEndpoint {
         let now = Utc::now();
         ServiceEndpoint {
+            target_id: None,
             id: Uuid::new_v4().to_string(),
             service_id: Uuid::new_v4().to_string(),
             name: "create_item".to_string(),
@@ -1584,6 +1590,7 @@ mod tests {
             updated_at: Some(now),
             description: None,
             allowed_service_ids: vec![user_service_id.to_string()],
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: false,
             allow_auto_connected_services: false,
@@ -1865,6 +1872,87 @@ mod tests {
         assert!(
             matches!(result, Err(AppError::ApiKeyScopePlanNotFound(_))),
             "unexpected planning result: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_grant_creation_rejects_custom_method_templates() {
+        let db = connect_test_database("durable_custom_method_creation")
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4().to_string();
+        let user_service_id = Uuid::new_v4().to_string();
+        let user_endpoint_id = Uuid::new_v4().to_string();
+        let template = ServiceEndpoint {
+            path: "/items/{item_id}:publish".to_string(),
+            ..endpoint()
+        };
+        let mut catalog_service = dummy_service();
+        catalog_service.id = template.service_id.clone();
+        catalog_service.slug = format!("durable-custom-method-{}", Uuid::new_v4());
+        catalog_service.requires_user_credential = false;
+        db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog_service)
+            .await
+            .unwrap();
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(&template)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &owner,
+                "Custom method",
+                "https://durable.example.test",
+                None,
+                Some(&template.service_id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &user_service_id,
+                &owner,
+                "durable-custom-method",
+                &user_endpoint_id,
+                Some(&template.service_id),
+                None,
+            ))
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let selection = DurableOperationSelection {
+            user_service_id,
+            endpoint_id: template.id,
+            constraints: constraints(),
+            valid_from: now.to_rfc3339(),
+            expires_at: (now + Duration::hours(1)).to_rfc3339(),
+            total_limit: 1,
+            window: None,
+            replay_policy: DurableReplayPolicy::NonReplayable,
+            client_audit_binding: None,
+        };
+        let result = build_operation_plans(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &owner,
+            &[],
+            &[selection],
+            Some(now + Duration::hours(2)),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(AppError::ValidationError(message))
+                if message == "durable operation path variables must occupy a complete path segment"),
+            "unexpected creation validation result: {result:?}"
+        );
+        assert_eq!(
+            db.collection::<DurableOperationGrant>(GRANTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
         );
     }
 

@@ -79,15 +79,15 @@ pub async fn compute_viewer_routing(
     }
 
     let id_strings: Vec<String> = catalog_service_ids.iter().map(|s| s.to_string()).collect();
-    let user_services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "user_id": viewer_user_id,
-            "catalog_service_id": { "$in": &id_strings },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let user_services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": viewer_user_id,
+                "catalog_service_id": { "$in": &id_strings },
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     // Group by catalog_service_id so we can detect "multiple bindings".
     let mut grouped: HashMap<String, Vec<UserService>> = HashMap::new();
@@ -118,6 +118,13 @@ pub async fn compute_viewer_routing(
 
 /// Verify that the authenticated user has admin privileges.
 pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+    if !is_admin(state, auth_user).await? {
+        return Err(AppError::Forbidden("Admin access required".to_string()));
+    }
+    Ok(())
+}
+
+pub async fn is_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<bool> {
     let user_id = auth_user.user_id.to_string();
 
     let user_model = state
@@ -128,19 +135,18 @@ pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
-    if !platform_role.is_admin() {
-        return Err(AppError::Forbidden("Admin access required".to_string()));
-    }
-
-    Ok(())
+    Ok(platform_role.is_admin())
 }
 
 /// Verify admin or service creator.
 pub async fn require_admin_or_creator(
     state: &AppState,
     auth_user: &AuthUser,
-    service_created_by: &str,
+    service: &DownstreamService,
 ) -> AppResult<()> {
+    if service.owner_user_id.is_some() {
+        return require_admin(state, auth_user).await;
+    }
     let user_id_str = auth_user.user_id.to_string();
 
     let user_model = state
@@ -151,7 +157,7 @@ pub async fn require_admin_or_creator(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
-    if !platform_role.is_admin() && service_created_by != user_id_str {
+    if !platform_role.is_admin() && service.created_by != user_id_str {
         return Err(AppError::Forbidden(
             "Only admins or the service creator can perform this action".to_string(),
         ));
@@ -167,6 +173,7 @@ pub async fn fetch_service(state: &AppState, service_id: &str) -> AppResult<Down
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "_id": service_id })
         .await?
+        .filter(|service| !crate::services::retired_service_service::is_retired(service))
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))
 }
 
@@ -193,6 +200,7 @@ pub async fn resolve_service_or_user_service(
         .find_one(doc! { "_id": service_id })
         .await?
     {
+        crate::services::retired_service_service::require_available(&service)?;
         return Ok(ResolvedService::Catalog(Box::new(service)));
     }
 
@@ -202,21 +210,30 @@ pub async fn resolve_service_or_user_service(
         return Err(AppError::NotFound("Service not found".to_string()));
     };
 
+    if let Some(catalog_id) = &user_service.catalog_service_id
+        && let Some(catalog) = state
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": catalog_id })
+            .await?
+    {
+        crate::services::retired_service_service::require_available(&catalog)?;
+    }
+
     let access =
         org_service::resolve_owner_access(&state.db, caller_user_id, &user_service.user_id).await?;
     if !access.can_read() || !access.allows_resource(&user_service.id) {
         return Err(AppError::NotFound("Service not found".to_string()));
     }
 
-    let user_endpoint = state
-        .db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
-        .find_one(doc! {
-            "_id": &user_service.endpoint_id,
-            "user_id": &user_service.user_id,
-        })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+    let user_endpoint =
+        crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+            .find_one(doc! {
+                "_id": &user_service.endpoint_id,
+                "user_id": &user_service.user_id,
+            })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
     Ok(ResolvedService::Owned {
         owner_id: user_service.user_id.clone(),
@@ -233,15 +250,27 @@ pub async fn resolve_service_or_user_service(
 /// the create handler, where the catalog row didn't exist a moment
 /// ago). See [`compute_viewer_routing`] for batched resolution and
 /// [`ViewerRouting`] for the multi-binding semantics.
-pub fn service_to_response_with_viewer(
+pub async fn service_to_response_with_viewer(
+    inspection_keys: Option<&crate::crypto::aes::EncryptionKeys>,
     s: DownstreamService,
     viewer: Option<&ViewerRouting>,
 ) -> ServiceResponse {
+    let skills_manifest_digest = crate::services::catalog_skill_service::manifest_digest(
+        &crate::services::catalog_skill_service::state(&s),
+    );
     let legacy_public_master =
         s.platform_key.is_none() && crate::services::platform_key_service::legacy_public_master(&s);
     let effective_platform_metric =
         crate::services::billing::metric_resolution::effective_platform_metric(&s);
+    let allowance_metrics = crate::services::billing::metric_resolution::allowance_metrics(&s);
     ServiceResponse {
+        provider_config_id: s.provider_config_id.clone(),
+        credential_configured: match inspection_keys {
+            Some(keys) => {
+                crate::services::platform_key_service::credential_configured(keys, &s).await
+            }
+            None => None,
+        },
         id: s.id,
         name: s.name,
         slug: s.slug,
@@ -285,11 +314,15 @@ pub fn service_to_response_with_viewer(
         inference: s.inference,
         platform_key: s.platform_key,
         effective_platform_metric,
+        allowance_metrics,
         legacy_public_master,
         auth_notes: s.auth_notes,
         known_limitations: s.known_limitations,
         required_permissions: s.required_permissions,
         examples_url: s.examples_url,
+        skills_manifest_digest,
+        skills_revision: s.skills_revision,
+        recommended_skill_refs: s.recommended_skill_refs,
         recommended_skills: s.recommended_skills,
         custom_user_agent: s.custom_user_agent,
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
@@ -298,7 +331,12 @@ pub fn service_to_response_with_viewer(
         ws_frame_injections: s.ws_frame_injections,
         anonymous_endpoints: s.anonymous_endpoints,
         proxy_operation_policy: s.proxy_operation_policy,
+        destination_targets: s.destination_targets,
         developer_app_ids: s.developer_app_ids,
+        owner_user_id: s
+            .owner_user_id
+            .clone()
+            .unwrap_or_else(|| s.created_by.clone()),
         created_by: s.created_by,
         created_at: s.created_at.to_rfc3339(),
         updated_at: s.updated_at.to_rfc3339(),

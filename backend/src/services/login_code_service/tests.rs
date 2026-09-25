@@ -204,6 +204,15 @@ async fn failed_issuance_rolls_back_claim_and_all_rows_then_can_retry() {
 #[tokio::test]
 async fn source_and_owner_budgets_throttle_distributed_attempts() {
     let (state, actor) = fixture("login_code_limits").await;
+    // The redeem/mint budgets use the shared DB limiter with epoch-aligned
+    // 300 s bins; a burst that straddles a boundary observes a fresh window
+    // and gets an extra admission exactly where this test expects a denial.
+    // Keep every burst below inside one bin (see `ensure_rate_window_headroom`).
+    crate::test_utils::ensure_rate_window_headroom(
+        std::time::Duration::from_secs(300),
+        std::time::Duration::from_secs(60),
+    )
+    .await;
     for _ in 0..10 {
         assert!(matches!(
             redeem_code(&state, "ABCD-EFGH", "192.0.2.1").await,

@@ -208,6 +208,20 @@ const RFC8628_DEVICE_CODE_ENTRY = {
   default_scopes: ["openid"],
 } as unknown as CatalogEntry;
 
+const SUPABASE_ENTRY = {
+  ...OPENAI_ENTRY,
+  slug: "api-supabase",
+  name: "Supabase Data API",
+  description: "Supabase PostgREST Data API connector",
+  base_url: "https://project-ref.supabase.co/rest/v1",
+  provider_config_id: "provider-supabase",
+  provider_type: "api_key",
+  auth_method: "header",
+  auth_key_name: "apikey",
+  requires_gateway_url: true,
+  requires_credential: true,
+} as unknown as CatalogEntry;
+
 function makeReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
   const key = buildReconnectKey(overrides);
   lastReconnectKey.value = key as unknown as Record<string, unknown>;
@@ -525,6 +539,42 @@ describe("AddKeyDialog — catalog template path", () => {
     expect(toastFns.success).not.toHaveBeenCalledWith("Key created");
     expect(mockNavigate).not.toHaveBeenCalled();
   });
+
+  it("requires a real Supabase project URL instead of submitting the catalog placeholder", async () => {
+    catalog.entries = [SUPABASE_ENTRY];
+    createKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.({ id: "new-supabase-key" });
+    });
+    const user = userEvent.setup();
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /Supabase Data API/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+
+    const endpoint = document.querySelector<HTMLInputElement>("#add-key-endpoint");
+    expect(endpoint).not.toBeNull();
+    expect(endpoint?.value).toBe("");
+    expect(endpoint?.placeholder).toBe("https://project-ref.supabase.co");
+    expect(screen.getByText("Supabase Project URL")).toBeInTheDocument();
+    expect(screen.getByText("Supabase API Key")).toBeInTheDocument();
+
+    await typeInto(user, "add-key-credential", "sb_secret_test");
+    await typeInto(user, "add-key-endpoint", "https://demo.supabase.co");
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+    await waitFor(() => expect(createKeyMutate).toHaveBeenCalledTimes(1));
+    expect(createKeyMutate).toHaveBeenCalledWith(
+      {
+        credential: "sb_secret_test",
+        label: "Supabase Data API",
+        service_slug: "api-supabase",
+        endpoint_url: "https://demo.supabase.co",
+      },
+      expect.anything(),
+    );
+  });
 });
 
 describe("AddKeyDialog — platform one-click path (credential_mode=both)", () => {
@@ -723,6 +773,73 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
     expect(
       screen.queryByText(/Setup GitHub credentials/i),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("AddKeyDialog — IFTTT OAuth", () => {
+  it("connects with the required scope before client registration and clears a prefilled node", async () => {
+    catalog.entries = [
+      {
+        ...OAUTH_ENTRY,
+        slug: "api-ifttt-mcp",
+        name: "IFTTT",
+        base_url: "https://ifttt.com/mcp",
+        auth_method: "ifttt_mcp",
+        credential_mode: "admin",
+        has_platform_oauth_credentials: false,
+        default_scopes: ["mcp"],
+        scope_catalog: [
+          {
+            scope: "mcp",
+            label: "IFTTT tools",
+            description: "Use IFTTT tools",
+            sensitive: true,
+            required: true,
+          },
+        ],
+        platform_scope_allowlist: ["mcp"],
+      },
+    ];
+    initiateOAuthMutateAsync.mockResolvedValue({
+      authorization_url: "https://ifttt.com/oauth/authorize?state=test",
+    });
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="api-ifttt-mcp"
+        prefillNodeId="old-node"
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: /Via Node/i }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Next: Connect" }));
+    expect(screen.queryByLabelText(/Client Secret/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /IFTTT tools/i })).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: "Connect with IFTTT" }),
+    );
+
+    await waitFor(() =>
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          providerId: "provider-oauth",
+          keyId: "created-service-1",
+          scopeOverride: ["mcp"],
+        }),
+      ),
+    );
+    expect(createKeyMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ service_slug: "api-ifttt-mcp" }),
+    );
+    expect(createKeyMutateAsync.mock.calls[0]?.[0].node_id).toBeUndefined();
+    expect(await screen.findByRole("link", { name: /IFTTT/i })).toHaveAttribute(
+      "href",
+      "https://ifttt.com/oauth/authorize?state=test",
+    );
   });
 });
 
@@ -1771,6 +1888,81 @@ function minCatalogEntry(slug: string, name = slug): CatalogEntry {
 }
 
 describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", () => {
+  it.each(["api-ifttt", "api-ifttt-2"])(
+    "connects IFTTT with a raw key and never probes %s",
+    async (createdSlug) => {
+      catalog.entries = [
+        {
+          ...minCatalogEntry("api-ifttt", "IFTTT Webhooks"),
+          base_url: "https://maker.ifttt.com",
+          auth_method: "ifttt_webhook",
+          auth_key_name: "",
+          provider_type: "api_key",
+        },
+      ];
+      createKeyMutate.mockImplementation((_params, opts) => {
+        opts?.onSuccess?.({ id: "ifttt-connection", slug: createdSlug });
+      });
+      createApiKeyMutate.mockImplementation((_params, opts) => {
+        opts?.onSuccess?.({
+          id: "ifttt-agent",
+          full_key: "nyxid_ag_ifttt_test",
+          key_prefix: "nyxid_ag_",
+          scopes: ["proxy"],
+          allow_all_services: false,
+          allowed_service_ids: ["ifttt-connection"],
+        });
+      });
+      const fetchSpy = vi.spyOn(window, "fetch").mockRejectedValue(
+        new Error("IFTTT setup must not make a downstream request"),
+      );
+      const onSuccess = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <AddKeyDialog open onOpenChange={vi.fn()} onSuccess={onSuccess} />,
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: /IFTTT Webhooks/i }),
+      );
+      await user.click(
+        screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+      );
+      expect(screen.getByLabelText(/IFTTT Webhooks key/)).toHaveAttribute(
+        "type", "password",
+      );
+      expect(
+        screen.getByPlaceholderText(/Raw key.*not a URL/i),
+      ).toBeInTheDocument();
+      await typeInto(user, "add-key-credential", "test_IFTTT_key");
+      await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+      expect(createKeyMutate).toHaveBeenCalledWith(
+        {
+          credential: "test_IFTTT_key",
+          label: "IFTTT Webhooks",
+          service_slug: "api-ifttt",
+          endpoint_url: "https://maker.ifttt.com",
+        },
+        expect.anything(),
+      );
+      await user.click(
+        await screen.findByRole("button", { name: "Create Agent Key" }),
+      );
+      expect(
+        await screen.findByText(/Automatic testing isn't supported/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /Test Agent Key/i }),
+      ).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Done" }));
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(onSuccess).toHaveBeenCalledWith({
+        userServiceId: "ifttt-connection",
+      });
+    },
+  );
+
   it("reports the created UserService id only when the success step is finished", async () => {
     createKeyMutate.mockImplementation((_params, opts) => {
       opts?.onSuccess?.({

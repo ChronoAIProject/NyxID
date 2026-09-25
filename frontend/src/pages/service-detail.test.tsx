@@ -1,36 +1,42 @@
 import type { ReactNode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DownstreamService } from "@/types/api";
 import { ServiceDetailPage } from "./service-detail";
 
-const { hooks, mockCreateAnonymousEndpoint, mockToastError, mockToastSuccess } =
-  vi.hoisted(() => ({
-    hooks: {
-      service: {
-        data: undefined as DownstreamService | undefined,
-        isLoading: false,
-        error: null as unknown,
-        refetch: vi.fn(),
-      },
-      anonymousEndpoints: {
-        data: [
-          {
-            id: "rule-1",
-            enabled: true,
-            method: "GET" as const,
-            path_pattern: "/public/**",
-            daily_quota: 25,
-          },
-        ],
-        isLoading: false,
-      },
+const {
+  hooks,
+  mockCreateAnonymousEndpoint,
+  mockUpdateRule,
+  mockToastError,
+  mockToastSuccess,
+} = vi.hoisted(() => ({
+  hooks: {
+    service: {
+      data: undefined as DownstreamService | undefined,
+      isLoading: false,
+      error: null as unknown,
+      refetch: vi.fn(),
     },
-    mockCreateAnonymousEndpoint: vi.fn(),
-    mockToastError: vi.fn(),
-    mockToastSuccess: vi.fn(),
-  }));
+    anonymousEndpoints: {
+      data: [
+        {
+          id: "rule-1",
+          enabled: true,
+          method: "GET" as const,
+          path_pattern: "/public/**",
+          daily_quota: 25,
+        },
+      ],
+      isLoading: false,
+    },
+  },
+  mockCreateAnonymousEndpoint: vi.fn(),
+  mockUpdateRule: vi.fn(),
+  mockToastError: vi.fn(),
+  mockToastSuccess: vi.fn(),
+}));
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
@@ -49,6 +55,10 @@ vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ serviceId: "svc-1" }),
 }));
 
+vi.mock("@/hooks/use-ownership-transfers", () => ({
+  useOwnershipTransferAuthorization: () => ({ data: { can_transfer: false } }),
+}));
+
 vi.mock("@/hooks/use-services", () => ({
   useService: () => hooks.service,
   useDeleteService: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -62,7 +72,7 @@ vi.mock("@/hooks/use-anonymous-endpoints", () => ({
     isPending: false,
   }),
   useUpdateAnonymousEndpoint: () => ({
-    mutateAsync: vi.fn(),
+    mutateAsync: mockUpdateRule,
     isPending: false,
   }),
   useDeleteAnonymousEndpoint: () => ({
@@ -216,4 +226,50 @@ describe("service detail anonymous endpoints", () => {
     );
     expect(mockToastSuccess).toHaveBeenCalledWith("Anonymous endpoint created");
   });
+});
+
+it("reviews public rule enable and quota changes, preserving a draft during refetch", async () => {
+  const user = userEvent.setup();
+  mockUpdateRule.mockImplementation(async ({ data }) => ({
+    ...hooks.anonymousEndpoints.data[0],
+    ...data,
+  }));
+  const view = render(<ServiceDetailPage />);
+  const save = screen.getByRole("button", { name: "Save" });
+  const row = save.closest("div.grid")!;
+  const quota = row.querySelector('input[type="number"]')!;
+  fireEvent.change(quota, { target: { value: "50" } });
+  hooks.anonymousEndpoints.data = [{ ...hooks.anonymousEndpoints.data[0]! }];
+  view.rerender(<ServiceDetailPage />);
+  expect(quota).toHaveValue(50);
+  await user.click(save);
+  expect(mockUpdateRule).not.toHaveBeenCalled();
+  await user.click(
+    await screen.findByRole("button", { name: "Confirm changes" }),
+  );
+  await waitFor(() =>
+    expect(mockUpdateRule).toHaveBeenCalledExactlyOnceWith({
+      serviceId: "svc-1",
+      ruleId: "rule-1",
+      data: { daily_quota: 50 },
+    }),
+  );
+});
+
+it("stages a public switch and blocks confirmation if its path changes", async () => {
+  const user = userEvent.setup();
+  const view = render(<ServiceDetailPage />);
+  const save = screen.getByRole("button", { name: "Save" });
+  const row = save.closest("div.grid")!;
+  fireEvent.click(row.querySelector('[role="switch"]')!);
+  expect(mockUpdateRule).not.toHaveBeenCalled();
+  await user.click(save);
+  await screen.findByRole("button", { name: "Confirm changes" });
+  hooks.anonymousEndpoints.data = [
+    { ...hooks.anonymousEndpoints.data[0]!, path_pattern: "/**" },
+  ];
+  view.rerender(<ServiceDetailPage />);
+  expect(
+    screen.getByRole("button", { name: "Confirm changes" }),
+  ).toBeDisabled();
 });

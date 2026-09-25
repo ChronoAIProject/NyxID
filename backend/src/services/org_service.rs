@@ -149,6 +149,39 @@ pub async fn find_org_by_key(db: &mongodb::Database, key: &str) -> AppResult<Use
         .ok_or_else(|| AppError::OrgNotFound(key.to_string()))
 }
 
+/// Resolve the read role for an already-loaded org using the actor's
+/// polymorphic owner identity.
+/// Direct ownership projects to Admin for reads without creating or requiring
+/// a membership. Other actors need an active membership; service scope does
+/// not restrict org metadata. Write handlers keep their membership-only ACLs.
+pub async fn read_role_for_org(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    org: &User,
+) -> AppResult<OrgRole> {
+    let role = if actor_user_id == org.id {
+        OrgRole::Admin
+    } else {
+        get_active_membership(db, &org.id, actor_user_id)
+            .await?
+            .ok_or(AppError::OrgMembershipRequired)?
+            .role
+    };
+    Ok(role)
+}
+
+/// Load an org and resolve the actor's read role. Resolve the org first to
+/// preserve OrgNotFound versus OrgMembershipRequired.
+pub async fn get_org_for_read(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    org_user_id: &str,
+) -> AppResult<(User, OrgRole)> {
+    let org = get_org_user(db, org_user_id).await?;
+    let role = read_role_for_org(db, actor_user_id, &org).await?;
+    Ok((org, role))
+}
+
 /// Suffix used for the synthetic placeholder email generated when an org is
 /// created without an explicit contact email. Kept as a const so UI/API
 /// normalizers can hide it behind a single check.
@@ -424,7 +457,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             // built-in `require_admin_or_creator` cleanup gate fails
             // for everyone except a global admin. Force the admin to
             // call `DELETE /services/{id}` first.
-            doc! { "created_by": org_user_id, "is_active": true },
+            doc! { "$and": [super::ownership_transfer_service::catalog_owner_filter(org_user_id), { "is_active": true }] },
             "custom catalog services",
         ),
     ];
@@ -472,9 +505,12 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // about-to-be-deleted org user_id. Leaving them behind would
     // accumulate dangling rows in MongoDB; the API can never reach
     // them after the org user is gone.
-    db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
-        .delete_many(doc! { "user_id": org_user_id, "is_active": false })
-        .await?;
+    crate::services::service_history::collection::<bson::Document>(
+        db,
+        crate::models::user_service::COLLECTION_NAME,
+    )
+    .delete_many(doc! { "user_id": org_user_id, "is_active": false })
+    .await?;
     db.collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id, "is_active": false })
         .await?;
@@ -657,7 +693,10 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // `service_account_tokens` patterns above.
     let owned_service_ids: Vec<String> = db
         .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .distinct("_id", doc! { "created_by": org_user_id })
+        .distinct(
+            "_id",
+            super::ownership_transfer_service::catalog_owner_filter(org_user_id),
+        )
         .await?
         .into_iter()
         .filter_map(|value| match value {
@@ -666,7 +705,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         })
         .collect();
     db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
-        .delete_many(doc! { "created_by": org_user_id, "is_active": false })
+        .delete_many(doc! { "$and": [super::ownership_transfer_service::catalog_owner_filter(org_user_id), { "is_active": false }] })
         .await?;
     if !owned_service_ids.is_empty() {
         let svc_id_array: Vec<bson::Bson> = owned_service_ids
@@ -708,6 +747,16 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             conv_ids.iter().cloned().map(bson::Bson::String).collect();
         db.collection::<bson::Document>(crate::models::channel_event_log::COLLECTION_NAME)
             .delete_many(doc! { "conversation_id": { "$in": &conv_id_array } })
+            .await?;
+    }
+    for collection in [
+        crate::models::channel_email::SUBSCRIPTIONS,
+        crate::models::channel_email::SENDS,
+        crate::models::channel_email::BATCHES,
+        crate::models::channel_email::RECEIPTS,
+    ] {
+        db.collection::<bson::Document>(collection)
+            .delete_many(doc! { "user_id": org_user_id })
             .await?;
     }
     db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)

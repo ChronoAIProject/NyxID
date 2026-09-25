@@ -137,8 +137,7 @@ pub async fn import_api_key(
     let db = db.clone();
     let user = user.to_string();
     let expected = expected.cloned();
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run2(async move |session| {
+    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
         let operation: AppResult<UserProviderToken> = async {
             // Serialize two first imports before either has a token row to lock.
             let owner = db.collection::<User>(USERS).update_one(doc! {"_id":&user},
@@ -162,12 +161,12 @@ pub async fn import_api_key(
             ]);
             if let Some(old) = old {
                 if let Some(id) = old.metadata.as_ref().and_then(|m| m.get("service_id")) {
-                    let service = db.collection::<UserService>(SERVICES).find_one(doc! {
+                    let service = crate::services::service_history::collection::<UserService>(&db, SERVICES).find_one(doc! {
                         "_id":id,"user_id":&user,"is_active":true,
                     }).session(&mut *session).await?;
                     if let Some(service) = service
                         && let Some(key_id) = service.api_key_id
-                        && db.collection::<crate::models::user_api_key::UserApiKey>(crate::models::user_api_key::COLLECTION_NAME)
+                        && crate::services::service_history::collection::<crate::models::user_api_key::UserApiKey>(&db, crate::models::user_api_key::COLLECTION_NAME)
                             .find_one(doc! {"_id":key_id,"user_id":&user,"status":"active",
                                 "provider_config_id":&provider.id,"connection_id":null})
                             .session(&mut *session).await?.is_some() {
@@ -235,8 +234,7 @@ pub async fn verification_binding(
     token: &UserProviderToken,
     service_id: &str,
 ) -> AppResult<VerificationBinding> {
-    let service = db
-        .collection::<UserService>(SERVICES)
+    let service = crate::services::service_history::collection::<UserService>(db, SERVICES)
         .find_one(doc! {"_id":service_id,"user_id":&token.user_id,"is_active":true})
         .await?
         .ok_or_else(|| {
@@ -245,8 +243,9 @@ pub async fn verification_binding(
     let id = service
         .api_key_id
         .ok_or_else(|| AppError::Conflict("Saved service credential changed".into()))?;
-    let key = db
-        .collection::<crate::models::user_api_key::UserApiKey>(
+    let key =
+        crate::services::service_history::collection::<crate::models::user_api_key::UserApiKey>(
+            db,
             crate::models::user_api_key::COLLECTION_NAME,
         )
         .find_one(doc! {"_id":&id,"user_id":&token.user_id,"status":"active"})
@@ -261,13 +260,12 @@ pub async fn verification_binding(
             "Saved service no longer uses this credential; reconnect before verification".into(),
         ));
     }
-    let endpoint = db
-        .collection::<crate::models::user_endpoint::UserEndpoint>(
-            crate::models::user_endpoint::COLLECTION_NAME,
-        )
-        .find_one(doc! {"_id":&service.endpoint_id,"user_id":&token.user_id})
-        .await?
-        .ok_or_else(|| AppError::Conflict("Saved service endpoint was deleted".into()))?;
+    let endpoint = crate::services::service_history::collection::<
+        crate::models::user_endpoint::UserEndpoint,
+    >(db, crate::models::user_endpoint::COLLECTION_NAME)
+    .find_one(doc! {"_id":&service.endpoint_id,"user_id":&token.user_id})
+    .await?
+    .ok_or_else(|| AppError::Conflict("Saved service endpoint was deleted".into()))?;
     Ok(VerificationBinding {
         key_id: id,
         credential_epoch: key.credential_epoch,

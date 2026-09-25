@@ -21,7 +21,7 @@ use crate::models::usage_meter::{
 };
 
 use super::grants::CREDIT_MICROS;
-use super::reservation::{LayerReservation, whole_credits_for_micros};
+use super::reservation::LayerReservation;
 use super::route_context::BillingRouteContext;
 
 const FUNDING_CLAIM_LEASE_SECS: i64 = 60;
@@ -62,7 +62,7 @@ async fn reserve_layer(
                 .as_deref()
                 .or(ctx.user_service_id.as_deref()),
             ctx.service_slug.as_deref(),
-            ctx.platform_metric,
+            layer.metric,
             uncovered_quantity,
         )
         .await?;
@@ -74,8 +74,10 @@ async fn reserve_layer(
         uncovered_quantity = uncovered_quantity.saturating_sub(reserved_units);
     }
 
-    let estimated_micros =
-        saturating_cost_micros(layer.credits_per_unit_micros, uncovered_quantity);
+    let rate =
+        super::amounts::rate_pico(layer.credits_per_unit_pico, layer.credits_per_unit_micros);
+    let estimated_pico = super::amounts::cost_pico(rate, uncovered_quantity);
+    let estimated_micros = super::amounts::cost_micros(rate, uncovered_quantity);
     layer.grant_reservations = reserve_grants(
         db,
         &ctx.billing_owner_id,
@@ -91,8 +93,9 @@ async fn reserve_layer(
         .iter()
         .map(|allocation| allocation.amount_micros)
         .sum();
-    layer.reserved_credits =
-        whole_credits_for_micros(estimated_micros.saturating_sub(grant_micros));
+    layer.reserved_credits = super::amounts::whole_credits(
+        estimated_pico.saturating_sub(i128::from(grant_micros) * super::amounts::PICO_PER_MICRO),
+    );
     Ok(())
 }
 
@@ -427,6 +430,7 @@ fn expiry_order(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Or
     }
 }
 
+#[cfg(test)]
 fn saturating_cost_micros(rate_micros: i64, quantity: i64) -> i64 {
     (i128::from(rate_micros.max(0)) * i128::from(quantity.max(0))).min(i128::from(i64::MAX)) as i64
 }
@@ -503,7 +507,7 @@ pub async fn settle_usage_funding(
     };
 
     let quantity = claimed.quantity.unwrap_or(0).max(0);
-    let rate_micros = settlement_rate_micros(db, &claimed).await?;
+    let rate = settlement_rate_pico(db, &claimed).await?;
     let mut allowance_covered = claimed
         .funding
         .as_ref()
@@ -604,7 +608,7 @@ pub async fn settle_usage_funding(
     }
 
     let chargeable_quantity = quantity.saturating_sub(allowance_covered);
-    let total_charge_micros = saturating_cost_micros(rate_micros, chargeable_quantity);
+    let charge_after_allowance_micros = super::amounts::cost_micros(rate, chargeable_quantity);
     let mut grant_covered_micros = claimed
         .funding
         .as_ref()
@@ -616,7 +620,7 @@ pub async fn settle_usage_funding(
                 .sum::<i64>()
         })
         .unwrap_or(0)
-        .min(total_charge_micros);
+        .min(charge_after_allowance_micros);
     let grant_reservations = claimed
         .funding
         .as_ref()
@@ -631,7 +635,7 @@ pub async fn settle_usage_funding(
         let consume = reservation
             .amount_micros
             .max(0)
-            .min(total_charge_micros.saturating_sub(grant_covered_micros));
+            .min(charge_after_allowance_micros.saturating_sub(grant_covered_micros));
         if settle_grant_resource(
             db,
             &claimed,
@@ -645,12 +649,12 @@ pub async fn settle_usage_funding(
         {
             grant_covered_micros = grant_covered_micros
                 .saturating_add(consume)
-                .min(total_charge_micros);
+                .min(charge_after_allowance_micros);
             refresh_claimed_funding(db, &mut claimed).await?;
         }
     }
 
-    if grant_covered_micros < total_charge_micros {
+    if grant_covered_micros < charge_after_allowance_micros {
         let now = Utc::now();
         let mut grants =
             super::grants::list_active_for_user(db, &claimed.billing_owner_id, now).await?;
@@ -666,7 +670,7 @@ pub async fn settle_usage_funding(
                 .then_with(|| left.created_at.cmp(&right.created_at))
         });
         for grant in grants {
-            if grant_covered_micros >= total_charge_micros {
+            if grant_covered_micros >= charge_after_allowance_micros {
                 break;
             }
             let operation_id = format!("{}:grant-extra:{}", claimed.id, grant.id);
@@ -675,7 +679,7 @@ pub async fn settle_usage_funding(
                 continue;
             }
             let consume = super::grants::available_grant_micros(&grant)
-                .min(total_charge_micros.saturating_sub(grant_covered_micros));
+                .min(charge_after_allowance_micros.saturating_sub(grant_covered_micros));
             if consume <= 0 {
                 continue;
             }
@@ -684,20 +688,22 @@ pub async fn settle_usage_funding(
             {
                 grant_covered_micros = grant_covered_micros
                     .saturating_add(consume)
-                    .min(total_charge_micros);
+                    .min(charge_after_allowance_micros);
                 refresh_claimed_funding(db, &mut claimed).await?;
             }
         }
     }
 
-    let wallet_micros = total_charge_micros.saturating_sub(grant_covered_micros);
-    let wallet_charge_credits = whole_credits_for_micros(wallet_micros);
+    let wallet_micros = charge_after_allowance_micros.saturating_sub(grant_covered_micros);
+    let wallet_pico = super::amounts::cost_pico(rate, chargeable_quantity)
+        .saturating_sub(i128::from(grant_covered_micros) * super::amounts::PICO_PER_MICRO);
+    let wallet_charge_credits = super::amounts::whole_credits(wallet_pico);
     // Grant- and allowance-funded usage is deliberately absent from Lago's
     // charging stream. Only the wallet-funded fraction is emitted, so Lago's
     // invoice, NyxID's pending debit, wallet refresh, and drift comparison all
     // describe the same chargeable usage.
     let lago_billable_quantity_micros =
-        billable_quantity_micros(wallet_micros, rate_micros, chargeable_quantity);
+        billable_quantity_precise(wallet_pico, rate, chargeable_quantity);
     let settled_at = Utc::now();
     let result = db
         .collection::<UsageMeterRow>(USAGE_METER)
@@ -710,6 +716,11 @@ pub async fn settle_usage_funding(
             doc! {
                 "$set": {
                     "funding.settled": true,
+                    "funding.total_charge_micros": super::amounts::cost_micros(rate, quantity),
+                    "funding.allowance_funded_quantity": allowance_covered,
+                    "funding.allowance_funded_micros": super::amounts::cost_micros(rate, quantity).saturating_sub(charge_after_allowance_micros),
+                    "funding.grant_funded_micros": grant_covered_micros,
+                    "funding.wallet_funded_micros": wallet_micros,
                     "funding.wallet_charge_credits": wallet_charge_credits,
                     "funding.lago_billable_quantity_micros": lago_billable_quantity_micros,
                     "funding.settled_at": bson::DateTime::from_chrono(settled_at),
@@ -741,21 +752,29 @@ fn settlement_from_funding(funding: &UsageFunding) -> FundingSettlement {
     }
 }
 
-async fn settlement_rate_micros(db: &mongodb::Database, row: &UsageMeterRow) -> AppResult<i64> {
+async fn settlement_rate_pico(db: &mongodb::Database, row: &UsageMeterRow) -> AppResult<i128> {
     if let Some(rate) =
         super::reservation::find_rate(db, &row.lago_metric_code, row.model.as_deref()).await?
     {
-        return Ok(rate.credits_per_unit_micros.max(0));
+        return Ok(super::amounts::rate_pico(
+            rate.credits_per_unit_pico,
+            rate.credits_per_unit_micros,
+        ));
     }
     if row.model.is_some()
         && let Some(rate) = super::reservation::find_rate(db, &row.lago_metric_code, None).await?
     {
-        return Ok(rate.credits_per_unit_micros.max(0));
+        return Ok(super::amounts::rate_pico(
+            rate.credits_per_unit_pico,
+            rate.credits_per_unit_micros,
+        ));
     }
     Ok(row
         .funding
         .as_ref()
-        .map(|value| value.credits_per_unit_micros)
+        .map(|value| {
+            super::amounts::rate_pico(value.credits_per_unit_pico, value.credits_per_unit_micros)
+        })
         .unwrap_or(0)
         .max(0))
 }
@@ -1175,12 +1194,16 @@ fn quantity_to_micros(quantity: i64) -> i64 {
     (i128::from(quantity.max(0)) * i128::from(CREDIT_MICROS)).min(i128::from(i64::MAX)) as i64
 }
 
-fn billable_quantity_micros(wallet_micros: i64, rate_micros: i64, chargeable_quantity: i64) -> i64 {
-    if wallet_micros <= 0 || rate_micros <= 0 || chargeable_quantity <= 0 {
+fn billable_quantity_precise(wallet_pico: i128, rate: i128, chargeable_quantity: i64) -> i64 {
+    if wallet_pico <= 0 || rate <= 0 || chargeable_quantity <= 0 {
         return 0;
     }
-    let numerator = i128::from(wallet_micros) * i128::from(CREDIT_MICROS);
-    let units = (numerator + i128::from(rate_micros - 1)) / i128::from(rate_micros);
+    // Divide before scaling to avoid overflowing i128 for saturated legacy rates.
+    let whole = wallet_pico / rate;
+    let remainder = wallet_pico % rate;
+    let units = whole
+        .saturating_mul(i128::from(CREDIT_MICROS))
+        .saturating_add((remainder.saturating_mul(i128::from(CREDIT_MICROS)) + rate - 1) / rate);
     units
         .min(i128::from(quantity_to_micros(chargeable_quantity)))
         .min(i128::from(i64::MAX)) as i64
@@ -1245,12 +1268,14 @@ mod tests {
                 lago_metric_code: "platform_funding".to_string(),
                 model: None,
                 credits_per_unit_micros: 500_000,
+                credits_per_unit_pico: None,
                 synced_at: now,
             })
             .await
             .expect("insert rate");
         db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
             .insert_one(UsageAllowance {
+                bundle_id: None,
                 id: allowance_id.to_string(),
                 service_id: service_id.to_string(),
                 service_slug: service_slug.to_string(),
@@ -1259,6 +1284,8 @@ mod tests {
                 recurrence: AllowanceRecurrence::Daily,
                 target_kind: BillingTargetKind::AllUsers,
                 target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 is_active: true,
                 created_by: "admin-1".to_string(),
                 created_at: now,
@@ -1289,6 +1316,8 @@ mod tests {
                 schedule_origin: None,
                 recipient_user_id: owner_id.to_string(),
                 target_kind: BillingTargetKind::SelectedUsers,
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
                 amount_credits: 2,
                 amount_micros: 2_000_000,
                 remaining_micros: 2_000_000,
@@ -1316,6 +1345,7 @@ mod tests {
             .expect("insert grant");
 
         let row = UsageMeterRow {
+            rollup_pending: true,
             id: row_id.to_string(),
             transaction_id: "funding-tx-1".to_string(),
             billing_request_id: "funding-request-1".to_string(),
@@ -1335,6 +1365,7 @@ mod tests {
             reserved_credits: 0,
             funding: Some(UsageFunding {
                 credits_per_unit_micros: 500_000,
+                credits_per_unit_pico: None,
                 allowance_reservations: vec![AllowanceReservationAllocation {
                     allowance_id: allowance_id.to_string(),
                     period_id: period_id.clone(),
@@ -1348,6 +1379,7 @@ mod tests {
             }),
             quantity: Some(10),
             pending_resale_quantity: None,
+            pending_platform_usage: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: false,
@@ -1455,3 +1487,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod target_tests;

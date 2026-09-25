@@ -646,7 +646,7 @@ pub async fn run_api_key_rotate_wizard(
         prefill,
         no_wait,
         |display, id| {
-            eprintln!("✓ API key '{display}' rotated. New value was shown in the browser.");
+            eprintln!("✓ API key '{display}' rotated.");
             eprintln!("  ID: {id}");
             eprintln!("  The previous key is now revoked.");
         },

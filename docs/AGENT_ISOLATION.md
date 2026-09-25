@@ -10,6 +10,18 @@ Authentication resolves the live parent key for scopes, service/node restriction
 
 Login credential labels combine the sanitized client hostname and requested profile (up to 96 characters), so separate profiles on one machine remain identifiable. Public preview exposes request context and status only; key metadata is available through authenticated selection and self routes or credential delivery. Approval, denial, and delivery audits retain the actor's IP and user agent, with the request ID linking the events. A failed expiry cleanup is logged and retained for retry while the sweep continues processing other exchanges.
 
+## Asset ownership transfer
+
+General Agent Keys with `write` or `admin` scope and `allow_all_services=true`
+can transfer their owner's catalog definitions and supported channel bots through
+`/api/v1/ownership/{kind}/{id}`. An org-owned key acts as that organization;
+a personal key can also act through its owner's active, unrestricted org-admin
+membership. Platform-admin status on the key owner grants no cross-owner override.
+Proxy-only, scheduled-invocation, and limited connected-service keys cannot
+transfer these assets. There is no per-transfer mobile approval. Preview, live
+permission checks, transactional receipts and agent-attributed audit still apply.
+See [Ownership transfers](ADMIN_OWNERSHIP_TRANSFERS.md) for routes and adapter limits.
+
 ## Overview
 
 Agent isolation lets different AI agents (Claude Code, Codex, custom bots, etc.) belonging to the same NyxID user operate with independent credentials, rate limits, scopes, and audit trails. There is no separate "agent" model -- an **API key is the agent identity**.
@@ -100,7 +112,7 @@ The indexed expansion query only runs for restricted, opted-in keys.
 
 Ownership remains authoritative: a personal platform row cannot be selected for
 an org key, and expansion never includes a different owner's rows. Version 0.20
-includes explicit platform bindings in the auto-connected grant. Key listing,
+includes explicit platform bindings in the auto-connected grant. Human and delegated key listing,
 Agent Key login delivery (login options), and device-code approval/onboarding for
 the acting person's own account invoke shared provisioning, which may idempotently
 create org-owned auto-connected rows only through that person's own active
@@ -205,6 +217,10 @@ erDiagram
 Optional metadata uses `serde(default)`; the platform-services grant is a defaulted boolean. Legacy keys keep their existing scope.
 
 ## API Endpoints
+
+General agent keys can read org membership through `GET /api/v1/orgs`, `/orgs/{key}`, `/orgs/{key}/authorization`, `/orgs/{org_id}/members`, `/orgs/{org_id}/members/{member_id}/authorization`, and `/orgs/{org_id}/role-scopes` (all under `/api/v1`; `{key}` accepts UUID or slug). No extra scope or service allowlist is required; active membership governs reads and role scopes require admin. The actor is the key owner: person-owned keys see that person's memberships, while org-owned keys list their own org and receive Direct read access, projected as `your_role: "admin"` without a membership row. All writes, invites (including GET), and primary-org changes remain human-only for API keys. Scheduled-invocation keys remain rejected; delegated `account:read` parity is unchanged.
+
+Agent keys can also GET `/keys`, `/keys/{id_or_slug}`, `/keys/{id_or_slug}/authorization`, `/user-services`, `/endpoints` (including authorized `?org_id=`), `/endpoints/{id}/authorization`, `/endpoints/{id}/openapi-endpoints`, `/api-keys/external`, `/api-keys/external/{id}/authorization`, and `/mcp/config`, plus `/catalog`, `/catalog/{slug}`, and `/catalog/{slug}/endpoints`. Catalog GETs require no proxy scope; template metadata and live platform availability do not expose instance overrides or connection state. Instance-backed private catalog access and mounted-spec fallback require an allowed backing UserService and the same Member/Admin org scopes as inventory. MCP `nyx__discover_services` gives unrestricted API keys the same discovery result as the owner's session; credential-free auto-connected templates remain suppressed for all callers. For restricted keys, instance-based suppression uses only visible instances. MCP discovery applies the same visibility rule as `GET /api/v1/catalog` for every caller: public and legacy rows, rows the actor created, and platform-key-enabled rows subject to live availability. `/mcp/config` requires `proxy` or `proxy:*` scope and matches stateless MCP discovery, including mounted instance specs; assistant chat keys discover services before acknowledgement, with grants enforced at execution. These API-key reads perform no auto-provisioning or lazy pending-OAuth reconciliation. Restricted keys are filtered to their effective service allowlist, including auto-connected expansion; endpoints and credentials must back at least one allowed service. Personal keys list personal and org-shared services through active Member/Admin memberships and effective role scopes; Viewer-only org services are excluded. Org-owned keys list their own services with the existing `credential_source.type: "personal"` tag. `/keys` still includes disabled rows within key scope. All inventory writes and the entire NyxID `/api-keys` management router remain human-only for API keys; delegated `account:read` parity is unchanged.
 
 ### Credential Bindings
 

@@ -96,6 +96,18 @@ describe("probePathForSlug — registry uses seeded service_slug forms", () => {
     expect(probePathForSlug("api-feishu")).toBe("authen/v1/user_info");
   });
 
+  it.each(["api-google-docs", "api-google-sheets", "api-google-slides"])(
+    "%s requires a document ID and never offers an automatic probe",
+    (slug) => {
+      for (const connectionSlug of [slug, `${slug}-2`]) {
+        expect(recipeForSlug(connectionSlug)).toBeNull();
+        expect(isKnownUntestable(connectionSlug)).toBe(true);
+        expect(isTestable(connectionSlug)).toBe(false);
+        expect(probePathForSlug(connectionSlug)).toBe("");
+      }
+    },
+  );
+
   it("returns '' for explicitly untestable seeded slugs", () => {
     // Registered as `null` — no probe endpoint we can rely on.
     expect(probePathForSlug("llm-openai-codex")).toBe("");
@@ -172,6 +184,14 @@ describe("PROBE_REGISTRY — table-driven coverage (typo trap)", () => {
 });
 
 describe("recipeForSlug — suffix strip edge cases", () => {
+  it.each(["api-aurinko", "api-aurinko-2"])(
+    "%s probes the authenticated account endpoint from the unversioned base",
+    (slug) => {
+      expect(recipeForSlug(slug)).toEqual({ path: "v1/account" });
+      expect(probePathForSlug(slug)).toBe("v1/account");
+      expect(isTestable(slug)).toBe(true);
+    },
+  );
   it("does NOT strip letter-only suffixes (llm-openai-abc → miss)", () => {
     expect(recipeForSlug("llm-openai-abc")).toBeUndefined();
     expect(probePathForSlug("llm-openai-abc")).toBe("");

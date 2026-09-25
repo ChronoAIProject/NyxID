@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -19,6 +20,7 @@ import {
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
+import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { authorizationBlockerToConnectCard } from "@/lib/assistant/chat-authorization";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type {
@@ -164,10 +166,14 @@ export function ChatMessageBubble({
     content ||
       message.steps?.length ||
       message.toolCalls?.length ||
+      message.images?.length ||
       message.artifacts?.length ||
       message.authorizationBlockers?.length,
   );
   const thinking = streaming && !printable;
+  const runningTool = streaming
+    ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
+    : undefined;
   return (
     <article
       role={thinking ? "status" : undefined}
@@ -185,6 +191,13 @@ export function ChatMessageBubble({
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
         <ActivityBlock message={message} />
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
+        {message.images?.length ? (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {message.images.map((image) => (
+              <ToolImage key={image.id} image={image} />
+            ))}
+          </div>
+        ) : null}
         {interactiveCards
           ? message.authorizationBlockers?.map((blocker) => (
               <div className="mt-2" key={blocker.serviceSlug}>
@@ -207,6 +220,14 @@ export function ChatMessageBubble({
             <PulseDot />
             <PulseDot className="[animation-delay:120ms]" />
             <PulseDot className="[animation-delay:240ms]" />
+            {runningTool ? (
+              <span
+                data-running-tool
+                className="ml-1.5 truncate font-mono text-[11px] text-muted-foreground"
+              >
+                {runningTool.name}
+              </span>
+            ) : null}
           </div>
         ) : null}
         {message.status === "error" && message.error ? (
@@ -227,6 +248,13 @@ export function ChatMessageEntry({
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
 }) {
+  if (message.role === "system" && message.id.startsWith("nyxagent-context-reset:")) {
+    return (
+      <p role="note" aria-label="Conversation context reset" className="text-xs text-text-tertiary">
+        {message.content}
+      </p>
+    );
+  }
   const authorName = message.authorName?.trim() ?? "";
   if (message.role === "user" || message.role === "assistant") {
     return (
@@ -285,6 +313,7 @@ export function ChatMessageList({
   footer,
   notice,
   projectionVersion,
+  renderMessage,
 }: {
   readonly session: ChatSessionState | null;
   readonly bottomInset: number;
@@ -292,6 +321,7 @@ export function ChatMessageList({
   readonly footer?: ReactNode;
   readonly notice?: ReactNode;
   readonly projectionVersion?: string | number;
+  readonly renderMessage?: (message: ChatMessage) => ReactNode;
 }) {
   const [detectedMessageId, setDetectedMessageId] = useState<string>();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -309,7 +339,11 @@ export function ChatMessageList({
       terminalAssistant?.role === "assistant" &&
       !terminalAssistant.content.trim() &&
       !terminalAssistant.error &&
-      !(terminalAssistant.steps?.length || terminalAssistant.toolCalls?.length) &&
+      !(
+        terminalAssistant.steps?.length ||
+        terminalAssistant.toolCalls?.length ||
+        terminalAssistant.images?.length
+      ) &&
       !(terminalAssistant.artifacts?.length ||
         terminalAssistant.authorizationBlockers?.length),
   );
@@ -378,7 +412,9 @@ export function ChatMessageList({
         ) : null}
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
-          <ChatMessageEntry key={message.id} message={message} />
+          <Fragment key={message.id}>
+            {renderMessage?.(message) ?? <ChatMessageEntry message={message} />}
+          </Fragment>
         ))}
         {footer}
         {emptyTurnDetected ? (

@@ -4,6 +4,7 @@ import { telegramLoginDataSchema } from "@/schemas/providers";
 import type {
   MessageResponse,
   ProviderConfig,
+  ProviderRevocationConfig,
   ProviderListResponse,
   ProviderActionResponse,
   UserTokenListResponse,
@@ -153,8 +154,7 @@ export function useInitiateOAuth() {
             readonly flow?: OAuthFlowKind;
           },
     ): Promise<OAuthInitiateResponse> => {
-      const params =
-        typeof input === "string" ? { providerId: input } : input;
+      const params = typeof input === "string" ? { providerId: input } : input;
       const query = new URLSearchParams();
       if (params.redirectPath) {
         query.set("redirect_path", params.redirectPath);
@@ -165,7 +165,10 @@ export function useInitiateOAuth() {
       // own minimum.
       if (params.scopeOverride !== undefined) {
         query.set("scope_override", params.scopeOverride.join(","));
-      } else if (params.additionalScopes && params.additionalScopes.length > 0) {
+      } else if (
+        params.additionalScopes &&
+        params.additionalScopes.length > 0
+      ) {
         query.set("scope", params.additionalScopes.join(","));
       }
       if (params.targetOrgId) {
@@ -202,12 +205,14 @@ export function useInitiateDeviceCode() {
             readonly keyId?: string;
           },
     ): Promise<DeviceCodeInitiateResponse> => {
-      const params =
-        typeof input === "string" ? { providerId: input } : input;
+      const params = typeof input === "string" ? { providerId: input } : input;
       const query = new URLSearchParams();
       if (params.scopeOverride !== undefined) {
         query.set("scope_override", params.scopeOverride.join(","));
-      } else if (params.additionalScopes && params.additionalScopes.length > 0) {
+      } else if (
+        params.additionalScopes &&
+        params.additionalScopes.length > 0
+      ) {
         query.set("scope", params.additionalScopes.join(","));
       }
       if (params.targetOrgId) {
@@ -456,7 +461,8 @@ export function useUpdateProvider(providerId: string) {
       readonly credential_mode?: string;
       readonly authorization_url?: string;
       readonly token_url?: string;
-      readonly revocation_url?: string;
+      revocation_url?: string;
+      revocation?: ProviderRevocationConfig | null;
       readonly default_scopes?: readonly string[];
       readonly client_id?: string;
       readonly client_secret?: string;

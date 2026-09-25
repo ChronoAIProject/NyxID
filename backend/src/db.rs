@@ -31,8 +31,6 @@ use crate::models::node_service_binding::{
 use crate::models::oauth_broker_binding::{
     COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding,
 };
-use crate::models::platform_op_usage::COLLECTION_NAME as PLATFORM_OP_USAGE;
-use crate::models::platform_operation::COLLECTION_NAME as PLATFORM_OPERATIONS;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
@@ -88,15 +86,30 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
     db.run_command(doc! { "ping": 1 }).await?;
     tracing::info!("MongoDB connection established");
 
+    require_transactions(&db).await?;
     ensure_indexes(&db).await?;
     tracing::info!("MongoDB indexes verified");
 
     backfill_downstream_service_types(&db).await?;
     migrate_legacy_api_spec_url(&db).await?;
+    crate::services::oracle_pool_service::migrate_legacy_default_model_label(&db).await?;
     migrate_remove_org_scoped_feature_flag_overrides(&db).await?;
     backfill_onboarding_state(&db).await?;
 
     Ok(db)
+}
+
+/// Service configuration changes require an atomic mutation + history journal.
+pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::Error> {
+    let hello = db.run_command(doc! { "hello": 1 }).await?;
+    if !hello.contains_key("logicalSessionTimeoutMinutes")
+        || (!hello.contains_key("setName") && hello.get_str("msg") != Ok("isdbgrid"))
+    {
+        return Err(mongodb::error::Error::custom(
+            "NyxID requires transaction-capable MongoDB (replica set or mongos). See docs/SERVICE_HISTORY.md for local setup and existing-volume migration.",
+        ));
+    }
+    Ok(())
 }
 
 /// Create all required indexes for every collection.
@@ -104,6 +117,9 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    crate::services::service_history::relay::ensure_indexes(db).await?;
+    crate::services::catalog_skill_service::ensure_indexes(db).await?;
+    crate::services::assistant_nyxagent::ensure_indexes(db).await?;
     crate::services::coordination_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
@@ -303,34 +319,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
-    // ── platform operations ──
-    db.collection::<mongodb::bson::Document>(PLATFORM_OPERATIONS)
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "op": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name("platform_operations_op_unique".to_string())
-                        .unique(true)
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
-    db.collection::<mongodb::bson::Document>(PLATFORM_OP_USAGE)
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "op": 1, "user_id": 1, "yyyymmdd": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name("platform_op_usage_user_day_unique".to_string())
-                        .unique(true)
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
-
     // ── mfa_factors ──
     let mfa = db.collection::<mongodb::bson::Document>("mfa_factors");
     mfa.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
@@ -338,6 +326,18 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 
     // ── downstream_services ──
     let services = db.collection::<mongodb::bson::Document>("downstream_services");
+    services
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_user_id": 1, "is_active": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! { "owner_user_id": { "$type": "string" } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     // Migration: drop legacy non-partial unique index on slug so the new partial index can be created
     let _ = services.drop_index("slug_1").await;
     services
@@ -951,6 +951,12 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
     sa.create_index(IndexModel::builder().keys(doc! { "created_by": 1 }).build())
         .await?;
+    sa.create_index(
+        IndexModel::builder()
+            .keys(doc! { "owner_user_id": 1 })
+            .build(),
+    )
+    .await?;
 
     // ── service_account_tokens ──
     let sat = db.collection::<mongodb::bson::Document>("service_account_tokens");
@@ -2084,6 +2090,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // ── channel_bots ──
     crate::services::telegram_new_service::ensure_indexes(db).await?;
     let channel_bots = db.collection::<mongodb::bson::Document>("channel_bots");
+    crate::services::channel_adapters::aurinko::ensure_indexes(db).await?;
+
     channel_bots
         .create_index(
             IndexModel::builder()
@@ -2174,6 +2182,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // ── channel_messages ──
+    crate::services::channel_delivery_service::ensure_indexes(db).await?;
     let channel_msgs = db.collection::<mongodb::bson::Document>("channel_messages");
     channel_msgs
         .create_index(
@@ -2227,6 +2236,22 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+
+    // Metadata-only proactive-send claims: completed and in-flight claims expire after 24h.
+    db.collection::<crate::models::channel_send_claim::ChannelSendClaim>(
+        crate::models::channel_send_claim::COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! { "expires_at": 1 })
+            .options(
+                IndexOptions::builder()
+                    .expire_after(Duration::from_secs(0))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     // ── channel_event_logs ──
     // ADR-013 metadata-only event forwarding ledger. No payload content is
@@ -2323,29 +2348,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "org_user_id": 1, "role": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
-
-    // ── platform_vendor_templates ──
-    // Vendor keys and canonical slugs are the stable admin-facing identities;
-    // inactive templates remain available for audit/history, so uniqueness is
-    // enforced across all rows.
-    let platform_vendor_templates =
-        db.collection::<Document>(crate::models::platform_vendor_template::COLLECTION_NAME);
-    platform_vendor_templates
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "vendor": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
-    platform_vendor_templates
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "slug": 1 })
                 .options(IndexOptions::builder().unique(true).build())
                 .build(),
         )
@@ -2519,6 +2521,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    crate::services::billing::usage_rollup::ensure_indexes(db).await?;
+
     // ── usage_meter ──
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
     usage_meter
@@ -2570,6 +2574,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .options(
                     IndexOptions::builder()
                         .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // Global admin reporting has no owner prefix. One additional non-unique
+    // index bounds both finalized/dead-letter branches by the selected window.
+    // Trade-off: one extra B-tree update per meter insert/status transition;
+    // avoids separate actor, owner and service indexes for this bounded report.
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "created_at": -1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("usage_meter_admin_window".to_string())
                         .build(),
                 )
                 .build(),
@@ -2743,6 +2764,31 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    for field in ["target_org_ids", "target_group_ids"] {
+        usage_allowances
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { field: 1, "is_active": 1 })
+                    .build(),
+            )
+            .await?;
+    }
+    db.collection::<Document>("users")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "group_ids": 1, "is_active": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    usage_allowances
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "bundle_id": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
     let allowance_periods = db.collection::<Document>(USAGE_ALLOWANCE_PERIODS);
     allowance_periods
         .create_index(
@@ -3213,8 +3259,8 @@ const SCHEMA_MIGRATIONS: &str = "schema_migrations";
 const PURGE_CHANNEL_MESSAGE_CONTENT_MIGRATION: &str = "purge_channel_message_content_v1";
 
 /// Enforce ADR-013 on any historical `channel_messages` documents that were
-/// written before the metadata-only refactor. Unsets `text`, `attachments`,
-/// and `raw_platform_data` from matching rows.
+/// written before the metadata-only refactor. Removes message content and
+/// legacy attachment objects, retaining the new provider-reference metadata.
 ///
 /// Gated behind a `schema_migrations` marker so the full-collection scan
 /// (the `$exists` filter cannot use an index) runs exactly once per
@@ -3237,17 +3283,24 @@ async fn purge_legacy_channel_message_content(db: &Database) -> Result<(), mongo
             doc! {
                 "$or": [
                     { "text": { "$exists": true } },
-                    { "attachments": { "$exists": true } },
                     { "raw_platform_data": { "$exists": true } },
                 ],
             },
             doc! {
                 "$unset": {
                     "text": "",
-                    "attachments": "",
                     "raw_platform_data": "",
                 },
             },
+        )
+        .await?;
+
+    // New metadata always has provider_ref. Do not erase it if a migration
+    // is retried after this server has already accepted an inbound attachment.
+    messages
+        .update_many(
+            doc! { "attachments": { "$elemMatch": { "provider_ref": { "$exists": false } } } },
+            doc! { "$unset": { "attachments": "" } },
         )
         .await?;
 
@@ -3427,7 +3480,7 @@ async fn migrate_legacy_ssh_auth_mode(db: &Database) -> Result<(), mongodb::erro
         )
         .await?;
 
-    let user_services = db.collection::<Document>(USER_SERVICES);
+    let user_services = crate::services::service_history::collection::<Document>(db, USER_SERVICES);
     let non_ssh_mode = user_services
         .update_many(
             doc! {
@@ -3669,16 +3722,16 @@ async fn cleanup_duplicate_migration_services(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Find active migration-sourced UserService records with suffixed slugs
     // (the "-N" pattern produced by the slug collision resolver).
-    let migration_services: Vec<UserService> = db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! {
-            "is_active": true,
-            "source": { "$regex": "^migration_" },
-            "catalog_service_id": { "$ne": null },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let migration_services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+            .find(doc! {
+                "is_active": true,
+                "source": { "$regex": "^migration_" },
+                "catalog_service_id": { "$ne": null },
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     let mut cleaned = 0u64;
     for svc in &migration_services {
@@ -3701,32 +3754,29 @@ async fn cleanup_duplicate_migration_services(
         };
 
         // Verify the base slug record exists and is active for the same user + catalog service
-        let base_exists = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "user_id": &svc.user_id,
-                "slug": base_slug,
-                "catalog_service_id": csid,
-                "is_active": true,
-            })
-            .await?;
+        let base_exists =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &svc.user_id,
+                    "slug": base_slug,
+                    "catalog_service_id": csid,
+                    "is_active": true,
+                })
+                .await?;
 
         if base_exists.is_none() {
             continue;
         }
 
         // This is a migration-created suffix duplicate -- delete it and its associated records
-        let _ = db
-            .collection::<UserService>(USER_SERVICES)
+        let _ = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
             .delete_one(doc! { "_id": &svc.id })
             .await;
-        let _ = db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
+        let _ = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .delete_one(doc! { "_id": &svc.endpoint_id })
             .await;
         if let Some(ref ak_id) = svc.api_key_id {
-            let _ = db
-                .collection::<UserApiKey>(USER_API_KEYS)
+            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .delete_one(doc! { "_id": ak_id })
                 .await;
         }
@@ -3819,16 +3869,16 @@ async fn resolve_migration_user_service_slug(
         .cloned()
         .map(bson::Bson::String)
         .collect();
-    let existing: Vec<Document> = db
-        .collection::<Document>(USER_SERVICES)
-        .find(doc! {
-            "user_id": user_id,
-            "is_active": true,
-            "slug": { "$in": slug_values },
-        })
-        .await?
-        .try_collect()
-        .await?;
+    let existing: Vec<Document> =
+        crate::services::service_history::collection::<Document>(db, USER_SERVICES)
+            .find(doc! {
+                "user_id": user_id,
+                "is_active": true,
+                "slug": { "$in": slug_values },
+            })
+            .await?
+            .try_collect()
+            .await?;
 
     let existing_slugs: HashSet<String> = existing
         .into_iter()
@@ -3857,38 +3907,56 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
         // sibling `user_api_keys` row while leaving the matching
         // `user_services` row in place, leaving stale state that would
         // otherwise re-trigger the insert and hit the unique index.
-        let existing_api_key = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .find_one(doc! {
-                "source": "migration_provider_token",
-                "source_id": &token.id,
-            })
-            .await?;
+        let existing_api_key =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .find_one(doc! {
+                    "source": "migration_provider_token",
+                    "source_id": &token.id,
+                })
+                .await?;
         if existing_api_key.is_some() {
             continue;
         }
-        let existing_service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "source": "migration_provider_token",
-                "source_id": &token.id,
-            })
-            .await?;
+        let existing_service =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "source": "migration_provider_token",
+                    "source_id": &token.id,
+                })
+                .await?;
         if existing_service.is_some() {
             continue;
         }
-
-        // Find the DownstreamService linked to this provider
-        let service = db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find_one(doc! { "provider_config_id": &token.provider_config_id, "is_active": true })
-            .await?;
 
         // Load ProviderConfig for name
         let provider = db
             .collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .find_one(doc! { "_id": &token.provider_config_id })
             .await?;
+
+        // Legacy Google tokens have no product identity. Only the original
+        // api-google service is a valid migration target, regardless of the
+        // insertion order of products sharing its provider. If it is absent,
+        // leave the token alone until that legacy target becomes available.
+        let mut service_filter = doc! {
+            "provider_config_id": &token.provider_config_id, "is_active": true,
+        };
+        let legacy_google = provider.as_ref().is_some_and(|p| p.slug == "google");
+        if legacy_google {
+            service_filter.insert("slug", "api-google");
+        }
+        let service = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(service_filter)
+            .await?;
+        if (legacy_google && service.is_none())
+            || service.as_ref().is_some_and(|service| {
+                crate::services::google_workspace::GoogleProduct::from_slug(&service.slug).is_some()
+            })
+        {
+            // Also reject product rows when the provider is missing or renamed.
+            continue;
+        }
 
         let provider_name = provider
             .as_ref()
@@ -3937,14 +4005,14 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
         // Skip if a UserService already exists for this user + catalog service
         // (e.g., created by an earlier token for the same provider)
         if let Some(ref csid) = catalog_service_id {
-            let already_has_service = db
-                .collection::<UserService>(USER_SERVICES)
-                .find_one(doc! {
-                    "user_id": &token.user_id,
-                    "catalog_service_id": csid,
-                    "is_active": true,
-                })
-                .await?;
+            let already_has_service =
+                crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                    .find_one(doc! {
+                        "user_id": &token.user_id,
+                        "catalog_service_id": csid,
+                        "is_active": true,
+                    })
+                    .await?;
             if already_has_service.is_some() {
                 continue;
             }
@@ -3986,7 +4054,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             created_at: now,
             updated_at: now,
         };
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .insert_one(&endpoint)
             .await?;
 
@@ -4030,16 +4098,16 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             updated_at: now,
             credential_epoch: 1,
         };
-        if let Err(e) = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(&api_key)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .insert_one(&api_key)
+                .await
         {
             // Clean up orphaned endpoint
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
             return Err(e.into());
         }
 
@@ -4055,6 +4123,9 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             .and_then(|svc| svc.ssh_config.as_ref().map(|ssh| ssh.ssh_auth_mode))
             .unwrap_or(SshAuthMode::ProxyOnly);
         let user_service = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: service_id,
             user_id: token.user_id.clone(),
             slug,
@@ -4093,18 +4164,17 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             state_version: 1,
             rotation_predecessor_id: None,
         };
-        if let Err(e) = db
-            .collection::<UserService>(USER_SERVICES)
-            .insert_one(&user_service)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .insert_one(&user_service)
+                .await
         {
             // Clean up orphaned endpoint and api_key
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
-            let _ = db
-                .collection::<UserApiKey>(USER_API_KEYS)
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
+            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .delete_one(doc! { "_id": &api_key_id })
                 .await;
             if is_duplicate_key_error(&e) {
@@ -4145,23 +4215,23 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
         // `user_api_keys` row while leaving the matching `user_services` row
         // in place, leaving stale state that would otherwise re-trigger the
         // insert and hit the unique index.
-        let existing_api_key = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .find_one(doc! {
-                "source": "migration_connection",
-                "source_id": &conn.id,
-            })
-            .await?;
+        let existing_api_key =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .find_one(doc! {
+                    "source": "migration_connection",
+                    "source_id": &conn.id,
+                })
+                .await?;
         if existing_api_key.is_some() {
             continue;
         }
-        let existing_service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "source": "migration_connection",
-                "source_id": &conn.id,
-            })
-            .await?;
+        let existing_service =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "source": "migration_connection",
+                    "source_id": &conn.id,
+                })
+                .await?;
         if existing_service.is_some() {
             continue;
         }
@@ -4184,14 +4254,14 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
         };
 
         // Check if already migrated via provider token path
-        let already_has_service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "user_id": &conn.user_id,
-                "catalog_service_id": &service.id,
-                "is_active": true,
-            })
-            .await?;
+        let already_has_service =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &conn.user_id,
+                    "catalog_service_id": &service.id,
+                    "is_active": true,
+                })
+                .await?;
         if already_has_service.is_some() {
             continue;
         }
@@ -4237,7 +4307,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             created_at: now,
             updated_at: now,
         };
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .insert_one(&endpoint)
             .await?;
 
@@ -4276,21 +4346,24 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             updated_at: now,
             credential_epoch: 1,
         };
-        if let Err(e) = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(&api_key)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .insert_one(&api_key)
+                .await
         {
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
             return Err(e.into());
         }
 
         // Create UserService -- clean up endpoint + api_key on failure
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: service_id,
             user_id: conn.user_id.clone(),
             slug,
@@ -4334,17 +4407,16 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             state_version: 1,
             rotation_predecessor_id: None,
         };
-        if let Err(e) = db
-            .collection::<UserService>(USER_SERVICES)
-            .insert_one(&user_service)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .insert_one(&user_service)
+                .await
         {
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
-            let _ = db
-                .collection::<UserApiKey>(USER_API_KEYS)
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
+            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .delete_one(doc! { "_id": &api_key_id })
                 .await;
             if is_duplicate_key_error(&e) {
@@ -4384,8 +4456,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
     let mut created = 0u64;
     for binding in &bindings {
         // Try to update existing UserService (created by provider_token or connection migration)
-        let result = db
-            .collection::<Document>(USER_SERVICES)
+        let result = crate::services::service_history::collection::<Document>(db, USER_SERVICES)
             .update_one(
                 doc! {
                     "user_id": &binding.user_id,
@@ -4408,26 +4479,26 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
         }
 
         // No existing UserService was updated -- check if one already exists
-        let already_exists = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "user_id": &binding.user_id,
-                "catalog_service_id": &binding.service_id,
-                "is_active": true,
-            })
-            .await?;
+        let already_exists =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .find_one(doc! {
+                    "user_id": &binding.user_id,
+                    "catalog_service_id": &binding.service_id,
+                    "is_active": true,
+                })
+                .await?;
         if already_exists.is_some() {
             continue;
         }
 
         // Check idempotency by source
-        let migrated_before = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .find_one(doc! {
-                "source": "migration_node_binding",
-                "source_id": &binding.id,
-            })
-            .await?;
+        let migrated_before =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .find_one(doc! {
+                    "source": "migration_node_binding",
+                    "source_id": &binding.id,
+                })
+                .await?;
         if migrated_before.is_some() {
             continue;
         }
@@ -4507,7 +4578,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             created_at: now,
             updated_at: now,
         };
-        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
             .insert_one(&endpoint)
             .await?;
 
@@ -4538,21 +4609,24 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             updated_at: now,
             credential_epoch: 1,
         };
-        if let Err(e) = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(&api_key)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .insert_one(&api_key)
+                .await
         {
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
             return Err(e.into());
         }
 
         // Create UserService with node routing
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: service_id,
             user_id: binding.user_id.clone(),
             slug,
@@ -4596,17 +4670,16 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             state_version: 1,
             rotation_predecessor_id: None,
         };
-        if let Err(e) = db
-            .collection::<UserService>(USER_SERVICES)
-            .insert_one(&user_service)
-            .await
+        if let Err(e) =
+            crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+                .insert_one(&user_service)
+                .await
         {
-            let _ = db
-                .collection::<UserEndpoint>(USER_ENDPOINTS)
-                .delete_one(doc! { "_id": &endpoint_id })
-                .await;
-            let _ = db
-                .collection::<UserApiKey>(USER_API_KEYS)
+            let _ =
+                crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
+                    .delete_one(doc! { "_id": &endpoint_id })
+                    .await;
+            let _ = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .delete_one(doc! { "_id": &api_key_id })
                 .await;
             return Err(e.into());
@@ -4628,6 +4701,134 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn google_token_migration_never_infers_a_product_from_provider_id() {
+        let db = crate::test_utils::connect_test_database("google_token_product_migration")
+            .await
+            .expect("MongoDB required");
+        let enc = crate::test_utils::test_encryption_keys();
+        crate::services::provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        let provider = db
+            .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .find_one(doc! {"slug":"google"})
+            .await
+            .unwrap()
+            .unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        // Insert the new products first: the old find_one would migrate into Docs.
+        for product in ["docs", "sheets", "slides"] {
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = uuid::Uuid::new_v4().to_string();
+            service.slug = format!("api-google-{product}");
+            service.base_url = format!("https://{product}.googleapis.com");
+            service.provider_config_id = Some(provider.id.clone());
+            services.insert_one(service).await.unwrap();
+        }
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let now = bson::DateTime::now();
+        db.collection::<Document>(USER_PROVIDER_TOKENS)
+            .insert_one(doc! {
+                "_id": &token_id, "user_id": &owner_id, "provider_config_id": &provider.id,
+                "token_type": "oauth2", "status": "active", "created_at": now, "updated_at": now,
+            })
+            .await
+            .unwrap();
+        migrate_provider_tokens(&db).await.unwrap();
+        for collection in [USER_ENDPOINTS, USER_API_KEYS, USER_SERVICES] {
+            assert_eq!(
+                db.collection::<Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "no legacy target: {collection}"
+            );
+        }
+        let mut legacy = crate::models::downstream_service::test_helpers::dummy_service();
+        legacy.id = uuid::Uuid::new_v4().to_string();
+        legacy.slug = "api-google".into();
+        legacy.base_url = "https://www.googleapis.com".into();
+        legacy.provider_config_id = Some(provider.id.clone());
+        services.insert_one(&legacy).await.unwrap();
+        migrate_provider_tokens(&db).await.unwrap();
+        let migrated = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"source_id":&token_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated.slug, "api-google");
+        assert_eq!(
+            migrated.catalog_service_id.as_deref(),
+            Some(legacy.id.as_str())
+        );
+        let endpoint = db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .find_one(doc! {"_id":&migrated.endpoint_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(endpoint.url, "https://www.googleapis.com");
+        // Repeat migration must not rewrite, retarget or clone any existing row.
+        let mut snapshots = Vec::new();
+        for collection in [
+            DOWNSTREAM_SERVICES,
+            USER_ENDPOINTS,
+            USER_API_KEYS,
+            USER_SERVICES,
+        ] {
+            let rows: Vec<Document> = db
+                .collection::<Document>(collection)
+                .find(doc! {})
+                .sort(doc! {"_id":1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            snapshots.push((collection, rows));
+        }
+        migrate_provider_tokens(&db).await.unwrap();
+        for (collection, original) in snapshots {
+            let rows: Vec<Document> = db
+                .collection::<Document>(collection)
+                .find(doc! {})
+                .sort(doc! {"_id":1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(rows, original, "migration altered {collection}");
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_media_migration_preserves_provider_metadata_and_purges_legacy_content() {
+        let Some(db) = crate::test_utils::connect_test_database("channel_media_migration").await
+        else {
+            eprintln!("no local MongoDB available");
+            return;
+        };
+        let rows = db.collection::<Document>("channel_messages");
+        rows.insert_many([
+            doc! {"_id":"legacy", "text":"private", "raw_platform_data":{"text":"private"}, "attachments":[{"url":"old"}]},
+            doc! {"_id":"new", "attachments":[{"content_type":"file", "provider_ref":"file-id"}]},
+        ]).await.unwrap();
+        purge_legacy_channel_message_content(&db).await.unwrap();
+        let legacy = rows.find_one(doc! {"_id":"legacy"}).await.unwrap().unwrap();
+        for key in ["text", "raw_platform_data", "attachments"] {
+            assert!(!legacy.contains_key(key));
+        }
+        let current = rows.find_one(doc! {"_id":"new"}).await.unwrap().unwrap();
+        assert_eq!(current.get_array("attachments").unwrap().len(), 1);
+        purge_legacy_channel_message_content(&db).await.unwrap();
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn billing_ledger_dedupe_index_falls_back_on_historical_duplicates() {
@@ -4681,6 +4882,10 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "svc-1".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),

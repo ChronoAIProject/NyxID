@@ -1,4 +1,8 @@
 export interface ServiceAccount {
+  readonly purpose?: "general" | "curation" | "catalog_editor";
+  readonly platform_protected?: boolean;
+  readonly credential_generation?: number;
+  readonly curation_grant?: CurationGrant | null;
   readonly id: string;
   readonly name: string;
   readonly description: string | null;
@@ -9,6 +13,7 @@ export interface ServiceAccount {
   readonly is_active: boolean;
   readonly rate_limit_override: number | null;
   readonly created_by: string;
+  readonly owner_id?: string;
   readonly created_at: string;
   readonly updated_at: string;
   readonly last_authenticated_at: string | null;
@@ -43,6 +48,13 @@ export interface CreateServiceAccountResponse {
 }
 
 export interface UpdateServiceAccountRequest {
+  readonly expected_access?: {
+    readonly role_ids: readonly string[];
+    readonly allowed_scopes: string;
+    readonly purpose: "general" | "curation" | "catalog_editor";
+    readonly platform_protected: boolean;
+    readonly is_active: boolean;
+  };
   readonly name?: string;
   readonly description?: string;
   readonly allowed_scopes?: string;
@@ -131,4 +143,25 @@ export interface SaServiceConnectResponse {
 
 export interface SaServiceConnectionActionResponse {
   readonly message: string;
+}
+
+export interface CurationGrant {
+  readonly id: string;
+  readonly service_ids: readonly string[];
+  readonly ornn_proxy_service_id: string | null;
+  readonly issued_by: string;
+  readonly issued_at: string;
+  readonly expires_at: string | null;
+  readonly max_writes: number;
+  readonly window_seconds: number;
+  readonly window_started_at: string;
+  readonly writes_used: number;
+}
+
+export interface IssueCurationGrantRequest {
+  readonly service_ids: readonly string[];
+  readonly ornn_proxy_service_id?: string;
+  readonly expires_at?: string;
+  readonly max_writes: number;
+  readonly window_seconds: number;
 }

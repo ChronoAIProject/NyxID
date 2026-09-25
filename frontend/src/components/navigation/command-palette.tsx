@@ -9,6 +9,7 @@ import {
   BookOpen,
   Sparkles,
   ClipboardList,
+  ChartNoAxesCombined,
   Lock,
   Bell,
   Plus,
@@ -25,7 +26,6 @@ import {
   Server,
   Plug,
   Webhook,
-  WandSparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -66,13 +66,7 @@ export const ALL_ITEMS: readonly CommandItem[] = [
   { icon: Users, label: "Users", to: "/admin/users", group: "admin" },
   { icon: Ticket, label: "Invite Codes", to: "/admin/invite-codes", group: "admin" },
   { icon: ClipboardList, label: "Audit Log", to: "/admin/audit-log", group: "admin" },
-  {
-    icon: WandSparkles,
-    label: "Platform Operations",
-    to: "/admin/platform-ops",
-    group: "admin",
-    requiresAdminWrite: true,
-  },
+  { icon: ChartNoAxesCombined, label: "Usage", to: "/admin/usage", group: "admin" },
   { icon: Bot, label: "Service Accounts", to: "/admin/service-accounts", group: "admin" },
   { icon: KeyRound, label: "OAuth Clients", to: "/admin/oauth-clients", group: "admin" },
   { icon: ShieldCheck, label: "Roles", to: "/admin/roles", group: "admin" },

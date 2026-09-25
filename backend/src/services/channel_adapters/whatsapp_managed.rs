@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-use super::whatsapp::{GRAPH_API_VERSION, graph_response, validate_id};
+use super::whatsapp::{GRAPH_API_VERSION, validate_id};
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::{ChannelBot, ManagedBotSetup};
 use crate::services::channel_managed::{
@@ -121,12 +121,7 @@ fn protocol_error() -> AppError {
 }
 
 async fn send(request: reqwest::RequestBuilder) -> AppResult<Value> {
-    let response = request
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|_| protocol_error())?;
-    graph_response(response).await
+    super::whatsapp::graph_send(request).await
 }
 
 pub async fn complete(
@@ -211,6 +206,7 @@ pub async fn complete(
         return Err(AppError::ValidationError("Meta token does not authorize this app and WhatsApp Business Account with both required permissions".to_string()));
     }
     let credentials = BotCredentials {
+        billing: None,
         token: &token,
         platform_bot_id: None,
         platform_secrets: Some(platform),

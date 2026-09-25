@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
  * `h-[n]` on a service icon — add a token here if a new size is genuinely
  * needed.
  */
-export type ServiceIconSize = "2xs" | "xs" | "sm" | "md" | "lg";
+export type ServiceIconSize = "2xs" | "xs" | "sm" | "md" | "lg" | "xl";
 
 // Sizes are `!important` on purpose: some shadcn containers (e.g.
 // `DropdownMenuItem`, `Button`) ship a blanket `[&_svg]:h-3.5 w-3.5` that
@@ -21,6 +21,7 @@ const SIZE_CLASS: Readonly<Record<ServiceIconSize, string>> = {
   sm: "!h-5 !w-5", // 20px — list/table rows, compact cards
   md: "!h-6 !w-6", // 24px — card headers, detail rows
   lg: "!h-8 !w-8", // 32px — page-header leading / detail hero
+  xl: "!h-9 !w-9", // 36px — connection identity circles
 };
 
 /**

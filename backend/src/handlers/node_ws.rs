@@ -927,7 +927,13 @@ async fn handle_node_connection(
                                 "auth_token": raw_auth_token,
                                 "signing_secret": raw_signing_secret,
                             });
-                            let _ = ws_sink.send(Message::Text(ok_msg.to_string().into())).await;
+                            if ws_sink
+                                .send(Message::Text(ok_msg.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                return None;
+                            }
 
                             // Telemetry: node.registered. `profile` is unknown server-side
                             // (the CLI-side profile name is never sent over the wire).
@@ -949,7 +955,7 @@ async fn handle_node_connection(
                                 },
                             );
 
-                            return Some((node.id, node.user_id));
+                            return Some((node.id, node.user_id, false));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Node registration failed");
@@ -966,10 +972,10 @@ async fn handle_node_connection(
                                 None,
                                 "node_ws_auth_failed".to_string(),
                                 Some(serde_json::json!({ "reason": "registration_failed" })),
-                        ip_address.clone(),
-                        user_agent.clone(),
-                        None,
-                        None,
+                                ip_address.clone(),
+                                user_agent.clone(),
+                                None,
+                                None,
                             );
                             return None;
                         }
@@ -978,16 +984,10 @@ async fn handle_node_connection(
                 NodeMessage::Auth { node_id, token } => {
                     match node_service::validate_auth_token(&state.db, &token).await {
                         Ok(node) if node.id == node_id => {
-                            let ok_msg = serde_json::json!({
-                                "type": "auth_ok",
-                                "node_id": &node.id,
-                                "heartbeat_interval_secs": state.config.node_heartbeat_interval_secs,
-                                "capabilities": {
-                                    "proxy_binary_chunks": true
-                                }
-                            });
-                            let _ = ws_sink.send(Message::Text(ok_msg.to_string().into())).await;
-                            return Some((node.id, node.user_id));
+                            // Success is acknowledged only after ownership and local
+                            // publication. A rejected lease must fail the auth phase,
+                            // including for older agents whose clean-close retry is immediate.
+                            return Some((node.id, node.user_id, true));
                         }
                         Ok(_) => {
                             let err_msg = serde_json::json!({
@@ -1006,10 +1006,10 @@ async fn handle_node_connection(
                                     "reason": "node_id_mismatch",
                                     "claimed_node_id": &node_id,
                                 })),
-                        ip_address.clone(),
-                        user_agent.clone(),
-                        None,
-                        None,
+                                ip_address.clone(),
+                                user_agent.clone(),
+                                None,
+                                None,
                             );
                             return None;
                         }
@@ -1028,10 +1028,10 @@ async fn handle_node_connection(
                                 None,
                                 "node_ws_auth_failed".to_string(),
                                 Some(serde_json::json!({ "reason": "invalid_auth_token" })),
-                        ip_address.clone(),
-                        user_agent.clone(),
-                        None,
-                        None,
+                                ip_address.clone(),
+                                user_agent.clone(),
+                                None,
+                                None,
                             );
                             return None;
                         }
@@ -1064,7 +1064,7 @@ async fn handle_node_connection(
     })
     .await;
 
-    let (node_id, owner_user_id) = match auth_result {
+    let (node_id, owner_user_id, needs_auth_ok) = match auth_result {
         Ok(Some(pair)) => pair,
         _ => {
             // Timeout or auth failure -- close connection
@@ -1078,10 +1078,12 @@ async fn handle_node_connection(
         }
     };
 
-    tracing::info!(node_id = %node_id, "Node connected via WebSocket");
+    // Keep claim and publication in the same order for concurrent reconnects
+    // on this replica. MongoDB still fences ownership across replicas/generations.
+    let setup_guard = state.node_ws_manager.lock_connection_setup(&node_id).await;
 
     // H4: Use bounded channel to prevent memory exhaustion from slow/malicious nodes
-    let (tx, mut rx) = mpsc::channel::<NodeOutboundMessage>(WS_WRITER_CHANNEL_SIZE);
+    let (tx, rx) = mpsc::channel::<NodeOutboundMessage>(WS_WRITER_CHANNEL_SIZE);
     let connection_id = uuid::Uuid::new_v4().to_string();
     let owner = match crate::services::node_owner_service::claim(
         &state.db,
@@ -1094,30 +1096,66 @@ async fn handle_node_connection(
     {
         Ok(Some(owner)) => owner,
         Ok(None) => {
-            let _ = ws_sink
-                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            tracing::debug!(node_id, "Node connection ownership unavailable");
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                ws_sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 4008,
-                    reason: "Node is connected to another backend".into(),
-                })))
-                .await;
+                    reason: "Node connection ownership unavailable".into(),
+                }))),
+            )
+            .await;
             return;
         }
         Err(error) => {
             tracing::error!(node_id, %error, "Failed to claim node connection ownership");
-            let _ = ws_sink
-                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                ws_sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 4002,
                     reason: "Node registration failed".into(),
-                })))
-                .await;
+                }))),
+            )
+            .await;
             return;
         }
     };
     let owner_fence =
         crate::services::node_owner_service::NodeOwnerFence::from_owner(&node_id, &owner);
-    state
-        .node_ws_manager
-        .register_connection_with_id(&node_id, connection_id.clone(), tx);
+    let (_, mut close_rx) =
+        state
+            .node_ws_manager
+            .register_connection_with_id(&node_id, connection_id.clone(), tx);
+
+    if needs_auth_ok {
+        let ok_msg = serde_json::json!({
+            "type": "auth_ok",
+            "node_id": &node_id,
+            "heartbeat_interval_secs": state.config.node_heartbeat_interval_secs,
+            "capabilities": { "proxy_binary_chunks": true }
+        });
+        let acknowledged = tokio::select! {
+            biased;
+            _ = close_rx.changed() => false,
+            result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                ws_sink.send(Message::Text(ok_msg.to_string().into())),
+            ) => matches!(result, Ok(Ok(()))),
+        };
+        if !acknowledged {
+            state
+                .node_ws_manager
+                .unregister_connection_if(&node_id, &connection_id);
+            if let Err(error) =
+                crate::services::node_owner_service::release(&state.db, &owner_fence).await
+            {
+                tracing::warn!(node_id, %error, "Failed to release unacknowledged node connection ownership");
+            }
+            return;
+        }
+    }
+    drop(setup_guard);
+    tracing::info!(node_id = %node_id, connection_id, "Node connected via WebSocket");
 
     // Telemetry: node.connected. Emitted once after WS auth + registration
     // in the manager. `profile` is unknown server-side -- only the CLI knows
@@ -1141,29 +1179,7 @@ async fn handle_node_connection(
         );
     }
 
-    // Spawn writer task: forwards messages from the channel to the WS sink
-    let node_id_writer = node_id.clone();
-    let writer_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                NodeOutboundMessage::Text(text) => {
-                    if ws_sink.send(Message::Text(text.into())).await.is_err() {
-                        tracing::debug!(node_id = %node_id_writer, "WebSocket send failed, closing writer");
-                        break;
-                    }
-                }
-                NodeOutboundMessage::Close { code, reason } => {
-                    let _ = ws_sink
-                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                            code,
-                            reason: reason.into(),
-                        })))
-                        .await;
-                    break;
-                }
-            }
-        }
-    });
+    let mut writer_task = tokio::spawn(run_node_writer(ws_sink, rx, close_rx, node_id.clone()));
 
     // Reader loop: process incoming messages from the node
     let node_id_reader = node_id.clone();
@@ -1174,7 +1190,17 @@ async fn handle_node_connection(
     // close; any read error flips it to "error" before the loop breaks.
     let mut reason: &'static str = "client_close";
 
-    while let Some(msg) = ws_stream.next().await {
+    loop {
+        let msg = tokio::select! {
+            msg = ws_stream.next() => {
+                let Some(msg) = msg else { break; };
+                msg
+            }
+            _ = &mut writer_task => {
+                reason = "writer_closed";
+                break;
+            }
+        };
         // A reconnect on this replica replaces the local correlation maps.
         // Fence the old reader before it can deliver a late response into the
         // replacement connection's request or session entry.
@@ -1608,7 +1634,7 @@ async fn handle_node_connection(
     }
 
     // Cleanup on disconnect
-    tracing::info!(node_id = %node_id, "Node disconnected");
+    tracing::info!(node_id = %node_id, connection_id, reason, "Node disconnected");
     writer_task.abort();
     ws_manager.unregister_connection_if(&node_id, &connection_id);
 
@@ -1636,6 +1662,69 @@ async fn handle_node_connection(
                 reason: reason.to_string(),
             },
         );
+    }
+}
+
+/// Established writes are bounded by the configured heartbeat/operation
+/// policies, not the short handshake deadline. The out-of-band close signal
+/// interrupts even a blocked write; delivery of the terminal Close is bounded.
+async fn run_node_writer<S>(
+    mut ws_sink: S,
+    mut rx: mpsc::Receiver<NodeOutboundMessage>,
+    mut close_rx: tokio::sync::watch::Receiver<Option<NodeOutboundMessage>>,
+    node_id: String,
+) where
+    S: futures::Sink<Message> + Unpin,
+{
+    loop {
+        let closing = close_rx.borrow().clone();
+        let msg = if let Some(closing) = closing {
+            closing
+        } else {
+            tokio::select! {
+                biased;
+                result = close_rx.changed() => {
+                    if result.is_err() { break; }
+                    continue;
+                },
+                msg = rx.recv() => {
+                    let Some(msg) = msg else { break; };
+                    msg
+                }
+            }
+        };
+        match msg {
+            NodeOutboundMessage::Text(text) => {
+                // Large proxy requests may legitimately take longer than
+                // the handshake timeout. Heartbeat/operation policies own
+                // their deadlines; lifecycle cancellation interrupts even
+                // an in-progress send without waiting for queue capacity.
+                tokio::select! {
+                    biased;
+                    result = close_rx.changed() => {
+                        if result.is_err() { break; }
+                        continue;
+                    },
+                    result = ws_sink.send(Message::Text(text.into())) => {
+                        if result.is_err() {
+                            tracing::debug!(node_id = %node_id, "WebSocket send failed, closing writer");
+                            break;
+                        }
+                    }
+                }
+            }
+            NodeOutboundMessage::Close { code, reason } => {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    ws_sink.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code,
+                        reason: reason.into(),
+                    }))),
+                )
+                .await;
+                break;
+            }
+        }
     }
 }
 
@@ -1817,6 +1906,260 @@ mod tests {
         connect_test_database(prefix)
             .await
             .expect("local MongoDB required for node WS behavior tests")
+    }
+
+    struct BlockedNodeSink;
+
+    impl futures::Sink<axum::extract::ws::Message> for BlockedNodeSink {
+        type Error = std::convert::Infallible;
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+        fn start_send(
+            self: std::pin::Pin<&mut Self>,
+            _: axum::extract::ws::Message,
+        ) -> Result<(), Self::Error> {
+            unreachable!("blocked sink never becomes ready")
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_writer_allows_slow_upload_until_lifecycle_cancellation() {
+        let (tx, rx) = mpsc::channel(1);
+        let (close_tx, close_rx) = tokio::sync::watch::channel(None);
+        tx.send(NodeOutboundMessage::Text("large proxy upload".to_string()))
+            .await
+            .unwrap();
+        let writer = tokio::spawn(super::run_node_writer(
+            BlockedNodeSink,
+            rx,
+            close_rx,
+            "node".to_string(),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !writer.is_finished(),
+            "established uploads must not inherit the 10s handshake timeout"
+        );
+        close_tx.send_replace(Some(NodeOutboundMessage::Close {
+            code: 4005,
+            reason: "configured heartbeat timeout".to_string(),
+        }));
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        writer.await.unwrap();
+        assert!(
+            tx.is_closed(),
+            "lifecycle cancellation must interrupt even a blocked sink"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_writer_exits_when_close_signal_sender_disappears() {
+        let (_tx, rx) = mpsc::channel(1);
+        let (close_tx, close_rx) = tokio::sync::watch::channel(None);
+        drop(close_tx);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            super::run_node_writer(BlockedNodeSink, rx, close_rx, "node".to_string()),
+        )
+        .await
+        .expect("closed watch must exit instead of spinning");
+    }
+
+    async fn start_node_ws_test_server(
+        state: crate::AppState,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = axum::Router::new()
+            .route("/ws", axum::routing::get(super::ws_handler))
+            .with_state(state);
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        (format!("ws://{address}/ws"), task)
+    }
+
+    async fn auth_test_socket(
+        url: &str,
+        node_id: &str,
+        token: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        use futures::SinkExt;
+        let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({
+                    "type": "auth", "node_id": node_id, "token": token
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    }
+
+    async fn wait_for_socket_count(manager: &NodeWsManager, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while manager.total_connection_count() != count {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("socket reservations must be released even when the client is idle");
+    }
+
+    #[tokio::test]
+    async fn reconnect_rejects_previous_generation_before_auth_ok_then_recovers_after_expiry() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        use crate::services::node_owner_service::{self, ReplicaIdentity};
+        use futures::StreamExt;
+        let db = test_db("ws_owner_retry").await;
+        let node = test_node(&uuid::Uuid::new_v4().to_string(), "retry", "auth-token");
+        insert_user_and_node(&db, &node.user_id, &node).await;
+        let state = test_app_state(db.clone());
+        let old_identity = ReplicaIdentity {
+            instance_name: state.replica_identity.instance_name.clone(),
+            generation_id: "previous-generation".to_string(),
+            internal_base_url: "http://127.0.0.1:3002".to_string(),
+        };
+        node_owner_service::claim(
+            &db,
+            &node.id,
+            &old_identity,
+            "old-connection",
+            std::time::Duration::from_secs(90),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (url, server) = start_node_ws_test_server(state.clone()).await;
+        let mut rejected = auth_test_socket(&url, &node.id, "auth-token").await;
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), rejected.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(first, tokio_tungstenite::tungstenite::Message::Close(Some(ref frame)) if u16::from(frame.code) == 4008),
+            "ownership rejection must be the first response (old agents then back off during auth): {first:?}"
+        );
+        wait_for_socket_count(&state.node_ws_manager, 0).await;
+        assert!(!state.node_ws_manager.is_connected(&node.id));
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": &node.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.connection_owner.unwrap().generation_id,
+            "previous-generation"
+        );
+        db.collection::<Node>(NODES).update_one(doc! {"_id": &node.id}, doc! {"$set": {"connection_owner.expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+        let mut accepted = auth_test_socket(&url, &node.id, "auth-token").await;
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), accepted.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let payload: Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
+        assert_eq!(payload["type"], "auth_ok");
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": &node.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let owner = stored.connection_owner.unwrap();
+        assert_eq!(owner.generation_id, state.replica_identity.generation_id);
+        assert_eq!(
+            Some(owner.connection_id),
+            state.node_ws_manager.connection_id(&node.id)
+        );
+        accepted.close(None).await.unwrap();
+        wait_for_socket_count(&state.node_ws_manager, 0).await;
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": &node.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.connection_owner.is_none());
+        server.abort();
+        }).await.expect("node WebSocket lifecycle regression timed out");
+    }
+
+    #[tokio::test]
+    async fn reconnect_replacement_and_admin_close_release_idle_readers_with_fenced_cleanup() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            use futures::StreamExt;
+            let db = test_db("ws_idle_replace").await;
+            let node = test_node(&uuid::Uuid::new_v4().to_string(), "idle", "auth-token");
+            insert_user_and_node(&db, &node.user_id, &node).await;
+            let state = test_app_state(db.clone());
+            let (url, server) = start_node_ws_test_server(state.clone()).await;
+            let mut old = auth_test_socket(&url, &node.id, "auth-token").await;
+            assert!(old.next().await.unwrap().unwrap().is_text());
+            let old_id = state.node_ws_manager.connection_id(&node.id).unwrap();
+            let mut replacement = auth_test_socket(&url, &node.id, "auth-token").await;
+            assert!(replacement.next().await.unwrap().unwrap().is_text());
+            // The old client does not read or answer Close. Writer completion must
+            // still end the old reader, release its reservation, and preserve the new lease.
+            wait_for_socket_count(&state.node_ws_manager, 1).await;
+            let new_id = state.node_ws_manager.connection_id(&node.id).unwrap();
+            assert_ne!(old_id, new_id);
+            let stored = db
+                .collection::<Node>(NODES)
+                .find_one(doc! {"_id": &node.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.connection_owner.unwrap().connection_id, new_id);
+            assert_eq!(stored.status, NodeStatus::Online);
+            state
+                .node_ws_manager
+                .disconnect_connection_if(&node.id, &new_id, 4000, "admin disconnected")
+                .await;
+            wait_for_socket_count(&state.node_ws_manager, 0).await;
+            let stored = db
+                .collection::<Node>(NODES)
+                .find_one(doc! {"_id": &node.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(stored.connection_owner.is_none());
+            assert_eq!(stored.status, NodeStatus::Offline);
+            drop((old, replacement));
+            server.abort();
+        })
+        .await
+        .expect("node WebSocket lifecycle regression timed out");
     }
 
     fn b64url(byte: u8, len: usize) -> String {
@@ -2496,6 +2839,7 @@ mod tests {
             &node.id,
             Some("0.7.1-test".to_string()),
             Some(NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),
@@ -2616,6 +2960,7 @@ mod tests {
             &node.id,
             None,
             Some(NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),
@@ -2806,6 +3151,7 @@ mod tests {
             .send_proxy_request(
                 "node-1",
                 NodeProxyRequest {
+                    target_id: None,
                     request_id: "req-stream-invalid".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),

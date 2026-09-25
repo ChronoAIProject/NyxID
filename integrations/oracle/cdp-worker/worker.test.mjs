@@ -1,13 +1,59 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test("preferredModelPillIndex never selects an unlabelled control", () => {
+  // The composer region also contains icon-only menu buttons such as
+  // composer-plus-btn ("Add files and more"), whose innerText is empty.
+  // Returning index 0 there makes the worker click the wrong button and no
+  // model menu opens (menu_not_opened, items=0).
+  assert.equal(preferredModelPillIndex(["", "6\nPro"]), 1);
+  assert.equal(preferredModelPillIndex(["", "Some Control"]), 1);
+  assert.equal(preferredModelPillIndex(["", ""]), -1);
+  assert.equal(preferredModelPillIndex([]), -1);
+  // A recognised level still wins outright.
+  assert.equal(preferredModelPillIndex(["", "GPT-5.5 High"]), 1);
+});
+
+
 import {
+  PRE_SEND_ACTION_MS,
+  promptFillTimeout,
+  PROMPT_MAX_CHARS,
+  promptExceedsLimit,
+  classifySubmissionResponse,
+  interactionBudget,
+  diagnosticFileName,
+  diagnosticsToPrune,
+  settleDom,
+  familyFromModelRadios,
+  pillLabelPending,
+  switcherMetadataMatches,
+  familyUnverifiableButAcceptable,
+  sendReadyTimeout,
+  SEND_READY_TIMEOUT_MS,
+  PROMPT_FILL_CHARS_PER_MS,
+  PROMPT_FILL_MAX_MS,
+  composerHasDraft,
+  draftNeedsFastClear,
+  COMPOSER_FAST_CLEAR_CHARS,
+  composerVisibleHitPoint,
+  retryPresendModelRead,
+  usageCooldownConfig,
+  effortSelectionMismatch,
+  chooseSwitcherFamilyEntry,
   accountFingerprint,
   artifactBudgetDecision,
   artifactFileId,
   backoffDelay,
   chooseChatPage,
   choosePromptNavigation,
+  TEMPORARY_CHAT_URL,
+  isTemporaryChatUrl,
+  promptUsesTemporaryChat,
+  effortSliderIndex,
+  parseEffortSliderState,
+  effortSliderPlan,
+  effortSliderDetail,
   classifyArtifactLink,
   decidePromptResume,
   daemonPath,
@@ -33,6 +79,7 @@ import {
   modelSelectionFailureReason,
   modelLevelTargets,
   pillShowsLevel,
+  splitTierOffered,
   detectPillLevel,
   dropCancelledCommand,
   resolveNpmExecutable,
@@ -533,11 +580,18 @@ test("profile name is seeded only for a fresh profile", () => {
   assert.equal(seedProfileName("/p", "x", { ...fs, existsSync: () => true }), false);
 });
 
+test("extra-high accepts hyphen, dot and underscore separators", () => {
+  for (const label of ["chatgpt-6-extra-high", "gpt-6-extra_high", "extra.high", "Extra High"]) {
+    assert.equal(modelLevelTargets(label)[0], "Extra High", label);
+  }
+  assert.equal(modelLevelTargets("chatgpt-6-high")[0], "High");
+});
+
 test("model labels map to ChatGPT reasoning levels with Pro first", () => {
   assert.equal(modelLevelTargets("chatgpt-5.5-pro")[0], "Pro");
   assert.equal(modelLevelTargets("gpt-5.5-extended")[0], "Pro");
   assert.equal(modelLevelTargets("Pro 扩展")[0], "Pro");
-  assert.deepEqual(modelLevelTargets("chatgpt-6-pro"), ["Pro", "Pro Standard", "Pro 扩展", "扩展"]);
+  assert.deepEqual(modelLevelTargets("chatgpt-6-pro"), ["Pro", "Pro Extended", "Pro 扩展", "扩展"]);
   assert.deepEqual(modelLevelTargets("chatgpt-6-pro-extended"), ["Pro", "Pro Extended", "Pro 扩展", "扩展"]);
   assert.deepEqual(modelLevelTargets("Pro 扩展"), ["Pro", "Pro Extended", "Pro 扩展", "扩展"]);
   assert.equal(modelLevelTargets("extra high")[0], "Extra High");
@@ -568,10 +622,146 @@ test("pill text verifies the selected level without cross-matching", () => {
   assert.equal(pillShowsLevel("", high), false);
 });
 
+test("an oversized leftover draft takes the single-assignment clear", () => {
+  // fill("") drives a select-all and delete through React; on a composer
+  // holding tens of thousands of characters that does not finish inside
+  // PRE_SEND_ACTION_MS. The clear is best-effort, so the timeout is swallowed,
+  // the draft survives a browser relaunch, and every worker that picks the task
+  // up dies as operation_timeout@selecting_model. Observed 2026-09-21 with an
+  // 83,046 character draft that walked through a 15-worker pool.
+  assert.equal(draftNeedsFastClear(83046), true);
+  assert.equal(draftNeedsFastClear(COMPOSER_FAST_CLEAR_CHARS), true);
+  // An ordinary leftover still takes the normal path.
+  assert.equal(draftNeedsFastClear(COMPOSER_FAST_CLEAR_CHARS - 1), false);
+  assert.equal(draftNeedsFastClear(12), false);
+  assert.equal(draftNeedsFastClear(0), false);
+  // A missing or unreadable length must never trigger it.
+  assert.equal(draftNeedsFastClear(undefined), false);
+  assert.equal(draftNeedsFastClear(NaN), false);
+  assert.equal(draftNeedsFastClear(Infinity), false);
+  // The emptiness check itself is unchanged.
+  assert.equal(composerHasDraft("  "), false);
+  assert.equal(composerHasDraft("Architec"), true);
+});
+
+test("a menu without the split tier is not a missing level", () => {
+  // Captured from a live Pro account 2026-09-21. The composer pill's menu now
+  // lists model versions; "6 Pro" is a heading with aria-checked unset, so it
+  // cannot be clicked. modelLevelTargets still asks for Pro Extended on every
+  // Pro request, so the hunt can never succeed - the pool went fully down with
+  // every task rerouted through all 15 workers before failing level_unavailable.
+  const liveMenu = [
+    { text: "6 Pro" }, { text: "" }, { text: "Latest" },
+    { text: "GPT-5.6 Sol" }, { text: "GPT-5.5 Leaving on October 14" },
+  ];
+  assert.equal(splitTierOffered(liveMenu), false);
+  // Where the split does exist, nothing changes: the hunt still applies.
+  assert.equal(splitTierOffered([{ text: "Pro Standard" }, { text: "Pro Extended" }]), true);
+  assert.equal(splitTierOffered([{ text: "Pro \u6269\u5c55" }]), true);
+  assert.equal(splitTierOffered([{ text: "Pro \u6807\u51c6" }]), true);
+  // A bare Pro entry is not a split tier.
+  assert.equal(splitTierOffered([{ text: "Pro" }, { text: "GPT 6 Pro" }]), false);
+  // Absent or malformed menus never claim the split.
+  assert.equal(splitTierOffered([]), false);
+  assert.equal(splitTierOffered(undefined), false);
+  assert.equal(splitTierOffered([{}, { text: null }]), false);
+});
+
+test("the prompt fill allowance scales with the prompt", () => {
+  // fill() drives the prompt through the composer's React handlers. A flat
+  // PRE_SEND_ACTION_MS overruns on a long prompt; the error carries "timeout",
+  // stableErrorCode maps it to operation_timeout, and the last acked phase is
+  // still selecting_model - so a task that selected its model correctly is
+  // reported as operation_timeout@selecting_model and leaves its half-typed
+  // prompt in the composer, stranding the tab. Observed 2026-09-22 with a
+  // 50,432 character prompt that did this on four machines in turn.
+  assert.equal(promptFillTimeout(50432), 10087);
+  assert.equal(promptFillTimeout(129411), 25883);
+  // Short prompts keep the existing allowance exactly.
+  assert.equal(promptFillTimeout(0), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(5000), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(PRE_SEND_ACTION_MS * PROMPT_FILL_CHARS_PER_MS), PRE_SEND_ACTION_MS);
+  // A pathological prompt still fails promptly rather than hanging.
+  assert.equal(promptFillTimeout(400000), PROMPT_FILL_MAX_MS);
+  // An unreadable length keeps the default allowance rather than granting the
+  // maximum - Infinity is garbage, not a very long prompt.
+  assert.equal(promptFillTimeout(undefined), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(NaN), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(Infinity), PRE_SEND_ACTION_MS);
+  assert.equal(promptFillTimeout(-1), PRE_SEND_ACTION_MS);
+});
+
+test("an attachment gets longer for its send control to become clickable", () => {
+  // ChatGPT finishes wiring the composer after the upload reports "attached",
+  // and a promo card can sit over the send button while it does. The flat
+  // allowance expired exactly on the 5s boundary: "attachment attached (2s)"
+  // at 09:19:02, "browser failure ... send_button_not_found" at 09:19:07 -
+  // while the probe recorded send_found=true, because the button was present
+  // all along, just not hittable. Observed 2026-09-22.
+  assert.equal(sendReadyTimeout(true), SEND_READY_TIMEOUT_MS);
+  assert.ok(SEND_READY_TIMEOUT_MS > PRE_SEND_ACTION_MS);
+  // A plain prompt keeps the existing allowance exactly.
+  assert.equal(sendReadyTimeout(false), PRE_SEND_ACTION_MS);
+  assert.equal(sendReadyTimeout(undefined), PRE_SEND_ACTION_MS);
+  assert.equal(sendReadyTimeout(null), PRE_SEND_ACTION_MS);
+});
+
+test("an attachment gets longer for its send control to become clickable", () => {
+  // ChatGPT finishes wiring the composer after the upload reports "attached",
+  // and a promo card can sit over the send button while it does. The flat
+  // allowance expired exactly on the 5s boundary: "attachment attached (2s)"
+  // at 09:19:02, "browser failure ... send_button_not_found" at 09:19:07 -
+  // while the probe recorded send_found=true, because the button was present
+  // all along, just not hittable. Observed 2026-09-22.
+  assert.equal(sendReadyTimeout(true), SEND_READY_TIMEOUT_MS);
+  assert.ok(SEND_READY_TIMEOUT_MS > PRE_SEND_ACTION_MS);
+  // A plain prompt keeps the existing allowance exactly.
+  assert.equal(sendReadyTimeout(false), PRE_SEND_ACTION_MS);
+  assert.equal(sendReadyTimeout(undefined), PRE_SEND_ACTION_MS);
+  assert.equal(sendReadyTimeout(null), PRE_SEND_ACTION_MS);
+});
+
+test("an absent family verifies only when the request pins no minor version", () => {
+  // Some older composers have neither a header switcher nor a version radio, so
+  // family evidence is absent rather than contradictory. Observed 2026-09-23:
+  // "already_selected selected=Pro pill_source=fallback slider=absent
+  // family=absent", then switcher_unverified 0.13s later - the model was right
+  // and the page simply could not prove it.
+  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", "Pro"), true);
+  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", "GPT 6 Pro"), true);
+  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-high", "High"), true);
+  // A pinned minor version is never acceptable on no evidence: nothing on such
+  // a page distinguishes 6 Pro from 5.5 Pro.
+  assert.equal(familyUnverifiableButAcceptable("chatgpt-5.5-pro", "Pro"), false);
+  assert.equal(familyUnverifiableButAcceptable("chatgpt-5.5-high", "High"), false);
+  // The level must still match what the pill shows.
+  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", "Instant"), false);
+  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", ""), false);
+  // A raw compact label is refused here too; callers adapt it first.
+  assert.equal(familyUnverifiableButAcceptable("chatgpt-6-pro", "6\nPro"), false);
+  // Missing input never verifies.
+  assert.equal(familyUnverifiableButAcceptable("", "Pro"), false);
+  assert.equal(familyUnverifiableButAcceptable(null, "Pro"), false);
+});
+
 test("pill level detection prefers the longest alias", () => {
   assert.equal(detectPillLevel("GPT-5.5 Extra High"), "Extra High");
   assert.equal(detectPillLevel("GPT-5.5 High"), "High");
   assert.equal(detectPillLevel("Pro 扩展"), "Pro");
+  assert.equal(detectPillLevel("GPT-5.5"), null);
+
+  // Observed live on chatgpt.com 2026-09-16: the composer pill renders the
+  // family and the level as separate text nodes, so innerText is "6\nPro".
+  // First-line-only reads "6", strips it as a version, and reports the pill
+  // as unrecognized, after which the worker clicks the wrong control.
+  assert.equal(detectPillLevel("6\nPro"), "Pro");
+  assert.equal(detectPillLevel("GPT-6\nPro"), "Pro");
+  // "Thinking" is not in MODEL_LEVELS, so it is null on one line or two;
+  // the multi-line path must not invent a level that single-line lacks.
+  assert.equal(detectPillLevel("6\nThinking"), detectPillLevel("6 Thinking"));
+  // A single-line label must behave exactly as before.
+  assert.equal(detectPillLevel("6 Pro"), "Pro");
+  // A menu entry whose second line is a description must not be folded in.
   assert.equal(detectPillLevel("GPT-5.5"), null);
 });
 
@@ -629,13 +819,13 @@ test("nested entry choice prefers exact target, then fuzzy target, then a recogn
   const items = [{ text: "Instant", checked: true }, { text: "GPT-6 Pro" }, { text: "Pro" }];
   assert.equal(chooseNestedLevelEntry(items, targets), 2);
   assert.equal(chooseNestedLevelEntry(items.slice(0, 2), targets), 1);
-  assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets), 0);
+  assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets), -1);
   assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets, false), -1);
 });
 
-test("split Pro tiers choose Standard for a plain Pro label and Extended for an extended label", () => {
+test("split Pro tiers choose Extended by default and Standard only explicitly", () => {
   const tiers = [{ text: "Instant" }, { text: "Extra High" }, { text: "Pro Extended" }, { text: "Pro Standard" }];
-  assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("chatgpt-6-pro")), 3);
+  assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("chatgpt-6-pro")), 2);
   assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("chatgpt-6-pro-extended")), 2);
   assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("Pro 扩展")), 2);
   // A single "Pro" entry still wins exactly for both labels.
@@ -645,7 +835,7 @@ test("split Pro tiers choose Standard for a plain Pro label and Extended for an 
   // Only an Extended entry present: the plain label falls back to it fuzzily; never Instant.
   assert.equal(chooseNestedLevelEntry([{ text: "Instant" }, { text: "Pro Extended" }], modelLevelTargets("chatgpt-6-pro")), 1);
   for (const label of ["chatgpt-6-pro", "chatgpt-6-pro-extended"]) {
-    assert.equal(pillShowsLevel("GPT-6 Pro Standard", modelLevelTargets(label)), true, label);
+    assert.equal(pillShowsLevel("GPT-6 Pro Standard", modelLevelTargets(label)), false, label);
     assert.equal(pillShowsLevel("GPT-6 Pro Extended", modelLevelTargets(label)), true, label);
     assert.equal(modelSelectionDetail({ level: modelLevelTargets(label)[0], verified: true, reason: "selected" }), "selected=Pro");
   }
@@ -660,10 +850,10 @@ test("nested entry choice never picks an unchecked first item or a checked arbit
   assert.equal(chooseNestedLevelEntry([{ text: "Extra High" }], modelLevelTargets("high")), -1);
 });
 
-test("prompt result model reports only the observed pill, independently of verification", () => {
+test("prompt result retains the request; observations are separate canonical metadata", () => {
   for (const verified of [true, false]) {
-    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "GPT-6 Pro", verified }), "GPT-6 Pro");
-    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "自动", verified }), "自动");
+    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "GPT-6 Pro", verified }), "chatgpt-6-pro");
+    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "自动", verified }), "chatgpt-6-pro");
   }
   for (const model_selected of [undefined, null, ""]) {
     assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected, clicked: "Pro" }), "chatgpt-6-pro");
@@ -738,4 +928,497 @@ test("selection distinguishes the shared deadline from a shorter step timeout", 
   assert.equal(modelSelectionFailureReason(error, { deadline: 100, aborted: false }, 100), "timeout");
   assert.equal(modelSelectionFailureReason(error, { deadline: 100, aborted: true }, 50), "timeout");
   assert.equal(modelSelectionFailureReason({ code: "interaction_deadline" }, { deadline: 100, aborted: false }, 50), "interaction_deadline");
+});
+
+import { failureDetail, cooldownRemaining, classifyChatGptError, stableErrorCode,
+  switcherMetadata, switcherMatches, compactModelLabel, chooseSwitcherEntry, effortMetadata } from './worker.mjs';
+
+test('failure attribution is bounded metadata and classifies real crash messages', () => {
+  assert.equal(stableErrorCode(new Error('Target crashed')), 'page_crashed');
+  assert.equal(stableErrorCode(new Error('Page crashed')), 'page_crashed');
+  assert.equal(stableErrorCode(new Error('locator.waitFor: Timeout 60000ms exceeded')), 'operation_timeout');
+  assert.equal(failureDetail('composer_not_found', 'page_ready'), 'composer_not_found@page_ready');
+  assert.equal(failureDetail('page_crashed', 'waiting_response'), 'page_crashed@waiting_response');
+  for (const input of ['https://chatgpt.com/c/private', 'secret\nprompt', 'a'.repeat(65), 'Secret', 'cookie=value']) {
+    assert.equal(failureDetail(input, 'private url'), 'worker_error');
+  }
+  assert.equal(failureDetail('a'.repeat(64), 'b'.repeat(40)).length, 105);
+  assert.equal(failureDetail('ok', 'b'.repeat(41)), 'ok');
+});
+
+test('capacity cooldown is capped, durable-time based and expires', () => {
+  assert.equal(cooldownRemaining(901000, 1000), 900);
+  assert.equal(cooldownRemaining(1001, 1000), 1);
+  assert.equal(cooldownRemaining(null, 1000), 0);
+  assert.equal(cooldownRemaining(1000, 1001), 0);
+  assert.equal(cooldownRemaining(Infinity, 1), 86400);
+});
+
+test('UI error classification returns fixed content or capacity codes only', () => {
+  for (const text of ['Something went wrong', 'Network error', '发生错误']) assert.equal(classifyChatGptError(text), 'chatgpt_error_response');
+  for (const text of ["You've reached the limit for Pro", 'Usage limit reached', '已达到使用上限']) assert.equal(classifyChatGptError(text), 'usage_limit_reached');
+  assert.equal(classifyChatGptError('This model is unavailable'), 'model_unavailable');
+  assert.equal(classifyChatGptError('Regenerate'), null);
+  assert.equal(classifyChatGptError(''), null);
+});
+
+test('header target selection verifies family and tier, preferring exact known entries', () => {
+  assert.equal(switcherMetadata('GPT-6 Pro'), 'gpt_6_pro');
+  assert.equal(switcherMetadata('GPT-6 专业'), 'gpt_6_pro');
+  assert.equal(modelLevelTargets('专业')[0], 'Pro');
+  assert.equal(switcherMatches('GPT-6 专业', '专业'), true);
+  assert.equal(switcherMetadata('GPT-5 Pro'), 'gpt_5_pro');
+  assert.equal(switcherMetadata('GPT-6'), 'gpt_6');
+  for (const label of ['Try GPT-6 Pro', 'Profile', 'private label']) assert.equal(switcherMetadata(label), 'unrecognized');
+  assert.equal(switcherMetadata(null), 'absent');
+  assert.equal(switcherMatches('GPT-5 Pro', 'chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('GPT-6', 'chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('GPT-6 Pro', 'chatgpt-6-pro'), true);
+  assert.equal(switcherMatches('unknown', 'unknown'), false);
+  assert.equal(chooseSwitcherEntry([{text: 'GPT-6 Pro details'}, {text: 'GPT-6 Pro'}, {text: 'Delete'}], 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry([{text: 'GPT-5 Pro'}, {text: 'Delete'}], 'chatgpt-6-pro'), -1);
+  assert.equal(chooseSwitcherEntry([{text: 'ChatGPT-6 Pro details'}, {text: 'ChatGPT-6 Pro'}], 'chatgpt-6-pro'), 1);
+});
+
+test('compact numeric labels require adaptation for model matching and never imply effort', () => {
+  for (const label of ['6\nPro', '5.5 Pro', 'Pro', '6\nPro\nFor complex work']) {
+    assert.equal(switcherMetadata(label), 'unrecognized');
+    assert.equal(switcherMatches(label, 'chatgpt-6-pro'), false);
+  }
+  assert.equal(effortMetadata('6\nPro'), 'unrecognized');
+  assert.equal(effortMetadata('GPT 6 Pro'), 'pro');
+  assert.equal(chooseSwitcherEntry([{ text: '6\nPro' }], 'chatgpt-6-pro'), 0);
+  for (const label of ['6\nPro', '6\n专业', '6\nThinking', '6\n思考']) {
+    assert.equal(effortMetadata(label), 'unrecognized', label);
+  }
+});
+
+test('compact model labels accept only whole numeric family and known tier labels', () => {
+  for (const tier of ['Pro', '专业', 'Auto', 'Instant', 'Thinking', 'Medium', 'High', 'Extra High', '自动', '极速', '思考', '均衡', '高级', '超高']) {
+    const label = `6\n${tier}`;
+    const adapted = compactModelLabel(label);
+    assert.equal(adapted, `GPT 6 ${tier}`);
+    assert.equal(switcherMetadata(adapted), ['Pro', '专业'].includes(tier) ? 'gpt_6_pro' : 'gpt_6');
+    assert.equal(effortMetadata(label), 'unrecognized');
+  }
+  assert.equal(compactModelLabel(' 5.5\n pRo '), 'GPT 5.5 pRo');
+  assert.equal(compactModelLabel('6\nExtra  High'), 'GPT 6 Extra High');
+  assert.equal(compactModelLabel('999.999 Pro'), 'GPT 999.999 Pro');
+  for (const label of [null, '', 'Pro', '专业', '6', '1000 Pro', '6.1000 Pro', '6.1.2 Pro', '6_1 Pro', '6Pro',
+    '6\nPro\nFor complex work', '6 Pro plan', 'Try 6 Pro', '6\nPro Extended', '6\nPro Standard', '6\n扩展', '6\nTools']) {
+    assert.equal(compactModelLabel(label), null, label);
+    assert.equal(chooseSwitcherEntry([{ text: label }], 'chatgpt-6-pro'), -1, label);
+  }
+});
+
+test('compact picker entries share family and tier matching with exact entries preferred', () => {
+  const items = labels => labels.map(text => ({ text }));
+  assert.equal(chooseSwitcherEntry(items(['5.5\nPro', '6\nPro']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6\nThinking', '6\n专业']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6\nPro', '6\nThinking']), 'chatgpt-6-thinking'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6.2\nPro', '6.1\nPro']), 'chatgpt-6.1-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6.1\nPro', '6\nPro']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['GPT-6 Pro\nFor complex work', '6\nPro']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['6.1\nPro', 'GPT-6 Pro']), 'chatgpt-6-pro'), 1);
+  assert.equal(chooseSwitcherEntry(items(['60\nPro', '6\nInstant']), 'chatgpt-6-pro'), -1);
+  assert.equal(chooseSwitcherEntry(items(['Pro']), 'chatgpt-6-pro', compactModelLabel('6\nThinking')), 0);
+  assert.equal(chooseSwitcherEntry(items(['专业']), 'chatgpt-6-pro', compactModelLabel('6\n思考')), 0);
+  assert.equal(chooseSwitcherEntry(items(['Pro']), 'chatgpt-6-pro', compactModelLabel('5.5\nThinking')), -1);
+  assert.equal(chooseSwitcherFamilyEntry(items(['6', '6\nPro', '6\nThinking']), 'chatgpt-6-pro'), -1);
+});
+
+test('effort observations are canonical and Standard is explicit', () => {
+  assert.equal(effortMetadata('GPT-6 Pro Extended'), 'pro_extended');
+  assert.equal(effortMetadata('Pro 扩展'), 'pro_extended');
+  assert.equal(effortMetadata('GPT-6 Pro Standard'), 'pro_standard');
+  assert.equal(effortMetadata('private label'), 'unrecognized');
+  assert.equal(effortMetadata('Extra High'), 'extra_high');
+  assert.equal(effortMetadata(null), 'absent');
+  const standard = modelLevelTargets('chatgpt-6-pro-standard');
+  assert.equal(chooseNestedLevelEntry([{text:'Pro Extended'}, {text:'Pro Standard'}], standard), 1);
+  assert.equal(pillShowsLevel('Pro Extended', standard), false);
+  assert.equal(pillShowsLevel('Pro Standard', standard), true);
+});
+
+test('an authenticated DOM-shape failure permits exactly one relaunch cycle', () => {
+  assert.deepEqual(taskRecoveryDecision({kind:'prompt', phase:'page_ready', failureCount:1, shapeFailures:1}), {action:'recover', forceRelaunch:true});
+  assert.deepEqual(taskRecoveryDecision({kind:'prompt', phase:'page_ready', failureCount:2, shapeFailures:2}), {action:'fail', code:'browser_recovery_exhausted'});
+  assert.equal(taskRecoveryDecision({kind:'prompt', phase:'send_attempted', failureCount:2, shapeFailures:2}).action, 'recover');
+});
+
+test('descriptions and account actions cannot masquerade as the requested Pro tier', () => {
+  for (const text of ['GPT-6 Instant\nUpgrade to Pro', 'GPT-6 Instant with Pro features']) {
+    assert.equal(switcherMatches(text, 'chatgpt-6-pro'), false);
+  }
+  for (const text of ['Upgrade to Pro', 'Pro plan', 'GPT-6 Instant\nPro capabilities']) {
+    assert.notEqual(detectPillLevel(text), 'Pro');
+    assert.equal(pillShowsLevel(text, modelLevelTargets('chatgpt-6-pro')), false);
+  }
+  assert.equal(switcherMatches('GPT-6 Pro', 'Pro 扩展'), true);
+  assert.equal(switcherMatches('GPT-5 Pro', 'Pro 扩展'), false);
+  assert.equal(switcherMatches('GPT-6 Pro', '扩展'), true);
+});
+
+test('split Pro preference ignores descriptions and refuses the lighter-only fallback', () => {
+  const target = modelLevelTargets('chatgpt-6-pro');
+  assert.equal(chooseNestedLevelEntry([{text:'Pro Standard'}, {text:'Pro Extended\nFor complex work'}, {text:'Pro'}], target), 1);
+  assert.equal(chooseNestedLevelEntry([{text:'Pro Standard', checked:true}], target), -1);
+});
+
+
+test('strict effort decisions require recognized evidence', () => {
+  const target = 'chatgpt-6-pro';
+  for (const observed of [null, 'Tools', '+', 'Pro']) {
+    assert.equal(effortSelectionMismatch({observed, verified:false}, target), false);
+  }
+  assert.equal(effortSelectionMismatch({observed:'High', verified:false}, target), true);
+  assert.equal(effortSelectionMismatch({observed:'Tools', verified:false, recognizedObservation:true}, target), true);
+  assert.equal(effortSelectionMismatch({observed:'Pro', verified:false, recognizedObservation:true}, target), false);
+  assert.equal(effortSelectionMismatch({observed:'Tools', verified:false, recognizedLevels:true}, target), true);
+  assert.equal(effortSelectionMismatch({observed:'Pro Extended', verified:true, recognizedLevels:true}, target), false);
+});
+
+test('generic GPT families compare a minor version only when both sides expose one', () => {
+  for (const [label, metadata] of [['GPT-6.1 Pro','gpt_6_1_pro'], ['ChatGPT 7 Pro','gpt_7_pro'], ['chatgpt-5.5-pro','gpt_5_5_pro']]) {
+    assert.equal(switcherMetadata(label), metadata);
+    assert.equal(switcherMatches(label, label), true);
+  }
+  assert.equal(switcherMatches('GPT-6.1 Pro','chatgpt-6-pro'), true);
+  assert.equal(switcherMatches('GPT-6 Pro','chatgpt-6.1-pro'), true);
+  assert.equal(switcherMatches('GPT-6.2 Pro','chatgpt-6.1-pro'), false);
+  assert.equal(switcherMatches('GPT-60 Pro','chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('Try GPT-6 Pro','chatgpt-6-pro'), false);
+  assert.equal(switcherMatches('GPT-6 Instant','chatgpt-6-pro', true), true);
+  assert.equal(switcherMetadata('GPT-1000 Pro'), 'unrecognized');
+});
+
+test('tier-only and family submenu entries require recognized family context and exact first lines', () => {
+  const items = ['Auto', 'Instant', 'Thinking', 'Pro\nFor complex work'].map(text => ({text}));
+  assert.equal(chooseSwitcherEntry(items, 'chatgpt-6-pro', 'GPT-6'), 3);
+  assert.equal(chooseSwitcherEntry(items, 'chatgpt-6-pro', 'GPT-5 Pro'), -1);
+  assert.equal(chooseSwitcherEntry([{text:'专业'}], 'chatgpt-6-pro', 'GPT-6'), 0);
+  assert.equal(chooseSwitcherEntry([{text:'Upgrade to Pro'}], 'chatgpt-6-pro', 'GPT-6 Instant'), -1);
+  const families = ['Legacy models','Try GPT-6','GPT-60','GPT-6\nMore choices'].map(text => ({text}));
+  assert.equal(chooseSwitcherFamilyEntry(families, 'chatgpt-6-pro'), 3);
+  assert.equal(chooseSwitcherFamilyEntry([{text:'GPT-6 Pro'}], 'chatgpt-6-pro'), -1);
+});
+
+test('effort tokens recognize separators without accepting prose', () => {
+  for (const label of ['Pro · Extended', 'Thinking: Pro', 'Pro (Extended)', '专业 · 扩展', 'Pro — Extended', 'Pro|Extended', 'Pro/Extended', 'Pro-Extended']) {
+    assert.equal(detectPillLevel(label), 'Pro', label);
+    assert.equal(effortMetadata(label), label === 'Thinking: Pro' ? 'pro' : 'pro_extended', label);
+    assert.equal(chooseNestedLevelEntry([{text:'Pro Standard'}, {text:label}], modelLevelTargets('chatgpt-6-pro')), 1, label);
+    if (label !== 'Thinking: Pro') assert.equal(chooseNestedLevelEntry([{text:'Pro'}, {text:label}], modelLevelTargets('chatgpt-6-pro')), 1, label);
+  }
+  for (const label of ['Upgrade to Pro', 'Pro capabilities', 'Pro plan', 'Profile', 'propro']) {
+    assert.equal(detectPillLevel(label), null, label);
+    assert.equal(effortMetadata(label), 'unrecognized', label);
+  }
+});
+
+test('cooldown parsing defaults explicitly for invalid and below-minimum values', () => {
+  assert.deepEqual(usageCooldownConfig(undefined), {milliseconds:900000, invalid:false});
+  for (const value of ['0', '-1', '', 'invalid', 'NaN', 'Infinity', '0.5']) {
+    assert.deepEqual(usageCooldownConfig(value), {milliseconds:900000, invalid:true});
+  }
+  assert.deepEqual(usageCooldownConfig('1'), {milliseconds:1000, invalid:false});
+  assert.deepEqual(usageCooldownConfig('60'), {milliseconds:60000, invalid:false});
+  assert.deepEqual(usageCooldownConfig('100000'), {milliseconds:86400000, invalid:false});
+});
+
+
+test('pre-send read-back retries transient errors at most three times', async () => {
+  let attempts = 0;
+  const observed = {header: {metadata:'gpt_6_pro'}, pill: {observed:'Pro'}};
+  const result = await retryPresendModelRead(async () => {
+    if (++attempts < 3) throw Object.assign(new Error('read deadline'), {code:'interaction_deadline'});
+    return observed;
+  });
+  assert.equal(result, observed);
+  assert.equal(attempts, 3);
+  attempts = 0;
+  assert.equal(await retryPresendModelRead(async () => { attempts += 1; throw new TypeError('unreadable'); }), null);
+  assert.equal(attempts, 3);
+});
+
+test('pre-send read-back rethrows crashes and disconnects without retrying', async () => {
+  for (const code of ['page_crashed', 'cdp_disconnected']) {
+    let attempts = 0;
+    const error = Object.assign(new Error(code), {code});
+    await assert.rejects(retryPresendModelRead(async () => { attempts += 1; throw error; }), e => e === error);
+    assert.equal(attempts, 1);
+  }
+});
+
+test('pre-send read-back shares PRE_SEND_ACTION_MS across retries and rejects late results', async t => {
+  t.mock.timers.enable({apis:['Date', 'setTimeout'], now:10000});
+  let attempts = 0;
+  let settled = false;
+  const budgets = [];
+  const pending = retryPresendModelRead(budget => {
+    budgets.push(budget);
+    const attempt = ++attempts;
+    return new Promise((resolve, reject) => setTimeout(() => {
+      if (attempt < 3) reject(Object.assign(new Error('read deadline'), {code:'interaction_deadline'}));
+      else resolve('late observations');
+    }, 1800));
+  });
+  pending.then(() => { settled = true; });
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  for (let i = 0; i < 2; i += 1) {
+    t.mock.timers.tick(1800);
+    await flush();
+  }
+  assert.equal(attempts, 3);
+  assert.ok(budgets.every(b => b === budgets[0] && b.deadline === 10000 + PRE_SEND_ACTION_MS));
+  t.mock.timers.tick(PRE_SEND_ACTION_MS - 3600 - 1);
+  await flush();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  assert.equal(await pending, null);
+  assert.equal(Date.now(), 10000 + PRE_SEND_ACTION_MS);
+  assert.equal(budgets[0].controller.signal.aborted, true);
+  t.mock.timers.tick(PRE_SEND_ACTION_MS);
+  await flush();
+  assert.equal(attempts, 3);
+});
+
+
+test("composerVisibleHitPoint clamps a tall scrolled composer to its visible centre", () => {
+  // Live capture 2026-09-16 on the Heca worker: a 111,353-char draft made the
+  // composer 55,864px tall with its top at -55,316px in a 764px viewport, so
+  // the geometric centre sat ~27,000px above the viewport. elementFromPoint at
+  // that point returned null and the composer was wrongly judged obstructed
+  // (composer_unobstructed_failed@selecting_model).
+  const rect = { left: 0, right: 800, top: -55316, bottom: 548 };
+  const viewport = { width: 1000, height: 764 };
+  const geometricCentreY = rect.top + (rect.bottom - rect.top) / 2;
+  assert.ok(geometricCentreY < 0); // the old hit-test fell off screen
+  const point = composerVisibleHitPoint(rect, [], viewport);
+  assert.ok(point);
+  assert.ok(point.y >= 0 && point.y <= viewport.height); // the new one does not
+  assert.deepEqual(point, { x: 400, y: 274 });
+});
+
+test("composerVisibleHitPoint leaves a fully visible composer untouched", () => {
+  const rect = { left: 100, right: 900, top: 600, bottom: 700 };
+  assert.deepEqual(composerVisibleHitPoint(rect, [], { width: 1000, height: 764 }), { x: 500, y: 650 });
+});
+
+test("composerVisibleHitPoint intersects scroll/clip ancestor bounds", () => {
+  // Composer spans y 0..800 but a scroll container only reveals 100..500.
+  const clip = { y: true, top: 100, bottom: 500, left: 0, right: 1000 };
+  assert.deepEqual(
+    composerVisibleHitPoint({ left: 0, right: 400, top: 0, bottom: 800 }, [clip], { width: 1000, height: 764 }),
+    { x: 200, y: 300 },
+  );
+});
+
+test("composerVisibleHitPoint returns null when nothing is visible", () => {
+  // Entirely below the fold.
+  assert.equal(composerVisibleHitPoint({ left: 0, right: 800, top: 2000, bottom: 2100 }, [], { width: 1000, height: 764 }), null);
+  // A clipping ancestor hides it on the Y axis.
+  const clip = { y: true, top: 0, bottom: 100, left: 0, right: 1000 };
+  assert.equal(composerVisibleHitPoint({ left: 0, right: 800, top: 300, bottom: 500 }, [clip], { width: 1000, height: 764 }), null);
+  // No composer at all.
+  assert.equal(composerVisibleHitPoint(null, [], { width: 1000, height: 764 }), null);
+});
+
+
+test("composerHasDraft treats only non-whitespace content as a draft to clear", () => {
+  // A stale draft left in the composer by a prior attempt must be cleared
+  // before model selection, or a very long draft makes selection time out
+  // (operation_timeout@selecting_model) on every subsequent task pickup.
+  assert.equal(composerHasDraft("Review this PR"), true);
+  assert.equal(composerHasDraft("6\nPro"), true);
+  // An empty or whitespace-only composer is a no-op: nothing to clear.
+  assert.equal(composerHasDraft(""), false);
+  assert.equal(composerHasDraft("   \n\t "), false);
+  // Non-string reads (missing composer) are not drafts.
+  assert.equal(composerHasDraft(null), false);
+  assert.equal(composerHasDraft(undefined), false);
+});
+
+test("single-shot prompts use a Temporary Chat; sessions, follow-ups and projects do not", () => {
+  // Off by default: single-shot answers keep a /c/<id> URL for `nyxid oracle attach`.
+  assert.equal(promptUsesTemporaryChat({ is_followup: false }), false);
+  assert.equal(promptUsesTemporaryChat({ is_followup: false }, true), true);
+  assert.equal(promptUsesTemporaryChat({ is_followup: true, conversation_id: "c1" }, true), false);
+  assert.equal(promptUsesTemporaryChat({ is_followup: false, conversation_id: "c1" }, true), false);
+  assert.equal(promptUsesTemporaryChat({ required_project_url: "https://chatgpt.com/g/g-p-x/project" }, true), false);
+  assert.equal(promptUsesTemporaryChat({ is_followup: false }, false), false);
+  assert.equal(isTemporaryChatUrl(TEMPORARY_CHAT_URL), true);
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/c/abc123?temporary-chat=true"), true);
+  assert.equal(isTemporaryChatUrl("https://chatgpt.com/"), false);
+  assert.equal(isTemporaryChatUrl("not a url"), false);
+});
+
+test("fresh prompts navigate to the Temporary Chat surface and leave finished ones", () => {
+  const fresh = { recovering: false, isFollowup: false, persistedUrl: null, taskConversationUrl: null, requiredProjectUrl: null, temporaryChat: true };
+  assert.deepEqual(choosePromptNavigation({ ...fresh, currentUrl: "https://chatgpt.com/" }), { error: null, target: TEMPORARY_CHAT_URL });
+  assert.deepEqual(choosePromptNavigation({ ...fresh, currentUrl: "https://chatgpt.com/c/abc123?temporary-chat=true" }), { error: null, target: TEMPORARY_CHAT_URL });
+  // The URL never changes after a Temporary Chat turn, so a fresh prompt always reloads it.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, currentUrl: TEMPORARY_CHAT_URL }), { error: null, target: TEMPORARY_CHAT_URL });
+  // Post-send recovery on the same live Temporary Chat tab stays put; the transcript decides.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, recovering: true, phase: "waiting_response", persistedUrl: TEMPORARY_CHAT_URL, currentUrl: TEMPORARY_CHAT_URL }), { error: null, target: null });
+  // Post-send recovery after the tab moved elsewhere reopens the surface (the transcript then reports uncertainty, never a resend).
+  assert.deepEqual(choosePromptNavigation({ ...fresh, recovering: true, phase: "waiting_response", persistedUrl: TEMPORARY_CHAT_URL, currentUrl: "https://chatgpt.com/" }), { error: null, target: TEMPORARY_CHAT_URL });
+  // Pre-send recovery reloads the surface.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, recovering: true, phase: "page_ready", persistedUrl: TEMPORARY_CHAT_URL, currentUrl: TEMPORARY_CHAT_URL }), { error: null, target: TEMPORARY_CHAT_URL });
+  // A persistent prompt never reuses a leftover Temporary Chat surface.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, temporaryChat: false, currentUrl: TEMPORARY_CHAT_URL }), { error: null, target: "https://chatgpt.com/" });
+  assert.deepEqual(choosePromptNavigation({ ...fresh, temporaryChat: false, currentUrl: "https://chatgpt.com/" }), { error: null, target: null });
+  // Project pins outrank the Temporary Chat request.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, requiredProjectUrl: "https://chatgpt.com/g/g-p-x/project", currentUrl: "https://chatgpt.com/" }),
+    { error: null, target: "https://chatgpt.com/g/g-p-x/project" });
+  // Follow-ups still resume their pinned conversation.
+  assert.deepEqual(choosePromptNavigation({ ...fresh, isFollowup: true, taskConversationUrl: "https://chatgpt.com/c/def456", currentUrl: TEMPORARY_CHAT_URL }),
+    { error: null, target: "https://chatgpt.com/c/def456" });
+});
+
+test("effort slider state parses only a sane ARIA range", () => {
+  assert.deepEqual(parseEffortSliderState("0", "4", "4"), { min: 0, max: 4, value: 4 });
+  assert.deepEqual(parseEffortSliderState("0", "3", "2"), { min: 0, max: 3, value: 2 });
+  assert.equal(parseEffortSliderState(null, "4", "4"), null);
+  assert.equal(parseEffortSliderState("0", "4", "5"), null);
+  assert.equal(parseEffortSliderState("0", "9", "1"), null);
+  assert.equal(parseEffortSliderState("a", "4", "1"), null);
+  assert.equal(parseEffortSliderState("0", "4", "1.5"), null);
+});
+
+test("effort slider plans step counts from the minimum and reports a hidden Pro", () => {
+  assert.equal(effortSliderIndex("Pro"), 4);
+  assert.equal(effortSliderIndex("Instant"), 0);
+  assert.equal(effortSliderIndex("custom-label"), -1);
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 4, value: 4 }, "Pro"), { steps: 0, unavailable: false, target: 4 });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 4, value: 1 }, "Pro"), { steps: 3, unavailable: false, target: 4 });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 4, value: 4 }, "High"), { steps: -2, unavailable: false, target: 2 });
+  assert.deepEqual(effortSliderPlan({ min: 1, max: 5, value: 1 }, "Medium"), { steps: 1, unavailable: false, target: 2 });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 3, value: 3 }, "Pro"), { steps: null, unavailable: true, target: 4, hint: "pro_hidden_usage_limit" });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 1, value: 0 }, "High"), { steps: null, unavailable: true, target: 2, hint: "range_too_short" });
+  assert.deepEqual(effortSliderPlan({ min: 0, max: 4, value: 0 }, "custom-label"), { steps: null, unavailable: true, hint: "unsupported" });
+  assert.deepEqual(effortSliderPlan(null, "Pro"), { steps: null, unavailable: true, hint: "unsupported" });
+  assert.equal(effortSliderDetail({ min: 0, max: 4, before: 1, after: 4, confirmed: 4 }), "slider=1>4>4/0-4");
+  assert.equal(effortSliderDetail({ min: 0, max: 3, before: 3, hint: "pro_hidden_usage_limit" }), "slider=3/0-3 hint=pro_hidden_usage_limit");
+  assert.equal(effortSliderDetail(null), "slider=absent");
+});
+
+test("an undeliverable prompt is refused before the composer is touched", () => {
+  // The default ceiling is what the fill allowance can type at all.
+  assert.equal(PROMPT_MAX_CHARS, PROMPT_FILL_MAX_MS * PROMPT_FILL_CHARS_PER_MS);
+  assert.equal(promptExceedsLimit(PROMPT_MAX_CHARS), false);
+  assert.equal(promptExceedsLimit(PROMPT_MAX_CHARS + 1), true);
+  assert.equal(promptExceedsLimit(129411), false);
+  // Garbage lengths and a disabled ceiling never refuse a prompt.
+  assert.equal(promptExceedsLimit(undefined), false);
+  assert.equal(promptExceedsLimit(NaN), false);
+  assert.equal(promptExceedsLimit(10, 0), false);
+  assert.equal(promptExceedsLimit(10, 5), true);
+});
+
+test("only the page's own conversation POST returning 413 names a rejected message", () => {
+  const post = (url, status) => classifySubmissionResponse({ method: "POST", url, status });
+  assert.equal(post("https://chatgpt.com/backend-api/f/conversation", 413), "prompt_too_long");
+  assert.equal(post("https://chatgpt.com/backend-api/conversation", 413), "prompt_too_long");
+  assert.equal(post("https://chat.openai.com/backend-api/f/conversation?x=1", 413), "prompt_too_long");
+  assert.equal(post("https://chatgpt.com/backend-api/f/conversation/prepare", 413), "prompt_too_long");
+  assert.equal(post("https://chatgpt.com/backend-api/f/conversation", 200), null);
+  assert.equal(post("https://chatgpt.com/backend-api/f/conversation", 429), null);
+  assert.equal(post("https://chatgpt.com/backend-api/conversations", 413), null);
+  assert.equal(post("https://evil.example/backend-api/f/conversation", 413), null);
+  assert.equal(classifySubmissionResponse({ method: "GET", url: "https://chatgpt.com/backend-api/f/conversation", status: 413 }), null);
+  // The visible banner for the same rejection classifies identically.
+  assert.equal(classifyChatGptError("The message you submitted was too long, please reload the conversation and submit something shorter."), "prompt_too_long");
+  assert.equal(classifyChatGptError("消息过长，请缩短后重试"), "prompt_too_long");
+  assert.equal(classifyChatGptError("Something went wrong"), "chatgpt_error_response");
+  assert.equal(classifyChatGptError("You've reached the usage limit"), "usage_limit_reached");
+});
+
+test("selection budgets are bounded by silence up to a hard ceiling", () => {
+  const budget = interactionBudget(1000, null, { cap: 2500, now: 10_000 });
+  assert.equal(budget.deadline, 11_000);
+  assert.equal(budget.hardDeadline, 12_500);
+  // Progress restarts the window...
+  assert.equal(budget.progress(10_800), 11_800);
+  // ...but never past the hard deadline...
+  assert.equal(budget.progress(12_000), 12_500);
+  assert.equal(budget.progress(12_400), 12_500);
+  // ...and an aborted budget cannot be revived.
+  budget.controller.abort();
+  assert.equal(budget.progress(12_100), 12_500);
+  // Without a cap the window is also the ceiling.
+  const flat = interactionBudget(1000, null, { now: 0 });
+  assert.equal(flat.progress(900), 1000);
+});
+
+test("diagnostic snapshots are named chronologically and pruned oldest-first", () => {
+  const name = diagnosticFileName(Date.UTC(2026, 8, 22, 7, 5, 9, 123), "9a6d7697-e911-49aa", "operation_timeout");
+  assert.equal(name, "2026-09-22T07-05-09-123Z-9a6d7697-operation_timeout");
+  assert.equal(diagnosticFileName(0, "", "not a code!"), "1970-01-01T00-00-00-000Z-task-worker_error");
+  const names = [
+    "2026-09-22T07-00-00-000Z-aaaaaaaa-x.json", "2026-09-22T07-00-00-000Z-aaaaaaaa-x.png",
+    "2026-09-22T08-00-00-000Z-bbbbbbbb-x.json",
+    "2026-09-22T09-00-00-000Z-cccccccc-x.json", "notes.txt",
+  ];
+  // Keep the two newest snapshots; the PNG goes with its JSON; foreign files are untouched.
+  assert.deepEqual(diagnosticsToPrune(names, 2), ["2026-09-22T07-00-00-000Z-aaaaaaaa-x.json", "2026-09-22T07-00-00-000Z-aaaaaaaa-x.png"]);
+  assert.deepEqual(diagnosticsToPrune(names, 3), []);
+  assert.deepEqual(diagnosticsToPrune(names, 0).length, 4);
+  assert.deepEqual(diagnosticsToPrune([], 5), []);
+});
+
+test("settleDom resolves on a quiet page and falls back to a short sleep when it cannot evaluate", async () => {
+  const quiet = { evaluate: async () => true };
+  const settled = await settleDom(quiet, { quietMs: 50, maxMs: 500 });
+  assert.equal(settled.settled, true);
+  const broken = { evaluate: async () => { throw new Error("Execution context was destroyed"); } };
+  const started = Date.now();
+  const fallback = await settleDom(broken, { quietMs: 50, maxMs: 200 });
+  assert.equal(fallback.settled, false);
+  assert.ok(Date.now() - started >= 150, "fallback sleeps for min(maxMs, 500)");
+  const crashed = { evaluate: async () => { throw new Error("Target crashed"); } };
+  await assert.rejects(settleDom(crashed, { quietMs: 50, maxMs: 200 }), /Target crashed/);
+});
+
+test("the checked version radio is the family evidence below Pro", () => {
+  const radios = (checked) => [
+    { text: "Latest", checked: checked === "Latest" },
+    { text: "GPT-5.6 Sol", checked: checked === "GPT-5.6 Sol" },
+    { text: "GPT-5.5\nLeaving on October 14", checked: checked === "GPT-5.5" },
+  ];
+  assert.equal(familyFromModelRadios(radios("Latest")), "gpt_latest");
+  assert.equal(familyFromModelRadios(radios("GPT-5.6 Sol")), "gpt_5_6");
+  assert.equal(familyFromModelRadios(radios("GPT-5.5")), "gpt_5_5");
+  assert.equal(familyFromModelRadios(radios("none")), "absent");
+  assert.equal(familyFromModelRadios([{ text: "Latest", checked: false }, { text: "Log out", checked: true }]), "absent");
+  assert.equal(familyFromModelRadios([]), "absent");
+  assert.equal(familyFromModelRadios(null), "absent");
+  // Latest satisfies a request that names no minor version, never an older pin.
+  assert.equal(switcherMetadataMatches("gpt_latest", "chatgpt-6-high"), true);
+  assert.equal(switcherMetadataMatches("gpt_latest", "chatgpt-6-pro"), true);
+  assert.equal(switcherMetadataMatches("gpt_latest", "pro"), true);
+  assert.equal(switcherMetadataMatches("gpt_latest", "chatgpt-5.5-high"), false);
+  assert.equal(switcherMetadataMatches("gpt_latest", "gpt-5.6-sol"), false);
+  // Numbered radios compare family and minor version like the header does.
+  assert.equal(switcherMetadataMatches("gpt_5_6", "chatgpt-5.6-high"), true);
+  assert.equal(switcherMetadataMatches("gpt_5_6", "chatgpt-5.5-high"), false);
+  assert.equal(switcherMetadataMatches("gpt_5_6", "chatgpt-6-high"), false);
+  assert.equal(switcherMetadataMatches("gpt_6_pro", "chatgpt-6-pro"), true);
+  assert.equal(switcherMetadataMatches("absent", "chatgpt-6-high"), false);
+  assert.equal(switcherMetadataMatches(null, "chatgpt-6-high"), false);
+});
+
+test("a structural pill whose label is swapped out while its menu closes is retried, not trusted", () => {
+  assert.equal(pillLabelPending({ structural: true, pill: null, observed: null }), true);
+  assert.equal(pillLabelPending({ structural: true, pill: { index: 0 }, observed: "" }), true);
+  assert.equal(pillLabelPending({ structural: true, pill: { index: 0 }, observed: "Thinking effort" }), true);
+  assert.equal(pillLabelPending({ structural: true, pill: { index: 0 }, observed: "GPT 6 Pro" }), false);
+  assert.equal(pillLabelPending({ structural: true, pill: { index: 0 }, observed: "High" }), false);
+  // A composer form with no visible pill and no labelled stand-in is a pill still rendering.
+  assert.equal(pillLabelPending({ structural: false, form: true, pill: null, observed: null, candidates: [""] }), true);
+  assert.equal(pillLabelPending({ structural: false, form: true, pill: null, observed: null, candidates: [] }), true);
+  // A labelled fallback control, or no composer form at all, is not.
+  assert.equal(pillLabelPending({ structural: false, form: true, pill: { index: 0 }, observed: "GPT-5.5 High", candidates: ["GPT-5.5 High"] }), false);
+  assert.equal(pillLabelPending({ structural: false, form: false, pill: null, observed: null, candidates: [] }), false);
+  assert.equal(pillLabelPending(null), false);
 });

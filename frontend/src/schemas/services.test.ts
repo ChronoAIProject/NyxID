@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   createServiceSchema,
+  serviceResponseAllowanceMetricsSchema,
   updateServiceSchema,
   redirectUriSchema,
   sshServiceConfigSchema,
@@ -19,6 +20,8 @@ describe("constants", () => {
       "basic",
       "bearer",
       "bot_bearer",
+      "ifttt_webhook",
+      "ifttt_mcp",
       "body",
       "path",
       "oidc",
@@ -222,10 +225,13 @@ describe("updateServiceSchema", () => {
   });
 
   it("rejects negative, over-precise, and excessive per-unit prices", () => {
-    for (const platform_price of ["-1", "0.0000001", "1000000.000001"]) {
+    for (const platform_price of [
+      "-1",
+      "0.0000000000001",
+      "1000000.000000000001",
+    ]) {
       expect(
-        updateServiceSchema.safeParse({ ...validData, platform_price })
-          .success,
+        updateServiceSchema.safeParse({ ...validData, platform_price }).success,
       ).toBe(false);
     }
   });
@@ -366,4 +372,45 @@ describe("redirectUriSchema", () => {
     const result = redirectUriSchema.safeParse("ftp://files.example.com");
     expect(result.success).toBe(false);
   });
+});
+
+it("endpoint rules validate UTF-8 byte limits and reject ambiguous paths", async () => {
+  const { proxyOperationPolicySchema } = await import("./services");
+  const valid = (path_template: string) =>
+    proxyOperationPolicySchema.safeParse({
+      rules: [{ method: "GET", path_template }],
+    }).success;
+  expect(valid("/models/{id}")).toBe(true);
+  expect(valid("/" + "é".repeat(1023))).toBe(true);
+  expect(valid("/" + "é".repeat(1024))).toBe(false);
+  for (const path of [
+    "/foo\u0001",
+    "/foo\u007f",
+    "/a//b",
+    "/a/..",
+    "/a?b",
+    "/a%2fb",
+    "/a*",
+    "/a/",
+  ])
+    expect(valid(path)).toBe(false);
+});
+
+it("accepts backend allowance units and older responses omitting the list", () => {
+  expect(serviceResponseAllowanceMetricsSchema.parse({})).toEqual({});
+  expect(
+    serviceResponseAllowanceMetricsSchema.parse({
+      allowance_metrics: [
+        "input_tokens",
+        "cache_read_tokens",
+        "images",
+        "requests",
+      ],
+    }).allowance_metrics,
+  ).toEqual(["input_tokens", "cache_read_tokens", "images", "requests"]);
+  expect(
+    serviceResponseAllowanceMetricsSchema.safeParse({
+      allowance_metrics: ["invalid"],
+    }).success,
+  ).toBe(false);
 });

@@ -430,6 +430,7 @@ mod tests {
     fn usage_row(owner_id: &str, wallet_id: &str, lago_acked: bool) -> UsageMeterRow {
         let now = Utc::now();
         UsageMeterRow {
+            rollup_pending: true,
             id: Uuid::new_v4().to_string(),
             transaction_id: Uuid::new_v4().to_string(),
             billing_request_id: Uuid::new_v4().to_string(),
@@ -450,6 +451,7 @@ mod tests {
             funding: None,
             quantity: Some(1),
             pending_resale_quantity: None,
+            pending_platform_usage: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: true,

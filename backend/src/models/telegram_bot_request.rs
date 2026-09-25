@@ -58,6 +58,16 @@ pub struct TelegramBotRequest {
     pub bot_username: Option<String>,
     pub consent_hash: Option<String>,
     pub manager_revision: Option<i64>,
+    #[serde(default)]
+    pub auto_connect: bool,
+    #[serde(default)]
+    pub start_update_id: Option<i64>,
+    #[serde(default)]
+    pub connection_attempts: u32,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub next_connection_attempt_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub connection_error: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

@@ -107,6 +107,7 @@ mod tests {
     fn test_pool(owner: &str) -> OraclePool {
         let now = Utc::now();
         OraclePool {
+            require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: owner.to_string(),
             slug: format!("pool-{}", &uuid::Uuid::new_v4().to_string()[..8]),

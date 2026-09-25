@@ -416,8 +416,7 @@ async fn validate_personal_service_ids(
     user_id: &str,
     service_ids: &[String],
 ) -> AppResult<()> {
-    let matching = db
-        .collection::<UserService>(USER_SERVICES)
+    let matching = crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
         .count_documents(mongodb::bson::doc! {
             "_id": { "$in": service_ids },
             "user_id": user_id,
@@ -956,6 +955,7 @@ mod tests {
             updated_at: Some(now),
             description: Some("assistant key fixture".to_string()),
             allowed_service_ids,
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: false,
             allow_auto_connected_services: false,

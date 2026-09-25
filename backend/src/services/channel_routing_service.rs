@@ -34,6 +34,7 @@ pub async fn resolve_agent(
     channel_bot_id: &str,
     platform_conversation_id: &str,
     platform_sender_id: Option<&str>,
+    owner_id: &str,
 ) -> AppResult<Option<AgentRoute>> {
     let col = db.collection::<ChannelConversation>(COLLECTION_NAME);
 
@@ -42,9 +43,11 @@ pub async fn resolve_agent(
         Some(sender_id) if !sender_id.is_empty() => {
             col.find_one(doc! {
                 "channel_bot_id": channel_bot_id,
+                "user_id": owner_id,
                 "platform_conversation_id": platform_conversation_id,
                 "platform_sender_id": sender_id,
                 "is_active": true,
+                "retired_by_transfer": { "$ne": true },
             })
             .await?
         }
@@ -57,9 +60,11 @@ pub async fn resolve_agent(
         None => {
             col.find_one(doc! {
                 "channel_bot_id": channel_bot_id,
+                "user_id": owner_id,
                 "platform_conversation_id": platform_conversation_id,
                 "platform_sender_id": null,
                 "is_active": true,
+                "retired_by_transfer": { "$ne": true },
             })
             .await?
         }
@@ -71,8 +76,10 @@ pub async fn resolve_agent(
         None => {
             col.find_one(doc! {
                 "channel_bot_id": channel_bot_id,
+                "user_id": owner_id,
                 "default_agent": true,
                 "is_active": true,
+                "retired_by_transfer": { "$ne": true },
             })
             .await?
         }
@@ -88,11 +95,15 @@ pub async fn resolve_agent(
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! {
             "_id": &conversation.agent_api_key_id,
+            "user_id": owner_id,
             "is_active": true,
         })
         .await?;
 
-    let callback_url = match api_key.and_then(|k| k.callback_url) {
+    let callback_url = match api_key
+        .filter(|key| ensure_route_agent(key, owner_id).is_ok())
+        .and_then(|k| k.callback_url)
+    {
         Some(url) if !url.is_empty() => url,
         _ => return Ok(None),
     };
@@ -102,6 +113,57 @@ pub async fn resolve_agent(
         conversation,
         callback_url,
     }))
+}
+
+pub fn ensure_route_agent(key: &ApiKey, owner_id: &str) -> AppResult<()> {
+    if key.user_id != owner_id {
+        return Err(AppError::ValidationError(
+            "Agent key and conversation must have the same owner".into(),
+        ));
+    }
+    if !key.is_active || key.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+        return Err(AppError::ValidationError(
+            "Agent key is inactive or expired".into(),
+        ));
+    }
+    if key.platform.as_deref()
+        == Some(super::assistant_agent_credential_service::ASSISTANT_PLATFORM)
+    {
+        return Err(AppError::ValidationError(
+            "Assistant chat keys cannot be used as channel route agents".into(),
+        ));
+    }
+    if key
+        .callback_url
+        .as_deref()
+        .is_none_or(|url| url.trim().is_empty())
+    {
+        return Err(AppError::ValidationError(
+            "API key must have a callback_url configured".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn load_callback_key(
+    db: &mongodb::Database,
+    route: &AgentRoute,
+    owner_id: &str,
+) -> AppResult<ApiKey> {
+    let key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": &route.api_key_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Route agent key is unavailable".into()))?;
+    ensure_route_agent(&key, owner_id)?;
+    if route.conversation.user_id != owner_id
+        || key.callback_url.as_deref() != Some(route.callback_url.as_str())
+    {
+        return Err(AppError::Conflict(
+            "Route agent callback or owner changed before dispatch".into(),
+        ));
+    }
+    Ok(key)
 }
 
 /// Create a new conversation routing rule.
@@ -120,6 +182,7 @@ pub async fn create_conversation(
     platform_sender_id: Option<&str>,
     agent_api_key_id: &str,
     default_agent: bool,
+    allow_agent_initiated: bool,
 ) -> AppResult<ChannelConversation> {
     // Verify the API key exists and belongs to the user
     let api_key = db
@@ -128,37 +191,7 @@ pub async fn create_conversation(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("API key not found: {agent_api_key_id}")))?;
 
-    if api_key.callback_url.is_none() {
-        return Err(AppError::ValidationError(
-            "API key must have a callback_url configured".to_string(),
-        ));
-    }
-
-    // If setting as default, deactivate any existing default route for this
-    // bot. We deactivate (not just clear default_agent) because the old route
-    // with platform_conversation_id="*" would otherwise clash with the unique
-    // partial index on active routes.
-    //
-    // Only applies to bot-backed conversations: device channels have no
-    // default-agent concept (there's no webhook fan-out to disambiguate).
-    if default_agent && let Some(bot_id) = channel_bot_id {
-        let now = bson::DateTime::from_chrono(Utc::now());
-        db.collection::<ChannelConversation>(COLLECTION_NAME)
-            .update_many(
-                doc! {
-                    "channel_bot_id": bot_id,
-                    "user_id": user_id,
-                    "default_agent": true,
-                    "is_active": true,
-                },
-                doc! { "$set": {
-                    "default_agent": false,
-                    "is_active": false,
-                    "updated_at": now,
-                }},
-            )
-            .await?;
-    }
+    ensure_route_agent(&api_key, user_id)?;
 
     let now = Utc::now();
     let conversation = ChannelConversation {
@@ -171,17 +204,72 @@ pub async fn create_conversation(
         platform_sender_id: platform_sender_id.map(String::from),
         agent_api_key_id: agent_api_key_id.to_string(),
         default_agent,
+        allow_agent_initiated,
         is_active: true,
         last_message_at: None,
         created_at: now,
         updated_at: now,
     };
 
-    db.collection::<ChannelConversation>(COLLECTION_NAME)
-        .insert_one(&conversation)
-        .await?;
+    if channel_bot_id.is_some() {
+        insert_bot_conversation(db, &conversation).await?;
+    } else {
+        db.collection::<ChannelConversation>(COLLECTION_NAME)
+            .insert_one(&conversation)
+            .await?;
+    }
 
     Ok(conversation)
+}
+
+async fn insert_bot_conversation(
+    db: &mongodb::Database,
+    conversation: &ChannelConversation,
+) -> AppResult<()> {
+    use super::api_key_mutation_service::{map_transaction_error, transaction_result};
+    let db = db.clone();
+    let conversation = conversation.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> =
+                async {
+                    let bot_id = conversation.channel_bot_id.as_deref().expect("bot route");
+                    // Serialize route creation against ownership transfer on the bot row.
+                    let bot = db
+                        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                        .update_one(
+                            doc! { "_id": bot_id, "user_id": &conversation.user_id,
+                            "platform": &conversation.platform, "is_active": true },
+                            doc! { "$inc": { "route_revision": 1_i64 } },
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    if bot.matched_count != 1 {
+                        return Err(AppError::Conflict(
+                            "Channel bot changed owner or is no longer active".into(),
+                        ));
+                    }
+                    if conversation.default_agent {
+                        db.collection::<ChannelConversation>(COLLECTION_NAME).update_many(
+                    doc! { "channel_bot_id": bot_id, "user_id": &conversation.user_id,
+                        "default_agent": true, "is_active": true },
+                    doc! { "$set": { "default_agent": false, "is_active": false,
+                        "updated_at": bson::DateTime::from_chrono(conversation.updated_at) } },
+                ).session(&mut *session).await?;
+                    }
+                    db.collection::<ChannelConversation>(COLLECTION_NAME)
+                        .insert_one(&conversation)
+                        .session(&mut *session)
+                        .await?;
+                    Ok(())
+                }
+                .await;
+            transaction_result(result)
+        })
+        .await
+        .map_err(map_transaction_error)
 }
 
 /// List active conversations for a user, optionally filtered by bot.
@@ -214,29 +302,40 @@ pub async fn update_conversation(
     agent_api_key_id: Option<&str>,
     default_agent: Option<bool>,
     is_active: Option<bool>,
+    allow_agent_initiated: Option<bool>,
 ) -> AppResult<ChannelConversation> {
+    let current = db
+        .collection::<ChannelConversation>(COLLECTION_NAME)
+        .find_one(doc! {"_id": conversation_id, "user_id": user_id, "retired_by_transfer": { "$ne": true }})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+    // Permission reductions remain available even when the route's key is unusable.
+    if agent_api_key_id.is_some()
+        || is_active == Some(true)
+        || default_agent == Some(true)
+        || allow_agent_initiated == Some(true)
+    {
+        let key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"_id": agent_api_key_id.unwrap_or(&current.agent_api_key_id)})
+            .await?
+            .ok_or_else(|| AppError::NotFound("Route agent key is unavailable".into()))?;
+        ensure_route_agent(&key, user_id)?;
+    }
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
 
     if let Some(key_id) = agent_api_key_id {
-        // Verify the API key belongs to the user and has a callback URL
-        let api_key = db
-            .collection::<ApiKey>(API_KEYS)
-            .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("API key not found: {key_id}")))?;
-
-        if api_key.callback_url.is_none() {
-            return Err(AppError::ValidationError(
-                "API key must have a callback_url configured".to_string(),
-            ));
-        }
         set_doc.insert("agent_api_key_id", key_id);
     }
 
     if let Some(active) = is_active {
         set_doc.insert("is_active", active);
+    }
+
+    if let Some(allowed) = allow_agent_initiated {
+        set_doc.insert("allow_agent_initiated", allowed);
     }
 
     // Handle default_agent toggle: clear other defaults first
@@ -282,7 +381,7 @@ pub async fn update_conversation(
     let updated = db
         .collection::<ChannelConversation>(COLLECTION_NAME)
         .find_one_and_update(
-            doc! { "_id": conversation_id, "user_id": user_id },
+            doc! { "_id": conversation_id, "user_id": user_id, "retired_by_transfer": { "$ne": true } },
             doc! { "$set": set_doc },
         )
         .return_document(mongodb::options::ReturnDocument::After)
@@ -356,6 +455,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: vec![],
             allow_all_services: true,
             allow_auto_connected_services: false,
@@ -369,6 +469,19 @@ mod tests {
         }
     }
 
+    async fn seed_bot(db: &mongodb::Database, bot_id: &str, user_id: &str, platform: &str) {
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": bot_id,
+                "user_id": user_id,
+                "platform": platform,
+                "is_active": true,
+                "ownership_version": 0_i64,
+            })
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_create_conversation() {
         let Some(db) = connect_test_database("chan_route_create").await else {
@@ -376,6 +489,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -397,6 +513,7 @@ mod tests {
             None,
             &key_id,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -416,6 +533,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -433,6 +553,7 @@ mod tests {
             None,
             &key_id,
             false,
+            false,
         )
         .await
         .unwrap_err();
@@ -446,6 +567,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -467,11 +591,14 @@ mod tests {
             None,
             &key_id,
             false,
+            false,
         )
         .await
         .unwrap();
 
-        let route = resolve_agent(&db, &bot_id, "chat_789", None).await.unwrap();
+        let route = resolve_agent(&db, &bot_id, "chat_789", None, &user_id)
+            .await
+            .unwrap();
         assert!(route.is_some());
         let route = route.unwrap();
         assert_eq!(route.conversation.id, conv.id);
@@ -486,6 +613,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "telegram", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -507,11 +637,12 @@ mod tests {
             None,
             &key_id,
             true,
+            false,
         )
         .await
         .unwrap();
 
-        let route = resolve_agent(&db, &bot_id, "unknown_chat", None)
+        let route = resolve_agent(&db, &bot_id, "unknown_chat", None, &user_id)
             .await
             .unwrap();
         assert!(route.is_some());
@@ -525,7 +656,7 @@ mod tests {
         };
         let bot_id = uuid::Uuid::new_v4().to_string();
 
-        let route = resolve_agent(&db, &bot_id, "nonexistent", None)
+        let route = resolve_agent(&db, &bot_id, "nonexistent", None, "nobody")
             .await
             .unwrap();
         assert!(route.is_none());
@@ -538,6 +669,9 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! { "_id": &bot_id, "user_id": &user_id, "platform": "discord", "is_active": true })
+            .await.unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -554,6 +688,7 @@ mod tests {
             "group",
             None,
             &key_id,
+            false,
             false,
         )
         .await
@@ -580,6 +715,12 @@ mod tests {
         };
         let user_id = uuid::Uuid::new_v4().to_string();
         let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(
+                doc! { "_id": &bot_id, "user_id": &user_id, "platform": "lark", "is_active": true },
+            )
+            .await
+            .unwrap();
         let key_id = uuid::Uuid::new_v4().to_string();
 
         db.collection::<ApiKey>(API_KEYS)
@@ -597,6 +738,7 @@ mod tests {
             None,
             &key_id,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -611,5 +753,247 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(updated.last_message_at.is_some());
+    }
+    #[tokio::test]
+    async fn route_writes_resolution_and_final_callback_read_enforce_eligibility() {
+        let db = crate::test_utils::connect_transaction_test_database("wa_route_eligibility").await;
+        for (name, mutation) in [
+            (
+                "expired",
+                doc! {"expires_at": bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))},
+            ),
+            ("inactive", doc! {"is_active":false}),
+            ("owner", doc! {"user_id":"other-owner"}),
+            ("assistant", doc! {"platform":"nyxid-assistant"}),
+            ("missing_callback", doc! {"callback_url":bson::Bson::Null}),
+            ("empty_callback", doc! {"callback_url":"  "}),
+        ] {
+            let owner = uuid::Uuid::new_v4().to_string();
+            let bot = uuid::Uuid::new_v4().to_string();
+            seed_bot(&db, &bot, &owner, "whatsapp").await;
+            let key = make_api_key(
+                &uuid::Uuid::new_v4().to_string(),
+                &owner,
+                Some("https://agent.test/callback"),
+            );
+            db.collection::<ApiKey>(API_KEYS)
+                .insert_one(&key)
+                .await
+                .unwrap();
+            let route = create_conversation(
+                &db,
+                &owner,
+                Some(&bot),
+                "whatsapp",
+                "123",
+                "private",
+                None,
+                &key.id,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+            let resolved = resolve_agent(&db, &bot, "123", None, &owner)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(load_callback_key(&db, &resolved, &owner).await.is_ok());
+            db.collection::<ApiKey>(API_KEYS)
+                .update_one(doc! {"_id":&key.id}, doc! {"$set":mutation})
+                .await
+                .unwrap();
+            assert!(
+                load_callback_key(&db, &resolved, &owner).await.is_err(),
+                "final read accepted {name}"
+            );
+            assert!(
+                resolve_agent(&db, &bot, "123", None, &owner)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "resolution accepted {name}"
+            );
+            assert!(
+                create_conversation(
+                    &db,
+                    &owner,
+                    Some(&bot),
+                    "whatsapp",
+                    "456",
+                    "private",
+                    None,
+                    &key.id,
+                    false,
+                    false
+                )
+                .await
+                .is_err(),
+                "create accepted {name}"
+            );
+            assert!(
+                update_conversation(&db, &route.id, &owner, None, None, Some(true), None)
+                    .await
+                    .is_err(),
+                "enable accepted {name}"
+            );
+            assert!(
+                update_conversation(&db, &route.id, &owner, Some(&key.id), None, None, None)
+                    .await
+                    .is_err(),
+                "replacement accepted {name}"
+            );
+            assert!(
+                update_conversation(&db, &route.id, &owner, None, None, Some(false), None)
+                    .await
+                    .is_ok(),
+                "disable rejected {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_url_swap_and_wrong_owner_route_are_rejected_at_dispatch() {
+        let db = crate::test_utils::connect_transaction_test_database("wa_callback_swap").await;
+        seed_bot(&db, "bot", "owner", "whatsapp").await;
+        let key = make_api_key("agent", "owner", Some("https://agent.test/original"));
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+        let route = create_conversation(
+            &db,
+            "owner",
+            Some("bot"),
+            "whatsapp",
+            "123",
+            "private",
+            None,
+            "agent",
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let resolved = resolve_agent(&db, "bot", "123", None, "owner")
+            .await
+            .unwrap()
+            .unwrap();
+        db.collection::<ApiKey>(API_KEYS)
+            .update_one(
+                doc! {"_id":"agent"},
+                doc! {"$set":{"callback_url":"https://agent.test/replaced"}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            load_callback_key(&db, &resolved, "owner").await,
+            Err(AppError::Conflict(_))
+        ));
+        db.collection::<ChannelConversation>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":route.id},
+                doc! {"$set":{"user_id":"another-owner"}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            resolve_agent(&db, "bot", "123", None, "owner")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn broken_route_allows_permission_reductions_without_a_usable_key() {
+        let db = crate::test_utils::connect_transaction_test_database("wa_route_reductions").await;
+        for missing in [false, true] {
+            let owner = uuid::Uuid::new_v4().to_string();
+            let bot = uuid::Uuid::new_v4().to_string();
+            seed_bot(&db, &bot, &owner, "whatsapp").await;
+            let key = make_api_key(
+                &uuid::Uuid::new_v4().to_string(),
+                &owner,
+                Some("https://agent.test/callback"),
+            );
+            db.collection::<ApiKey>(API_KEYS)
+                .insert_one(&key)
+                .await
+                .unwrap();
+            let route = create_conversation(
+                &db,
+                &owner,
+                Some(&bot),
+                "whatsapp",
+                "123",
+                "private",
+                None,
+                &key.id,
+                true,
+                true,
+            )
+            .await
+            .unwrap();
+            if missing {
+                db.collection::<ApiKey>(API_KEYS)
+                    .delete_one(doc! {"_id": &key.id})
+                    .await
+                    .unwrap();
+            } else {
+                db.collection::<ApiKey>(API_KEYS).update_one(doc! {"_id": &key.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
+            }
+            let narrowed =
+                update_conversation(&db, &route.id, &owner, None, None, None, Some(false))
+                    .await
+                    .expect("turning off proactive sends must remain available");
+            assert!(!narrowed.allow_agent_initiated);
+            assert!(narrowed.is_active);
+            let narrowed =
+                update_conversation(&db, &route.id, &owner, None, Some(false), None, None)
+                    .await
+                    .expect("removing the default must remain available");
+            assert!(!narrowed.default_agent);
+            assert!(
+                update_conversation(&db, &route.id, &owner, None, Some(true), None, None)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                update_conversation(&db, &route.id, &owner, None, None, None, Some(true))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                update_conversation(
+                    &db,
+                    &route.id,
+                    &owner,
+                    Some(&key.id),
+                    None,
+                    Some(false),
+                    None
+                )
+                .await
+                .is_err()
+            );
+            let disabled = update_conversation(
+                &db,
+                &route.id,
+                &owner,
+                None,
+                Some(false),
+                Some(false),
+                Some(false),
+            )
+            .await
+            .unwrap();
+            assert!(!disabled.is_active);
+            assert!(
+                update_conversation(&db, &route.id, &owner, None, None, Some(true), None)
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

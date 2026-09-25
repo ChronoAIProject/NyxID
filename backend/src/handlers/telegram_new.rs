@@ -1,10 +1,12 @@
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
+use zeroize::Zeroizing;
 
 use crate::models::telegram_bot_request::{TelegramBotRequest, TelegramRequestStatus as Status};
 use crate::services::{
@@ -15,6 +17,9 @@ use crate::{
     errors::{AppError, AppResult},
     mw::auth::{AuthMethod, AuthUser},
 };
+
+// Chat delivery must not occupy Telegram's single manager webhook connection.
+static MANAGER_CHANNEL_DELIVERIES: Semaphore = Semaphore::const_new(32);
 
 pub(crate) fn service(state: &AppState) -> TelegramNewService<'_> {
     TelegramNewService {
@@ -39,14 +44,13 @@ fn human(auth: &AuthUser) -> AppResult<String> {
 }
 
 async fn limit(state: &AppState, actor: &str) -> AppResult<()> {
-    if !crate::mw::rate_limit::PerKeyRateLimiter::with_db(
-        state.db.clone(),
-        "telegram_new_creation",
-        5,
-        60,
-    )
-    .check_shared(actor)
-    .await?
+    limit_bucket(state, actor, "telegram_new_creation", 5).await
+}
+
+async fn limit_bucket(state: &AppState, actor: &str, bucket: &str, requests: u32) -> AppResult<()> {
+    if !crate::mw::rate_limit::PerKeyRateLimiter::with_db(state.db.clone(), bucket, requests, 60)
+        .check_shared(actor)
+        .await?
     {
         return Err(AppError::RateLimited);
     }
@@ -71,6 +75,8 @@ pub struct RequestResponse {
     pub telegram_bot_id: Option<String>,
     pub bot_username: Option<String>,
     pub channel_bot_id: Option<String>,
+    pub auto_connect: bool,
+    pub connection_error: Option<String>,
 }
 
 impl From<TelegramBotRequest> for RequestResponse {
@@ -80,6 +86,8 @@ impl From<TelegramBotRequest> for RequestResponse {
             Status::Ready | Status::Provisioning | Status::Connected | Status::Suspended
         );
         Self {
+            auto_connect: request.auto_connect,
+            connection_error: request.connection_error,
             channel_bot_id: matches!(
                 request.status,
                 Status::Provisioning | Status::Connected | Status::Suspended
@@ -112,6 +120,13 @@ pub struct ConfigurationResponse {
 pub struct BeginRequest {
     pub label: String,
     pub target_org_id: Option<String>,
+    #[serde(default)]
+    pub auto_connect: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ConfigurationQuery {
+    pub request_id: Option<uuid::Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -127,9 +142,67 @@ pub struct LaunchResponse {
     pub launch_url: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimCodeRequest {
+    pub code: Zeroizing<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedeemClaimRequest {
+    pub code: Zeroizing<String>,
+    pub label: String,
+    pub target_org_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ClaimPreviewResponse {
+    pub bot_username: String,
+    pub expires_at: String,
+}
+
+pub async fn preview_claim(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<ClaimCodeRequest>,
+) -> AppResult<(HeaderMap, Json<ClaimPreviewResponse>)> {
+    let actor = human(&auth)?;
+    limit_bucket(&state, &actor, "telegram_new_claim_preview", 30).await?;
+    let claim = service(&state).preview_claim(&actor, &body.code).await?;
+    Ok((
+        private_headers(),
+        Json(ClaimPreviewResponse {
+            bot_username: claim.bot_username,
+            expires_at: claim.expires_at.to_rfc3339(),
+        }),
+    ))
+}
+
+pub async fn redeem_claim(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<RedeemClaimRequest>,
+) -> AppResult<(StatusCode, HeaderMap, Json<RequestResponse>)> {
+    let actor = human(&auth)?;
+    limit(&state, &actor).await?;
+    let owner =
+        super::channel_bots::resolve_create_owner(&state, &actor, body.target_org_id.as_deref())
+            .await?;
+    let request = service(&state)
+        .redeem_claim(&actor, &owner, &body.code, &body.label)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        private_headers(),
+        Json(request.into()),
+    ))
+}
+
 pub async fn configuration(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(query): Query<ConfigurationQuery>,
 ) -> AppResult<(HeaderMap, Json<ConfigurationResponse>)> {
     let actor = human(&auth)?;
     let row = crate::services::platform_credential_service::load(
@@ -141,7 +214,10 @@ pub async fn configuration(
         row.fields.get("webhook_ready").is_some_and(|v| v == "true")
             && row.secrets.contains_key("manager_bot_token")
     });
-    let request = service(&state).current(&actor).await?;
+    let request = match query.request_id {
+        Some(id) => Some(service(&state).get(&actor, &id.to_string()).await?),
+        None => service(&state).current(&actor).await?,
+    };
     Ok((
         private_headers(),
         Json(ConfigurationResponse {
@@ -162,7 +238,9 @@ pub async fn begin(
     let owner =
         super::channel_bots::resolve_create_owner(&state, &actor, body.target_org_id.as_deref())
             .await?;
-    let (request, launch_url) = service(&state).begin(&actor, &owner, &body.label).await?;
+    let (request, launch_url) = service(&state)
+        .begin(&actor, &owner, &body.label, body.auto_connect)
+        .await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth,
@@ -233,18 +311,18 @@ pub async fn connect(
     let bot = service(&state)
         .connect(&actor, &id, bot_id, body.revision)
         .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "channel_bot_created",
-        Some(
-            serde_json::json!({"bot_id": bot.id, "platform": bot.platform, "owner_user_id": bot.user_id}),
-        ),
-    );
-    Ok((
-        private_headers(),
-        Json(service(&state).get(&actor, &id).await?.into()),
-    ))
+    let request = service(&state).get(&actor, &id).await?;
+    if !request.auto_connect {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth,
+            "channel_bot_created",
+            Some(
+                serde_json::json!({"bot_id": bot.id, "platform": bot.platform, "owner_user_id": bot.user_id}),
+            ),
+        );
+    }
+    Ok((private_headers(), Json(request.into())))
 }
 
 pub async fn webhook(
@@ -252,8 +330,75 @@ pub async fn webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<StatusCode> {
-    service(&state).webhook(&headers, &body).await?;
+    webhook_with_service(&state, &service(&state), &headers, &body).await
+}
+
+pub(crate) async fn webhook_with_service(
+    state: &AppState,
+    service: &TelegramNewService<'_>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> AppResult<StatusCode> {
+    if let Some((bot, update)) = service.webhook(headers, body).await? {
+        relay_manager_channel(state.clone(), bot, update).await;
+    }
     Ok(StatusCode::OK)
+}
+
+pub(crate) async fn relay_manager_channel(
+    state: AppState,
+    bot: crate::models::channel_bot::ChannelBot,
+    update: serde_json::Value,
+) {
+    let prepared: AppResult<_> = async {
+        let adapter =
+            super::channel_bots::resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+        let channel_body = serde_json::to_vec(&update).map_err(|_| {
+            AppError::Internal("Unable to serialize Telegram channel update".into())
+        })?;
+        let messages = adapter.parse_inbound(&channel_body).await?;
+        Ok((adapter, messages))
+    }
+    .await;
+    let (adapter, messages) = match prepared {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            tracing::warn!(bot_id = %bot.id, "Telegram manager channel parsing failed; ordinary update dropped");
+            return;
+        }
+    };
+    if messages.is_empty() {
+        return;
+    }
+    let Ok(permit) = MANAGER_CHANNEL_DELIVERIES.try_acquire() else {
+        tracing::warn!(bot_id = %bot.id, "Telegram manager channel delivery capacity reached; message dropped");
+        return;
+    };
+    let deadline = std::time::Duration::from_secs(
+        u64::from(state.config.channel_relay_callback_timeout_secs) + 10,
+    );
+    tokio::spawn(async move {
+        let _permit = permit;
+        match tokio::time::timeout(
+            deadline,
+            crate::services::channel_inbound_service::process_inbound_messages(
+                (&state).into(),
+                &bot,
+                adapter.as_ref(),
+                &messages,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => {
+                tracing::warn!(bot_id = %bot.id, "Telegram manager channel relay failed");
+            }
+            Err(_) => {
+                tracing::warn!(bot_id = %bot.id, "Telegram manager channel delivery deadline exceeded");
+            }
+        }
+    });
 }
 
 #[cfg(test)]

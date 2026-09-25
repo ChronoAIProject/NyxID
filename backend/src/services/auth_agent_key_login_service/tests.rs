@@ -873,9 +873,14 @@ async fn live_parent_authority_expiry_logout_rotation_and_revocation() {
             .await
             .unwrap(),
             "rotation" => {
-                key_service::rotate_api_key(&db, &actor, &key.id)
-                    .await
-                    .unwrap();
+                key_service::rotate_api_key(
+                    &db,
+                    &std::sync::Arc::new(crate::test_utils::test_encryption_keys()),
+                    &actor,
+                    &key.id,
+                )
+                .await
+                .unwrap();
             }
             "revocation" => key_service::delete_api_key(&db, &actor, &key.id)
                 .await

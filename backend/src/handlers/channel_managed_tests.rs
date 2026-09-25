@@ -30,6 +30,12 @@ async fn fixture() -> (crate::AppState, crate::mw::auth::AuthUser, MockServer) {
     let db = connect_test_database("managed_channel")
         .await
         .expect("test MongoDB");
+    fixture_with_db(db).await
+}
+
+async fn fixture_with_db(
+    db: mongodb::Database,
+) -> (crate::AppState, crate::mw::auth::AuthUser, MockServer) {
     let state = test_app_state(db);
     let id = uuid::Uuid::new_v4().to_string();
     let mut user = test_user(&id, crate::models::user::UserType::Person);
@@ -200,7 +206,7 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
         );
         assert_eq!(
             adapter.platform_webhook(),
-            adapter.platform_id() == "whatsapp"
+            matches!(adapter.platform_id(), "whatsapp" | "x")
         );
     }
     let all = credentials::descriptors(&cache);
@@ -209,7 +215,7 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
         .map(|(_, descriptor)| descriptor.provider)
         .collect();
     providers.sort_unstable();
-    assert_eq!(providers, ["meta", "telegram-new", "x"]);
+    assert_eq!(providers, ["aurinko", "meta", "telegram-new", "x"]);
 }
 
 #[tokio::test]
@@ -484,7 +490,16 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
         .unwrap();
     let serialized = serde_json::to_value(&list).unwrap();
     assert!(!serialized.to_string().contains("secret-for-test"));
-    assert!(!format!("{list:?}").contains(list[0].webhook_verify_token.as_ref().unwrap()));
+    assert!(
+        !format!("{list:?}").contains(
+            list.iter()
+                .find(|row| row.provider == "meta")
+                .unwrap()
+                .webhook_verify_token
+                .as_ref()
+                .unwrap()
+        )
+    );
     assert!(!serialized.to_string().contains("test_graph_base"));
     let credential_descriptor = credentials::descriptor(&state.token_exchange_cache, "meta")
         .unwrap()
@@ -522,7 +537,13 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
     )
     .await
     .unwrap();
-    assert_eq!(list[0].webhook_verify_token, rotated.webhook_verify_token);
+    assert_eq!(
+        list.iter()
+            .find(|row| row.provider == "meta")
+            .unwrap()
+            .webhook_verify_token,
+        rotated.webhook_verify_token
+    );
     assert_eq!(
         build_verify_secrets(&state.db, &state.encryption_keys, adapter.as_ref(), &bot)
             .await
@@ -566,6 +587,283 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn aurinko_platform_credentials_share_provider_pair_and_keep_signing_secret_separate() {
+    use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
+    let db = crate::test_utils::connect_transaction_test_database("aurinko_credentials").await;
+    let (state, auth, _) = fixture_with_db(db).await;
+    let provider: ProviderConfig = bson::from_document(doc! {
+        "_id": uuid::Uuid::new_v4().to_string(), "slug": "aurinko", "name": "Aurinko",
+        "provider_type": "api_key", "is_active": true, "created_by": auth.user_id.to_string(),
+        "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+    })
+    .unwrap();
+    state
+        .db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .insert_one(&provider)
+        .await
+        .unwrap();
+    let existing_pair = crate::services::provider_service::update_provider(
+        &state.db,
+        &state.encryption_keys,
+        &provider.id,
+        crate::services::provider_service::ProviderUpdateInput {
+            client_id: Some("aurinko-application-id".into()),
+            client_secret: Some("aurinko-application-secret".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(existing_pair.provider_type, "api_key");
+    let descriptor = credentials::descriptor(&state.token_exchange_cache, "aurinko")
+        .unwrap()
+        .1;
+    let imported = credentials::load_decrypted(&state.db, &state.encryption_keys, &descriptor)
+        .await
+        .unwrap();
+    assert_eq!(imported.get("client_id"), Some("aurinko-application-id"));
+    assert_eq!(
+        imported.get("client_secret"),
+        Some("aurinko-application-secret")
+    );
+    assert!(imported.get("signing_secret").is_none());
+    let (_, Json(saved)) = admin::update(
+        State(state.clone()),
+        auth.clone(),
+        Path("aurinko".into()),
+        Json(
+            serde_json::from_value(json!({"fields": {
+                "signing_secret": "aurinko-webhook-secret",
+            }}))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(saved.available);
+    assert!(
+        saved
+            .fields
+            .iter()
+            .all(|field| field.configured && field.value.is_none())
+    );
+    assert!(saved.webhook_verify_token.is_none());
+    for secret in [
+        "aurinko-application-id",
+        "aurinko-application-secret",
+        "aurinko-webhook-secret",
+    ] {
+        assert!(!serde_json::to_string(&saved).unwrap().contains(secret));
+        assert!(!format!("{saved:?}").contains(secret));
+    }
+    let stored = state
+        .db
+        .collection::<PlatformCredential>(CREDENTIALS)
+        .find_one(doc! {"provider": "aurinko"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored
+            .secrets
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["signing_secret"]
+    );
+    let shared = state
+        .db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .find_one(doc! {"_id": &provider.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shared.provider_type, "api_key");
+    assert_eq!(
+        shared.client_id_encrypted,
+        existing_pair.client_id_encrypted
+    );
+    assert_eq!(
+        shared.client_secret_encrypted,
+        existing_pair.client_secret_encrypted
+    );
+    assert_eq!(
+        state
+            .encryption_keys
+            .decrypt(shared.client_id_encrypted.as_ref().unwrap())
+            .await
+            .unwrap(),
+        b"aurinko-application-id"
+    );
+    assert_eq!(
+        state
+            .encryption_keys
+            .decrypt(shared.client_secret_encrypted.as_ref().unwrap())
+            .await
+            .unwrap(),
+        b"aurinko-application-secret"
+    );
+    let loaded = credentials::load_decrypted(&state.db, &state.encryption_keys, &descriptor)
+        .await
+        .unwrap();
+    assert_eq!(loaded.get("signing_secret"), Some("aurinko-webhook-secret"));
+    assert_eq!(
+        loaded.get("client_secret"),
+        Some("aurinko-application-secret")
+    );
+
+    let (_, Json(cleared)) = admin::update(
+        State(state.clone()),
+        auth.clone(),
+        Path("aurinko".into()),
+        Json(serde_json::from_value(json!({"fields": {"signing_secret": null}})).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert!(!cleared.available);
+    let loaded = credentials::load_decrypted(&state.db, &state.encryption_keys, &descriptor)
+        .await
+        .unwrap();
+    assert!(loaded.get("signing_secret").is_none());
+    assert_eq!(
+        loaded.get("client_secret"),
+        Some("aurinko-application-secret")
+    );
+
+    // Unknown fields abort before either backing store is changed.
+    assert!(
+        admin::update(
+            State(state.clone()),
+            auth.clone(),
+            Path("aurinko".into()),
+            Json(
+                serde_json::from_value(
+                    json!({"fields": {"client_secret": "bad-change", "unknown": "invalid"}})
+                )
+                .unwrap()
+            )
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        credentials::load_decrypted(&state.db, &state.encryption_keys, &descriptor)
+            .await
+            .unwrap()
+            .get("client_secret"),
+        Some("aurinko-application-secret")
+    );
+
+    admin::delete(State(state.clone()), auth, Path("aurinko".into()))
+        .await
+        .unwrap();
+    let shared = state
+        .db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .find_one(doc! {"_id": &provider.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(shared.client_id_encrypted.is_none() && shared.client_secret_encrypted.is_none());
+    assert!(
+        state
+            .db
+            .collection::<PlatformCredential>(CREDENTIALS)
+            .find_one(doc! {"provider": "aurinko"})
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn aurinko_composite_reads_never_mix_concurrent_rotations() {
+    use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
+    let db = crate::test_utils::connect_transaction_test_database("aurinko_rotations").await;
+    let (state, auth, _) = fixture_with_db(db).await;
+    let provider: ProviderConfig = bson::from_document(doc! {
+        "_id": uuid::Uuid::new_v4().to_string(), "slug": "aurinko", "name": "Aurinko",
+        "provider_type": "api_key", "is_active": true, "created_by": "seed-author",
+        "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+    })
+    .unwrap();
+    state
+        .db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .insert_one(provider)
+        .await
+        .unwrap();
+    let descriptor = credentials::descriptor(&state.token_exchange_cache, "aurinko")
+        .unwrap()
+        .1;
+    let actor = auth.user_id.to_string();
+    let fields = |version: usize| {
+        ["client_id", "client_secret", "signing_secret"]
+            .map(|name| {
+                (
+                    name.to_string(),
+                    Some(zeroize::Zeroizing::new(format!("revision-{version}"))),
+                )
+            })
+            .into()
+    };
+    credentials::update(
+        &state.db,
+        &state.encryption_keys,
+        &descriptor,
+        &actor,
+        &fields(0),
+        false,
+    )
+    .await
+    .unwrap();
+    tokio::join!(
+        async {
+            for version in 1..=12 {
+                credentials::update(
+                    &state.db,
+                    &state.encryption_keys,
+                    &descriptor,
+                    &actor,
+                    &fields(version),
+                    false,
+                )
+                .await
+                .unwrap();
+            }
+        },
+        async {
+            for _ in 0..24 {
+                let row =
+                    credentials::load_decrypted(&state.db, &state.encryption_keys, &descriptor)
+                        .await
+                        .unwrap();
+                assert_eq!(row.get("client_id"), row.get("client_secret"));
+                assert_eq!(row.get("client_id"), row.get("signing_secret"));
+            }
+        }
+    );
+    let projected = credentials::load(&state.db, &descriptor)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(projected.updated_by, actor);
+    assert!(
+        state
+            .db
+            .collection::<PlatformCredential>(CREDENTIALS)
+            .find_one(doc! { "provider": "aurinko" })
+            .await
+            .unwrap()
+            .unwrap()
+            .secrets
+            .keys()
+            .all(|name| name == "signing_secret")
     );
 }
 
@@ -896,6 +1194,13 @@ async fn repair_checks_owner_and_shared_rate_limit() {
         5,
         60,
     );
+    // Shared DB windows are epoch-aligned 60 s bins: the five admissions and
+    // the denied repair must land in the same bin.
+    crate::test_utils::ensure_rate_window_headroom(
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(10),
+    )
+    .await;
     for _ in 0..5 {
         assert!(
             limiter
@@ -1055,7 +1360,12 @@ async fn platform_dispatcher_handshake_signature_and_multinumber_targets() {
         ("hub.mode".to_string(), "subscribe".to_string()),
         (
             "hub.verify_token".to_string(),
-            rows[0].webhook_verify_token.clone().unwrap(),
+            rows.iter()
+                .find(|row| row.provider == "meta")
+                .unwrap()
+                .webhook_verify_token
+                .clone()
+                .unwrap(),
         ),
         ("hub.challenge".to_string(), "000123".to_string()),
     ]

@@ -104,7 +104,25 @@ pub async fn append_chained_entry(
 
         match collection.insert_one(&entry).await {
             Ok(_) => return Ok(entry),
-            Err(error) if is_duplicate_key_error(&error) && attempt < MAX_APPEND_ATTEMPTS => {
+            Err(error) if is_duplicate_key_error(&error) => {
+                if let Some(existing) = collection.find_one(doc! { "_id": &entry.id }).await? {
+                    if immutable_entry_matches(&existing, &entry)
+                        && existing.seq.is_some()
+                        && existing.prev_hash.is_some()
+                        && existing.entry_hash.as_ref().is_some_and(|hash| {
+                            compute_entry_hash(&existing, key)
+                                .is_ok_and(|expected| &expected == hash)
+                        })
+                    {
+                        return Ok(existing);
+                    }
+                    return Err(mongodb::error::Error::custom(
+                        "Audit UUID already exists with different immutable content",
+                    ));
+                }
+                if attempt == MAX_APPEND_ATTEMPTS {
+                    return Err(error);
+                }
                 last_error = Some(error);
                 sleep_before_retry(attempt).await;
             }
@@ -114,6 +132,19 @@ pub async fn append_chained_entry(
 
     Err(last_error
         .unwrap_or_else(|| mongodb::error::Error::custom("audit chain append exhausted retries")))
+}
+
+/// Chain position is assigned on append; every other field belongs to the caller's identity.
+pub fn immutable_entry_matches(left: &AuditLog, right: &AuditLog) -> bool {
+    left.id == right.id
+        && left.user_id == right.user_id
+        && left.event_type == right.event_type
+        && left.event_data == right.event_data
+        && left.ip_address == right.ip_address
+        && left.user_agent == right.user_agent
+        && left.api_key_id == right.api_key_id
+        && left.api_key_name == right.api_key_name
+        && left.created_at.timestamp_millis() == right.created_at.timestamp_millis()
 }
 
 pub async fn verify_chain(

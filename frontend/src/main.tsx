@@ -1,3 +1,4 @@
+import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -147,7 +148,11 @@ function Root() {
         router.getMatchedRoutes(path).foundRoute,
       );
       if (pathMatchesRoute && !isPublicPath(path)) {
-        router.navigate({ to: "/login" });
+        preserveTelegramClaimForLogin();
+        router.navigate({
+          to: "/login",
+          search: { return_to: window.location.origin + path + window.location.search },
+        });
       }
     }
   }, [ready, isAuthenticated]);

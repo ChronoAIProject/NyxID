@@ -47,6 +47,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Admin Roles](#admin-roles)
   - [Admin Groups](#admin-groups)
   - [Admin Service Accounts](#admin-service-accounts)
+  - [Catalog Skill Curation](#catalog-skill-curation)
   - [Notification Settings](#notification-settings)
   - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
@@ -2043,7 +2044,7 @@ Contract guarantees for `contract_version: "1.0"`:
 - `is_generic_proxy: true` means the service exposes only NyxID's generic HTTP request operation. It is not a declared OpenAPI operation and must not be admitted as one.
 - Only currently executable operations are in `services`. Credential-unavailable services are counted in diagnostics but omitted. Service and node scope restrictions are applied before publication.
 - `service_scope_restricted` and `node_scope_restricted` report that caller scope is active. `node_scope_exclusions_present` may explain an omission only after service authorization has established that the service is caller-visible; it is a boolean and never enumerates excluded nodes or services. Diagnostics never include excluded-resource counts, IDs, node topology, credential material, tokens, or internal routing details.
-- REST `/mcp/config` and stateless MCP `tools/list` use the same scoped catalog loader. Stateful MCP sessions may show only the subset activated for that session.
+- REST `/mcp/config` and stateless MCP `tools/list` use the same scoped catalog loader, including auto-connected service expansion. Assistant chat keys discover services before acknowledgement on both surfaces; platform grants and account acknowledgement gate execution, not discovery. MCP adds its protocol-specific account/meta-tools separately. Stateful MCP sessions may show only the subset activated for that session.
 
 `catalog_digest` is the source revision for the normalized descriptor. It is `sha256:<lowercase-hex>` over compact UTF-8 JSON containing exactly `{"contract_version":"1.0","services":[...]}`. Services are sorted by `service_id`, endpoints by `endpoint_id`, and every JSON object key recursively in lexicographic order. `user_id`, `proxy_base_url`, diagnostics, counts, and observation time are excluded. Consumers must not substitute fetch time or a local counter for this digest.
 
@@ -2057,7 +2058,7 @@ Schema contract:
 
 Platform services are included only when the user has a valid connection with satisfied credentials. `provider` services are excluded because they are not proxyable. User-managed services additionally require an executable server credential or an in-scope dispatchable node route.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`), or non-Curation service-account access token. Tokens and API keys require `proxy` or `proxy:*` scope. Scheduled-invocation keys, Curation service accounts, delegated tokens, and relay tokens are rejected.
 
 **Response (200):**
 
@@ -2652,6 +2653,11 @@ Get a single provider configuration by ID.
 
 Returns a single provider object (same shape as list response items).
 
+Provider responses include the saved `authorization_url`, `token_url`, and
+`revocation_url`, plus `has_client_id` and `has_client_secret` booleans. These
+allow editors to display configured values without returning stored client
+credentials. Device-flow URLs remain available in their corresponding fields.
+
 **Errors:**
 - `1003 not_found` -- Provider does not exist
 
@@ -2709,6 +2715,11 @@ Update a provider configuration. Only the provided fields are updated (partial u
 Returns the updated provider object.
 
 Structured `revocation` uses the same fields and validation rules as provider creation. An omitted field preserves the current configuration; explicit `"revocation": null` clears both `revocation` and deprecated `revocation_url`. RFC 7009 configurations keep the alias synchronized, while vendor-specific styles clear the alias.
+
+An explicit empty `default_scopes` array clears the scope list. Trimmed-empty
+`description`, `api_key_instructions`, `api_key_url`, `icon_url`, and
+`documentation_url` strings remove the corresponding optional stored field.
+Blank replacement credentials should be omitted to preserve existing secrets.
 
 **Errors:**
 - `1002 forbidden` -- User is not an admin
@@ -3193,13 +3204,21 @@ Create a new key from catalog or custom endpoint. Auto-provisions all 3 records 
 
 #### GET /api/v1/keys
 
-List all user's keys (combined endpoint + key + service view).
+List all user's keys (combined endpoint + key + service view) for existing human/API-key/delegated callers. CatalogEditor service accounts receive all platform catalog entries with `resource_type: "catalog_service"` and catalog UUIDs when token/live scopes include `user-services:read catalog:skills:read` and an assigned global role contains `nyxid:catalog:skills:read`. No resource grants are required. General/Curation service accounts with `user-services:read` in both the token and live account scopes and a live key read grant receive `{"keys":[...]}` containing only the grant's currently readable, nonsecret metadata entries. See the detail response below for the SA entry fields. Curation accounts also require their live Curation grant.
 
 **Auth:** Required
 
 #### GET /api/v1/keys/{id}
 
-Get a single key's combined view.
+Get a single key's combined view for existing human/API-key/delegated callers. Service accounts receive a smaller nonsecret metadata response. CatalogEditor must use a catalog UUID returned by its `/keys` list; General/Curation must use an exact UserService UUID.
+
+**CatalogEditor auth:** token/live `user-services:read catalog:skills:read` and live global role permission `nyxid:catalog:skills:read`. The response additionally contains `resource_type: "catalog_service"`. See [Platform catalog editors](SERVICE_ACCOUNTS.md#platform-catalog-editors) for one-time setup.
+
+**General/Curation SA auth:** `user-services:read` in both the token and live account scopes, an unexpired exact key read grant, and current SA-owner access. Curation accounts also require their live Curation grant. Slug access, HEAD, upgrades, and key writes are not included.
+
+The SA response includes identity/label, service type and active state, catalog association, effective `recommended_skills`/`recommended_skill_refs`, `skills_revision`, and `skills_manifest_digest`. It excludes credentials, raw URLs, headers, frame injections, and routing/authentication configuration. No credential resolution or OAuth reconciliation occurs.
+
+Platform admins manage exact grants with `PUT`/`DELETE /api/v1/admin/service-accounts/{sa_id}/key-read-grant`; admins/operators can inspect them with `GET`. PUT accepts `{"user_service_ids":["<uuid>"],"expires_at":"<optional future RFC3339>"}` and replaces all targets. See [Connection metadata reads](SERVICE_ACCOUNTS.md#connection-metadata-reads) for setup and lifecycle.
 
 **Auth:** Required
 
@@ -3467,6 +3486,9 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
 
 `scopes` is an optional array of additional OAuth scopes (default `[]`). Each entry may contain comma- or whitespace-separated scopes; NyxID trims and deduplicates them in order, preserving case. The shared OAuth scope limits apply across the entire request: at most 32 scopes before deduplication, at most 256 characters per scope, and only `[A-Za-z0-9._:/~+*=-]` characters. Scopes supplement the provider defaults for OAuth and RFC 8628 device-code flows; they do not replace defaults, and the provider decides which permissions to grant. Stored scopes survive provider denial and retry.
 
+`endpoint_url` is an optional HTTP(S) service URL prefill for connectors that require a gateway URL. It appears as an editable Service URL on the hosted page; the user confirms the final value during completion. It is ignored when the user selects a NyxID platform key.
+The CLI accepts the same value through `nyxid connect <service_slug> --endpoint-url <url>`.
+
 Creation returns HTTP 400 (`AppError::ValidationError`) for malformed/oversized scopes or non-empty scopes on API-key/no-auth services, providers with `supports_oauth_scopes = false`, and OpenAI-format device-code providers. An empty list preserves the existing behavior for every connection method.
 
 **Public preview:** `POST /api/v1/connect-links/preview` with `{ "token": "nyx_clk_<opaque-secret>" }` returns service and request details, including `connect_method` (`oauth`, `device_code`, `api_key`, or `none`) and `scopes: ["public_repo"]`. The `scopes` array is always present, possibly empty, including for legacy stored links. The hosted page displays these creator-selected permissions for human review; completion cannot edit them.
@@ -3583,13 +3605,23 @@ Read-only catalog of available service templates for users.
 
 List all available service templates from the admin-managed catalog.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
 
 #### GET /api/v1/catalog/{slug}
 
 Get a specific catalog template by slug.
 
-**Auth:** Required
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
+
+#### GET /api/v1/catalog/{slug}/endpoints
+
+Return operations parsed from the admin-configured catalog OpenAPI spec. If no readable catalog template matches, a readable user-service slug can resolve its owner-scoped mounted spec.
+
+**Auth:** Session cookie, human access token, general `nyx_` or scoped/platform `nyxid_ag_` API key (via `X-API-Key` or `Authorization: Bearer`; no proxy scope required). Scheduled-invocation keys, service accounts, and relay tokens are rejected. Delegated tokens retain the existing exact `account:read` GET exception.
+
+Service accounts remain rejected: catalog detail resolves restricted platform grants through a User actor, while SA tokens carry the SA ID.
+
+Catalog entries use template slugs, resource URIs and skills, with live platform grants determining `platform_key.available` and inference binding/status. They do not include instance overrides or connection flags. API keys can use instance-backed private catalog access and mounted-spec fallback only within their effective service allowlist, including auto-connected expansion, and active Member/Admin org scopes. Org-owned keys act as the org. Catalog discovery does not provision services or reconcile pending OAuth credentials.
 
 ---
 
@@ -5176,9 +5208,56 @@ curl -X POST http://localhost:3001/api/v1/auth/mfa/confirm \
 
 ---
 
+### Provider-linked service configuration
+
+Both provider/service endpoints require admin access:
+`GET /api/v1/providers/{provider_id}/services` lists canonical links and legacy
+provider requirements. `PUT /api/v1/providers/{provider_id}/services/{service_id}` links an existing catalog
+service; `POST /api/v1/services` also accepts `provider_config_id` for atomic
+creation/linking. A service already linked to another provider is not rebound.
+Direct-auth services retain their authentication method without adding provider
+requirements.
+
+Service updates accept a write-only `credential` (blank preserves), `platform_key`,
+credential-class billing lanes, and `proxy_operation_policy`. Omitted policy
+preserves; null clears; `{ "rules": [] }` denies every endpoint. Rules contain
+an HTTP `method` and absolute `path_template`, and apply to all service bindings.
+New shared keys default disabled/restricted. Admin response
+`credential_configured` is true/false after authorized inspection, or null when
+unreadable; non-admin responses return null without inspecting the credential.
+
+Platform Operations routes and its three named MCP operation tools are removed.
+See [Service configuration and vendor retirement](SERVICE_CONFIGURATION.md) for
+linking, access, billing, and migration behavior, and [Admin form save
+behavior](ADMIN_FORM_SAFETY.md) for sparse updates and confirmation.
+
 ### Admin
 
 All admin endpoints require the authenticated user to have `is_admin = true`. Admin endpoints include self-protection: admins cannot change their own role, disable themselves, or delete themselves.
+
+#### PATCH /api/v1/admin/feature-flags/{flag_key}/metadata
+
+Update only the supplied metadata fields for a registered feature flag.
+
+**Auth:** Admin
+
+| Field | Type | Required | Behavior |
+| --- | --- | --- | --- |
+| `description` | string/null | No | Omission preserves; null or trimmed blank clears the custom description and displays the code-declared fallback. |
+| `owner` | string/null | No | Omission preserves; null or trimmed blank clears the owner. |
+
+Unknown fields are rejected. An empty object leaves the metadata unchanged.
+An unknown flag key returns a bad-request error.
+
+**Response (200):** The saved metadata descriptor: `key`, effective `description`,
+`code_description`, nullable `custom_description`, nullable `owner`, and nullable
+`metadata_updated_at` / `metadata_updated_by`.
+
+For example, `{"owner":"Identity team"}` changes only the owner. The existing
+`PUT` route at this path keeps its replacement contract: omitted fields are
+cleared. Clients that need sparse updates should use `PATCH`.
+
+---
 
 #### GET /api/v1/admin/users
 
@@ -7836,27 +7915,49 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 ---
 
+## X channel event selection
+
+Human owners and owning-org admins can `PATCH /api/v1/channel-bots/{id}` with `{"x_events":["dm","mentions","replies"]}`. Choose any nonempty, unique subset. New and legacy X bots default to `dm`; omitting `x_events` preserves it. The field is X-only and appears on bot detail responses.
+
+`mentions` receives explicit @mentions; `replies` receives direct replies to the connected account's posts. Public events require configured X webhook credentials and user OAuth permission `tweet.write` in addition to the DM channel scopes. A missing scope fails before saving. After validation, NyxID saves the desired selection and reconciles X subscriptions; an upstream failure can therefore return an error with the selection already saved. Refresh bot detail for current status and use `POST /api/v1/channel-bots/{id}/verify` to retry after correcting the cause.
+
+Public messages use `post:<conversation_id>` addresses. Agents use `POST /api/v1/channel-relay/reply` with the callback's NyxID `message_id` and reply token. Replies are text-only and target that incoming post; caller metadata cannot change the target. Public callbacks omit owner access tokens. Public initiated sends and edits are unsupported. See [X channel setup and limitations](CHANNEL_BOT_RELAY.md#select-mentions-and-replies) for the CLI, routing, scope and billing details.
+
 ## Telegram New Channel Creation
 
 Telegram New is the separate `telegram-new` channel option. The existing `telegram` registration API and token-based setup remain available. See [Telegram New](TELEGRAM_NEW.md#api-and-storage) for request/response fields, status transitions, recovery rules, and administrator setup.
 
-Routes below are relative to `/api/v1`. Creation routes require an authenticated person; API keys, service accounts, relay tokens, and delegated access are rejected. Requests are bound to the initiating person and destination. Connecting requires current destination write access plus the exact bot ID and revision approved in Telegram.
+Routes below are relative to `/api/v1`. Creation routes require an authenticated person; API keys, service accounts, relay tokens, and delegated access are rejected. Requests are bound to the initiating person and destination. New website requests use `auto_connect: true`: the initial authenticated action authorizes connection of one fresh bot through the private Telegram handoff, and the verified creation event queues server completion with live destination-access checks. Omitting the flag preserves the legacy exact-bot approval and browser confirmation flow.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| GET | `/channel-bots/telegram-new` | Read availability and the current creation request |
-| POST | `/channel-bots/telegram-new` | Prepare a request with `{label, target_org_id?}` |
+| GET | `/channel-bots/telegram-new` | Read availability and the current creation request; optional `?request_id={uuid}` reads an actor-owned request including completed setup |
+| POST | `/channel-bots/telegram-new` | Prepare a request with `{label, target_org_id?, auto_connect?}`; the website sends `auto_connect: true` |
 | GET | `/channel-bots/telegram-new/requests/{id}` | Read the saved request |
 | POST | `/channel-bots/telegram-new/requests/{id}/launch` | Issue a fresh Telegram launch link |
 | DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning begins |
-| POST | `/channel-bots/telegram-new/requests/{id}/connect` | Confirm `{telegram_bot_id, revision}` and connect or retry |
+| POST | `/channel-bots/telegram-new/claims/preview` | Human-only, non-mutating preview of `{code}`; returns `{bot_username, expires_at}` without provider calls |
+| POST | `/channel-bots/telegram-new/claims/redeem` | Human-only `{code, label, target_org_id?}`; atomically save the claim destination and return HTTP 202 with the connection request; worker completes setup |
+| POST | `/channel-bots/telegram-new/requests/{id}/connect` | Legacy completion: confirm `{telegram_bot_id, revision}` and connect or retry |
 | POST | `/webhooks/channel/telegram-new/manager` | Receive updates authenticated by the configured manager webhook secret |
+
+Request responses expose `auto_connect` (false for legacy requests) and nullable `connection_error` with safe automatic-retry text. Automatic connection continues while the browser is closed; clients poll the saved request rather than POSTing `/connect`.
 
 The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
 
 ---
 
 ## Webhooks
+
+### Aurinko email channel
+
+The existing channel APIs accept `platform: "aurinko"`. The platform descriptor is available through `GET /api/v1/channel-platforms`, including account-token and signing-secret fields, setup instructions, and capabilities. Registration uses `POST /api/v1/channel-bots` with `label`, `bot_token`, `app_secret`, and optional `target_org_id`. Credential rotation uses the existing PATCH endpoint; `POST /api/v1/channel-bots/{id}/verify` repairs the bound subscription without changing its mailbox.
+
+`POST /api/v1/webhooks/channel/aurinko/{id}` verifies Aurinko's signed raw request before returning a plaintext `validationToken` challenge or processing a notification. Successful/ignored notifications return 200; verification failures return 401, malformed requests 400, and recoverable failures 503 with `Retry-After: 10`. It never returns Aurinko's unsubscribe signal, 422.
+
+Agents reply through `POST /api/v1/channel-relay/reply` with `{"message_id":"INBOUND_UUID","reply":{"text":"Reply text"}}`, using the assigned agent key or message-bound reply token. The original email determines the single recipient; recipient overrides, channel attachments, initiated sends, and edits are unsupported. A durable send barrier prevents automatic resubmission after an uncertain provider POST.
+
+Aurinko bot deletion returns HTTP 200 with `{"webhook_cleanup":"removed"}` or `{"webhook_cleanup":"failed"}`; existing platforms retain HTTP 204. Both outcomes deactivate the bot locally. Failed cleanup requires removal of the remaining exact callback subscription in Aurinko or a later deletion retry. See [Aurinko integration](AURINKO_INTEGRATION.md) for the complete contract and independent AI Service setup.
 
 ### Inbound Triggers
 
@@ -7986,3 +8087,24 @@ Content-Type: application/json
 Default limits:
 - **Per-IP:** 30 requests per 1-second window
 - **Global:** 10 requests/second sustained with burst capacity of 30
+
+
+### Catalog Skill Curation
+
+CatalogEditor and legacy Curation service accounts use the `/catalog-curation` runtime routes below. CatalogEditor requires matching token/live scopes and exact global role permissions `nyxid:catalog:skills:read` or `nyxid:catalog:skills:write`, covering all existing and future catalog entries without grants. The remaining grant requirements in this section apply only to legacy Curation. Legacy Curation runtime requests require the verified SA token, the live unexpired embedded grant, and the exact token/live account scope; their reads reveal only grant-listed catalog services. Both modes deny human credentials, API keys, delegated tokens, and relay tokens. The separate `/admin/service-accounts/{id}/curation-grant` management routes require a human platform admin.
+
+| Method | Path | Scope or authority |
+| --- | --- | --- |
+| POST / DELETE | `/api/v1/admin/service-accounts/{id}/curation-grant` | Human platform admin; sticky Curation purpose/protection |
+| GET | `/api/v1/catalog-curation/services` | `catalog:skills:read` |
+| GET | `/api/v1/catalog-curation/services/{id}/skills` | `catalog:skills:read` |
+| GET | `/api/v1/catalog-curation/services/{id}/openapi.json` | `catalog:skills:read` |
+| PUT | `/api/v1/catalog-curation/services/{id}/skills` | `catalog:skills:write` |
+| GET | `/api/v1/catalog-curation/services/{id}/skills/history` | `catalog:skills:read` |
+| POST | `/api/v1/catalog-curation/services/{id}/skills/restore` | `catalog:skills:write` |
+
+PUT accepts a complete `recommended_skills` and/or `recommended_skill_refs` list, optional `clear_refs`, and required `base_revision` plus UUID `request_id`. Restore accepts `revision`, `base_revision`, and `request_id`. Both reject unknown fields. Revision and budget changes, service state, history, and actor/request receipts commit atomically. Conflicting revisions or reuse of a committed ID with changed input return 409; exhausted budget returns 429. Pure no-ops write no receipt/history/revision and spend no budget.
+
+Human `POST/PUT /api/v1/services` use the same skill validation/history path; updates accept `skills_revision`, `skills_request_id`, optional refs, and `clear_skill_refs`. Omitted update revision means expected zero. Mixed metadata effects retain full request idempotency even when skills are unchanged.
+
+The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.

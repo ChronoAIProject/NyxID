@@ -1,0 +1,126 @@
+{
+  "base_commit": "6f633320c636963e7baa1aad7921814ca1d819cd",
+  "identity_note": "Deterministic test-only identities; live IDs are preserved, never derived or replaced.",
+  "operations": [
+    {
+      "slug": "api-google-drive",
+      "operation": "drive_create_file",
+      "service_id": "0ee51173-8fde-5ab4-8e26-5e5216dbf77e",
+      "endpoint_id": "cd865d30-882e-5f0c-881d-7069a1e0ec97",
+      "before_digest": "sha256:e2f08dd87bfac1077ce15d132b3af5331415c6a344a3252d84f1521c4a73d3c3",
+      "after_digest": "sha256:0178b207db6321749eb0a3433217ac6f5ef32a85273a3c1ab1f629cd3d7f6583",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-drive",
+      "operation": "drive_get_file",
+      "service_id": "0ee51173-8fde-5ab4-8e26-5e5216dbf77e",
+      "endpoint_id": "ecfdc161-18ce-58e3-8c71-a0b3a3e2bc4e",
+      "before_digest": "sha256:f7b2b0cda6678d97173254cfec2d437705e6aec49b22c22bd0eabbc618405754",
+      "after_digest": "sha256:f215b677c4863872368dc8cbdc16a13dbad7454fa17b03709eab077f522a7a76",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-drive",
+      "operation": "drive_update_file",
+      "service_id": "0ee51173-8fde-5ab4-8e26-5e5216dbf77e",
+      "endpoint_id": "15f138ac-c6c9-59b1-94a9-f9079d8f6b15",
+      "before_digest": "sha256:725cc24bddfb040f20efa2c2d2f0f4c2aa3c2d4d6c9686dbe5cddfb8e5290131",
+      "after_digest": "sha256:144dbcfd7a4e3918ad639bb2e348a62ae62bac0745bed764da66cacbf556280c",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-drive",
+      "operation": "drive_copy_file",
+      "service_id": "0ee51173-8fde-5ab4-8e26-5e5216dbf77e",
+      "endpoint_id": "995f0ff0-a38c-54f9-9876-e575dd5d2321",
+      "before_digest": "sha256:18b0779176e958e393526586a3501b65768c7f849075f8bf296f52a77b698626",
+      "after_digest": "sha256:afb1587fdaac22a500868ea0b2a8384e76ae4cdbc2d10047fe0fda95930d22e7",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-drive",
+      "operation": "drive_upload_file",
+      "service_id": "0ee51173-8fde-5ab4-8e26-5e5216dbf77e",
+      "endpoint_id": "7a64a88a-068d-524f-9524-6133c9488f17",
+      "before_digest": "sha256:755d9eedd4755bfb4b9dd86b5966b4f745da59af0c620704444267ea0da9b540",
+      "after_digest": "sha256:709cfedc0f4631bae0d3eadaf7e787a8b8847e8458811948f31911550886a7cd",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-drive",
+      "operation": "drive_upload_file_content",
+      "service_id": "0ee51173-8fde-5ab4-8e26-5e5216dbf77e",
+      "endpoint_id": "65eebacf-0187-5d46-aa73-45e6cb47f085",
+      "before_digest": "sha256:7e2c5f31203eee6b453f09adbe310bbb7d87597faa6803fc2a6851464fe69dca",
+      "after_digest": "sha256:d1b43d3cb9bd924b633d0bd4452afc7388efdbd4b39c82d228bd0a2ce6f15cfd",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-workspace",
+      "operation": "drive_create_file",
+      "service_id": "6402317f-81a8-5b95-ae1f-61cbb6f2169c",
+      "endpoint_id": "02084e44-2a44-506f-a3df-58a9cbcfc507",
+      "before_digest": "sha256:69423e015efc2fbb1683622bfc1a537bf566759bb9304ee6bf87c9931d58720a",
+      "after_digest": "sha256:c7742fb99b668c623aa18f49f178b4fe7869f025e51472b0c7dee2302915e0a3",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-workspace",
+      "operation": "drive_get_file",
+      "service_id": "6402317f-81a8-5b95-ae1f-61cbb6f2169c",
+      "endpoint_id": "5258b83a-539d-5887-8aed-10076d8f5411",
+      "before_digest": "sha256:e62f4e6ea8fa6b7f6be8ae8b4666552429a3ee942d49a46e28bbc9657e754d24",
+      "after_digest": "sha256:77176d56789156c83a973479a230a316d4e914c41e2b0cdd91085c321304b0cd",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-workspace",
+      "operation": "drive_update_file",
+      "service_id": "6402317f-81a8-5b95-ae1f-61cbb6f2169c",
+      "endpoint_id": "c7f1e7a8-9531-5cd1-92a4-d7d09904e88a",
+      "before_digest": "sha256:66e8c40e4b1fbb435583f8c354c64e92521858f274ac4a6e41e2a9dbb63152fb",
+      "after_digest": "sha256:7c2515ea362dd14540d615f1f24ad7435c0747d499b0698693d76cf9a6dad92a",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-workspace",
+      "operation": "drive_copy_file",
+      "service_id": "6402317f-81a8-5b95-ae1f-61cbb6f2169c",
+      "endpoint_id": "6eb3e6aa-df02-5416-af1b-bc5d1ca16dd7",
+      "before_digest": "sha256:bcdacbb9906f32e8f0a636b3b373428c6d1297c37ce2a84f765742bdbdeda0dc",
+      "after_digest": "sha256:ba6e4c19406f0f7413cbe8ac3e70d61880e83edc9d1989e78a3623521f70f7f2",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-workspace",
+      "operation": "drive_upload_file",
+      "service_id": "6402317f-81a8-5b95-ae1f-61cbb6f2169c",
+      "endpoint_id": "37eeed51-751a-5753-87cc-8a21a141fd57",
+      "before_digest": "sha256:33e65220173ec5e52bf4a94bbf3cdab5b1570911524b13ed07f895e0464e96c5",
+      "after_digest": "sha256:fd9f7c1ef5c61b5ca470c975fde80ea7aa8ff2fcd574ddbf321f19985994d011",
+      "before_generation": 7,
+      "after_generation": 8
+    },
+    {
+      "slug": "api-google-workspace",
+      "operation": "drive_upload_file_content",
+      "service_id": "6402317f-81a8-5b95-ae1f-61cbb6f2169c",
+      "endpoint_id": "b051c077-7e44-5b29-9066-89f648d98460",
+      "before_digest": "sha256:46b85a7386d03df482c6345c7babea221f68ae19ad3cf9f3009dc0edeaa0c7d7",
+      "after_digest": "sha256:2b0cfa503d151dae5d5cca20c2e8ca9001ecb207789176e57bde545a96c08de7",
+      "before_generation": 7,
+      "after_generation": 8
+    }
+  ]
+}

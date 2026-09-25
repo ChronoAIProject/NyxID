@@ -141,6 +141,8 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   bot_bearer: "Authorization",
   token_exchange: "",
   aws_sigv4: "",
+  ifttt_webhook: "",
+  ifttt_mcp: "Authorization",
   none: "",
 };
 
@@ -224,7 +226,14 @@ function composeAwsSigv4Credential(fields: AwsSigv4Fields): string {
 function getCredentialFieldMeta(
   authMethod: string,
   authKeyName: string,
+  catalogSlug?: string,
 ): { readonly label: string; readonly placeholder: string } {
+  if (catalogSlug === "api-supabase") {
+    return {
+      label: "Supabase API Key",
+      placeholder: "sb_secret_... or sb_publishable_...",
+    };
+  }
   if (authMethod === "bot_bearer") {
     return { label: "Bot Token", placeholder: "Discord bot token" };
   }
@@ -245,6 +254,9 @@ function getCredentialFieldMeta(
   }
   if (authMethod === "basic") {
     return { label: "Username:Password", placeholder: "user:pass" };
+  }
+  if (authMethod === "ifttt_webhook") {
+    return { label: "IFTTT Webhooks key", placeholder: "Raw key from Webhooks Documentation (not a URL)" };
   }
   if (authMethod === "aws_sigv4") {
     return {
@@ -313,7 +325,8 @@ function shouldShowAuthKeyName(authMethod: string): boolean {
     authMethod !== "oauth2" &&
     authMethod !== "bot_bearer" &&
     authMethod !== "token_exchange" &&
-    authMethod !== "aws_sigv4"
+    authMethod !== "aws_sigv4" &&
+    authMethod !== "ifttt_webhook"
   );
 }
 
@@ -562,6 +575,7 @@ function RoutingStep({
             </button>
             <button
               type="button"
+              disabled={catalogEntry?.auth_method === "ifttt_mcp"}
               onClick={() => setRoutingChoice("node")}
               className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 routingChoice === "node"
@@ -572,7 +586,9 @@ function RoutingStep({
               <Server className="h-5 w-5" />
               <span className="text-xs font-medium">Via Node</span>
               <span className="text-[10px] text-muted-foreground">
-                Route through credential node
+                {catalogEntry?.auth_method === "ifttt_mcp"
+                  ? "IFTTT OAuth uses direct routing"
+                  : "Route through credential node"}
               </span>
             </button>
           </div>
@@ -713,6 +729,7 @@ function KeyForm({
   const credentialMeta = getCredentialFieldMeta(
     form.authMethod,
     form.authKeyName,
+    catalogEntry?.slug,
   );
   // Live URL-format errors: only once the user has typed something, so an
   // untouched optional field stays quiet.
@@ -727,6 +744,7 @@ function KeyForm({
     !isValidHttpUrl(form.openapiSpecUrl.trim())
       ? "Must be a full URL with a domain, e.g. https://api.example.com/openapi.json"
       : null;
+  const isSupabase = catalogEntry?.slug === "api-supabase";
 
   return (
     <div className="space-y-4">
@@ -970,14 +988,18 @@ function KeyForm({
 
         <div className="space-y-1.5">
           <Label htmlFor="add-key-endpoint">
-            Endpoint URL{" "}
+            {isSupabase ? "Supabase Project URL" : "Endpoint URL"}{" "}
             {(isCustom || catalogEntry?.requires_gateway_url) && (
               <span className="text-destructive">*</span>
             )}
           </Label>
           <Input
             id="add-key-endpoint"
-            placeholder="https://api.example.com/v1"
+            placeholder={
+              isSupabase
+                ? "https://project-ref.supabase.co"
+                : "https://api.example.com/v1"
+            }
             value={form.endpointUrl}
             onChange={(e) => onChange({ endpointUrl: e.target.value })}
             readOnly={!endpointEditable}
@@ -1036,6 +1058,7 @@ function KeyForm({
                   <SelectItem value="header">Header</SelectItem>
                   <SelectItem value="query">Query Parameter</SelectItem>
                   <SelectItem value="path">Path Prefix</SelectItem>
+                  <SelectItem value="ifttt_webhook">IFTTT Webhooks</SelectItem>
                   <SelectItem value="basic">Basic Auth</SelectItem>
                   <SelectItem value="body">JSON Body Injection</SelectItem>
                   <SelectItem value="bot_bearer">
@@ -1297,6 +1320,7 @@ function NodeSetupStep({
                     <SelectItem value="header">Header</SelectItem>
                     <SelectItem value="query">Query Parameter</SelectItem>
                     <SelectItem value="path">Path Prefix</SelectItem>
+                    <SelectItem value="ifttt_webhook">IFTTT Webhooks</SelectItem>
                     <SelectItem value="basic">Basic Auth</SelectItem>
                     <SelectItem value="body">JSON Body Injection</SelectItem>
                     <SelectItem value="bot_bearer">
@@ -2973,34 +2997,41 @@ export function AddKeyDialog({
     onOpenChange(next);
   }
 
-  const handleSelectCatalog = useCallback((
-    entry: CatalogEntry,
-    routing: {
-      readonly nodeId?: string;
-      readonly targetOrgId?: string;
-    } = {},
-  ) => {
-    setSelectedEntry(entry);
-    setAuthKey(null);
-    // Fresh entry → default back to the managed one-click choice so a prior
-    // "your own app" selection can't leak into a different provider's flow.
-    setClientSource("managed");
-    setByoOAuthClientId(null);
-    setByoOAuthClientSecret(null);
-    setForm({
-      ...INITIAL_FORM,
-      label: entry.name,
-      endpointUrl: entry.base_url,
-      authMethod: entry.auth_method ?? "bearer",
-      authKeyName: entry.auth_key_name ?? "Authorization",
-      nodeId: routing.nodeId ?? "",
-    });
-    if (routing.targetOrgId !== undefined) {
-      setTargetOrgId(routing.targetOrgId || null);
-    }
-    setUsePlatformKey(prefillUsePlatformKey ?? true);
-    setStep(entry.platform_key?.available && !routing.nodeId ? "binding" : "routing");
-  }, [prefillUsePlatformKey]);
+  const handleSelectCatalog = useCallback(
+    (
+      entry: CatalogEntry,
+      routing: {
+        readonly nodeId?: string;
+        readonly targetOrgId?: string;
+      } = {},
+    ) => {
+      setSelectedEntry(entry);
+      setAuthKey(null);
+      // Fresh entry → default back to the managed one-click choice so a prior
+      // "your own app" selection can't leak into a different provider's flow.
+      setClientSource("managed");
+      setByoOAuthClientId(null);
+      setByoOAuthClientSecret(null);
+      setForm({
+        ...INITIAL_FORM,
+        label: entry.name,
+        endpointUrl: entry.requires_gateway_url ? "" : entry.base_url,
+        authMethod: entry.auth_method ?? "bearer",
+        authKeyName: entry.auth_key_name ?? "Authorization",
+        nodeId: entry.auth_method === "ifttt_mcp" ? "" : (routing.nodeId ?? ""),
+      });
+      if (routing.targetOrgId !== undefined) {
+        setTargetOrgId(routing.targetOrgId || null);
+      }
+      setUsePlatformKey(prefillUsePlatformKey ?? true);
+      setStep(
+        entry.platform_key?.available && !routing.nodeId
+          ? "binding"
+          : "routing",
+      );
+    },
+    [prefillUsePlatformKey],
+  );
 
   // Auto-select from `prefillSlug` once the catalog resolves. Only
   // fires on initial open (tracked via `appliedPrefillRef`) so a

@@ -53,7 +53,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
-import { Plug } from "lucide-react";
+import { ServiceIcon } from "@/components/service-icon";
 import { DishAntennaIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
@@ -107,7 +107,7 @@ export function ProviderListPage() {
 
   async function onSubmit(data: CreateProviderFormData) {
     try {
-      await createMutation.mutateAsync(
+      const created = await createMutation.mutateAsync(
         buildCreateProviderPayload(data) as Parameters<
           typeof createMutation.mutateAsync
         >[0],
@@ -115,6 +115,7 @@ export function ProviderListPage() {
       toast.success("Provider created successfully");
       setCreateOpen(false);
       form.reset();
+      void navigate({ to: "/providers/$providerId", params: { providerId: created.id } });
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
@@ -769,7 +770,7 @@ export function ProviderListPage() {
               <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-3">
                 <div className="flex items-center gap-3">
                   <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                    <Plug className="h-4 w-4 text-primary" />
+                    <ServiceIcon slug={provider.slug} size="sm" />
                   </div>
                   <div>
                     <CardTitle>{provider.name}</CardTitle>

@@ -43,6 +43,7 @@ const LOCAL_UPGRADE_WAIT_SECS: u64 = 4 * 60 * 60;
 pub async fn run(command: OracleCommands) -> Result<()> {
     match command {
         OracleCommands::Ask {
+            require_model_match,
             pool,
             prompt,
             file,
@@ -66,6 +67,9 @@ pub async fn run(command: OracleCommands) -> Result<()> {
 
             let mut body = serde_json::json!({ "prompt": prompt_text });
             insert_opt_str(&mut body, "model", model.as_deref());
+            if let Some(value) = require_model_match {
+                body["require_model_match"] = Value::Bool(value);
+            }
             insert_opt_str(&mut body, "project_url", project_url.as_deref());
             insert_opt_str(&mut body, "tag", tag.as_deref());
             insert_opt_str(&mut body, "client_ref", client_ref.as_deref());
@@ -297,6 +301,7 @@ pub async fn run(command: OracleCommands) -> Result<()> {
 async fn run_pool(command: OraclePoolCommands) -> Result<()> {
     match command {
         OraclePoolCommands::Create {
+            require_model_match,
             slug,
             name,
             description,
@@ -323,6 +328,9 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
             insert_opt_str(&mut body, "visibility", visibility.as_deref());
             insert_opt_str(&mut body, "chatgpt_project_url", project_url.as_deref());
             insert_opt_str(&mut body, "default_model_label", model.as_deref());
+            if let Some(value) = require_model_match {
+                body["require_model_match"] = Value::Bool(value);
+            }
             body["allow_extract"] = Value::Bool(allow_extract);
             insert_opt_str(&mut body, "target_org_id", target_org_id.as_deref());
             insert_opt_u64(&mut body, "max_workers", max_workers.map(u64::from));
@@ -441,6 +449,10 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
                     if let Some(url) = p["chatgpt_project_url"].as_str() {
                         eprintln!("Project URL: {url}");
                     }
+                    eprintln!(
+                        "Require model match: {}",
+                        p["require_model_match"].as_bool().unwrap_or(true)
+                    );
                     if let Some(model) = p["default_model_label"].as_str() {
                         eprintln!("Model:       {model}");
                     }
@@ -449,6 +461,7 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
             Ok(())
         }
         OraclePoolCommands::Update {
+            require_model_match,
             pool,
             name,
             description,
@@ -471,6 +484,9 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
             insert_opt_str(&mut body, "visibility", visibility.as_deref());
             insert_opt_str(&mut body, "chatgpt_project_url", project_url.as_deref());
             insert_opt_str(&mut body, "default_model_label", model.as_deref());
+            if let Some(value) = require_model_match {
+                body["require_model_match"] = Value::Bool(value);
+            }
             if let Some(allow_extract) = allow_extract {
                 body["allow_extract"] = Value::Bool(allow_extract);
             }
@@ -947,6 +963,8 @@ fn print_workers(output: OutputFormat, response: &Value, include_offline: bool) 
         "Current task",
         "Chrome",
         "State",
+        "Last error",
+        "Cooldown until",
     ]);
     for worker in workers {
         let seen = if worker["online"].as_bool().unwrap_or(false) {
@@ -959,12 +977,14 @@ fn print_workers(output: OutputFormat, response: &Value, include_offline: bool) 
         };
         table.add_row([
             text_field(&worker, "label"),
-            text_field(&worker, "version"),
+            worker_version_display(&worker),
             seen,
             bool_state(worker.get("logged_in").and_then(Value::as_bool)),
             text_field(&worker, "current_task_id"),
             bool_state(worker.get("chrome_alive").and_then(Value::as_bool)),
             text_field(&worker, "desired_state"),
+            text_field(&worker, "last_error"),
+            text_field(&worker, "cooldown_until"),
         ]);
     }
     println!("{table}");
@@ -972,6 +992,15 @@ fn print_workers(output: OutputFormat, response: &Value, include_offline: bool) 
         eprintln!("{hidden} offline worker(s) hidden; pass --all to show them.");
     }
     Ok(())
+}
+
+fn worker_version_display(worker: &Value) -> String {
+    let version = text_field(worker, "version");
+    if worker["bundle_outdated"].as_bool().unwrap_or(false) {
+        format!("{version} (outdated)")
+    } else {
+        version
+    }
 }
 
 fn print_worker(output: OutputFormat, worker: &Value, commands: &Value) -> Result<()> {
@@ -986,7 +1015,8 @@ fn print_worker(output: OutputFormat, worker: &Value, commands: &Value) -> Resul
         return Ok(());
     }
     eprintln!("Label:        {}", text_field(worker, "label"));
-    eprintln!("Version:      {}", text_field(worker, "version"));
+    eprintln!("Version:      {}", worker_version_display(worker));
+    eprintln!("Cooldown:     {}", text_field(worker, "cooldown_until"));
     eprintln!("Platform:     {}", text_field(worker, "platform"));
     eprintln!(
         "Online:       {} (last seen {}s ago)",
@@ -2296,6 +2326,18 @@ fn print_result(output: OutputFormat, task: &Value) -> Result<()> {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(task)?),
         OutputFormat::Table => {
             let status = task["status"].as_str().unwrap_or("-");
+            for (key, label) in [
+                ("failure_detail", "Failure detail"),
+                ("observed_model_switcher", "Observed switcher"),
+                ("observed_model_effort", "Observed effort"),
+            ] {
+                if let Some(value) = task[key].as_str() {
+                    eprintln!("{label}: {value}");
+                }
+            }
+            if let Some(count) = task["reroute_count"].as_u64() {
+                eprintln!("Capacity reroutes: {count}");
+            }
             if let Some(attempts) = task["attempts"].as_u64() {
                 eprintln!(
                     "Attempts: {attempts} (infrastructure retries {}/{})",
@@ -2313,7 +2355,11 @@ fn print_result(output: OutputFormat, task: &Value) -> Result<()> {
                 }
                 "failed" => {
                     let reason = task["failure_reason"].as_str().unwrap_or("unknown");
-                    bail!("Task failed ({reason}).");
+                    let detail = task["failure_detail"]
+                        .as_str()
+                        .map(|v| format!("; {v}"))
+                        .unwrap_or_default();
+                    bail!("Task failed ({reason}{detail}).");
                 }
                 "cancelled" => bail!("Task was cancelled."),
                 other => {
@@ -2337,6 +2383,11 @@ fn print_status(output: OutputFormat, pool: &str, status: &Value) -> Result<()> 
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(status)?),
         OutputFormat::Table => {
             eprintln!("Pool '{pool}':");
+            eprintln!(
+                "  Outdated workers: {} (bundle {})",
+                status["outdated_workers"].as_u64().unwrap_or(0),
+                text_field(status, "bundle_version")
+            );
             eprintln!("  Queued:     {}", status["queued"].as_u64().unwrap_or(0));
             eprintln!(
                 "  Dispatched: {} / {}",
@@ -2356,13 +2407,22 @@ fn print_status(output: OutputFormat, pool: &str, status: &Value) -> Result<()> 
             } else {
                 let mut table = Table::new();
                 table.load_preset(UTF8_FULL_CONDENSED);
-                table.set_header(["Worker", "Seen (s ago)", "Task", "Script"]);
+                table.set_header([
+                    "Worker",
+                    "Seen (s ago)",
+                    "Task",
+                    "Script",
+                    "Last error",
+                    "Cooldown until",
+                ]);
                 for w in &workers {
                     table.add_row([
                         w["worker_label"].as_str().unwrap_or("-").to_string(),
                         w["last_seen_secs_ago"].as_i64().unwrap_or(0).to_string(),
                         w["current_task_id"].as_str().unwrap_or("-").to_string(),
                         w["script_version"].as_str().unwrap_or("-").to_string(),
+                        text_field(w, "last_error"),
+                        text_field(w, "cooldown_until"),
                     ]);
                 }
                 println!("{table}");
@@ -2550,6 +2610,68 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[test]
+    fn oracle_failure_output_includes_underlying_detail_and_version_marks_drift() {
+        let failed = serde_json::json!({"status":"failed", "failure_reason":"infrastructure_retry_exhausted", "failure_detail":"page_crashed@waiting_response"});
+        let error = print_result(OutputFormat::Table, &failed)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("infrastructure_retry_exhausted"));
+        assert!(error.contains("page_crashed@waiting_response"));
+        assert_eq!(
+            worker_version_display(&serde_json::json!({"version":"old", "bundle_outdated":true})),
+            "old (outdated)"
+        );
+        assert_eq!(
+            worker_version_display(
+                &serde_json::json!({"version":"current", "bundle_outdated":false})
+            ),
+            "current"
+        );
+        assert_eq!(
+            worker_version_display(&serde_json::json!({"version":"legacy"})),
+            "legacy"
+        );
+    }
+
+    #[test]
+    fn oracle_model_match_flags_parse_as_optional_booleans() {
+        use clap::Parser;
+        for args in [
+            vec![
+                "nyxid",
+                "oracle",
+                "ask",
+                "pool",
+                "prompt",
+                "--require-model-match",
+                "false",
+            ],
+            vec![
+                "nyxid",
+                "oracle",
+                "pool",
+                "create",
+                "pool",
+                "--name",
+                "Pool",
+                "--require-model-match",
+                "true",
+            ],
+            vec![
+                "nyxid",
+                "oracle",
+                "pool",
+                "update",
+                "pool",
+                "--require-model-match",
+                "false",
+            ],
+        ] {
+            assert!(crate::cli::Cli::try_parse_from(args).is_ok());
+        }
     }
 
     #[tokio::test]
@@ -2920,6 +3042,7 @@ mod tests {
             .await;
 
         let result = run(OracleCommands::Ask {
+            require_model_match: None,
             pool: "chatgpt-pro".to_string(),
             prompt: Some("what is 2+2?".to_string()),
             file: None,
@@ -2963,6 +3086,7 @@ mod tests {
             .await;
 
         run(OracleCommands::Ask {
+            require_model_match: None,
             pool: "p".to_string(),
             prompt: Some("hello".to_string()),
             file: None,
@@ -3004,6 +3128,7 @@ mod tests {
             .await;
 
         run(OracleCommands::Ask {
+            require_model_match: None,
             pool: "p".to_string(),
             prompt: Some("route this prompt".to_string()),
             file: None,
@@ -3056,6 +3181,7 @@ mod tests {
             .await;
 
         run(OracleCommands::Ask {
+            require_model_match: None,
             pool: "p".to_string(),
             prompt: Some("2+2?".to_string()),
             file: None,
@@ -3316,6 +3442,7 @@ mod tests {
             .await;
 
         run_pool(OraclePoolCommands::Create {
+            require_model_match: None,
             slug: "chatgpt-pro".to_string(),
             name: "ChatGPT Pro".to_string(),
             description: None,

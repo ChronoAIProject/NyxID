@@ -1,7 +1,7 @@
 //! Product presets sharing the existing Google OAuth client.
 
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{ProxyOperationPolicy, ProxyOperationRule};
+use crate::models::downstream_service::ProxyOperationPolicy;
 
 pub const DRIVE: &str = "https://www.googleapis.com/auth/drive";
 pub const CALENDAR: &str = "https://www.googleapis.com/auth/calendar";
@@ -28,6 +28,9 @@ pub enum GoogleProduct {
     Calendar,
     Drive,
     Gmail,
+    Docs,
+    Sheets,
+    Slides,
 }
 
 impl GoogleProduct {
@@ -37,6 +40,9 @@ impl GoogleProduct {
             "api-google-calendar" => Some(Self::Calendar),
             "api-google-drive" => Some(Self::Drive),
             "api-google-gmail" => Some(Self::Gmail),
+            "api-google-docs" => Some(Self::Docs),
+            "api-google-sheets" => Some(Self::Sheets),
+            "api-google-slides" => Some(Self::Slides),
             _ => None,
         }
     }
@@ -46,7 +52,7 @@ impl GoogleProduct {
         match self {
             Self::Workspace => scopes.extend([DRIVE, CALENDAR, GMAIL_READONLY, GMAIL_SEND]),
             Self::Calendar => scopes.push(CALENDAR),
-            Self::Drive => scopes.push(DRIVE),
+            Self::Drive | Self::Docs | Self::Sheets | Self::Slides => scopes.push(DRIVE),
             Self::Gmail => scopes.extend([GMAIL_READONLY, GMAIL_SEND]),
         }
         scopes.into_iter().map(String::from).collect()
@@ -55,7 +61,7 @@ impl GoogleProduct {
     pub fn required_scopes(self) -> &'static [&'static str] {
         match self {
             Self::Workspace | Self::Gmail => &[GMAIL_SEND],
-            Self::Calendar | Self::Drive => &[],
+            Self::Calendar | Self::Drive | Self::Docs | Self::Sheets | Self::Slides => &[],
         }
     }
 
@@ -91,7 +97,9 @@ impl GoogleProduct {
                     || match self {
                         Self::Workspace => true,
                         Self::Calendar => scope.starts_with(CALENDAR),
-                        Self::Drive => scope.starts_with(DRIVE),
+                        Self::Drive | Self::Docs | Self::Sheets | Self::Slides => {
+                            scope.starts_with(DRIVE)
+                        }
                         Self::Gmail => matches!(**scope, GMAIL_READONLY | GMAIL_SEND),
                     }
             })
@@ -119,7 +127,28 @@ impl GoogleProduct {
             Self::Calendar => "google-calendar",
             Self::Drive => "google-drive",
             Self::Gmail => "google-gmail",
+            Self::Docs => "google-docs",
+            Self::Sheets => "google-sheets",
+            Self::Slides => "google-slides",
         }
+    }
+
+    pub fn has_editor_destinations(self) -> bool {
+        matches!(self, Self::Workspace | Self::Drive)
+    }
+
+    /// The original single-origin policy is the activation migration's CAS pin.
+    pub fn legacy_operation_policy(self) -> AppResult<ProxyOperationPolicy> {
+        let source = match self {
+            Self::Drive => include_str!("../../specs/fixtures/google-drive-legacy-policy.json"),
+            Self::Workspace => {
+                include_str!("../../specs/fixtures/google-workspace-legacy-policy.json")
+            }
+            _ => return self.operation_policy(),
+        };
+        serde_json::from_str(source).map_err(|error| {
+            AppError::Internal(format!("Invalid historical Google policy: {error}"))
+        })
     }
 
     /// The operation catalog also defines the proxy boundary, including for
@@ -136,12 +165,34 @@ impl GoogleProduct {
                 ["get", "post", "put", "patch", "delete"]
                     .into_iter()
                     .filter(move |method| item.get(*method).is_some())
-                    .map(move |method| ProxyOperationRule {
-                        method: method.to_ascii_uppercase(),
-                        path_template: path.clone(),
+                    .map(move |method| {
+                        let mut rule = super::proxy_authorization::rule_from_endpoint(
+                            method,
+                            path,
+                            item[method].get("parameters"),
+                        )?;
+                        if self.has_editor_destinations()
+                            && let Some(origin) = item
+                                .get("servers")
+                                .and_then(|servers| servers[0]["url"].as_str())
+                        {
+                            rule.target_id = Some(
+                                super::destination_routing::workspace_targets()
+                                    .into_iter()
+                                    .find(|(_, allowed)| allowed == origin)
+                                    .map(|(id, _)| id)
+                                    .ok_or_else(|| {
+                                        AppError::Internal(
+                                            "Google overlay origin is not an allowed recipient"
+                                                .into(),
+                                        )
+                                    })?,
+                            );
+                        }
+                        Ok(rule)
                     })
             })
-            .collect();
+            .collect::<AppResult<Vec<_>>>()?;
         super::proxy_authorization::normalize_policy(ProxyOperationPolicy { rules })
     }
 }
@@ -152,12 +203,24 @@ mod tests {
     use crate::services::proxy_authorization::{CanonicalPath, authorize_proxy_operation_fields};
 
     #[test]
+    fn legacy_google_policy_pins_preserve_production_source_order() {
+        for product in [GoogleProduct::Drive, GoogleProduct::Workspace] {
+            let mut main_policy = product.operation_policy().unwrap();
+            main_policy.rules.retain(|rule| rule.target_id.is_none());
+            assert_eq!(product.legacy_operation_policy().unwrap(), main_policy);
+        }
+    }
+
+    #[test]
     fn google_product_scopes_exclude_other_apis() {
         for product in [
             GoogleProduct::Workspace,
             GoogleProduct::Calendar,
             GoogleProduct::Drive,
             GoogleProduct::Gmail,
+            GoogleProduct::Docs,
+            GoogleProduct::Sheets,
+            GoogleProduct::Slides,
         ] {
             product
                 .validate_scopes(Some(&product.default_scopes().join(" ")))
@@ -167,13 +230,23 @@ mod tests {
                 "https://www.googleapis.com/auth/gmail.compose",
                 "https://mail.google.com/",
                 "https://www.googleapis.com/auth/cloud-platform",
+                "https://www.googleapis.com/auth/documents",
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/presentations",
             ] {
                 assert!(product.validate_scopes(Some(scope)).is_err());
             }
             for (scope, allowed) in [
                 (
                     DRIVE,
-                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Drive),
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace
+                            | GoogleProduct::Drive
+                            | GoogleProduct::Docs
+                            | GoogleProduct::Sheets
+                            | GoogleProduct::Slides
+                    ),
                 ),
                 (
                     CALENDAR,
@@ -236,6 +309,9 @@ mod tests {
             GoogleProduct::Calendar,
             GoogleProduct::Drive,
             GoogleProduct::Gmail,
+            GoogleProduct::Docs,
+            GoogleProduct::Sheets,
+            GoogleProduct::Slides,
         ] {
             let policy = product.operation_policy().unwrap();
             for (method, path, allowed) in [
@@ -288,6 +364,30 @@ mod tests {
                     "POST",
                     "/gmail/v1/users/me/messages/send",
                     matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail),
+                ),
+                (
+                    "POST",
+                    "/v1/documents/doc:batchUpdate",
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace | GoogleProduct::Drive | GoogleProduct::Docs
+                    ),
+                ),
+                (
+                    "PUT",
+                    "/v4/spreadsheets/sheet/values/A1:B2",
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace | GoogleProduct::Drive | GoogleProduct::Sheets
+                    ),
+                ),
+                (
+                    "POST",
+                    "/v1/presentations/slides:batchUpdate",
+                    matches!(
+                        product,
+                        GoogleProduct::Workspace | GoogleProduct::Drive | GoogleProduct::Slides
+                    ),
                 ),
                 ("DELETE", "/gmail/v1/users/me/messages/message1", false),
                 ("POST", "/gmail/v1/users/me/messages/message1/trash", false),

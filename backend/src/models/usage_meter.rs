@@ -37,6 +37,7 @@ pub enum UsageStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CredentialClass {
     NyxidManagedMaster,
+    NyxidPlatformOauthApp,
     UserOwned,
     AgentOverrideUserOwned,
     NodeManaged,
@@ -77,6 +78,8 @@ pub struct UsageFunding {
     /// temporarily unavailable. Model-specific rates still win at settlement.
     #[serde(default)]
     pub credits_per_unit_micros: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits_per_unit_pico: Option<i64>,
     #[serde(default)]
     pub allowance_reservations: Vec<AllowanceReservationAllocation>,
     #[serde(default)]
@@ -93,6 +96,19 @@ pub struct UsageFunding {
     pub settlement_claimed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallet_charge_credits: Option<i64>,
+    /// Gross cost of the full finalized quantity at the settlement rate,
+    /// including units covered by allowances. Display only; never a wallet debit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_charge_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_funded_quantity: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_funded_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_funded_micros: Option<i64>,
+    /// Exact wallet-funded cost before rounding to whole debit credits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_funded_micros: Option<i64>,
     /// Lago quantity funded by the wallet, in millionths of one metered
     /// unit. None preserves legacy whole-quantity event behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,6 +121,11 @@ pub struct UsageFunding {
 pub struct UsageMeterRow {
     #[serde(rename = "_id")]
     pub id: String,
+    /// New rows enter the indexed live tail. Missing legacy markers are also
+    /// pending; the bounded fold discovers them without a migration.
+    #[serde(default = "default_rollup_pending")]
+    pub rollup_pending: bool,
+
     pub transaction_id: String,
     pub billing_request_id: String,
     pub layer: BillingLayer,
@@ -137,6 +158,9 @@ pub struct UsageMeterRow {
     pub quantity: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_resale_quantity: Option<i64>,
+    /// Crash-recoverable final quantities for all platform components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_platform_usage: Option<crate::models::service_billing::PlatformUsage>,
     pub status: UsageStatus,
     pub forwarded: bool,
     pub released: bool,
@@ -156,4 +180,8 @@ pub struct UsageMeterRow {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+fn default_rollup_pending() -> bool {
+    true
 }

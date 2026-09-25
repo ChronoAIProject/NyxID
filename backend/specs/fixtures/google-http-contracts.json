@@ -1,0 +1,1871 @@
+{
+  "drive_list_files": {
+    "parameters": [
+      {
+        "name": "q",
+        "in": "query",
+        "required": false,
+        "description": "Drive search expression, for example trashed = false.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "pageSize",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      {
+        "name": "pageToken",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "orderBy",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "corpora",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "driveId",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "includeItemsFromAllDrives",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      {
+        "name": "supportsAllDrives",
+        "in": "query",
+        "required": false,
+        "description": "Support shared drives as well as My Drive.",
+        "schema": {
+          "type": "boolean"
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/drive/v3/files"
+  },
+  "drive_create_file": {
+    "parameters": [
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "description": "Fields to return, for example id,name,mimeType.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "supportsAllDrives",
+        "in": "query",
+        "required": false,
+        "description": "Support shared drives as well as My Drive.",
+        "schema": {
+          "type": "boolean"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string",
+                "description": "Use application/vnd.google-apps.folder to create a folder."
+              },
+              "description": {
+                "type": "string"
+              },
+              "parents": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "trashed": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/drive/v3/files"
+  },
+  "drive_get_file": {
+    "parameters": [
+      {
+        "name": "fileId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "description": "Fields to return, for example id,name,mimeType.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "supportsAllDrives",
+        "in": "query",
+        "required": false,
+        "description": "Support shared drives as well as My Drive.",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      {
+        "name": "alt",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "json",
+            "media"
+          ]
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/drive/v3/files/{fileId}"
+  },
+  "drive_update_file": {
+    "parameters": [
+      {
+        "name": "fileId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "description": "Fields to return, for example id,name,mimeType.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "supportsAllDrives",
+        "in": "query",
+        "required": false,
+        "description": "Support shared drives as well as My Drive.",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      {
+        "name": "addParents",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "removeParents",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string",
+                "description": "Use application/vnd.google-apps.folder to create a folder."
+              },
+              "description": {
+                "type": "string"
+              },
+              "trashed": {
+                "type": "boolean"
+              }
+            },
+            "description": "File metadata to update. Move files using the existing addParents and removeParents query parameters; parents cannot be updated in this body."
+          }
+        }
+      }
+    },
+    "method": "PATCH",
+    "path": "/drive/v3/files/{fileId}"
+  },
+  "drive_delete_file": {
+    "parameters": [
+      {
+        "name": "fileId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "supportsAllDrives",
+        "in": "query",
+        "required": false,
+        "description": "Support shared drives as well as My Drive.",
+        "schema": {
+          "type": "boolean"
+        }
+      }
+    ],
+    "method": "DELETE",
+    "path": "/drive/v3/files/{fileId}"
+  },
+  "drive_copy_file": {
+    "parameters": [
+      {
+        "name": "fileId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "description": "Fields to return, for example id,name,mimeType.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "supportsAllDrives",
+        "in": "query",
+        "required": false,
+        "description": "Support shared drives as well as My Drive.",
+        "schema": {
+          "type": "boolean"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string",
+                "description": "Use application/vnd.google-apps.folder to create a folder."
+              },
+              "description": {
+                "type": "string"
+              },
+              "parents": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "trashed": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/drive/v3/files/{fileId}/copy"
+  },
+  "drive_export_file": {
+    "parameters": [
+      {
+        "name": "fileId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "mimeType",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/drive/v3/files/{fileId}/export"
+  },
+  "drive_upload_file": {
+    "parameters": [
+      {
+        "name": "uploadType",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "media",
+            "multipart"
+          ]
+        },
+        "x-nyxid-mcp-enum": [
+          "media"
+        ],
+        "description": "media sends raw content with the request Content-Type identifying the content type. multipart sends multipart/related with a boundary parameter, JSON File metadata as the first part, and content with its own Content-Type as the second part. MCP supports media only."
+      },
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "description": "Fields to return, for example id,name,mimeType.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "supportsAllDrives",
+        "in": "query",
+        "required": false,
+        "description": "Support shared drives as well as My Drive.",
+        "schema": {
+          "type": "boolean"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/octet-stream": {
+          "schema": {
+            "type": "string",
+            "description": "Raw file bytes. MCP callers supply the binary body using the tool's base64 encoding."
+          }
+        },
+        "multipart/related": {
+          "schema": {
+            "type": "string",
+            "description": "For HTTP/CLI multipart requests set Content-Type: multipart/related; boundary=nyxid_google_doc and send JSON File metadata first, then text/html content. Set metadata mimeType to application/vnd.google-apps.document for the HTML Google Doc import. POST imports a new document; use docs_batch_update_document for targeted edits after creation. The generated MCP tool supports only uploadType=media with a base64 body and application/octet-stream. POST File metadata may optionally include parents to select a folder.",
+            "example": "--nyxid_google_doc\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{\"name\":\"Imported document\",\"mimeType\":\"application/vnd.google-apps.document\"}\r\n--nyxid_google_doc\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<!doctype html><html><body><h1>Imported document</h1><p>Hello from NyxID.</p></body></html>\r\n--nyxid_google_doc--\r\n"
+          }
+        }
+      },
+      "x-nyxid-mcp-media": "application/octet-stream"
+    },
+    "method": "POST",
+    "path": "/upload/drive/v3/files"
+  },
+  "drive_upload_file_content": {
+    "parameters": [
+      {
+        "name": "fileId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "uploadType",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "media",
+            "multipart"
+          ]
+        },
+        "x-nyxid-mcp-enum": [
+          "media"
+        ],
+        "description": "media sends raw content with the request Content-Type identifying the content type. multipart sends multipart/related with a boundary parameter, JSON File metadata as the first part, and content with its own Content-Type as the second part. MCP supports media only."
+      },
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "description": "Fields to return, for example id,name,mimeType.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "supportsAllDrives",
+        "in": "query",
+        "required": false,
+        "description": "Support shared drives as well as My Drive.",
+        "schema": {
+          "type": "boolean"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/octet-stream": {
+          "schema": {
+            "type": "string",
+            "description": "Raw file bytes. MCP callers supply the binary body using the tool's base64 encoding."
+          }
+        },
+        "multipart/related": {
+          "schema": {
+            "type": "string",
+            "description": "For HTTP/CLI multipart requests set Content-Type: multipart/related; boundary=nyxid_google_doc and send JSON File metadata first, then text/html content. Set metadata mimeType to application/vnd.google-apps.document for the HTML Google Doc import. This replaces the whole document; use docs_batch_update_document for targeted edits. The generated MCP tool supports only uploadType=media with a base64 body and application/octet-stream. Move files using addParents/removeParents on drive_update_file, not parents in PATCH metadata.",
+            "example": "--nyxid_google_doc\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{\"name\":\"Updated document\",\"mimeType\":\"application/vnd.google-apps.document\"}\r\n--nyxid_google_doc\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<!doctype html><html><body><h1>Updated document</h1><p>Hello from NyxID.</p></body></html>\r\n--nyxid_google_doc--\r\n"
+          }
+        }
+      },
+      "x-nyxid-mcp-media": "application/octet-stream"
+    },
+    "method": "PATCH",
+    "path": "/upload/drive/v3/files/{fileId}"
+  },
+  "docs_create_document": {
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "title": {
+                "type": "string",
+                "description": "Document title shown in Drive. The document is created in the account's root Drive folder; move it with drive_update_file."
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/v1/documents"
+  },
+  "docs_get_document": {
+    "parameters": [
+      {
+        "name": "documentId",
+        "in": "path",
+        "required": true,
+        "description": "Document id. This is the same id as the Drive file id.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "suggestionsViewMode",
+        "in": "query",
+        "required": false,
+        "description": "How suggested edits are rendered in the response.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "DEFAULT_FOR_CURRENT_ACCESS",
+            "SUGGESTIONS_INLINE",
+            "PREVIEW_SUGGESTIONS_ACCEPTED",
+            "PREVIEW_WITHOUT_SUGGESTIONS"
+          ]
+        }
+      },
+      {
+        "name": "includeTabsContent",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        },
+        "description": "Include all document tabs; set true when editing content outside the first tab."
+      },
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Optional partial-response field mask."
+      }
+    ],
+    "method": "GET",
+    "path": "/v1/documents/{documentId}"
+  },
+  "docs_batch_update_document": {
+    "parameters": [
+      {
+        "name": "documentId",
+        "in": "path",
+        "required": true,
+        "description": "Document id. This is the same id as the Drive file id.",
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "requests"
+            ],
+            "properties": {
+              "requests": {
+                "type": "array",
+                "description": "Ordered edits applied atomically: the whole batch succeeds or none of it does. Each entry holds exactly one request object, for example insertText, deleteContentRange, replaceAllText, updateTextStyle, updateParagraphStyle, insertTable, or createParagraphBullets. Indexes refer to the document returned by docs_get_document, and each request sees the document as modified by the previous ones.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "writeControl": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Optional optimistic concurrency control. Set requiredRevisionId to the revisionId from docs_get_document to reject the batch if the document changed in the meantime.",
+                "properties": {
+                  "requiredRevisionId": {
+                    "type": "string"
+                  },
+                  "targetRevisionId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/v1/documents/{documentId}:batchUpdate"
+  },
+  "sheets_create_spreadsheet": {
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "properties": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "locale": {
+                    "type": "string"
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title"
+                ]
+              },
+              "sheets": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "description": "Initial sheets and their properties."
+              }
+            },
+            "required": [
+              "properties"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/v4/spreadsheets"
+  },
+  "sheets_get_spreadsheet": {
+    "parameters": [
+      {
+        "name": "spreadsheetId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "includeGridData",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      {
+        "name": "ranges",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "A1 range to include in grid data."
+      },
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Optional partial-response field mask."
+      }
+    ],
+    "method": "GET",
+    "path": "/v4/spreadsheets/{spreadsheetId}"
+  },
+  "sheets_batch_update_spreadsheet": {
+    "parameters": [
+      {
+        "name": "spreadsheetId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "requests": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "description": "Ordered API request objects, applied atomically. Each entry contains exactly one request, such as addSheet, updateCells, repeatCell, or updateSpreadsheetProperties."
+              },
+              "includeSpreadsheetInResponse": {
+                "type": "boolean"
+              },
+              "responseIncludeGridData": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "requests"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/v4/spreadsheets/{spreadsheetId}:batchUpdate"
+  },
+  "sheets_get_values": {
+    "parameters": [
+      {
+        "name": "spreadsheetId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "range",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "A1 range or named range, such as Sheet1!A1:B2, 'Quarter 1'!A1:B2, A:A, or A1. Colons separate coordinates only; custom-method suffixes are not range values.",
+        "x-nyxid-path-constraint": "sheets_a1_range"
+      },
+      {
+        "name": "majorDimension",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "ROWS",
+            "COLUMNS"
+          ]
+        }
+      },
+      {
+        "name": "valueRenderOption",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "FORMATTED_VALUE",
+            "UNFORMATTED_VALUE",
+            "FORMULA"
+          ]
+        }
+      },
+      {
+        "name": "dateTimeRenderOption",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "SERIAL_NUMBER",
+            "FORMATTED_STRING"
+          ]
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}"
+  },
+  "sheets_update_values": {
+    "parameters": [
+      {
+        "name": "spreadsheetId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "range",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "A1 range or named range, such as Sheet1!A1:B2, 'Quarter 1'!A1:B2, A:A, or A1. Colons separate coordinates only; custom-method suffixes are not range values.",
+        "x-nyxid-path-constraint": "sheets_a1_range"
+      },
+      {
+        "name": "valueInputOption",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "RAW",
+            "USER_ENTERED"
+          ]
+        }
+      },
+      {
+        "name": "includeValuesInResponse",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      {
+        "name": "responseValueRenderOption",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "FORMATTED_VALUE",
+            "UNFORMATTED_VALUE",
+            "FORMULA"
+          ]
+        }
+      },
+      {
+        "name": "responseDateTimeRenderOption",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "SERIAL_NUMBER",
+            "FORMATTED_STRING"
+          ]
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "range": {
+                "type": "string",
+                "description": "Optional range in A1 notation; the path range selects the target."
+              },
+              "majorDimension": {
+                "type": "string",
+                "enum": [
+                  "ROWS",
+                  "COLUMNS"
+                ]
+              },
+              "values": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {}
+                },
+                "description": "Rows or columns of scalar cell values (strings, numbers, booleans, or null to skip). Use an empty string to clear a cell."
+              }
+            },
+            "required": [
+              "values"
+            ]
+          }
+        }
+      }
+    },
+    "method": "PUT",
+    "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}"
+  },
+  "sheets_append_values": {
+    "parameters": [
+      {
+        "name": "spreadsheetId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "range",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "A1 range or named range, such as Sheet1!A1:B2, 'Quarter 1'!A1:B2, A:A, or A1. Colons separate coordinates only; custom-method suffixes are not range values.",
+        "x-nyxid-path-constraint": "sheets_a1_range"
+      },
+      {
+        "name": "valueInputOption",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "RAW",
+            "USER_ENTERED"
+          ]
+        }
+      },
+      {
+        "name": "includeValuesInResponse",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      {
+        "name": "responseValueRenderOption",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "FORMATTED_VALUE",
+            "UNFORMATTED_VALUE",
+            "FORMULA"
+          ]
+        }
+      },
+      {
+        "name": "responseDateTimeRenderOption",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "SERIAL_NUMBER",
+            "FORMATTED_STRING"
+          ]
+        }
+      },
+      {
+        "name": "insertDataOption",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "enum": [
+            "OVERWRITE",
+            "INSERT_ROWS"
+          ]
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "range": {
+                "type": "string",
+                "description": "Optional range in A1 notation; the path range selects the target."
+              },
+              "majorDimension": {
+                "type": "string",
+                "enum": [
+                  "ROWS",
+                  "COLUMNS"
+                ]
+              },
+              "values": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {}
+                },
+                "description": "Rows or columns of scalar cell values (strings, numbers, booleans, or null to skip). Use an empty string to clear a cell."
+              }
+            },
+            "required": [
+              "values"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}:append"
+  },
+  "sheets_clear_values": {
+    "parameters": [
+      {
+        "name": "spreadsheetId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "range",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "A1 range or named range, such as Sheet1!A1:B2, 'Quarter 1'!A1:B2, A:A, or A1. Colons separate coordinates only; custom-method suffixes are not range values.",
+        "x-nyxid-path-constraint": "sheets_a1_range"
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear"
+  },
+  "slides_create_presentation": {
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/v1/presentations"
+  },
+  "slides_get_presentation": {
+    "parameters": [
+      {
+        "name": "presentationId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Optional partial-response field mask."
+      }
+    ],
+    "method": "GET",
+    "path": "/v1/presentations/{presentationId}"
+  },
+  "slides_batch_update_presentation": {
+    "parameters": [
+      {
+        "name": "presentationId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "requests": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "description": "Ordered API request objects, applied atomically. Each entry contains exactly one request, such as createSlide, createShape, insertText, replaceAllText, updateTextStyle, or deleteObject."
+              },
+              "writeControl": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "requiredRevisionId": {
+                    "type": "string",
+                    "description": "Reject the batch if the presentation changed since this revision was read."
+                  }
+                }
+              }
+            },
+            "required": [
+              "requests"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/v1/presentations/{presentationId}:batchUpdate"
+  },
+  "calendar_list_calendars": {
+    "parameters": [
+      {
+        "name": "maxResults",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      {
+        "name": "pageToken",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "showHidden",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      {
+        "name": "minAccessRole",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/calendar/v3/users/me/calendarList"
+  },
+  "calendar_add_to_list": {
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/calendar/v3/users/me/calendarList"
+  },
+  "calendar_remove_from_list": {
+    "parameters": [
+      {
+        "name": "calendarId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "method": "DELETE",
+    "path": "/calendar/v3/users/me/calendarList/{calendarId}"
+  },
+  "calendar_create_calendar": {
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "summary": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "location": {
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/calendar/v3/calendars"
+  },
+  "calendar_get_calendar": {
+    "parameters": [
+      {
+        "name": "calendarId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/calendar/v3/calendars/{calendarId}"
+  },
+  "calendar_update_calendar": {
+    "parameters": [
+      {
+        "name": "calendarId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "summary": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "location": {
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "method": "PATCH",
+    "path": "/calendar/v3/calendars/{calendarId}"
+  },
+  "calendar_delete_calendar": {
+    "parameters": [
+      {
+        "name": "calendarId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "method": "DELETE",
+    "path": "/calendar/v3/calendars/{calendarId}"
+  },
+  "calendar_list_events": {
+    "parameters": [
+      {
+        "name": "calendarId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "timeMin",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "timeMax",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "maxResults",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer"
+        }
+      },
+      {
+        "name": "pageToken",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "syncToken",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "q",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "singleEvents",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      {
+        "name": "orderBy",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "showDeleted",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      {
+        "name": "timeZone",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/calendar/v3/calendars/{calendarId}/events"
+  },
+  "calendar_create_event": {
+    "parameters": [
+      {
+        "name": "calendarId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "sendUpdates",
+        "in": "query",
+        "required": false,
+        "description": "Which guests receive notifications.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "all",
+            "externalOnly",
+            "none"
+          ]
+        }
+      },
+      {
+        "name": "conferenceDataVersion",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "summary": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "location": {
+                "type": "string"
+              },
+              "start": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "date": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD for an all-day event."
+                  },
+                  "dateTime": {
+                    "type": "string",
+                    "description": "RFC3339 timestamp."
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                }
+              },
+              "end": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "date": {
+                    "type": "string",
+                    "description": "Exclusive end date for an all-day event."
+                  },
+                  "dateTime": {
+                    "type": "string",
+                    "description": "RFC3339 timestamp."
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                }
+              },
+              "attendees": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "email": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "email"
+                  ]
+                }
+              },
+              "recurrence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "conferenceData": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {}
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/calendar/v3/calendars/{calendarId}/events"
+  },
+  "calendar_get_event": {
+    "parameters": [
+      {
+        "name": "calendarId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "eventId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "timeZone",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}"
+  },
+  "calendar_update_event": {
+    "parameters": [
+      {
+        "name": "calendarId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "eventId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "sendUpdates",
+        "in": "query",
+        "required": false,
+        "description": "Which guests receive notifications.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "all",
+            "externalOnly",
+            "none"
+          ]
+        }
+      },
+      {
+        "name": "conferenceDataVersion",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "integer"
+        }
+      }
+    ],
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "summary": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "location": {
+                "type": "string"
+              },
+              "start": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "date": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD for an all-day event."
+                  },
+                  "dateTime": {
+                    "type": "string",
+                    "description": "RFC3339 timestamp."
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                }
+              },
+              "end": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "date": {
+                    "type": "string",
+                    "description": "Exclusive end date for an all-day event."
+                  },
+                  "dateTime": {
+                    "type": "string",
+                    "description": "RFC3339 timestamp."
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                }
+              },
+              "attendees": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "email": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "email"
+                  ]
+                }
+              },
+              "recurrence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "conferenceData": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "method": "PATCH",
+    "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}"
+  },
+  "calendar_delete_event": {
+    "parameters": [
+      {
+        "name": "calendarId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "eventId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "sendUpdates",
+        "in": "query",
+        "required": false,
+        "description": "Which guests receive notifications.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "all",
+            "externalOnly",
+            "none"
+          ]
+        }
+      }
+    ],
+    "method": "DELETE",
+    "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}"
+  },
+  "calendar_free_busy": {
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "timeMin": {
+                "type": "string",
+                "description": "RFC3339 timestamp."
+              },
+              "timeMax": {
+                "type": "string",
+                "description": "RFC3339 timestamp."
+              },
+              "timeZone": {
+                "type": "string"
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "Calendar or group ID."
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "timeMin",
+              "timeMax",
+              "items"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/calendar/v3/freeBusy"
+  },
+  "gmail_list_messages": {
+    "parameters": [
+      {
+        "name": "q",
+        "in": "query",
+        "description": "Gmail search query, for example is:unread.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "maxResults",
+        "in": "query",
+        "description": "Maximum number of messages to return, from 1 to 500.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      {
+        "name": "pageToken",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages"
+  },
+  "gmail_get_message": {
+    "parameters": [
+      {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      {
+        "name": "format",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "minimal",
+            "full",
+            "raw",
+            "metadata"
+          ]
+        }
+      }
+    ],
+    "method": "GET",
+    "path": "/gmail/v1/users/me/messages/{id}"
+  },
+  "gmail_send_message": {
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "raw": {
+                "type": "string",
+                "description": "Base64url-encoded RFC 2822 MIME message including To, Subject, and body."
+              },
+              "threadId": {
+                "type": "string",
+                "description": "Optional existing thread ID. Replies must also supply matching Subject, References, and In-Reply-To MIME headers."
+              }
+            },
+            "required": [
+              "raw"
+            ]
+          }
+        }
+      }
+    },
+    "method": "POST",
+    "path": "/gmail/v1/users/me/messages/send"
+  }
+}

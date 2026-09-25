@@ -155,7 +155,7 @@ async fn create_binding_with_scope_authorization_inner(
                 )
                 .await?;
 
-                db.collection::<UserService>(USER_SERVICES)
+                crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
                     .find_one(doc! {
                         "_id": &user_service_id,
                         "user_id": &user_id,
@@ -165,14 +165,20 @@ async fn create_binding_with_scope_authorization_inner(
                     .await?
                     .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
 
-                let credential = db
-                    .collection::<UserApiKey>(USER_API_KEYS)
-                    .find_one(doc! { "_id": &user_api_key_id, "user_id": &user_id })
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| {
-                        AppError::NotFound("External credential not found".to_string())
-                    })?;
+                let credential =
+                    crate::services::service_history::collection::<UserApiKey>(&db, USER_API_KEYS)
+                        .find_one(doc! { "_id": &user_api_key_id, "user_id": &user_id })
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| {
+                            AppError::NotFound("External credential not found".to_string())
+                        })?;
+                super::destination_routing::validate_override_recipient(
+                    &db,
+                    &user_service_id,
+                    &credential,
+                )
+                .await?;
                 if credential.status != "active" {
                     return Err(AppError::ValidationError(format!(
                         "credential is not active (status: {})",
@@ -198,6 +204,20 @@ async fn create_binding_with_scope_authorization_inner(
                 #[cfg(test)]
                 if let Some(hook) = collision_hook.as_ref() {
                     hook.after_reads().await;
+                }
+
+                let fenced = crate::services::service_history::mutation::fence_backing_reference(
+                    &db,
+                    USER_API_KEYS,
+                    &user_api_key_id,
+                    &user_id,
+                    &mut *session,
+                )
+                .await?;
+                if !fenced {
+                    return Err(AppError::NotFound(
+                        "External credential not found".to_string(),
+                    ));
                 }
 
                 db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
@@ -632,6 +652,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: vec![],
             allow_all_services: allow_all,
             allow_auto_connected_services: false,
@@ -932,6 +953,7 @@ mod tests {
         let binding_hook = key_mutations::TransactionCollisionHook::new(barrier.clone());
         let rotation_hook = key_mutations::TransactionCollisionHook::new(barrier);
 
+        let encryption_keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
         let (create_result, rotation_result) = tokio::join!(
             create_binding_with_collision_hook(
                 &db,
@@ -943,6 +965,7 @@ mod tests {
             ),
             key_service::rotate_api_key_with_scope_authorization_and_id_with_collision_hook(
                 &db,
+                &encryption_keys,
                 &user_id,
                 Some(&user_id),
                 &predecessor_id,
@@ -1001,6 +1024,7 @@ mod tests {
         let binding_hook = key_mutations::TransactionCollisionHook::new(barrier.clone());
         let rotation_hook = key_mutations::TransactionCollisionHook::new(barrier);
 
+        let encryption_keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
         let (delete_result, rotation_result) = tokio::join!(
             delete_binding_with_collision_hook(
                 &db,
@@ -1011,6 +1035,7 @@ mod tests {
             ),
             key_service::rotate_api_key_with_scope_authorization_and_id_with_collision_hook(
                 &db,
+                &encryption_keys,
                 &user_id,
                 Some(&user_id),
                 &predecessor_id,

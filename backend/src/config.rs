@@ -3,6 +3,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
 };
 
+pub const DEFAULT_CHANNEL_MEDIA_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
 const DEFAULT_INTERNAL_BIND_ADDR: &str = "127.0.0.1:3002";
 
 fn resolve_internal_advertise_url(
@@ -298,6 +300,9 @@ pub struct AppConfig {
     /// Parsed from the comma-separated `TRUSTED_PROXY_IPS` env var.
     /// Empty (the default) means no peer can produce verified attribution.
     pub trusted_proxy_ips: Vec<TrustedProxyRange>,
+    /// Client IP/CIDR allowlist exempt from general per-IP and global limits only.
+    /// Always resolved through the strict trusted-proxy boundary.
+    pub rate_limit_exempt_ips: Vec<TrustedProxyRange>,
 
     /// Optional reverse-proxy-forwarded client certificate header used for
     /// RFC 8705 certificate-bound broker access tokens. Unset/empty disables
@@ -507,10 +512,16 @@ pub struct AppConfig {
     pub channel_relay_max_bots_per_user: u32,
     /// TTL in days for channel messages before automatic expiry (default: 30)
     pub channel_relay_message_ttl_days: u32,
+    pub channel_media_max_bytes: u64,
     /// Per-message edit rate limit for channel relay replies (default: 10/s).
     pub channel_relay_edit_rate_limit_per_second: u32,
     /// Burst capacity for per-message edit rate limiting (default: 20).
     pub channel_relay_edit_rate_limit_burst: u32,
+
+    /// Per-conversation unsolicited message rate (default: 1/s).
+    pub channel_relay_initiate_rate_limit_per_second: u32,
+    /// Unsolicited message burst capacity (default: 5).
+    pub channel_relay_initiate_rate_limit_burst: u32,
 
     // HTTP Event Gateway (NyxID#221 / ADR-013)
     /// Per-channel event rate limit (events per second, default 100).
@@ -671,6 +682,7 @@ impl std::fmt::Debug for AppConfig {
                 &self.platform_service_rate_limit_burst,
             )
             .field("trusted_proxy_ips", &self.trusted_proxy_ips)
+            .field("rate_limit_exempt_ips", &self.rate_limit_exempt_ips)
             .field("mtls_client_cert_header", &self.mtls_client_cert_header)
             .field(
                 "broker_require_sender_constraint",
@@ -864,6 +876,7 @@ impl std::fmt::Debug for AppConfig {
                 "channel_relay_max_bots_per_user",
                 &self.channel_relay_max_bots_per_user,
             )
+            .field("channel_media_max_bytes", &self.channel_media_max_bytes)
             .field(
                 "channel_relay_message_ttl_days",
                 &self.channel_relay_message_ttl_days,
@@ -875,6 +888,14 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "channel_relay_edit_rate_limit_burst",
                 &self.channel_relay_edit_rate_limit_burst,
+            )
+            .field(
+                "channel_relay_initiate_rate_limit_per_second",
+                &self.channel_relay_initiate_rate_limit_per_second,
+            )
+            .field(
+                "channel_relay_initiate_rate_limit_burst",
+                &self.channel_relay_initiate_rate_limit_burst,
             )
             .field(
                 "channel_event_rate_limit_per_second",
@@ -966,6 +987,10 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 /// still succeeds because direct-exposure deployments are the common
 /// case and don't need this set.
 fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<TrustedProxyRange> {
+    parse_ip_ranges("TRUSTED_PROXY_IPS", raw)
+}
+
+fn parse_ip_ranges(setting: &str, raw: Option<String>) -> Vec<TrustedProxyRange> {
     let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
@@ -974,9 +999,10 @@ fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<TrustedProxyRange> {
         match entry.parse::<TrustedProxyRange>() {
             Ok(ip) => ips.push(ip),
             Err(err) => tracing::warn!(
+                setting,
                 entry = %entry,
                 error = %err,
-                "TRUSTED_PROXY_IPS entry is not a valid IP address or CIDR range; dropping",
+                "IP allowlist entry is not a valid IP address or CIDR range; dropping",
             ),
         }
     }
@@ -1134,6 +1160,10 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10),
             trusted_proxy_ips: parse_trusted_proxy_ips(env::var("TRUSTED_PROXY_IPS").ok()),
+            rate_limit_exempt_ips: parse_ip_ranges(
+                "RATE_LIMIT_EXEMPT_IPS",
+                env::var("RATE_LIMIT_EXEMPT_IPS").ok(),
+            ),
             mtls_client_cert_header: env::var("MTLS_CLIENT_CERT_HEADER")
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -1390,6 +1420,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            channel_media_max_bytes: env::var("CHANNEL_MEDIA_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_CHANNEL_MEDIA_MAX_BYTES),
             channel_relay_message_ttl_days: env::var("CHANNEL_RELAY_MESSAGE_TTL_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1404,6 +1438,16 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(20),
+            channel_relay_initiate_rate_limit_per_second: env::var(
+                "CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+            channel_relay_initiate_rate_limit_burst: env::var("CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
             channel_event_rate_limit_per_second: env::var("CHANNEL_EVENT_RATE_LIMIT_PER_SECOND")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1903,6 +1947,7 @@ mod tests {
             platform_service_rate_limit_per_second: 2,
             platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
+            rate_limit_exempt_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
@@ -1978,8 +2023,11 @@ mod tests {
             channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_media_max_bytes: DEFAULT_CHANNEL_MEDIA_MAX_BYTES,
             channel_relay_edit_rate_limit_per_second: 10,
             channel_relay_edit_rate_limit_burst: 20,
+            channel_relay_initiate_rate_limit_per_second: 1,
+            channel_relay_initiate_rate_limit_burst: 5,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_ttl_secs: 300,
@@ -2187,6 +2235,25 @@ mod tests {
     fn validate_ssh_runtime_config_accepts_valid_values() {
         let cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
         cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    fn rate_limit_exempt_ips_parse_client_cidrs_and_fail_closed_on_invalid_entries() {
+        assert!(parse_ip_ranges("RATE_LIMIT_EXEMPT_IPS", None).is_empty());
+        assert!(parse_ip_ranges("RATE_LIMIT_EXEMPT_IPS", Some("  ".to_string())).is_empty());
+        assert_eq!(
+            parse_ip_ranges(
+                "RATE_LIMIT_EXEMPT_IPS",
+                Some(
+                    "192.0.2.0/24, ::ffff:198.51.100.7, 2001:db8::/32, bad, 0.0.0.0/33".to_string()
+                )
+            ),
+            vec![
+                "192.0.2.0/24".parse().unwrap(),
+                "198.51.100.7".parse().unwrap(),
+                "2001:db8::/32".parse().unwrap()
+            ]
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub async fn create_platform_key(
         .find_one(doc! { "slug": slug, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Service is no longer available".to_string()))?;
-    if catalog_spec_sync::is_platform_vendor_service(&catalog) {
+    if crate::services::retired_service_service::is_retired(&catalog) {
         return Err(AppError::NotFound(
             "Service is no longer available".to_string(),
         ));
@@ -132,7 +132,7 @@ pub async fn switch_credential_binding(
                     "Credential must not be empty".to_string(),
                 ));
             }
-            validate_token_exchange_catalog_credential(&catalog, value)?;
+            validate_catalog_credential(&catalog, value)?;
         } else {
             let provider = match catalog.provider_config_id.as_deref() {
                 Some(id) => {
@@ -166,17 +166,20 @@ pub async fn switch_credential_binding(
     }
     // Retain api_key_id when selecting platform. It remains a user-owned row;
     // final resolution ignores it until the binding changes back to user.
-    db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": service_id, "user_id": owner_id },
-            doc! { "$set": {
-                "credential_binding": if use_platform_key { "platform" } else { "user" },
-                "auth_method": &auth_method, "auth_key_name": &auth_key_name,
-                "source": bson::Bson::Null, "source_id": bson::Bson::Null,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            }, "$inc": { "state_version": 1_i64 } },
-        )
-        .await?;
+    crate::services::service_history::collection::<UserService>(
+        db,
+        crate::models::user_service::COLLECTION_NAME,
+    )
+    .update_one(
+        doc! { "_id": service_id, "user_id": owner_id },
+        doc! { "$set": {
+            "credential_binding": if use_platform_key { "platform" } else { "user" },
+            "auth_method": &auth_method, "auth_key_name": &auth_key_name,
+            "source": bson::Bson::Null, "source_id": bson::Bson::Null,
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        }, "$inc": { "state_version": 1_i64 } },
+    )
+    .await?;
     Ok(())
 }
 
@@ -197,7 +200,7 @@ pub async fn set_platform_connection_active(
             .ok_or_else(|| AppError::NotFound("Service is no longer available".to_string()))?;
         platform_key_service::require(db, &catalog, owner_id).await?;
     }
-    db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
+    crate::services::service_history::collection::<UserService>(db, crate::models::user_service::COLLECTION_NAME)
         .update_one(doc! { "_id": service_id, "user_id": owner_id, "credential_binding": "platform" },
             doc! { "$set": { "is_active": active, "updated_at": bson::DateTime::from_chrono(Utc::now()) }, "$inc": { "state_version": 1_i64 } }).await?;
     Ok(())

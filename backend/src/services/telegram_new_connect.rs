@@ -42,7 +42,7 @@ impl TelegramNewService<'_> {
             )
         {
             return Err(AppError::Conflict(
-                "Approve the exact bot in Telegram before connecting it.".into(),
+                "Complete the bot creation in Telegram before connecting it.".into(),
             ));
         }
         if request.status == Status::Ready && request.revision != revision {
@@ -91,6 +91,9 @@ impl TelegramNewService<'_> {
             }
             let secret = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
             let bot = ChannelBot {
+                x_events: None,
+                last_verification: None,
+                ownership_version: 0,
                 id: id.into(),
                 user_id: request.owner_user_id.clone(),
                 platform: PLATFORM.into(),
@@ -192,13 +195,47 @@ impl TelegramNewService<'_> {
     }
 
     async fn finish_request(&self, id: &str) -> AppResult<()> {
-        self.db
+        let result = self.db
             .collection::<TelegramBotRequest>(REQUESTS)
             .update_one(
                 doc! {"_id": id, "status": "provisioning"},
-                doc! {"$set": {"status": "connected", "active": false}, "$inc": {"revision": 1}},
+                doc! {"$set": {"status": "connected", "active": false}, "$unset": {"connection_error": "", "next_connection_attempt_at": ""}, "$inc": {"revision": 1}},
             )
             .await?;
+        if result.modified_count == 1
+            && let Some(request) = self
+                .db
+                .collection::<TelegramBotRequest>(REQUESTS)
+                .find_one(doc! {"_id": id, "auto_connect": true})
+                .await?
+        {
+            super::audit_service::log_async(
+                self.db.clone(),
+                Some(request.actor_user_id.clone()),
+                "channel_bot_created".into(),
+                Some(
+                    json!({"bot_id": id, "platform": PLATFORM, "owner_user_id": request.owner_user_id, "source": "telegram_creation"}),
+                ),
+                None,
+                None,
+                None,
+                None,
+            );
+            if let Ok((_, _, values)) = self.manager().await
+                && let Some(token) = values.get(MANAGER_TOKEN)
+            {
+                let username = request.bot_username.as_deref().unwrap_or_default();
+                let _ = self.api.call(token, "sendMessage", json!({
+                    "chat_id": request.telegram_user_id,
+                    "text": format!("@{username} is connected to NyxID. Setup is complete. Tap Open your bot to go to its chat. You can choose an AI agent for replies in Bot settings."),
+                    "reply_markup": {"inline_keyboard": [
+                        [{"text": "Open your bot", "url": format!("https://t.me/{username}")}],
+                        [{"text": "Bot settings", "url": format!("{}/channel-bots/{id}", self.config.frontend_url.trim_end_matches('/'))}],
+                    ]},
+                    "link_preview_options": {"is_disabled": true},
+                })).await;
+            }
+        }
         Ok(())
     }
 }

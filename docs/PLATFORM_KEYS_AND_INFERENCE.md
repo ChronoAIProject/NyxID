@@ -1,5 +1,7 @@
 # Platform keys, inference discovery, and billing lanes
 
+Admin service creation, provider linking, and legacy vendor retirement are documented in [SERVICE_CONFIGURATION.md](SERVICE_CONFIGURATION.md).
+
 NyxID 0.20.0 adds catalog inference metadata and an authenticated, owner-authorized
 platform credential binding. A platform key is the catalog row's existing encrypted
 master credential. It is never a new credential store and never appears in a client
@@ -51,8 +53,9 @@ fetch active memberships once and batch-check person/org activity, then intersec
 owner IDs in memory; query count is independent of allowlist size. Catalog and key
 listings, auto-provisioning and reconciliation, MCP discovery and callable-service
 loading, and LLM status/gateway checks share request-scoped `OwnerGrants` across all
-service/owner checks. Key listing shares that snapshot with its provisioning and org
-row traversal. Provider eligibility uses the already-loaded catalog/status provider
+service/owner checks. Key listing shares that snapshot with org row traversal and,
+for human/delegated callers, provisioning. API-key inventory reads never provision
+or reconcile rows. Provider eligibility uses the already-loaded catalog/status provider
 batch or one provider batch shared across the other listing/provisioning paths.
 `available_with_grants` performs no database calls. Owner validation uses a single
 `$in` query. No membership or provider eligibility data is cached across requests.
@@ -90,27 +93,49 @@ final credential classification; they do not bypass a revoked connection grant.
 
 ### Personal and org provisioning
 
-Public platform services auto-provision through the existing idempotent lifecycle.
-Restricted services provision only eligible personal owners and granted org owners.
-Key listing, Agent Key login delivery (login options), and device-code
-approval/onboarding for the acting person's own account invoke shared provisioning,
-which may idempotently create org-owned auto-connected rows only through that
-person's own active Member/Admin memberships with `can_proxy()` and explicit
-platform-key grants. The 0.19.0 guarantee remains: org-targeted device
+Public platform services auto-provision one personal row per active person when
+no active or user-disabled connection to that catalog service already exists.
+They never create org-owned auto-connected rows, even when the person is an active
+Member/Admin with `can_proxy()`. Restricted services provision a personal row only
+when the person is in `allowed_owner_ids`, and an org row only when that org is in
+`allowed_owner_ids` and is reached through an active `can_proxy()` membership.
+Human and delegated key listing, Agent Key login delivery (login options), and
+device-code approval/onboarding for the acting person's own account invoke this
+shared provisioning. The 0.19.0 guarantee remains: org-targeted device
 approval/onboarding resolves existing org services and never provisions rows for
-the target org as a side effect of targeting. This limited reconciliation side
-effect requires no org-admin action.
-Org views badge these rows `auto_connected=true`. Removing the org grant removes
-the automatic org rows and orphan endpoints on the next owner reconciliation; live
-execution is refused immediately, before that cleanup. This new org
-walk provisions explicit platform configurations only; legacy no-auth provisioning
-remains personal unless an existing caller explicitly provisions an org owner. Stale automatic
-rows are removed with orphan endpoint cleanup, allowing re-provisioning after a
-grant returns. User-selected bindings retain their connection and any inactive
-personal credential when access is revoked, so management can switch back to BYOK.
-JWT/API-key authentication itself never provisions rows.
-Authentication's `allow_auto_connected_services` union includes active same-owner
-platform-bound rows as well as historical automatic rows.
+the target org as a side effect of targeting. Legacy no-auth provisioning remains
+personal-only during the org walk. Org views badge eligible rows
+`auto_connected=true`; removing an org grant removes the automatic org rows and
+orphan endpoints on the next owner reconciliation. Stale automatic rows are
+removed with orphan endpoint cleanup, allowing re-provisioning after a grant
+returns. JWT/API-key authentication itself never provisions rows.
+
+Active connections and inactive non-auto `UserService` rows whose endpoint still
+exists block provisioning for both personal and org owners. These disabled rows
+retain the user's choice and can be enabled on their original slug. Deleted
+tombstones (inactive non-auto rows whose endpoint is gone) do not block a
+replacement, and the partial active slug index lets the new auto-connected row
+reuse the catalog slug instead of receiving a `-2` suffix. Inactive automatic rows
+are reconciled away before provisioning.
+
+The startup sweep `cleanup_public_org_auto_provisions` removes pre-fix public
+platform rows owned by organizations, along with orphan endpoints. It deletes
+unshared credentials first, unshared endpoints next, and the service row last,
+without transactions, so it also works on standalone MongoDB. Interrupted runs
+retain the service's resource references for retry; rows whose endpoint is already
+gone are hidden by `/keys` and removed on the next sweep. Failures log deletion
+counts without failing startup. The sweep is idempotent and leaves personal rows,
+restricted org rows, and explicit (`source != auto_provision`) org platform
+bindings untouched. Those explicit
+public bindings continue to resolve under the existing execution ACL: public
+audience permits any active authenticated owner. The personal-only automatic
+provisioning rule does not narrow explicit public execution access. Authentication's
+`allow_auto_connected_services` union includes active same-owner automatic rows
+and explicit platform bindings; it does not require public org automatic rows.
+As with listing reconciliation, saved API-key allowlists and agent bindings are
+not rewritten: deleted service UUIDs cannot resolve or grant access to a replacement.
+Automatic rows never create credentials; startup defensively deletes any orphan
+credential attached to a malformed legacy row.
 
 ## Connection and administration surfaces
 
@@ -173,59 +198,111 @@ lane cards. Legacy billing is labeled superseded while lanes are configured.
 
 ## Billing lanes and durable accounting
 
-`ServiceBilling` gains optional `byok_pricing` and `platform_key_pricing`, each a
-`LanePricing { metric, credits_per_unit, lago_metric_code, sync_status, sync_error }`.
-Decimals use the existing exact normalization. Server-owned codes are stable:
-`platform_svc_{slug}_byok` and `platform_svc_{slug}_pk`; the legacy code is unchanged.
-Each lane has its own durable cleanup marker. Client input cannot author sync state,
-metric codes, cleanup markers, or upstream error details.
+Platform-key usage is billed to the requesting person regardless of the granting audience.
+An organization grant authorizes its members to use NyxID's key; it never charges that
+organization's wallet for the master credential. `BillingOwnerResolver::resolve_for_execution`
+uses the final credential class: `NyxidManagedMaster` selects the person's wallet and billing
+rollout flag, while org BYOK and agent override credentials retain org-wallet billing.
+Resource authorization, approval ownership, and rate limiting are unchanged.
+
+`ServiceBilling.byok_pricing` and `platform_key_pricing` are optional `LanePricing`
+blocks. Existing `metric`, decimal `credits_per_unit`, `lago_metric_code`, `sync_status`
+and `sync_error` fields remain the primary component. Optional/defaulted `components`
+adds objects with those same five fields. Metrics must be unique across the primary
+and additional components of each lane. Supported units are `tokens` (provider total),
+`requests`, `bytes`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
+`cache_write_tokens`, and `images`. Legacy `platform_metric` and `resale_metric` still
+accept only tokens/requests/bytes. Backend `BillingMetric` metadata and frontend
+`schemas/billing-metrics.ts` / CLI `commands/billing_units.rs` centralize unit names and labels.
 
 | Final credential class | Lane |
 | --- | --- |
-| UserOwned, AgentOverrideUserOwned, NodeManaged | BYOK |
+| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK |
 | NyxidManagedMaster | Platform key |
 | NoAuth | None (meter only) |
 
 At least one configured lane selects lane mode. A missing matching lane is free,
-even if legacy platform billing is enabled. A synced matching lane supplies the
-platform charge's metric/code. A pending or failed matching lane temporarily uses
-the prior legacy platform configuration (or free), matching existing price-sync
-rollout behavior. With no lanes, legacy behavior is unchanged. Clearing the last
-lane returns the service to legacy mode. Resale is an independent layer, with its
-existing flag and credential-class gates unchanged.
+even if legacy platform billing is enabled. While the selected lane's primary is
+pending or failed, the whole lane uses the legacy configuration (or is free);
+all additional components are ignored, even if synced. Once the primary is synced,
+it and every synced additional component create separate platform usage rows using
+their own metric/code. Unsynced additional components are free until they sync and
+never add a legacy charge. For example, a synced input primary and pending output
+component charges only input; after output syncs, both charge. Total `tokens` is
+charged only when explicitly configured.
+With no lanes, legacy behavior is unchanged. Resale remains independent. The
+`platform_charge_nyxid_credentials_only` restriction still applies after lane selection.
 
-Synchronization reuses the Lago standard-charge implementation and round-trips the
-entire plan charge array with IDs. Both lanes retry pending/failed writes and durable
-charge cleanup on the existing reconcile interval. Concurrent admin changes fence
-sync completion against the current price and metric so stale syncs cannot activate
-an obsolete configuration.
+Stable primary Lago codes remain `platform_svc_{slug}_byok` / `platform_svc_{slug}_pk`;
+additional components use `platform_svc_{slug}_{byok|pk}_{metric}`. Each price has its
+own rate-cache row and synchronization state. Removed components are recorded in
+server-owned `component_cleanup_metric_codes`, including when their entire lane is
+removed. The same pricing synchronizer, full Lago plan charge array with IDs, and
+reconcile interval handle all charges. Price/metric/code fences prevent stale admin
+sync completions from activating obsolete prices; stale writes after removal restore
+cleanup intent. Clients cannot control metric codes, sync state, or cleanup markers.
 
-Lane selection happens in the shared billing route context after final credential
-classification and before wallet gating/reservation. Existing metering, actual-unit
-allowances, expiring grants, wallet funding, settlement, Lago outbox, and dashboard
-queries consume the selected metric. Provider-reported token usage remains the
-authoritative token input. Capture recognizes token pricing on either configured lane,
-including pending lanes and non-`llm-` slugs, for JSON and SSE. MCP estimates tokens
-only for token-metered services; other services report zero tokens unless the body
-actually carries provider usage.
+Older admin payloads omitting lanes or nested `components` preserve them. A null lane
+clears the entire lane; `components: null` or `[]` clears only additional components.
+Lane-only edits preserve omitted legacy fallback and resale fields. Legacy-only edits
+retain their historical full-block behavior while preserving omitted lanes.
 
-When lanes use different units, each request's final `ctx.platform_metric` controls
-reservation and settlement allowance matching. Admin allowance create/update accepts
-optional `metric`: it must match a configured lane (or a legacy metric still used
-while a lane is pending/failed). Omitting it chooses BYOK's metric first, otherwise
-the platform-key metric, otherwise the legacy service default. The existing
-`effective_platform_metric` display field uses that same deterministic default;
-it is not a claim that every credential lane has that unit. The allowance UI offers
-a unit selector for mixed lanes. Existing allowances keep their stored unit on
-unrelated updates, including older clients repeating the same service reference, and only
-fund requests with that matching unit. Ledger canonical fields, order, hash derivation, dedupe
-keys, and verification are unchanged; lane charges use the existing platform layer
-and reference usage rows that distinguish lanes by metric code and credential class.
+Capture checks token-family and image metrics on **both** configured lanes, including
+pending components and non-`llm-` slugs. JSON, accumulated SSE, realtime WS, node and
+MCP paths feed normalized `PlatformUsage` classes. OpenAI cached prompt/input tokens
+and Gemini `cachedContentTokenCount` are subsets of input and are subtracted from
+priced `input_tokens`, clamped at zero. Anthropic cache-read/cache-creation counts
+are outside input and are kept separate without subtraction. Output tokens are their
+own class. `TokenBreakdown` preserves provider accounting for display; normalized
+classes are priced. Successful OpenAI `/images/generations`, `/images/edits`, and
+`/images/variations` responses count `data[]` entries, including paths with proxy or
+version prefixes; image usage can also populate all token classes. Completed image
+SSE events count once per image index; partial previews do not count. Capture uses
+existing bounded bodies/buffers and never reads an additional response body. MCP
+estimates tokens only for token-family services when reported usage is absent.
+Without provider-reported usage, input/output/cache token classes are zero while
+legacy `tokens` still uses the byte estimate, so per-class pricing requires
+providers that report usage.
 
+Each platform component has independent allowance -> grant -> wallet funding,
+settlement, ledger reference and Lago event. The primary transaction identity remains
+unchanged; additional rows append `:component:{metric_code}`. A durable primary-row
+`pending_platform_usage` snapshot lets reconciliation finish partially materialized
+component settlements. Repeated opens/settlements reuse the same identities. Estimates
+use the request-byte token estimator for `tokens`, `input_tokens`, and
+`output_tokens` (the best available output proxy); `cache_read_tokens` and
+`cache_write_tokens` reserve one unit because the input estimate already covers
+cache quantities. Images use the request's `n` (default 1); requests and bytes
+reserve one unit. The request body is parsed for `n` only when an active platform
+price uses images. Standalone legacy metrics and resale retain their existing
+one-unit reservation gate. Zero final units release every hold
+and emit no Lago event. Platform-key execution still bills the acting person.
 
-Lane-only admin updates preserve omitted legacy platform and resale fields, including
-the pending-sync fallback. Legacy billing-only updates retain their existing full-block
-semantics; omitted new lanes are always preserved, and explicit null clears a lane.
+An allowance may select any configured primary/component unit on either lane, plus
+the legacy fallback while any lane primary is unsynced (or when no lanes exist).
+An unsynced additional component never re-enables the fallback metric. Admin service
+responses expose this computed, non-stored list as `allowance_metrics`; the allowance
+dialog consumes it directly. Allowances fund only identical-metric usage rows.
+Omitted allowance metric defaults to BYOK primary, then platform-key primary,
+then legacy; `effective_platform_metric` remains this display default.
+Existing allowances preserve their stored unit on unrelated edits. Periods, recurrence,
+grant expiry, ledger canonical fields/order/hash/dedupe keys and verification are unchanged.
+
+Unit prices support `PRICE_FRACTIONAL_DIGITS = 12` and at most 1,000,000 credits/unit.
+The normalized exact decimal goes to Lago. Optional `credits_per_unit_pico` (10^-12
+credits) is preferred in cache/funding/reservations; legacy `credits_per_unit_micros`
+is still populated by truncation for rolling compatibility. Missing precise fields
+use the old micro rate exactly. All money multiplication uses saturating integer i128
+intermediates. Gross/funding display costs truncate **after** multiplying to micros;
+grant movements remain micros; the exact remaining wallet cost rounds **up** to whole
+credits per component, including sub-microcredit costs. Lago receives the wallet-funded quantity,
+rounded up to its existing micro-unit precision, capped at actual units. No floating
+point is used in rate or cost arithmetic. Ledger amount encoding remains unchanged.
+
+**Rollout:** upgrade ALL replicas before authoring component prices, allowances
+using new metrics, or prices beyond six fractional digits. Old binaries cannot deserialize the new enum variants or charge
+additional components. Defaulted fields require no data migration; existing lanes and
+prices of up to six fractional digits keep their prior accounting.
 
 ## Inference defaults and transports
 
@@ -292,7 +369,10 @@ existing org slug/display-name resolver; the admin UI reuses the people/org pick
 Admin inference flags are `--inference-protocol`, `--inference-model-list`, and
 `--inference-realtime`; `--inference-protocol none` clears metadata. Lane flags are
 `--byok-metric`, `--byok-price`, `--byok-free`, `--platform-key-metric`,
-`--platform-key-price`, and `--platform-key-free`. Catalog create uses `service add
+`--platform-key-price`, and `--platform-key-free`. Repeat `--byok-component <metric>=<price>` or
+`--platform-key-component <metric>=<price>` to add/update individual components.
+`--byok-clear-components` / `--platform-key-clear-components` removes additional prices
+while retaining the primary. Prices accept up to 12 fractional digits. Catalog create uses `service add
 <slug> --catalog-admin --endpoint-url <url> --label <name>` with the same controls.
 
 ### Upstream capability evidence
@@ -300,3 +380,7 @@ Admin inference flags are `--inference-protocol`, `--inference-model-list`, and
 - xAI [Models REST API](https://docs.x.ai/developers/rest-api-reference/inference/models.md): `GET /v1/models`, OpenAI-style `data`/model objects.
 - xAI [Voice agent guide](https://docs.x.ai/docs/guides/voice/agent): bearer-authenticated `wss://api.x.ai/v1/realtime`.
 - OpenAI [Models](https://developers.openai.com/api/reference/resources/models/methods/list), [DeepSeek models](https://api-docs.deepseek.com/api/list-models), [Mistral models](https://docs.mistral.ai/api/endpoint/models), [Anthropic models](https://docs.anthropic.com/en/api/models-list), and [OpenRouter models](https://openrouter.ai/api/v1/models) establish model-list capability. Transport construction tests cover OpenAI and xAI realtime; no paid upstream session is required for the local test suite.
+
+## Service-instance history
+
+Explicit platform/user credential-binding transitions and platform-instance settings are recorded in the service journal. Automatic provisioning and removal use verified system attribution; retained UUID history remains available after physical cleanup under current owner/admin scope. Re-provisioning starts a new instance history even when the slug is reused. Platform credential material is never included. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe details, archive discovery, and MongoDB transaction prerequisites.

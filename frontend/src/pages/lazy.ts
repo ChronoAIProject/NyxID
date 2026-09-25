@@ -242,11 +242,6 @@ export const AdminIntegrityPage = lazy(() =>
     default: m.AdminIntegrityPage,
   })),
 );
-export const AdminPlatformOpsPage = lazy(() =>
-  import("@/pages/admin-platform-ops").then((m) => ({
-    default: m.AdminPlatformOpsPage,
-  })),
-);
 export const AdminCreditsPage = lazy(() =>
   import("@/pages/admin-credits").then((m) => ({
     default: m.AdminCreditsPage,
@@ -270,6 +265,12 @@ export const ChannelBotsPage = lazy(() =>
   import("@/pages/channel-bots").then((m) => ({
     default: m.ChannelBotsPage,
   })),
+);
+export const ChannelBotSetupPage = lazy(() =>
+  import("@/pages/channel-bot-setup").then((m) => ({ default: m.ChannelBotSetupPage })),
+);
+export const ChannelBotSetupLinksPage = lazy(() =>
+  import("@/pages/channel-bot-setup").then((m) => ({ default: m.ChannelBotSetupLinksPage })),
 );
 export const ChannelBotDetailPage = lazy(() =>
   import("@/pages/channel-bot-detail").then((m) => ({
@@ -322,3 +323,5 @@ export const DocsIndexPage = lazy(() =>
 export const DocsPage = lazy(() =>
   import("@/features/docs/docs-page").then((m) => ({ default: m.DocsPage })),
 );
+
+export const AdminUsagePage = lazy(() => import("@/pages/admin-usage").then((m) => ({ default: m.AdminUsagePage })));

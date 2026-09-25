@@ -39,7 +39,7 @@ pub fn init_audit_chain_hmac_key(key: Zeroizing<[u8; 32]>) {
     }
 }
 
-fn audit_chain_hmac_key() -> Option<&'static [u8]> {
+pub(crate) fn audit_chain_hmac_key() -> Option<&'static [u8]> {
     AUDIT_CHAIN_HMAC_KEY.get().map(|key| key.as_ref())
 }
 

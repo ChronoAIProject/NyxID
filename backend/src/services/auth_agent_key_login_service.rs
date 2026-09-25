@@ -318,12 +318,12 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
         .await?
         .ok_or(AppError::AgentKeyLoginKeyIneligible)?;
     let effective_ids = key_service::effective_allowed_service_ids(db, key).await?;
-    let services: Vec<UserService> = db
-        .collection::<UserService>(SERVICES)
-        .find(doc! {"_id": {"$in": &effective_ids}})
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(db, SERVICES)
+            .find(doc! {"_id": {"$in": &effective_ids}})
+            .await?
+            .try_collect()
+            .await?;
     let nodes: Vec<Node> = db
         .collection::<Node>(NODES)
         .find(doc! {"_id": {"$in": &key.allowed_node_ids}})

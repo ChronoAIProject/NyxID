@@ -219,6 +219,9 @@ pub struct ConnectArgs {
     /// Human-readable label shown on the hosted connection page
     #[arg(long)]
     pub label: Option<String>,
+    /// Prefill the service URL in the hosted connection form
+    #[arg(long)]
+    pub endpoint_url: Option<String>,
     /// Additional OAuth scopes to request on top of the provider's defaults
     /// (repeatable, comma- or space-separated). The upstream provider decides
     /// whether to grant them. Example: --scope "public_repo,read:org"
@@ -847,6 +850,8 @@ pub enum CatalogCommands {
 }
 
 // ---- Service (C11-C13, I21-I23) ----
+// Inventory reads (`service list` / `service show`) work on an Agent Key
+// profile within its service scope. Mutating commands need an account login.
 
 #[derive(Args, Default)]
 pub struct CatalogServiceArgs {
@@ -870,18 +875,30 @@ pub struct CatalogServiceArgs {
     /// Remove an owner UUID or organization slug/display name (repeatable)
     #[arg(long, num_args = 1..)]
     pub platform_key_deny: Vec<String>,
-    #[arg(long, value_parser = ["tokens", "requests", "bytes"])]
+    #[arg(long, value_parser = crate::commands::billing_units::METRICS)]
     pub byok_metric: Option<String>,
-    #[arg(long, conflicts_with = "byok_free")]
+    #[arg(long, conflicts_with = "byok_free", value_parser = crate::commands::billing_units::price)]
     pub byok_price: Option<String>,
     #[arg(long)]
     pub byok_free: bool,
-    #[arg(long, value_parser = ["tokens", "requests", "bytes"])]
+    #[arg(long, value_parser = crate::commands::billing_units::METRICS)]
     pub platform_key_metric: Option<String>,
-    #[arg(long, conflicts_with = "platform_key_free")]
+    #[arg(long, conflicts_with = "platform_key_free", value_parser = crate::commands::billing_units::price)]
     pub platform_key_price: Option<String>,
     #[arg(long)]
     pub platform_key_free: bool,
+    /// Additional BYOK component price, repeatable (<metric>=<price>); replaces that unit's price
+    #[arg(long, value_parser = crate::commands::billing_units::component, conflicts_with_all = ["byok_free", "byok_clear_components"])]
+    pub byok_component: Vec<String>,
+    /// Remove all additional BYOK components, preserving the primary price
+    #[arg(long, conflicts_with = "byok_free")]
+    pub byok_clear_components: bool,
+    /// Additional platform-key component price, repeatable (<metric>=<price>)
+    #[arg(long, value_parser = crate::commands::billing_units::component, conflicts_with_all = ["platform_key_free", "platform_key_clear_components"])]
+    pub platform_key_component: Vec<String>,
+    /// Remove all additional platform-key components, preserving the primary price
+    #[arg(long, conflicts_with = "platform_key_free")]
+    pub platform_key_clear_components: bool,
 }
 
 #[derive(Subcommand)]
@@ -926,7 +943,7 @@ pub enum ServiceCommands {
         /// Label for this service
         #[arg(long)]
         label: Option<String>,
-        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, body (inject credential into JSON body), none (skips credential entry)
+        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, ifttt_webhook, body (inject credential into JSON body), none (skips credential entry)
         #[arg(long)]
         auth_method: Option<String>,
         /// Auth key name (e.g. Authorization, X-API-Key, or for body auth
@@ -1574,6 +1591,9 @@ pub enum BillingCommands {
 }
 
 // ---- API Key ----
+// Scope helpers used by `api-key create` / `api-key bind` read `/keys`, which
+// works on Agent Key profiles. NyxID API-key management itself, including
+// listing, creation, and binding mutations, requires an account login.
 
 #[derive(Subcommand)]
 pub enum ApiKeyCommands {
@@ -1773,10 +1793,12 @@ pub enum ApiKeyCommands {
 
 // ---- Org ----
 //
-// All org commands hit /api/v1/orgs/* and are gated by org membership
-// (read) or admin role (write) on the server. The actor's auth comes from
-// the standard `AuthArgs`. There is no profile-aware switching here -- the
-// caller is always the actor; org credentials are resolved server-side.
+// Org reads (`org list`, `org show`, `org member list`,
+// `org role-scope list`, and `--org` resolution) work with an Agent Key
+// profile. Mutating commands and invite reads require an account login.
+// The server applies membership/admin ACLs, or Direct read access for an
+// org-owned key. Standard AuthArgs supplies the actor; there is no implicit
+// profile switching, and org credentials are resolved server-side.
 
 #[derive(Subcommand)]
 pub enum OrgCommands {
@@ -2327,6 +2349,7 @@ pub enum PendingCredentialInjectionMethod {
     Header,
     QueryParam,
     PathPrefix,
+    IftttWebhook,
 }
 
 impl PendingCredentialInjectionMethod {
@@ -2335,6 +2358,7 @@ impl PendingCredentialInjectionMethod {
             Self::Header => "header",
             Self::QueryParam => "query-param",
             Self::PathPrefix => "path-prefix",
+            Self::IftttWebhook => "ifttt-webhook",
         }
     }
 }
@@ -2521,6 +2545,19 @@ pub enum NodeDaemonCommands {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn ifttt_generated_node_setup_command_parses() {
+        Cli::try_parse_from([
+            "nyxid",
+            "node",
+            "credentials",
+            "setup",
+            "--service",
+            "api-ifttt",
+        ])
+        .expect("connection UI node command must match Clap");
+    }
 
     #[test]
     fn managed_channel_signup_rejects_all_credential_flags() {
@@ -4328,6 +4365,8 @@ pub enum ApprovalCommands {
 }
 
 // ---- Endpoint (I24) ----
+// `endpoint list` works on an Agent Key profile within its service scope;
+// mutating commands need an account login.
 
 #[derive(Subcommand)]
 pub enum EndpointCommands {
@@ -4359,6 +4398,8 @@ pub enum EndpointCommands {
 }
 
 // ---- ExternalKey (I25-I26) ----
+// `external-key list` works on an Agent Key profile within its service scope;
+// mutating commands need an account login.
 
 #[derive(Subcommand)]
 pub enum ExternalKeyCommands {
@@ -4428,12 +4469,17 @@ pub enum ExternalKeyCommands {
 
 #[derive(Subcommand)]
 pub enum ServiceAccountCommands {
+    /// Manage the exact catalog curation grant (platform admin only)
+    CurationGrant {
+        #[command(subcommand)]
+        command: CurationGrantCommands,
+    },
     /// Create a service account (machine identity for `grant_type=client_credentials`)
     Create {
         /// Human-readable name for this service account
         #[arg(long)]
         name: String,
-        /// Space-separated OAuth scopes the SA may request (e.g. "openid profile")
+        /// Space-separated service-account scopes (e.g. "llm:proxy roles" or "custom:read")
         #[arg(long)]
         scopes: String,
         /// Optional description
@@ -4544,6 +4590,42 @@ pub enum ServiceAccountCommands {
     /// Revoke all active tokens for a service account
     RevokeTokens {
         /// Service account ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CurationGrantCommands {
+    /// Issue or replace a grant; permanently protects the account
+    Issue {
+        /// Service account UUID
+        id: String,
+        /// Permitted catalog UUID; repeat for multiple services
+        #[arg(long = "service-id", required = true)]
+        service_ids: Vec<String>,
+        /// Exact Ornn HTTP catalog target (requires the proxy scope)
+        #[arg(long)]
+        ornn_proxy_service_id: Option<String>,
+        /// Optional expiry in RFC 3339 format
+        #[arg(long)]
+        expires_at: Option<String>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10000))]
+        max_writes: u32,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(60..=86400))]
+        window_seconds: u32,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show the grant and protected account state
+    Show {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Revoke the grant; purpose and platform protection remain
+    Revoke {
         id: String,
         #[command(flatten)]
         auth: AuthArgs,
@@ -4769,9 +4851,17 @@ pub enum AiSetupCommands {
 
 #[derive(Subcommand)]
 pub enum ChannelBotCommands {
+    /// Discover supported platforms, registration fields, and media capabilities
+    Platforms {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Register a new messaging platform bot
+    #[command(
+        after_help = "Discover required fields and capabilities with: nyxid channel-bot platforms --output json"
+    )]
     Register {
-        /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp
+        /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp, aurinko (email)
         #[arg(long)]
         platform: String,
         /// Complete managed onboarding in your browser
@@ -4781,7 +4871,7 @@ pub enum ChannelBotCommands {
         /// Slack: pass the `xoxb-` bot user OAuth token.
         #[arg(long, hide = true)]
         bot_token: Option<String>,
-        /// Read bot token from this environment variable
+        /// Read bot token from this environment variable (not needed for Lark/Feishu)
         #[arg(long)]
         token_env: Option<String>,
         /// Label for this bot
@@ -4829,6 +4919,9 @@ pub enum ChannelBotCommands {
     Update {
         /// Bot ID
         id: String,
+        /// X events to receive: dm, mentions, replies (replaces the selection)
+        #[arg(long, value_delimiter = ',', num_args = 1.., value_parser = ["dm", "mentions", "replies"])]
+        x_events: Vec<String>,
         /// New label
         #[arg(long)]
         label: Option<String>,
@@ -4843,16 +4936,16 @@ pub enum ChannelBotCommands {
         /// Lark/Feishu App ID
         #[arg(long)]
         app_id: Option<String>,
-        /// Lark/Feishu App Secret, Slack signing secret, or Meta App Secret
+        /// Lark/Feishu App Secret, Slack/Aurinko signing secret, or Meta App Secret
         #[arg(long, hide = true)]
         app_secret: Option<String>,
         /// Read replacement app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
-        /// Replacement bot access token (WhatsApp); prefer --token-env
+        /// Replacement account/bot access token (Aurinko, WhatsApp); prefer --token-env
         #[arg(long, hide = true)]
         bot_token: Option<String>,
-        /// Read replacement bot access token from this environment variable (WhatsApp)
+        /// Read replacement bot access token from this environment variable (Aurinko, WhatsApp)
         #[arg(long)]
         token_env: Option<String>,
         #[command(flatten)]
@@ -4902,6 +4995,20 @@ pub enum ChannelBotCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Send a message to an opted-in conversation without an inbound reply anchor
+    Send {
+        /// NyxID conversation UUID
+        #[arg(long)]
+        conversation: String,
+        /// Message text
+        #[arg(long)]
+        text: String,
+        /// Reuse this key when retrying the same delivery (1-128 characters)
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Manage conversation routes
     Route {
         #[command(subcommand)]
@@ -4931,6 +5038,9 @@ pub enum ChannelRouteCommands {
         /// Mark as the default agent for unmatched conversations
         #[arg(long)]
         default_agent: bool,
+        /// Let the assigned agent message this chat unprompted (human opt-in)
+        #[arg(long)]
+        allow_agent_initiated: bool,
         /// Create this route under the given org (you must be an admin
         /// of that org). The bot and agent key must also belong to the
         /// same org. Omit for a personal route.
@@ -4969,6 +5079,9 @@ pub enum ChannelRouteCommands {
         /// Set as default agent
         #[arg(long)]
         default_agent: Option<bool>,
+        /// Allow unprompted agent messages; pass false to disable
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        allow_agent_initiated: Option<bool>,
         /// Set route active/inactive
         #[arg(long)]
         active: Option<bool>,
@@ -5115,6 +5228,9 @@ pub enum OracleCommands {
         /// Model hint forwarded to the worker (defaults to the pool's)
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// ChatGPT Project URL for this prompt (overrides the pool default)
         #[arg(long)]
         project_url: Option<String>,
@@ -5481,6 +5597,9 @@ pub enum OraclePoolCommands {
         /// Default model hint recorded on tasks
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// Allow this pool to drive worker browsers to extract arbitrary URLs
         #[arg(long)]
         allow_extract: bool,
@@ -5532,6 +5651,9 @@ pub enum OraclePoolCommands {
         project_url: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// Enable or disable browser URL extraction for this pool
         #[arg(long, action = clap::ArgAction::Set)]
         allow_extract: Option<bool>,

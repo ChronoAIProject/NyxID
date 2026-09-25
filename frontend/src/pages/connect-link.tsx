@@ -1,18 +1,16 @@
 import { useCatalogEntry } from "@/hooks/use-keys";
+import { NyxidIcon } from "@/components/brand/nyxid-icon";
+import { ConnectionArc } from "@/components/shared/connection-arc";
+import { ServiceIcon } from "@/components/service-icon";
+import { useApplyTheme } from "@/hooks/use-theme";
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { useEffect, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import {
-  CheckCircle2,
-  ExternalLink,
-  KeyRound,
-  ShieldCheck,
-  XCircle,
-} from "lucide-react";
+import { CheckCircle2, ExternalLink, ArrowRight, XCircle } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button, ButtonIcon } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Form,
   FormControl,
@@ -35,6 +33,7 @@ import {
   connectLinkErrorMessage,
   connectLinkNeedsOAuthCredentials,
   connectLinkNeedsSetupForm,
+  connectLinkShowsEndpointUrl,
   connectLinkProviderError,
 } from "@/lib/connect-link-page";
 import {
@@ -61,17 +60,24 @@ interface DeviceChallenge {
 export function ConnectLinkPage() {
   const { token } = useParams({ strict: false }) as { token: string };
   const navigate = useNavigate();
-  const { isAuthenticated, isLoading } = useAuthStore();
-  const [showSetupForm, setShowSetupForm] = useState(false);
+  const { isAuthenticated, isLoading, user } = useAuthStore();
   const [deviceChallenge, setDeviceChallenge] =
     useState<DeviceChallenge | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const lastClickAtRef = useRef(0);
+  const previewedTokenRef = useRef<string | null>(null);
   const preview = usePreviewConnectLink();
+  const previewConnect = preview.mutateAsync;
   const [platformChoice, setPlatformChoice] = useState<boolean | null>(null);
-  const { data: catalog } = useCatalogEntry(isAuthenticated ? preview.data?.service_slug : undefined);
-  const platformAvailable = Boolean(catalog?.platform_key?.available && !preview.data?.scopes.length);
-  const usePlatformKey = platformAvailable && (platformChoice ?? preview.data?.use_platform_key ?? true);
+  const { data: catalog } = useCatalogEntry(
+    isAuthenticated ? preview.data?.service_slug : undefined,
+  );
+  const platformAvailable = Boolean(
+    catalog?.platform_key?.available && !preview.data?.scopes.length,
+  );
+  const usePlatformKey =
+    platformAvailable &&
+    (platformChoice ?? preview.data?.use_platform_key ?? true);
   const complete = useCompleteConnectLink();
   const cancel = useCancelHostedConnectLink();
   const actionPending =
@@ -84,10 +90,26 @@ export function ConnectLinkPage() {
   }, [isAuthenticated, isLoading, navigate, token]);
 
   useEffect(() => {
+    if (isLoading || !isAuthenticated || previewedTokenRef.current === token)
+      return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active || previewedTokenRef.current === token) return;
+      previewedTokenRef.current = token;
+      void previewConnect(token).catch((error) => {
+        if (active) setSubmitError(connectLinkErrorMessage(error));
+      });
+    });
+    return () => {
+      active = false;
+    };
+  }, [isAuthenticated, isLoading, previewConnect, token]);
+
+  useEffect(() => {
     const callback =
       complete.data?.status === "completed"
         ? complete.data.callback_url
-        : cancel.data?.callback_url ?? preview.data?.callback_url;
+        : (cancel.data?.callback_url ?? preview.data?.callback_url);
     if (!callback) return;
     const timer = window.setTimeout(
       () => window.location.assign(callback),
@@ -113,27 +135,20 @@ export function ConnectLinkPage() {
     }
   }
 
-  async function handleConnect() {
-    if (!preview.data || actionPending || withinCooldown()) return;
-    if (!usePlatformKey && connectLinkNeedsSetupForm(preview.data)) {
-      setShowSetupForm(true);
-      return;
-    }
-    await submitCompletion();
-  }
-
   async function submitCompletion(values?: CompleteConnectLinkInput) {
     setSubmitError(null);
     try {
       const selected = { use_platform_key: usePlatformKey };
-      const result = await complete.mutateAsync({ token, values: usePlatformKey ? selected : { ...values, ...selected } });
+      const result = await complete.mutateAsync({
+        token,
+        values: usePlatformKey ? selected : { ...values, ...selected },
+      });
       if (result.status === "oauth_required" && result.authorization_url) {
         sessionStorage.setItem(connectLinkStorageKey(result.id), token);
         window.location.assign(result.authorization_url);
         return;
       }
       if (result.status === "device_code_required") {
-        setShowSetupForm(false);
         setDeviceChallenge((current) => ({
           code: result.device_user_code ?? current?.code ?? "",
           url: result.device_verification_uri ?? current?.url ?? "",
@@ -178,8 +193,7 @@ export function ConnectLinkPage() {
   }
 
   function handleDeviceCheck() {
-    if (!deviceChallenge?.state || actionPending || withinCooldown())
-      return;
+    if (!deviceChallenge?.state || actionPending || withinCooldown()) return;
     void submitCompletion({ device_state: deviceChallenge.state });
   }
 
@@ -191,43 +205,36 @@ export function ConnectLinkPage() {
     );
   }
 
-  const terminal = complete.data?.status === "completed"
-    ? { status: "completed" as const, callbackUrl: complete.data.callback_url }
-    : cancel.data && cancel.data.status !== "pending"
-      ? { status: cancel.data.status, callbackUrl: cancel.data.callback_url }
-      : preview.data && preview.data.status !== "pending"
-        ? { status: preview.data.status, callbackUrl: preview.data.callback_url }
-        : null;
+  const terminal =
+    complete.data?.status === "completed"
+      ? {
+          status: "completed" as const,
+          callbackUrl: complete.data.callback_url,
+        }
+      : cancel.data && cancel.data.status !== "pending"
+        ? { status: cancel.data.status, callbackUrl: cancel.data.callback_url }
+        : preview.data && preview.data.status !== "pending"
+          ? {
+              status: preview.data.status,
+              callbackUrl: preview.data.callback_url,
+            }
+          : null;
   return (
     <ConnectShell>
-      <header className="space-y-2 text-center">
-        <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg border border-nyx-500/30 bg-nyx-500/10">
-          <KeyRound className="h-4 w-4 text-nyx-secondary-400" />
-        </div>
-        <h1 className="text-[22px] font-bold leading-tight text-foreground sm:text-[28px]">
-          Connect a service
-        </h1>
-      </header>
-
       {terminal ? (
         <TerminalPanel
           status={terminal.status}
           callbackUrl={terminal.callbackUrl ?? null}
         />
       ) : (
-        <Card className="border-border/50">
-          <CardHeader>
-            <CardTitle>Connection request</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {submitError ? <ErrorBanner message={submitError} /> : null}
+        <Card className="connect-link-card border-border/70">
+          <CardContent className="space-y-6 p-5 sm:p-8">
             {!preview.data ? (
-              <div className="space-y-4">
-                <p className="text-[12px] leading-relaxed text-muted-foreground">
-                  Review who requested this connection before sharing a
-                  credential.
-                </p>
-                <div className="flex justify-end">
+              <div className="space-y-5 py-4 text-center">
+                <Skeleton className="mx-auto h-20 w-52" />
+                <Skeleton className="mx-auto h-7 w-4/5" />
+                {submitError ? <ErrorBanner message={submitError} /> : null}
+                {submitError ? (
                   <Button
                     type="button"
                     variant="primary"
@@ -235,56 +242,106 @@ export function ConnectLinkPage() {
                     isLoading={preview.isPending}
                     onClick={() => void handlePreview()}
                   >
-                    <ButtonIcon variant="primary">
-                      <ShieldCheck />
-                    </ButtonIcon>
-                    Review request
+                    Try again
                   </Button>
-                </div>
+                ) : null}
               </div>
             ) : (
               <>
+                <div className="connection-card-heading space-y-5 text-center">
+                  <div
+                    className="flex items-start justify-center"
+                    role="img"
+                    aria-label={`NyxID connects to ${preview.data.service_name}`}
+                  >
+                    <div className="flex w-20 flex-col items-center gap-2.5">
+                      <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
+                        <NyxidIcon className="size-9" alt="" />
+                      </div>
+                      <span className="text-xs font-medium">NyxID</span>
+                    </div>
+                    <ConnectionArc />
+                    <div className="flex w-20 flex-col items-center gap-2.5">
+                      <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
+                        {catalog?.icon_url ? (
+                          <img
+                            src={catalog.icon_url}
+                            alt=""
+                            className="size-9 object-contain"
+                          />
+                        ) : (
+                          <ServiceIcon
+                            slug={preview.data.service_slug}
+                            size="xl"
+                            className="text-foreground"
+                          />
+                        )}
+                      </div>
+                      <span className="text-xs font-medium">{preview.data.service_name}</span>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <h1 className="text-xl font-semibold leading-tight text-foreground sm:text-2xl">
+                      NyxID wants to connect to your {preview.data.service_name}
+                    </h1>
+                    <p className="text-sm text-muted-foreground">
+                      Add your connection details and approve the request.
+                    </p>
+                  </div>
+                </div>
+                {submitError ? <ErrorBanner message={submitError} /> : null}
                 <RequestDetails preview={preview.data} />
-                {platformAvailable && catalog?.platform_key && preview.data.status === "pending" && (
-                  <CredentialBindingChoice value={usePlatformKey} onChange={(value) => { setPlatformChoice(value); setShowSetupForm(false); }} platformPrice={catalog.platform_key.pricing} byokPrice={catalog.byok_pricing} legacyBillable={catalog.billing?.platform_billable} resaleBillable={catalog.billing?.resale_billable} disabled={actionPending} />
-                )}
+                {platformAvailable &&
+                  catalog?.platform_key &&
+                  preview.data.status === "pending" && (
+                    <CredentialBindingChoice
+                      value={usePlatformKey}
+                      onChange={setPlatformChoice}
+                      platformPrice={catalog.platform_key.pricing}
+                      byokPrice={catalog.byok_pricing}
+                      legacyBillable={catalog.billing?.platform_billable}
+                      resaleBillable={catalog.billing?.resale_billable}
+                      disabled={actionPending}
+                    />
+                  )}
                 {preview.data.status !== "pending" ? (
                   <ErrorBanner
                     message={`This connection request is ${preview.data.status}.`}
                   />
                 ) : null}
-                {showSetupForm ? (
+                {preview.data.status === "pending" && !deviceChallenge ? (
+                  !usePlatformKey &&
                   preview.data.connect_method === "api_key" ? (
                     <CredentialForm
                       preview={preview.data}
                       pending={actionPending}
                       onSubmit={handleCredentialSubmit}
                     />
-                  ) : (
+                  ) : !usePlatformKey &&
+                    connectLinkNeedsSetupForm(preview.data) ? (
                     <OAuthSetupForm
                       preview={preview.data}
                       pending={actionPending}
                       onSubmit={handleOAuthSubmit}
                     />
-                  )
-                ) : deviceChallenge ? null : (
-                  <div className="flex justify-end">
+                  ) : (
                     <Button
                       type="button"
                       variant="primary"
-                      disabled={
-                        actionPending || preview.data.status !== "pending"
-                      }
+                      className="w-full"
+                      disabled={actionPending}
                       isLoading={complete.isPending}
-                      onClick={() => void handleConnect()}
+                      onClick={() => {
+                        if (!withinCooldown()) void submitCompletion();
+                      }}
                     >
+                      Approve connection{" "}
                       <ButtonIcon variant="primary">
-                        <KeyRound />
+                        <ArrowRight />
                       </ButtonIcon>
-                      Connect
                     </Button>
-                  </div>
-                )}
+                  )
+                ) : null}
                 {deviceChallenge ? (
                   <DeviceCodePanel
                     code={deviceChallenge.code}
@@ -294,24 +351,26 @@ export function ConnectLinkPage() {
                   />
                 ) : null}
                 {preview.data.status === "pending" ? (
-                  <div className="flex justify-start">
+                  <div className="flex justify-center">
                     <Button
                       type="button"
-                      variant="destructive"
+                      variant="ghost"
                       disabled={actionPending}
                       isLoading={cancel.isPending}
                       onClick={() => void handleCancel()}
                     >
-                      <ButtonIcon variant="destructive">
-                        <XCircle />
-                      </ButtonIcon>
-                      Cancel request
+                      Decline
                     </Button>
                   </div>
                 ) : null}
               </>
             )}
           </CardContent>
+          {user?.email ? (
+            <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground">
+              Signed in as <span className="text-foreground">{user.email}</span>
+            </div>
+          ) : null}
         </Card>
       )}
     </ConnectShell>
@@ -445,7 +504,7 @@ function CredentialForm({
     resolver: zodResolver(connectCredentialFormSchema),
     defaultValues: {
       credential: "",
-      endpoint_url: "",
+      endpoint_url: preview.endpoint_url ?? "",
       oauth_client_id: "",
       oauth_client_secret: "",
     },
@@ -464,6 +523,9 @@ function CredentialForm({
     pending ||
     credential.length === 0 ||
     (preview.requires_gateway_url && endpointUrl.length === 0);
+  const credentialLabel =
+    preview.auth_key_name.trim() ||
+    (preview.requires_gateway_url ? "Gateway bearer token" : "API key or token");
 
   return (
     <Form {...form}>
@@ -473,7 +535,7 @@ function CredentialForm({
           name="credential"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>{preview.auth_key_name}</FormLabel>
+              <FormLabel>{credentialLabel}</FormLabel>
               <FormControl>
                 <Input type="password" autoComplete="off" {...field} />
               </FormControl>
@@ -481,7 +543,7 @@ function CredentialForm({
             </FormItem>
           )}
         />
-        {preview.requires_gateway_url ? (
+        {connectLinkShowsEndpointUrl(preview) ? (
           <FormField
             control={form.control}
             name="endpoint_url"
@@ -496,18 +558,24 @@ function CredentialForm({
             )}
           />
         ) : null}
+        {preview.api_key_instructions ? (
+          <p className="text-xs text-muted-foreground">
+            {preview.api_key_instructions}
+          </p>
+        ) : null}
         {formError ? <ErrorBanner message={formError} /> : null}
-        <div className="flex justify-end">
+        <div>
           <Button
+            className="w-full"
             type="submit"
             variant="primary"
             disabled={submitDisabled}
             isLoading={pending}
           >
+            Approve &amp; connect{" "}
             <ButtonIcon variant="primary">
-              <KeyRound />
+              <ArrowRight />
             </ButtonIcon>
-            Connect
           </Button>
         </div>
       </form>
@@ -529,7 +597,7 @@ function OAuthSetupForm({
   const form = useAppForm<ConnectOAuthForm>({
     resolver: zodResolver(connectOAuthFormSchema),
     defaultValues: {
-      endpoint_url: "",
+      endpoint_url: preview.endpoint_url ?? "",
       oauth_client_id: "",
       oauth_client_secret: "",
     },
@@ -555,7 +623,7 @@ function OAuthSetupForm({
   return (
     <Form {...form}>
       <form className="space-y-4" onSubmit={(event) => void submit(event)}>
-        {preview.requires_gateway_url ? (
+        {connectLinkShowsEndpointUrl(preview) ? (
           <FormField
             control={form.control}
             name="endpoint_url"
@@ -601,17 +669,18 @@ function OAuthSetupForm({
           </>
         ) : null}
         {formError ? <ErrorBanner message={formError} /> : null}
-        <div className="flex justify-end">
+        <div>
           <Button
+            className="w-full"
             type="submit"
             variant="primary"
             disabled={submitDisabled}
             isLoading={pending}
           >
+            Approve &amp; continue{" "}
             <ButtonIcon variant="primary">
-              <KeyRound />
+              <ArrowRight />
             </ButtonIcon>
-            Continue
           </Button>
         </div>
       </form>
@@ -619,52 +688,44 @@ function OAuthSetupForm({
   );
 }
 
-export function RequestDetails({ preview }: { readonly preview: ConnectLinkPreview }) {
+export function RequestDetails({
+  preview,
+}: {
+  readonly preview: ConnectLinkPreview;
+}) {
   return (
-    <div className="space-y-4">
-      <div className="divide-y divide-border/30 rounded-lg border border-border/50 bg-white/[0.02]">
-        <ConnectLinkDetailRow label="Service" value={preview.service_name} />
+    <div className="space-y-2 border-y border-border py-4">
+      <div className="space-y-1">
+        <ConnectLinkDetailRow
+          label="Requested by"
+          value={preview.requested_by ?? "Your NyxID account"}
+        />
+        {preview.label ? (
+          <ConnectLinkDetailRow label="Connection name" value={preview.label} />
+        ) : null}
         {preview.scopes.length > 0 ? (
           <ConnectLinkDetailRow
             label="Requested permissions"
             value={preview.scopes.join(", ")}
           />
         ) : null}
-        <ConnectLinkDetailRow
-          label="Requested by"
-          value={preview.requested_by ?? "Your NyxID account"}
-        />
-        <ConnectLinkDetailRow
-          label="Label"
-          value={preview.label ?? "Not provided"}
-        />
-        <ConnectLinkDetailRow
-          label="Created"
-          value={new Date(preview.created_at).toLocaleString()}
-        />
-        <ConnectLinkDetailRow
-          label="Status"
-          value={preview.status}
-          capitalizeValue
-        />
-        {preview.api_key_url ? (
-          <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
-            <span className="text-muted-foreground">Credential source</span>
-            <a
-              className="inline-flex items-center gap-1 text-nyx-secondary-400 hover:underline"
-              href={preview.api_key_url}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open provider <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
-        ) : null}
       </div>
+      {preview.api_key_url ? (
+        <a
+          className="inline-flex items-center gap-1.5 px-4 text-xs text-muted-foreground hover:text-foreground"
+          href={preview.api_key_url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Credential setup <ExternalLink className="size-3" aria-hidden="true" />
+        </a>
+      ) : null}
       {preview.scopes.length > 0 &&
-      (preview.connect_method === "oauth" || preview.connect_method === "device_code") ? (
-        <p className="text-[12px] text-muted-foreground">
-          These additional permissions will be requested on top of the provider defaults.
+      (preview.connect_method === "oauth" ||
+        preview.connect_method === "device_code") ? (
+        <p className="px-4 text-xs text-muted-foreground">
+          These additional permissions will be requested on top of the provider
+          defaults.
         </p>
       ) : null}
     </div>
@@ -681,7 +742,7 @@ export function ConnectLinkDetailRow({
   readonly capitalizeValue?: boolean;
 }) {
   return (
-    <div className="flex justify-between gap-4 px-4 py-2.5 text-[12px]">
+    <div className="flex justify-between gap-4 px-4 py-1 text-xs">
       <span className="text-muted-foreground">{label}</span>
       <span
         className={cn(
@@ -744,7 +805,9 @@ export function TerminalPanel({
   const completed = status === "completed";
   return (
     <Card
-      className={completed ? "border-success/25 bg-success/[0.03]" : "border-border/50"}
+      className={
+        completed ? "border-success/25 bg-success/[0.03]" : "border-border/50"
+      }
     >
       <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
         {completed ? (
@@ -775,9 +838,15 @@ export function TerminalPanel({
 }
 
 function ConnectShell({ children }: { readonly children: React.ReactNode }) {
+  useApplyTheme();
   return (
-    <main className="flex min-h-dvh items-start justify-center bg-background px-4 py-8 text-foreground sm:items-center">
-      <div className="flex w-full max-w-xl flex-col gap-5">{children}</div>
+    <main className="connect-link-shell flex min-h-dvh items-center justify-center px-4 py-8 text-foreground">
+      <div className="relative z-10 flex w-full max-w-lg flex-col gap-5">
+        {children}
+        <p className="text-center text-xs text-muted-foreground">
+          Service connection via NyxID
+        </p>
+      </div>
     </main>
   );
 }

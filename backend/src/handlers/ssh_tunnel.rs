@@ -271,10 +271,19 @@ async fn handle_ssh_socket(
             return;
         }
     };
+    let credential_class = if node_route.is_some() {
+        CredentialClass::NodeManaged
+    } else {
+        CredentialClass::NoAuth
+    };
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve_for_resource(&billing_resolution_user_id, &resource_owner_id)
+        .resolve_for_execution(
+            &billing_resolution_user_id,
+            &resource_owner_id,
+            credential_class,
+        )
         .await
     {
         Ok(owner) => owner,
@@ -307,11 +316,7 @@ async fn handle_ssh_socket(
         Some(service_slug.clone()),
         node_intent,
         "ssh".to_string(),
-        if node_route.is_some() {
-            CredentialClass::NodeManaged
-        } else {
-            CredentialClass::NoAuth
-        },
+        credential_class,
         BillingMetric::Bytes,
         None,
         false,
@@ -1060,7 +1065,10 @@ pub(crate) async fn authorize_ssh_access_for_operation(
             // UserService also resolves to `None` here and must not be locked
             // out of their own service. Public catalog services keep their
             // open behaviour.
-            if service.visibility == "private" && service.created_by != resolution_user_id {
+            if service.visibility == "private"
+                && crate::services::ownership_transfer_service::catalog_owner(&service)
+                    != resolution_user_id
+            {
                 return Err(AppError::NotFound("SSH service not found".to_string()));
             }
             &resolution_user_id
@@ -1408,6 +1416,10 @@ mod tests {
 
     fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: id.to_string(),
             name: "Bastion".to_string(),
             slug: format!("ssh-{id}"),
@@ -1595,7 +1607,11 @@ mod tests {
         let payer = state
             .billing
             .owner_resolver()
-            .resolve_for_resource(&billing_principal_user_id, &auth_context.owner_user_id)
+            .resolve_for_execution(
+                &billing_principal_user_id,
+                &auth_context.owner_user_id,
+                crate::models::usage_meter::CredentialClass::NodeManaged,
+            )
             .await
             .expect("resolve service-account SSH payer");
 

@@ -1,3 +1,4 @@
+import { ServiceAuthorshipFooter, ArchivedServiceHistory } from "@/components/dashboard/service-history";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys } from "@/hooks/use-keys";
@@ -269,21 +270,27 @@ function KeyCardContent({
           </Button>
         )}
 
-        <div className="mt-auto space-y-1.5 text-xs text-muted-foreground">
-          <div className="flex min-w-0 items-center gap-1.5">
-            {isSsh ? (
-              <Terminal className="h-3 w-3 shrink-0" />
-            ) : (
-              <Globe className="h-3 w-3 shrink-0" />
-            )}
-            <span className="truncate">{displayUrl}</span>
+        <div className="mt-auto flex min-w-0 items-end justify-between gap-3">
+          <div className="min-w-0 flex-1 space-y-1.5 text-xs text-muted-foreground">
+            <div className="flex min-w-0 items-center gap-1.5">
+              {isSsh ? (
+                <Terminal className="h-3 w-3 shrink-0" />
+              ) : (
+                <Globe className="h-3 w-3 shrink-0" />
+              )}
+              <span className="truncate">{displayUrl}</span>
+            </div>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Server className="h-3 w-3 shrink-0" />
+              <span className="truncate">
+                {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
+              </span>
+            </div>
           </div>
-          <div className="flex min-w-0 items-center gap-1.5">
-            <Server className="h-3 w-3 shrink-0" />
-            <span className="truncate">
-              {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
-            </span>
-          </div>
+          <ServiceAuthorshipFooter
+            authorship={keyInfo.authorship}
+            className="mt-0 max-w-[60%]"
+          />
         </div>
       </CardContent>
     </Card>
@@ -447,6 +454,7 @@ function ServiceTableRow({
           )}
         </div>
       </TableCell>
+      <TableCell><ServiceAuthorshipFooter authorship={keyInfo.authorship} /></TableCell>
     </TableRow>
   );
 }
@@ -485,15 +493,16 @@ function ServiceTableView({
             )}
           </div>
           <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
-            <Table>
+            <Table className="min-w-[1000px] table-fixed">
               <TableHeader>
                 <TableRow className="border-border/50 hover:bg-transparent">
-                  <TableHead className="w-[20%]">Name</TableHead>
-                  <TableHead className="w-[22%]">Endpoint</TableHead>
-                  <TableHead className="w-[10%]">Auth</TableHead>
-                  <TableHead className="w-[20%]">Proxy Slug</TableHead>
+                  <TableHead className="w-[16%]">Name</TableHead>
+                  <TableHead className="w-[18%]">Endpoint</TableHead>
+                  <TableHead className="w-[8%]">Auth</TableHead>
+                  <TableHead className="w-[16%]">Proxy Slug</TableHead>
                   <TableHead className="w-[10%]">Routing</TableHead>
-                  <TableHead className="w-[18%]">Status</TableHead>
+                  <TableHead className="w-[12%]">Status</TableHead>
+                  <TableHead className="w-[20%] min-w-52 text-right">Authorship</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -980,6 +989,7 @@ export function KeysPage() {
             showAutoConnected={showAutoConnected}
             viewMode={servicesViewMode}
           />
+          <ArchivedServiceHistory />
         </TabsContent>
 
         <TabsContent value="pools" className="mt-6">

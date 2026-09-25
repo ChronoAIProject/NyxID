@@ -108,6 +108,7 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   // `.../user` (works with both OAuth and PAT bearer tokens).
   "api-github": { path: "user" },
   "api-github-pat": { path: "user" },
+  "api-aurinko": { path: "v1/account" },
 
   // Bot APIs — dedicated bot-identity endpoints. Telegram Bot's path
   // is bare because the token is injected via `path` auth method
@@ -128,6 +129,10 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   },
   "api-google-drive": { path: "drive/v3/files?pageSize=1&fields=files(id)" },
   "api-google-gmail": { path: "gmail/v1/users/me/messages?maxResults=1" },
+  // Reads require an existing document ID; there is no account-level probe.
+  "api-google-docs": null,
+  "api-google-sheets": null,
+  "api-google-slides": null,
   "api-spotify": { path: "me" }, // base is .../v1
   "api-twitter": { path: "users/me" }, // base is .../2
   "api-reddit": { path: "api/v1/me" }, // base is bare oauth.reddit.com
@@ -142,6 +147,8 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   // No suitable status endpoint / requires special auth we don't emulate
   "api-firecrawl": null, // no public status endpoint
   "api-tiktok": null, // /oauth/userinfo needs POST body
+  "api-ifttt-mcp": null, // OAuth completion establishes the connection; tools are discovered explicitly.
+  "api-ifttt": null, // Every valid operation triggers an Applet; no automatic probe.
   "api-lark-bot": null, // OpenAPI probe path needs OAuth context
   "api-feishu-bot": null, // same as lark-bot
 

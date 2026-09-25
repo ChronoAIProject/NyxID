@@ -320,11 +320,13 @@ input[type="number"] {
   -moz-appearance: textfield;
 }
 
-/* ── iOS zoom prevention: force 16px on inputs to prevent auto-zoom ── */
+/* ── iOS: prevent input zoom and keep custom selects at the same text size ── */
 @supports (-webkit-touch-callout: none) {
   input,
   select,
-  textarea {
+  textarea,
+  [role="combobox"],
+  [role="option"] {
     font-size: 16px !important;
   }
 }
@@ -379,7 +381,106 @@ input[type="number"] {
   border-left: 2px solid rgba(90, 42, 241, 0.3);
 }
 
-/* ── Ambient glow backgrounds ── */
+.connect-link-shell {
+  background-color: var(--color-background);
+}
+
+.connection-identity-icon {
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.38),
+    0 0 0 4px rgba(255, 255, 255, 0.025);
+}
+
+html.theme-light .connection-identity-icon {
+  box-shadow:
+    0 10px 24px rgba(27, 24, 43, 0.14),
+    0 2px 5px rgba(27, 24, 43, 0.06);
+}
+
+.connection-card-heading {
+  margin: -1.25rem -1.25rem 0;
+  padding: 2rem 1.25rem 1.75rem;
+  background-image:
+    linear-gradient(to bottom, transparent, var(--color-card)),
+    radial-gradient(rgba(201, 176, 239, 0.08) 0.6px, transparent 0.8px),
+    linear-gradient(115deg, rgba(110, 73, 179, 0.22), rgba(45, 81, 137, 0.1) 65%, transparent);
+  background-size: auto, 6px 6px, auto;
+}
+
+.channel-connect-card .connection-card-heading {
+  background-image:
+    linear-gradient(to bottom, transparent, var(--color-card)),
+    radial-gradient(rgba(141, 219, 222, 0.08) 0.6px, transparent 0.8px),
+    linear-gradient(115deg, rgba(44, 150, 168, 0.2), rgba(96, 91, 164, 0.09) 65%, transparent);
+}
+
+.channel-connect-dialog {
+  background-color: var(--color-card);
+}
+
+.channel-connect-dialog::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 6.5rem;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to bottom, transparent, var(--color-card)),
+    radial-gradient(rgba(141, 219, 222, 0.08) 0.6px, transparent 0.8px),
+    linear-gradient(115deg, rgba(44, 150, 168, 0.2), rgba(96, 91, 164, 0.09) 65%, transparent);
+  background-size: auto, 6px 6px, auto;
+}
+
+.channel-connect-dialog > div {
+  position: relative;
+}
+
+.channel-connection-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 12rem;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to bottom, transparent, var(--color-card)),
+    radial-gradient(rgba(141, 219, 222, 0.08) 0.6px, transparent 0.8px),
+    linear-gradient(115deg, rgba(44, 150, 168, 0.2), rgba(96, 91, 164, 0.09) 65%, transparent);
+  background-size: auto, 6px 6px, auto;
+}
+
+.channel-connection-card > div {
+  position: relative;
+}
+
+@media (min-width: 640px) {
+  .connection-card-heading {
+    margin: -2rem -2rem 0;
+    padding: 2.25rem 2rem 1.75rem;
+  }
+}
+
+html.theme-light .connection-card-heading {
+  background-image:
+    linear-gradient(to bottom, transparent, var(--color-card)),
+    radial-gradient(rgba(89, 63, 127, 0.06) 0.6px, transparent 0.8px),
+    linear-gradient(115deg, rgba(110, 73, 179, 0.13), rgba(45, 81, 137, 0.06) 65%, transparent);
+}
+
+html.theme-light .channel-connect-card .connection-card-heading,
+html.theme-light .channel-connect-dialog::before {
+  background-image:
+    linear-gradient(to bottom, transparent, var(--color-card)),
+    radial-gradient(rgba(44, 150, 168, 0.06) 0.6px, transparent 0.8px),
+    linear-gradient(115deg, rgba(44, 150, 168, 0.12), rgba(96, 91, 164, 0.06) 65%, transparent);
+}
+
+html.theme-light .channel-connection-card::before {
+  background-image:
+    linear-gradient(to bottom, transparent, var(--color-card)),
+    radial-gradient(rgba(44, 150, 168, 0.06) 0.6px, transparent 0.8px),
+    linear-gradient(115deg, rgba(44, 150, 168, 0.12), rgba(96, 91, 164, 0.06) 65%, transparent);
+}
+
 .ambient-glow {
   background: radial-gradient(
     ellipse at 50% 80%,
@@ -413,6 +514,20 @@ input[type="number"] {
 }
 
 /* ── Animations ── */
+@keyframes channel-connection-sweep {
+  from {
+    transform: translateX(-40px);
+  }
+  to {
+    transform: translateX(80px);
+  }
+}
+
+.channel-connection-sweep {
+  transform: translateX(-40px);
+  animation: channel-connection-sweep 2.8s linear infinite;
+}
+
 @keyframes pulse-subtle {
   0%,
   100% {
@@ -634,6 +749,10 @@ html.theme-dark .assistant-halo--visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .channel-connection-sweep {
+    animation: none;
+  }
+
   /* Parks on frame 0 rather than hiding the halo — the turn is still running
      and the mark is the only signal that it is. */
   .assistant-halo-sprite {

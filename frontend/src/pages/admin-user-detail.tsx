@@ -1,3 +1,9 @@
+import {
+  changedFields,
+  describeChanges,
+  hasFieldConflicts,
+} from "@/lib/form-changes";
+import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -23,7 +29,11 @@ import { useAuthStore } from "@/stores/auth-store";
 import { updateUserSchema, type UpdateUserFormData } from "@/schemas/admin";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
-import { resolvePlatformRole, canAdminWrite, type PlatformRole } from "@/types/api";
+import {
+  resolvePlatformRole,
+  canAdminWrite,
+  type PlatformRole,
+} from "@/types/api";
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -95,10 +105,14 @@ const ROLE_LABEL: Record<PlatformRole, string> = {
 
 export function AdminUserDetailPage() {
   const { userId } = useParams({ strict: false }) as { userId: string };
+  return <AdminUserDetailPageEditor key={userId} userId={userId} />;
+}
+
+function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
 
-  const { data: user, isLoading, error } = useAdminUser(userId);
+  const { data: user, isLoading } = useAdminUser(userId);
   const { data: sessionsData } = useAdminUserSessions(userId);
 
   const updateMutation = useUpdateAdminUser();
@@ -131,42 +145,51 @@ export function AdminUserDetailPage() {
     },
   });
 
-  function openEditDialog() {
-    if (!user) return;
-    form.reset({
+  const normalize = (value: UpdateUserFormData) => ({
+    display_name: value.display_name ?? "",
+    email: value.email,
+    avatar_url: value.avatar_url ?? "",
+  });
+  function editValues(): UpdateUserFormData {
+    if (!user) return form.getValues();
+    return {
       display_name: user.display_name ?? "",
       email: user.email,
       avatar_url: user.avatar_url ?? "",
-    });
+    };
+  }
+
+  function openEditDialog() {
+    if (!user) return;
+    form.reset(editValues());
+    editReview.cancel();
     setEditOpen(true);
   }
 
-  async function handleEdit(data: UpdateUserFormData) {
-    const payload: Record<string, string> = {};
-    if (data.display_name && data.display_name !== (user?.display_name ?? "")) {
-      payload.display_name = data.display_name;
-    }
-    if (data.email && data.email !== user?.email) {
-      payload.email = data.email;
-    }
-    if (data.avatar_url) {
-      payload.avatar_url = data.avatar_url;
-    }
-
-    if (Object.keys(payload).length === 0) {
-      setEditOpen(false);
-      return;
-    }
-
-    try {
-      await updateMutation.mutateAsync({ userId, data: payload });
+  const editReview = useChangeReview<
+    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+  >(
+    async ({ before: _before, ...variables }) => {
+      void _before;
+      await updateMutation.mutateAsync(variables);
       toast.success("User updated successfully");
       setEditOpen(false);
-    } catch (err) {
-      toast.error(
-        err instanceof ApiError ? err.message : "Failed to update user",
-      );
-    }
+    },
+    (pending) =>
+      !user ||
+      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+    userId,
+  );
+
+  function handleEdit(data: UpdateUserFormData) {
+    const before = normalize(
+      form.formState.defaultValues as UpdateUserFormData,
+    );
+    const patch = changedFields(before, normalize(data));
+    editReview.review(
+      { userId, data: patch, before },
+      describeChanges(before, patch),
+    );
   }
 
   async function handleSetRole() {
@@ -263,7 +286,7 @@ export function AdminUserDetailPage() {
     }
   }
 
-  if (isLoading) {
+  if (isLoading && !user) {
     return (
       <div className="space-y-6">
         <Skeleton className="h-10 w-64" />
@@ -273,7 +296,7 @@ export function AdminUserDetailPage() {
     );
   }
 
-  if (error || !user) {
+  if (!user) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
@@ -302,7 +325,9 @@ export function AdminUserDetailPage() {
           canWrite ? (
             <>
               <Button variant="outline" onClick={openEditDialog}>
-                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <Pencil className="h-3 w-3" />
+                </ButtonIcon>
                 Edit
               </Button>
               {!isSelf && (
@@ -310,7 +335,9 @@ export function AdminUserDetailPage() {
                   variant="destructive"
                   onClick={() => setConfirmAction("delete")}
                 >
-                  <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+                  <ButtonIcon variant="destructive">
+                    <Trash2 className="h-3 w-3 text-destructive" />
+                  </ButtonIcon>
                   Delete
                 </Button>
               )}
@@ -410,7 +437,9 @@ export function AdminUserDetailPage() {
                   variant="outline"
                   onClick={() => setConfirmAction("verify-email")}
                 >
-                  <ButtonIcon><MailCheck className="h-3 w-3" /></ButtonIcon>
+                  <ButtonIcon>
+                    <MailCheck className="h-3 w-3" />
+                  </ButtonIcon>
                   Verify Email
                 </Button>
               )}
@@ -418,14 +447,18 @@ export function AdminUserDetailPage() {
                 variant="outline"
                 onClick={() => setConfirmAction("reset-password")}
               >
-                <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <KeyRound className="h-3 w-3" />
+                </ButtonIcon>
                 Reset Password
               </Button>
               <Button
                 variant="outline"
                 onClick={() => setConfirmAction("revoke-sessions")}
               >
-                <ButtonIcon><LogOut className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <LogOut className="h-3 w-3" />
+                </ButtonIcon>
                 Revoke Sessions
               </Button>
             </div>
@@ -441,7 +474,9 @@ export function AdminUserDetailPage() {
         {sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <BiometricIdentityIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-[12px] text-muted-foreground">No sessions found.</p>
+            <p className="text-[12px] text-muted-foreground">
+              No sessions found.
+            </p>
           </div>
         ) : (
           <Table>
@@ -491,6 +526,7 @@ export function AdminUserDetailPage() {
       </DetailSection>
 
       {/* Edit Dialog */}
+      {editReview.dialog}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -551,7 +587,11 @@ export function AdminUserDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  isLoading={updateMutation.isPending}
+                >
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -773,7 +813,11 @@ function UserRolesSection({
             </p>
             <div className="flex flex-wrap gap-1">
               {effectivePermissions.map((perm) => (
-                <Badge key={perm} variant="secondary" className="font-mono text-xs">
+                <Badge
+                  key={perm}
+                  variant="secondary"
+                  className="font-mono text-xs"
+                >
                   {perm}
                 </Badge>
               ))}

@@ -1,0 +1,123 @@
+# Aurinko email integration
+
+NyxID supports Aurinko in two places: an account-token connection in **AI Services**, and an **Aurinko email channel bot**. Both use the documented Aurinko account bearer token. The channel bot also needs the application's separate webhook signing secret. Each connection belongs to a NyxID person or organization; there is no platform-wide mailbox.
+
+This document supersedes the proposed connector/polling architecture in the historical [feasibility assessment](./assistant/AURINKO_EMAIL_CHANNEL_FEASIBILITY.md). The implemented channel is a native adapter with bounded inline handling and producer-owned retries; NyxID does not poll mailboxes.
+
+## Configure application credentials
+
+Admins can store the Aurinko application credentials in **Admin → Platform Credentials → Aurinko Email**. The three password fields are **Application Client ID**, **Application Client Secret**, and **Application webhook signing secret**. The signing secret comes from separate webhook settings; it is not the Client Secret or an account token. Values are encrypted and never prefilled or returned. The existing Aurinko provider retains the app ID and client secret; the platform credential row stores only the signing secret. Combined changes are atomic and configuration reads use one database snapshot.
+
+The CLI uses the same descriptor and storage:
+
+```sh
+nyxid admin platform-credentials set aurinko \
+  --field-env client_id=AURINKO_CLIENT_ID \
+  --field-env client_secret=AURINKO_CLIENT_SECRET \
+  --field-env signing_secret=AURINKO_SIGNING_SECRET
+```
+
+Saving these fields prepares platform configuration. Managed authorization remains unavailable under the OAuth decision below. Manual AI Service and bot credentials remain independent; storing or clearing application configuration does not change them.
+
+On installations without this Aurinko form, the existing provider admin API can already store the application pair. Authenticate as a NyxID admin, call `GET /api/v1/providers`, and find the `id` of the entry whose `slug` is `aurinko`. Send `PUT /api/v1/providers/{id}` with only these fields:
+
+```json
+{
+  "client_id": "YOUR_AURINKO_APPLICATION_CLIENT_ID",
+  "client_secret": "YOUR_AURINKO_APPLICATION_CLIENT_SECRET"
+}
+```
+
+The response reports `has_client_id: true` and `has_client_secret: true`; it never returns their values. This uses the same encrypted provider storage and requires no secret seed or provider-type change. It stores configuration only and does not enable managed mailbox authorization.
+
+## Connect an AI Service
+
+In **AI Services → Add service**, choose **Aurinko Email** and enter the Aurinko account access token in the existing API credential form. This creates the normal owner-scoped endpoint, encrypted credential, and service records. Use **Test Agent Key** to probe authenticated `GET /v1/account`; the probe separates NyxID agent-key authorization from the upstream credential result.
+
+The equivalent CLI flow is:
+
+```sh
+nyxid service add api-aurinko --credential-env AURINKO_ACCOUNT_TOKEN --label 'My mailbox'
+nyxid catalog show api-aurinko
+nyxid catalog endpoints api-aurinko
+```
+
+Set `AURINKO_ACCOUNT_TOKEN` through your usual secret-management environment. The token must represent the mailbox account, not an Aurinko application client secret. The AI Service and bot currently store independent encrypted copies of the account token: connecting, disabling, rotating, or deleting one does not change the other. To use the same mailbox on both surfaces, supply that account's token to each, and rotate both copies when replacing it. Agent service bindings and Disable/Enable/Delete retain their normal AI Services behavior.
+
+The catalog uses `https://api.aurinko.io` with Bearer authorization and a curated OpenAPI overlay. Fifteen concrete MCP operations cover account identity; email list/search; message, thread, and attachment reads; send and reply; draft create/get/update/delete/send; and email sync start/updated/deleted. Attachment reads return Aurinko's JSON representation. Writes carry write-risk/approval annotations and do not advertise provider idempotency. Scope the agent's NyxID API key to the intended service; normal owner, active-service, service-scope, and approval checks apply. A read-only agent should receive only read permissions and appropriate operation approvals. The general AI Service send operation supports user-authorized email composition; the channel reply endpoint has the narrower recipient policy below.
+
+Aurinko permissions depend on the operations used: `Mail.Read` for reads, `Mail.Send` for sending, and `Mail.Drafts` for drafts (`Mail.All` is broader). The channel requires `Mail.Read` plus `Mail.Send`, or `Mail.ReadWrite` plus `Mail.Send`, or `Mail.All`. NyxID verifies the channel token's account, active token status, scopes, and mailbox identity using `/v1/account?pingProvider=true`.
+
+## Synchronize a mailbox through the API
+
+The connected service exposes `POST /v1/email/sync`, `GET /v1/email/sync/updated`, and `GET /v1/email/sync/deleted` through its normal NyxID proxy path and MCP discovery. Start accepts `daysWithin` and `bodyType`; wait for `ready`, then use `syncUpdatedToken` and `syncDeletedToken` for the corresponding delta feeds. Follow `nextPageToken` while paging, and retain `nextDeltaToken` for the next incremental request. A 410 means the sync cursor expired and the caller must start again. Sync needs `Mail.Read`; starting it carries the normal write/approval annotation. The caller stores cursors and any synchronized messages. NyxID injects the account token and does not return it or persist message bodies.
+
+## Register an email channel bot
+
+Enable the existing channel relay and configure NyxID's public HTTPS `BASE_URL`. Aurinko must be able to reach the callback during registration. Prepare an agent API key owned by the same person or organization and set its approved callback URL. The runtime must acknowledge callbacks and deduplicate their stable `message_id` before doing work.
+
+In **Channel Bots → Register bot**, choose **Aurinko**, enter the **Account access token** and **Aurinko signing secret**, and create a route to that agent. The signing secret comes from the Aurinko application's webhook settings. It is not the account bearer token and is not a per-bot secret generated by NyxID.
+
+```sh
+nyxid channel-bot register --platform aurinko --label 'Support mailbox' \
+  --token-env AURINKO_ACCOUNT_TOKEN --app-secret-env AURINKO_SIGNING_SECRET
+nyxid channel-bot route create --bot-id BOT_UUID --agent-key-id AGENT_KEY_UUID --default-agent
+nyxid channel-bot verify BOT_UUID
+```
+
+Use `--org` consistently for organization-owned bots, routes, and agent keys. Only one active Aurinko bot can claim an account, enforced by a unique database index even during concurrent registration. Different mailbox accounts can have separate bots.
+
+The management API uses the existing endpoints:
+
+| Action | Request |
+|---|---|
+| Register | `POST /api/v1/channel-bots` with `platform: "aurinko"`, `label`, `bot_token`, `app_secret`, and optional `target_org_id` |
+| Rotate credentials | `PATCH /api/v1/channel-bots/{id}` with `bot_token` and/or `app_secret` |
+| Verify or repair | `POST /api/v1/channel-bots/{id}/verify` |
+| Delete | `DELETE /api/v1/channel-bots/{id}` |
+| Receive notification | `POST /api/v1/webhooks/channel/aurinko/{id}` |
+| Reply | `POST /api/v1/channel-relay/reply` |
+
+Registration stores the verified account before creating an Aurinko `/email/messages` subscription with `detailLevel: "status"` and `filters: ["withoutDrafts"]`. The signed POST validation challenge works while the bot is pending and returns the exact `validationToken` as `text/plain`. Normal delivery stays disabled until the subscription ID is persisted and setup succeeds.
+
+Verify repairs missing/failed setup and reconciles subscriptions at this bot's exact callback URL after an uncertain creation. It adopts only compatible active subscriptions; signal-only subscriptions are replaced. It never deletes subscriptions with another callback URL. Changing the account token to a different mailbox is rejected. Rotating the signing secret puts the bot into pending setup, and Verify requires evidence of a successful challenge using the current secret before enabling it; an existing subscription alone is insufficient. Lifecycle operations serialize across replicas and never reactivate deleted bots.
+
+Deletion deactivates the bot and its routes locally even when upstream authorization has been revoked. Aurinko deletion responds with `{"webhook_cleanup":"removed"}` or `{"webhook_cleanup":"failed"}`. CLI JSON adds `ok: true` and preserves `webhook_cleanup`; the UI and CLI warn on failed cleanup. In that case remove the subscription for the displayed callback URL in the Aurinko dashboard, or repeat Delete through the API/CLI after restoring access. Cleanup never deletes the mailbox account or another consumer's subscriptions. Ordinary legacy bot deletion still returns HTTP 204.
+
+Owner hard deletion removes the owner's Aurinko bot credentials and email channel metadata. This integration does not expand personal deletion to legacy channel records. Active email ingress/reply work makes self-deletion retryable **before** the user is deactivated, so the user can retry. Once deletion finishes, the callback URL is inert. Hard owner deletion is local cleanup and does not call Aurinko; remove any remaining subscription in the Aurinko dashboard. Organization deletion retains its existing requirement to delete active resources first.
+
+## Incoming mail and routing
+
+NyxID verifies the raw request bytes using HMAC-SHA256 over `v0:{timestamp}:{body}` and constant-time comparison of `X-Aurinko-Signature`, with `X-Aurinko-Request-Timestamp`. Signatures can be up to 30 days old to allow retries carrying the original signature, but cannot predate bot creation by more than five minutes or be over five minutes in the future. Durable per-message completion metadata prevents replay within and beyond this window. Signed challenges are authenticated too.
+
+Normal notifications must match the bot's persisted account and subscription. They contain IDs/change types, not mail bodies. NyxID fetches each eligible created/updated message with `bodyType=text`, `stripQuoted=true`, `loadInlines=false`, and `requireThreadId=true`. Lifecycle, tracking, deleted, and unrelated-resource events never become user messages. A missing thread or HTTP 408 can be transient; the producer must redeliver it.
+
+A conversation ID is `{accountId}:{sha256(threadId)}`, using lowercase hex, and fits the 256-character route limit. The original thread ID remains in callback routing metadata. Use `platform_conversation_id` from the callback when creating a per-thread route. Callbacks contain `Subject: …` followed by the text body, and transient `raw_platform_data` with account/message/thread/subject information. Attachments are not automatically fetched or forwarded. Agents can read them through an independently authorized AI Service connection.
+
+The channel ignores mail received before bot creation; sent, draft, junk, and trash labels; mail from the mailbox itself; common bounce/no-reply senders; mailing-list/bulk traffic; meeting messages; and automation/report headers including `Auto-Submitted` and `X-NyxID-Auto-Reply`. This policy applies again when replying. Oversized content and missing/deleted upstream messages are permanently ignored. Incomplete fetches remain retryable.
+
+Incoming notifications are capped at 256 KiB and 1,000 payload entries. Upstream responses are capped at 2 MiB, message text at 256 KiB, and subjects at 4,096 bytes. Provider requests have a three-second connect and ten-second total timeout, never follow redirects, and use a fixed origin. A batch has a bounded inline processing budget; a metadata-only rotating offset gives later items progress when earlier fetches repeatedly time out. No configurable upstream URL exists in production.
+
+Successful or deliberately ignored notifications receive HTTP 200. Signature/binding failures receive 401, malformed input 400, and recoverable fetch/callback/concurrency failures 503 with `Retry-After: 10`. NyxID never uses 422 for Aurinko because Aurinko removes subscriptions on that response. Completed items in partially failed batches stay deduplicated. In-flight claims are retryable, not acknowledged as completed.
+
+ADR-013 is preserved: no email bodies, attachments, raw notifications, or reply text are persisted; no queue or periodic retry worker is added. `channel_email_subscriptions` holds lifecycle bindings; `channel_email_batches` holds only a batch digest/cursor with a 31-day TTL; `channel_email_receipts` holds a stable UUID-v4 and completion marker; `channel_email_sends` holds the irreversible submission barrier. Receipts and sends last for the bot's lifetime, preventing an old message update from triggering fresh agent work after the normal 30-day channel-message log expires. Bot/owner cleanup removes this metadata.
+
+Callback retries reuse the same UUID-v4 independently of route changes. Pending retries follow the current approved route and current API-key callback URL/scopes. Route reassignment revokes the old Aurinko reply authority, including reassignment of the same route to another key. The receiving runtime must also deduplicate `message_id`: a lost callback acknowledgement cannot prove whether the runtime started an action. Completed messages do not reroute. Existing relay rate limiting, callback status, last-message time, and metadata auditing apply.
+
+## Reply behavior
+
+The runtime acknowledges the callback, then posts a text reply using its scoped NyxID API key or the callback's message-bound reply token:
+
+```json
+{"message_id":"INBOUND_UUID","reply":{"text":"Your reply text"}}
+```
+
+NyxID checks the current bot, original message, owner, key, and routing authority, verifies the upstream account, and fetches the original message again before any send. It calls only `POST /v1/email/messages/{messageId}/reply?bodyType=text&returnIds=true`. The original message supplies the subject and recipient: a single `Reply-To` is honored, otherwise the sender is used. Multiple Reply-To addresses require manual mailbox handling. CC/BCC are empty; caller metadata cannot add recipients or attachments. Outbound custom headers include `X-NyxID-Auto-Reply: true` and `X-Auto-Response-Suppress: All`; the inbound filter recognizes the NyxID marker to prevent two NyxID bots from replying to each other.
+
+Both authentication paths share one durable send barrier per bot/original message. Preflight errors are retryable with the same reply token. Once a provider POST is attempted, NyxID does not blindly resend it. A successful Aurinko `status: "Ok"` with `processingStatus: "Incomplete"` counts as submitted even without a returned ID. Repeated requests return the recorded optional ID without another POST. A timeout, connection loss, or unsuccessful/ambiguous POST leaves an uncertain barrier and returns a conflict requiring mailbox inspection. There is no documented Aurinko idempotency key, so NyxID cannot safely offer automatic recovery of an uncertain submission. Metadata auditing does not prove final recipient delivery.
+
+## OAuth decision and validation boundary
+
+Supported onboarding is **account-token entry**. NyxID does not offer managed Aurinko OAuth. The official [Account OAuth Flow](https://docs.aurinko.io/authentication/oauth-flow/account-oauth-flow) and [OpenAPI specification](https://apirefs.aurinko.io/assets/swagger.json) describe `GET /v1/auth/authorize` with `clientId`, `serviceType`, `scopes`, `responseType`, `returnUrl`, and `state`, followed by Basic-authenticated `POST /v1/auth/token/{code}` returning `accountId` and `accessToken`. These differ from NyxID's generic OAuth parser. Neither inspected contract documents PKCE challenge/verifier support. NyxID requires PKCE, so an interoperable managed flow needs official documentation/confirmation and testing of that support first. No security requirement is relaxed and no implicit/fake connection flow is exposed.
+
+Official references: [documentation index](https://docs.aurinko.io/llms.txt), [webhooks](https://docs.aurinko.io/unified-apis/webhooks-api), [webhook authentication](https://docs.aurinko.io/unified-apis/webhooks-api/authentication), [authentication scopes](https://docs.aurinko.io/authentication/authentication-scopes), and the OpenAPI specification above. The Aurinko overlay participates in the existing spec-drift map. Local validation uses mock Aurinko HTTP and a real MongoDB replica set; it does not establish production delivery latency, provider app verification, Google approval, or actual recipient delivery.

@@ -1,5 +1,13 @@
+import { AdminOwnershipPage } from "@/pages/admin-ownership";
+import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
+import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
+import {
+  channelBotSetupRewrite,
+  parseChannelBotSetupPageSearch,
+  parseChannelBotSetupSearch,
+} from "@/schemas/channel-bot-setup";
 import {
   createRouter,
   createRoute,
@@ -71,10 +79,10 @@ import {
   NodeDetailPage,
   AdminNodesPage,
   AdminAuditLogPage,
+  AdminUsagePage,
   AdminFeatureFlagsPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
-  AdminPlatformOpsPage,
   AdminCreditsPage,
   AdminInviteCodesPage,
   CliAuthPage,
@@ -90,6 +98,8 @@ import {
   BillingPage,
   KeyDetailPage,
   ChannelBotsPage,
+  ChannelBotSetupPage,
+  ChannelBotSetupLinksPage,
   ChannelBotDetailPage,
   ChannelConversationDetailPage,
   OrgsPage,
@@ -318,16 +328,15 @@ const sshTerminalRoute = createRoute({
   component: SshTerminalPage,
 });
 
-// Shared by every /assistant* route. Keep this auth mirror aligned with
-// dashboardLayout.beforeLoad below; the Assistant shell intentionally lives
-// outside DashboardLayout.
+// Shared by authenticated pages outside DashboardLayout. Keep this auth
+// mirror aligned with dashboardLayout.beforeLoad below.
 //
 // The assistant surface is deliberately not flag-gated here: both a reactive
 // component guard and a server-verified beforeLoad gate raced the auth store
 // (boot `checkAuth`, transient 401 `setUser(null)`) and bounced users whose
 // permission had simply not loaded yet. Reachability is nav-level only (the
 // sidebar link honours the flag) and the backend authorizes every API call.
-const assistantBeforeLoad = async ({
+const standaloneAuthBeforeLoad = async ({
   location,
 }: {
   location: { pathname: string; searchStr: string };
@@ -358,28 +367,28 @@ const assistantRoute = createRoute({
   // `?draft` means; a param dropped here makes the optimistic "New chat"
   // navigation a silent no-op.
   validateSearch: parseAssistantSearch,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: AssistantPage,
 });
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   getParentRoute: () => rootRoute,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="plugins" />,
 });
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
   getParentRoute: () => rootRoute,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="approvals" />,
 });
 
 const dashboardLayout = createRoute({
   id: "dashboard",
   getParentRoute: () => rootRoute,
-  beforeLoad: async () => {
+  beforeLoad: async ({ location }) => {
     if (import.meta.env.DEV) {
       const { isMockMode, getMockUser } = await import("./lib/mock-data");
       if (isMockMode()) {
@@ -397,7 +406,8 @@ const dashboardLayout = createRoute({
       // social-login `return_to` cookie both accept an absolute URL on
       // this origin. For plain `/dashboard` there's nothing useful to
       // preserve, so fall through to the bare redirect.
-      const returnPath = `${window.location.pathname}${window.location.search}`;
+      preserveTelegramClaimForLogin();
+      const returnPath = `${location.pathname}${location.searchStr}`;
       if (returnPath !== "/" && returnPath !== "/dashboard") {
         const returnTo = `${window.location.origin}${returnPath}`;
         window.location.assign(
@@ -740,9 +750,27 @@ const apiKeyDetailRoute = createRoute({
 
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
-  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string } => ({ connect: managedConnectPlatform(search.connect), label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined, target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined }),
+  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string; request_id?: string; claim_entry?: boolean } => ({
+    connect: managedConnectPlatform(search.connect),
+    claim_entry: search.claim_entry === true || search.claim_entry === "true" ? true : undefined,
+    ...parseChannelBotSetupSearch(search),
+  }),
   getParentRoute: () => dashboardLayout,
   component: ChannelBotsPage,
+});
+
+const channelBotSetupLinksRoute = createRoute({
+  path: "/channel-bots/connect",
+  getParentRoute: () => dashboardLayout,
+  component: ChannelBotSetupLinksPage,
+});
+
+export const channelBotSetupRoute = createRoute({
+  path: "/channel-bots/connect/$platform",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: parseChannelBotSetupPageSearch,
+  component: ChannelBotSetupPage,
 });
 
 const channelBotDetailRoute = createRoute({
@@ -863,6 +891,12 @@ const adminOAuthClientsRoute = createRoute({
   validateSearch: normalizeAdminOAuthClientSearch,
 });
 
+const adminOwnershipRoute = createRoute({
+  path: "ownership",
+  getParentRoute: () => adminLayout,
+  component: AdminOwnershipPage,
+});
+
 const adminNodesRoute = createRoute({
   path: "nodes",
   getParentRoute: () => adminLayout,
@@ -876,22 +910,17 @@ const adminAuditLogRoute = createRoute({
   validateSearch: normalizeAdminAuditLogSearch,
 });
 
+const adminUsageRoute = createRoute({
+  path: "usage",
+  getParentRoute: () => adminLayout,
+  component: AdminUsagePage,
+  validateSearch: normalizeAdminUsageSearch,
+});
+
 const adminIntegrityRoute = createRoute({
   path: "integrity",
   getParentRoute: () => adminLayout,
   component: AdminIntegrityPage,
-});
-
-const adminPlatformOpsRoute = createRoute({
-  path: "platform-ops",
-  getParentRoute: () => adminLayout,
-  beforeLoad: () => {
-    const { user, isLoading } = useAuthStore.getState();
-    if (!isLoading && !canAdminWrite(user)) {
-      throw redirect({ to: "/dashboard" });
-    }
-  },
-  component: AdminPlatformOpsPage,
 });
 
 const adminCreditsRoute = createRoute({
@@ -947,6 +976,7 @@ const routeTree = rootRoute.addChildren([
   loginDeviceRoute,
   loginCodeRoute,
   loginAgentKeyRoute,
+  channelBotSetupRoute,
   connectLinkRoute,
   connectLinkReturnRoute,
   sshTerminalRoute,
@@ -992,6 +1022,7 @@ const routeTree = rootRoute.addChildren([
     nodesRoute,
     nodeDetailRoute,
     channelBotsRoute,
+    channelBotSetupLinksRoute,
     channelBotDetailRoute,
     channelConversationDetailRoute,
     orgsRoute,
@@ -1000,6 +1031,7 @@ const routeTree = rootRoute.addChildren([
     orgServiceAccountDetailRoute,
     orgDeveloperAppDetailRoute,
     adminLayout.addChildren([
+      adminOwnershipRoute,
       adminUsersRoute,
       adminUserDetailRoute,
       adminRolesRoute,
@@ -1011,8 +1043,8 @@ const routeTree = rootRoute.addChildren([
       adminOAuthClientsRoute,
       adminNodesRoute,
       adminAuditLogRoute,
+      adminUsageRoute,
       adminIntegrityRoute,
-      adminPlatformOpsRoute,
       adminCreditsRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
@@ -1023,6 +1055,7 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({
   routeTree,
+  rewrite: channelBotSetupRewrite,
   defaultPreload: "intent",
   defaultNotFoundComponent: AppNotFound,
   // Without an error component the router's CatchBoundary renders nothing on a

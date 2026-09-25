@@ -60,6 +60,8 @@ pub struct ErrorResponse {
     pub details: Option<serde_json::Value>,
 }
 
+// Retired error codes 11800 and 11801 are reserved; never reuse them.
+
 /// Application-level error variants.
 /// Each variant maps to a specific HTTP status code and error payload.
 #[derive(Debug, thiserror::Error)]
@@ -69,12 +71,6 @@ pub enum AppError {
 
     #[error("{context} request body exceeds the configured limit of {max_bytes} bytes")]
     RequestBodyTooLarge { max_bytes: usize, context: String },
-
-    #[error("Platform operation vendor is unavailable")]
-    PlatformOperationUnavailable,
-
-    #[error("{0}")]
-    PlatformVendorProvisioningInvalid(String),
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
@@ -87,6 +83,9 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error("A turn is already active in this conversation")]
+    AssistantTurnActive,
 
     #[error("Grant cascade confirmation required")]
     GrantCascadeConfirmationRequired(Box<GrantCascadePayload>),
@@ -232,6 +231,14 @@ pub enum AppError {
 
     #[error("Node credential missing: {0}")]
     NodeCredentialMissing(String),
+
+    #[error("Target-selected HTTP requests require a node advertising HTTP signature v2")]
+    NodeHttpSignatureUnsupported,
+
+    #[error(
+        "workspace_destinations_not_activated (12300): Google Docs, Sheets, and Slides routing is not activated for this service. Startup reconciliation did not complete for this catalog row; check the server log for 'Google editor destinations were not activated' and the service's policy, destination map, and provider requirement."
+    )]
+    WorkspaceDestinationsNotActivated,
 
     #[error("WebSocket proxy downstream error: {0}")]
     WsProxyDownstream(String),
@@ -455,11 +462,34 @@ pub enum AppError {
     #[error("Device channel conversations do not support replies")]
     DeviceChannelReplyNotAllowed,
 
+    #[error("Conversation is not reachable: {0}")]
+    ChannelConversationNotReachable(String),
+    #[error("Channel media is not supported")]
+    ChannelMediaUnsupported,
+    #[error("Channel media exceeds the configured size limit")]
+    ChannelMediaTooLarge,
+    #[error("Channel media fetch failed: {0}")]
+    ChannelMediaFetchFailed(String),
+    #[error("Channel attachment not found")]
+    ChannelAttachmentNotFound,
+
+    #[error("Platform does not support initiated messages")]
+    ChannelPlatformSendUnsupported,
+
+    #[error("Conversation has no concrete platform chat address")]
+    ChannelConversationNotAddressable,
+
+    #[error("Agent-initiated messages are not enabled for this conversation")]
+    ChannelAgentInitiateNotAllowed,
+
     #[error("Organization accounts cannot authenticate directly")]
     OrgCannotAuthenticate,
 
     #[error("Organization membership query timed out")]
     OrgQueryTimeout,
+
+    #[error("Usage query timed out; select a shorter window or narrower filters and retry")]
+    AdminUsageQueryTimeout,
 
     #[error("Organization not found: {0}")]
     OrgNotFound(String),
@@ -583,14 +613,13 @@ impl AppError {
         match self {
             Self::BadRequest(_) | Self::ValidationError(_) => StatusCode::BAD_REQUEST,
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::PlatformOperationUnavailable => StatusCode::BAD_GATEWAY,
-            Self::PlatformVendorProvisioningInvalid(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
+            Self::AssistantTurnActive => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
@@ -631,6 +660,8 @@ impl AppError {
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
             Self::NodeCredentialMissing(_) => StatusCode::BAD_GATEWAY,
+            Self::NodeHttpSignatureUnsupported => StatusCode::BAD_GATEWAY,
+            Self::WorkspaceDestinationsNotActivated => StatusCode::SERVICE_UNAVAILABLE,
             Self::WsProxyDownstream(_) => StatusCode::BAD_GATEWAY,
             Self::ClientDisconnected => client_closed_request(),
             Self::PendingCredentialDecryptFailed(_) => StatusCode::BAD_REQUEST,
@@ -707,8 +738,16 @@ impl AppError {
             Self::ChannelPlatformError(_) => StatusCode::BAD_GATEWAY,
             Self::ChannelPlatformEditUnsupported => StatusCode::NOT_IMPLEMENTED,
             Self::DeviceChannelReplyNotAllowed => StatusCode::BAD_REQUEST,
+            Self::ChannelConversationNotReachable(_) => StatusCode::BAD_REQUEST,
+            Self::ChannelMediaUnsupported => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::ChannelMediaTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::ChannelMediaFetchFailed(_) => StatusCode::BAD_GATEWAY,
+            Self::ChannelAttachmentNotFound => StatusCode::NOT_FOUND,
+            Self::ChannelPlatformSendUnsupported => StatusCode::NOT_IMPLEMENTED,
+            Self::ChannelConversationNotAddressable => StatusCode::BAD_REQUEST,
+            Self::ChannelAgentInitiateNotAllowed => StatusCode::FORBIDDEN,
             Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
-            Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
+            Self::OrgQueryTimeout | Self::AdminUsageQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
             Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
             Self::OrgSlugTaken(_) => StatusCode::CONFLICT,
             Self::OrgMembershipRequired => StatusCode::FORBIDDEN,
@@ -756,12 +795,11 @@ impl AppError {
         match self {
             Self::BadRequest(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
-            Self::PlatformOperationUnavailable => 11800,
-            Self::PlatformVendorProvisioningInvalid(_) => 11801,
             Self::Unauthorized(_) => 1001,
             Self::Forbidden(_) => 1002,
             Self::NotFound(_) => 1003,
             Self::Conflict(_) => 1004,
+            Self::AssistantTurnActive => 12100,
             Self::RateLimited => 1005,
             Self::Internal(_) => 1006,
             Self::DatabaseError(_) => 1007,
@@ -809,6 +847,8 @@ impl AppError {
             Self::NodeCredentialMissing(_) => 8004,
             Self::WsProxyDownstream(_) => 8005,
             Self::ClientDisconnected => 8012,
+            Self::NodeHttpSignatureUnsupported => 8013,
+            Self::WorkspaceDestinationsNotActivated => 12300,
             Self::PendingCredentialDecryptFailed(_) => PENDING_CREDENTIAL_DECRYPT_FAILED_CODE,
             Self::PendingCredentialVersionUnsupported(_) => {
                 PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE
@@ -888,8 +928,17 @@ impl AppError {
             Self::ChannelPlatformError(_) => 10005,
             Self::ChannelPlatformEditUnsupported => 10007,
             Self::DeviceChannelReplyNotAllowed => 10006,
+            Self::ChannelConversationNotReachable(_) => 10011,
+            Self::ChannelMediaUnsupported => 10012,
+            Self::ChannelMediaTooLarge => 10013,
+            Self::ChannelMediaFetchFailed(_) => 10014,
+            Self::ChannelAttachmentNotFound => 10015,
+            Self::ChannelPlatformSendUnsupported => 10010,
+            Self::ChannelConversationNotAddressable => 10009,
+            Self::ChannelAgentInitiateNotAllowed => 10008,
             Self::OrgCannotAuthenticate => 1403,
             Self::OrgQueryTimeout => 8100,
+            Self::AdminUsageQueryTimeout => 12200,
             Self::OrgNotFound(_) => 8101,
             Self::OrgSlugTaken(_) => 8107,
             Self::OrgMembershipRequired => 8102,
@@ -970,12 +1019,11 @@ impl AppError {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
-            Self::PlatformOperationUnavailable => "platform_operation_unavailable",
-            Self::PlatformVendorProvisioningInvalid(_) => "platform_vendor_provisioning_invalid",
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
+            Self::AssistantTurnActive => "turn_active",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::RateLimited => "rate_limited",
             Self::Internal(_) => "internal_error",
@@ -1024,6 +1072,8 @@ impl AppError {
             Self::NodeProxyTimeout => "node_proxy_timeout",
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
             Self::NodeCredentialMissing(_) => "node_credential_missing",
+            Self::NodeHttpSignatureUnsupported => "node_http_signature_unsupported",
+            Self::WorkspaceDestinationsNotActivated => "workspace_destinations_not_activated",
             Self::WsProxyDownstream(_) => "ws_proxy_downstream",
             Self::ClientDisconnected => "client_disconnected",
             Self::PendingCredentialDecryptFailed(_) => "pending_credential_decrypt_failed",
@@ -1105,8 +1155,17 @@ impl AppError {
             Self::ChannelPlatformError(_) => "channel_platform_error",
             Self::ChannelPlatformEditUnsupported => "edit_unsupported",
             Self::DeviceChannelReplyNotAllowed => "device_channel_reply_not_allowed",
+            Self::ChannelConversationNotReachable(_) => "channel_conversation_not_reachable",
+            Self::ChannelMediaUnsupported => "channel_media_unsupported",
+            Self::ChannelMediaTooLarge => "channel_media_too_large",
+            Self::ChannelMediaFetchFailed(_) => "channel_media_fetch_failed",
+            Self::ChannelAttachmentNotFound => "channel_attachment_not_found",
+            Self::ChannelPlatformSendUnsupported => "channel_platform_send_unsupported",
+            Self::ChannelConversationNotAddressable => "channel_conversation_not_addressable",
+            Self::ChannelAgentInitiateNotAllowed => "channel_agent_initiate_not_allowed",
             Self::OrgCannotAuthenticate => "org_cannot_authenticate",
             Self::OrgQueryTimeout => "org_query_timeout",
+            Self::AdminUsageQueryTimeout => "admin_usage_query_timeout",
             Self::OrgNotFound(_) => "org_not_found",
             Self::OrgSlugTaken(_) => "org_slug_taken",
             Self::OrgMembershipRequired => "org_membership_required",
@@ -1532,6 +1591,10 @@ mod tests {
     #[test]
     fn error_codes_unique() {
         let codes = vec![
+            AppError::AssistantTurnActive.error_code(),
+            AppError::AdminUsageQueryTimeout.error_code(),
+            AppError::WorkspaceDestinationsNotActivated.error_code(),
+            AppError::NodeHttpSignatureUnsupported.error_code(),
             AppError::BadRequest("".into()).error_code(),
             AppError::RequestBodyTooLarge {
                 max_bytes: 0,
@@ -2359,10 +2422,58 @@ mod tests {
                 1015,
             ),
             (
+                AppError::ChannelMediaUnsupported,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "channel_media_unsupported",
+                10012,
+            ),
+            (
+                AppError::ChannelMediaTooLarge,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "channel_media_too_large",
+                10013,
+            ),
+            (
+                AppError::ChannelMediaFetchFailed("provider unavailable".into()),
+                StatusCode::BAD_GATEWAY,
+                "channel_media_fetch_failed",
+                10014,
+            ),
+            (
+                AppError::ChannelAttachmentNotFound,
+                StatusCode::NOT_FOUND,
+                "channel_attachment_not_found",
+                10015,
+            ),
+            (
                 AppError::ChannelPlatformEditUnsupported,
                 StatusCode::NOT_IMPLEMENTED,
                 "edit_unsupported",
                 10007,
+            ),
+            (
+                AppError::ChannelAgentInitiateNotAllowed,
+                StatusCode::FORBIDDEN,
+                "channel_agent_initiate_not_allowed",
+                10008,
+            ),
+            (
+                AppError::ChannelConversationNotAddressable,
+                StatusCode::BAD_REQUEST,
+                "channel_conversation_not_addressable",
+                10009,
+            ),
+            (
+                AppError::ChannelPlatformSendUnsupported,
+                StatusCode::NOT_IMPLEMENTED,
+                "channel_platform_send_unsupported",
+                10010,
+            ),
+            (
+                AppError::ChannelConversationNotReachable("target refused delivery".to_string()),
+                StatusCode::BAD_REQUEST,
+                "channel_conversation_not_reachable",
+                10011,
             ),
             (
                 AppError::DeviceChannelReplyNotAllowed,

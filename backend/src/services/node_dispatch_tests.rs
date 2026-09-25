@@ -68,7 +68,7 @@ async fn two_replica_fixture_with_limit(
     let connection_id = uuid::Uuid::new_v4().to_string();
     let owner_manager = Arc::new(NodeWsManager::new(5, 100));
     let (outbound_tx, outbound) = mpsc::channel(256);
-    let pending_proxy =
+    let (pending_proxy, _close_rx) =
         owner_manager.register_connection_with_id(&node_id, connection_id.clone(), outbound_tx);
     node_owner_service::claim(
         &db,
@@ -152,6 +152,7 @@ fn test_node(id: &str) -> Node {
 
 fn proxy_request(request_id: &str) -> NodeProxyRequest {
     NodeProxyRequest {
+        target_id: None,
         request_id: request_id.to_string(),
         service_id: "service-id".to_string(),
         service_slug: "service-slug".to_string(),
@@ -198,6 +199,7 @@ async fn local_session_info_prefers_exact_socket_capabilities() {
     state.node_ws_manager.record_capabilities(
         &node_id,
         &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+            http_signature_v2: false,
             remote_credential_crypto_v1: true,
             ..Default::default()
         },
@@ -796,4 +798,105 @@ async fn remote_credential_ack_and_admin_disconnect_reach_owner() {
         .unwrap();
     assert_eq!(stored.status, NodeStatus::Offline);
     assert!(stored.connection_owner.is_none());
+}
+
+#[tokio::test]
+async fn workspace_remote_node_dispatch_gates_persisted_capability_and_preserves_v2() {
+    use crate::services::node_ws_manager::{NodeCapabilitiesFlags, NodeCapabilitiesMsg};
+    let mut fixture = two_replica_fixture("workspace_remote_signature")
+        .await
+        .unwrap();
+    let mut request = proxy_request(&uuid::Uuid::new_v4().to_string());
+    request.target_id = Some("docs".into());
+    request.base_url = "https://docs.googleapis.com".into();
+    let error = fixture
+        .caller_dispatch
+        .send_proxy_request_classified(
+            &fixture.node_id,
+            request.clone(),
+            Some(&[0x11; 32]),
+            internal_node_dispatch_permit(),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(!error.dispatched);
+    assert!(matches!(
+        error.error,
+        crate::errors::AppError::NodeHttpSignatureUnsupported
+    ));
+    assert!(fixture.outbound.try_recv().is_err());
+    let node = fixture
+        .db
+        .collection::<Node>(NODES)
+        .find_one(doc! {"_id":&fixture.node_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let fence = node_owner_service::NodeOwnerFence::from_owner(
+        &fixture.node_id,
+        node.connection_owner.as_ref().unwrap(),
+    );
+    fixture.owner_manager.record_capabilities(
+        &fixture.node_id,
+        &NodeCapabilitiesMsg {
+            http_signature_v2: true,
+            ..Default::default()
+        },
+    );
+    node_owner_service::record_capabilities(
+        &fixture.db,
+        &fence,
+        NodeCapabilitiesFlags {
+            http_signature_v2: true,
+            ..Default::default()
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(
+        fixture
+            .caller_dispatch
+            .session_info(&fixture.node_id)
+            .await
+            .capabilities
+            .http_signature_v2
+    );
+    let dispatch = fixture.caller_dispatch.clone();
+    let node_id = fixture.node_id.clone();
+    let send_request = request.clone();
+    let task = tokio::spawn(async move {
+        dispatch
+            .send_proxy_request_classified(
+                &node_id,
+                send_request,
+                Some(&[0x11; 32]),
+                internal_node_dispatch_permit(),
+            )
+            .await
+    });
+    let frame = message_json(&next_outbound(&mut fixture.outbound).await);
+    assert_eq!(frame["signature_version"], 2);
+    assert_eq!(frame["target_id"], "docs");
+    assert_eq!(frame["base_url"], request.base_url);
+    assert_eq!(
+        frame["signature"],
+        crate::services::node_ws_manager::compute_http_v2_signature(
+            &[0x11; 32],
+            frame["timestamp"].as_str().unwrap(),
+            frame["nonce"].as_str().unwrap(),
+            &request
+        )
+    );
+    fixture.owner_manager.deliver_proxy_response(
+        &fixture.node_id,
+        NodeProxyResponse {
+            request_id: request.request_id,
+            status: 200,
+            headers: vec![],
+            body: b"ok".to_vec(),
+        },
+    );
+    assert!(task.await.unwrap().is_ok());
 }

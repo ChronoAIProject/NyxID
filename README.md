@@ -65,8 +65,13 @@ NyxID proxies requests, injects credentials automatically, punches through
 NAT (Network Address Translation) to reach your local services, and wraps
 any REST API as MCP (Model Context Protocol) tools.
 
+Administrators can configure shared credentials, access, endpoint rules, and
+billing from either services or linked providers. See [Service configuration and
+vendor retirement](docs/SERVICE_CONFIGURATION.md).
+
 ## What NyxID Does
 
+- **Connect email to agents** — [Aurinko Email](docs/AURINKO_INTEGRATION.md) provides an AI Service for mailbox API/MCP operations and an email channel bot for signed incoming notifications and replies. Connect with an account token; the channel additionally uses the application's signing secret.
 - **Create a Telegram channel bot** — [Telegram New](docs/TELEGRAM_NEW.md) uses a platform-managed creation flow so customers can create and connect a bot without copying a token. The existing Telegram option still connects bots using their current tokens. Administrators configure a dedicated manager before enabling Telegram New.
 - **Reach anything** — public APIs, internal APIs, localhost services via credential nodes (`nyxid node`). SSH (Secure Shell) tunneling (`nyxid ssh`) reaches remote hosts. No VPN (Virtual Private Network), no port forwarding.
 - **Never expose keys** — the reverse proxy injects credentials automatically. Your agent talks to NyxID; NyxID talks to the API with the real key.
@@ -203,7 +208,7 @@ For production deployment (TLS, custom domain, email verification), see [docs/DE
 
 ### 2. Pick a workflow
 
-With NyxID running and an Agent Key in hand, pick the workflow that matches what you want to build. Each is a step-by-step procedure that ends with a working integration; the four are independent and can be completed in any order.
+With NyxID running and an Agent Key in hand, pick the workflow that matches what you want to build. Each is a step-by-step procedure that ends with a working integration; the guides are independent and can be completed in any order.
 
 | Quickstart | Outcome | NyxID capability |
 |---|---|---|
@@ -211,6 +216,7 @@ With NyxID running and an Agent Key in hand, pick the workflow that matches what
 | [**Per-Agent Keys for Claude Code and Codex**](docs/quickstarts/claude-code.md) | Two coding agents on one machine, each scoped to a distinct service and credential, attributed independently in the audit log. | Agent isolation, scoped Agent Keys |
 | [**Reach a Localhost API from a Cloud-Hosted Agent**](docs/quickstarts/node-proxy.md) | A private-host API is reachable from a cloud agent without VPN, port forwarding, or a tunneling service. | Credential Node, outbound-only NAT traversal |
 | [**Wrap a REST API as MCP Tools**](docs/quickstarts/mcp-wrapping.md) | An OpenAPI spec is exposed as typed MCP tools to Claude Code / Cursor / VS Code / Codex with no MCP server code. | OpenAPI → MCP auto-wrap |
+| [**Use Supabase as an AI Agent Database**](docs/quickstarts/supabase.md) | A Supabase project becomes a credential-brokered PostgREST database for scoped AI agents. | Per-user endpoint + encrypted API key |
 
 > For a per-interface reference walkthrough that ends with `HTTP/1.1 200` from your first proxied call (Web UI · CLI · AI-driven · Direct API), see the [Connecting AI Services hub](docs/connecting-services/).
 

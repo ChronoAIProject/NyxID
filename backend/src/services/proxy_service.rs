@@ -49,6 +49,8 @@ pub enum ProxyBody {
 
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
+    pub workspace_destinations_pending: bool,
+    pub target_id: Option<String>,
     pub base_url: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -157,6 +159,12 @@ pub async fn authorize_master_credential(
     service: &DownstreamService,
     actor: &EffectiveActor,
 ) -> AppResult<AuthorizedMasterCredential> {
+    if !service.destination_targets.is_empty() {
+        return Err(AppError::ValidationError(
+            "Destination targets do not support platform keys".into(),
+        ));
+    }
+    super::retired_service_service::require_available(service)?;
     if service.platform_key.is_some() {
         super::platform_key_service::require(db, service, &actor.user_id).await?;
         validate_actor_addressed_master_credential_policy(service)?;
@@ -222,6 +230,12 @@ pub async fn authorize_master_credential_server_chosen(
     _db: &mongodb::Database,
     service: &DownstreamService,
 ) -> AppResult<AuthorizedMasterCredential> {
+    if !service.destination_targets.is_empty() {
+        return Err(AppError::ValidationError(
+            "Destination targets do not support platform keys".into(),
+        ));
+    }
+    super::retired_service_service::require_available(service)?;
     if let Some(config) = &service.platform_key
         && (!config.enabled
             || config.audience != crate::models::downstream_service::PlatformKeyAudience::Public
@@ -397,6 +411,24 @@ pub(crate) fn build_effective_outbound_headers(
     outbound_headers
 }
 
+/// A server-owned Authorization header must survive caller bearer forwarding.
+/// Both HTTP paths use this seam; service credential injection stays separate.
+pub(crate) fn forwarded_caller_token<'a>(
+    target: &ProxyTarget,
+    caller_token: Option<&'a str>,
+    extra_outbound_headers: &[(String, String)],
+) -> Option<&'a str> {
+    if target.service.forward_access_token
+        && !extra_outbound_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+    {
+        caller_token
+    } else {
+        None
+    }
+}
+
 /// Caller headers that are safe to forward to downstream HTTP services.
 ///
 /// This is the single admission policy for both direct and node-routed HTTP
@@ -429,6 +461,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "prefer",
     "x-trace-id",
     "range",
+    // PostgREST schema selection and item ranges.
+    "accept-profile",
+    "content-profile",
+    "range-unit",
     "if-range",
     "if-none-match",
     "if-modified-since",
@@ -682,7 +718,7 @@ pub(crate) fn credential_header_name(target: &ProxyTarget) -> Option<String> {
                 Some(trimmed.to_string())
             }
         }
-        "bearer" | "bot_bearer" | "basic" => Some("authorization".to_string()),
+        "bearer" | "bot_bearer" | "basic" | "ifttt_mcp" => Some("authorization".to_string()),
         // SigV4 sets Authorization plus several `X-Amz-*` headers; the only
         // one a caller-supplied or catalog default header could collide with
         // is `Authorization`, so we strip just that. The `X-Amz-*` headers
@@ -819,6 +855,69 @@ pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Enforce the IFTTT contract before either direct or node dispatch. A node may
+/// resolve an empty destination from its local credential configuration.
+pub(crate) fn validate_ifttt_request(
+    target: &ProxyTarget,
+    method: &reqwest::Method,
+    path: &str,
+    query: Option<&str>,
+    body: Option<&[u8]>,
+    node_routed: bool,
+) -> AppResult<()> {
+    use nyxid_service_adapters::{ifttt, ifttt_mcp};
+    if target.auth_method == ifttt_mcp::AUTH_METHOD {
+        validate_ifttt_configuration(target)?;
+        if node_routed {
+            return Err(AppError::BadRequest(
+                "IFTTT OAuth connections use server routing".into(),
+            ));
+        }
+        ifttt_mcp::validate_request(&target.base_url, method, path, query, body)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    }
+    if target.auth_method == ifttt::AUTH_METHOD {
+        validate_ifttt_configuration(target)?;
+        let base_url = if node_routed && target.base_url.is_empty() {
+            ifttt::BASE_URL
+        } else {
+            &target.base_url
+        };
+        ifttt::validate_request(base_url, method, path, query, body)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn validate_ifttt_configuration(target: &ProxyTarget) -> AppResult<()> {
+    if target.service.identity_propagation_mode != "none"
+        || target.service.forward_access_token
+        || target.service.inject_delegation_token
+        || !target.ws_frame_injections.is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "IFTTT does not support identity, access-token, delegation-token, or WebSocket frame injection".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_ifttt_delegation(
+    target: &ProxyTarget,
+    delegated: &[DelegatedCredential],
+) -> AppResult<()> {
+    if matches!(
+        target.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) && !delegated.is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "IFTTT does not support delegated provider credentials".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// When `target.auth_method` is `"path"`, synthesize a `DelegatedCredential`
 /// so `build_forward_path` / `prepare_delegated_request` inject the path
 /// prefix (e.g. `/bot<token>/`).  Appends in-place and returns the
@@ -949,6 +1048,7 @@ pub async fn resolve_admin_proxy_target(
 
     // A misconfigured platform row is a server fault, not a caller error:
     // the caller had no say in which service this is.
+    super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::Internal(format!(
             "platform service '{}' is inactive",
@@ -979,6 +1079,9 @@ pub async fn resolve_admin_proxy_target(
 
     if service.auth_method == "none" {
         return Ok(ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
             base_url: service.base_url.clone(),
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
@@ -1006,6 +1109,10 @@ pub async fn resolve_admin_proxy_target(
     })?;
 
     Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
@@ -1015,6 +1122,64 @@ pub async fn resolve_admin_proxy_target(
         user_service_default_headers: Vec::new(),
         ws_frame_injections,
         connection_id: None,
+    })
+}
+
+/// Resolve only the granted catalog endpoint and this service account's credential.
+pub async fn resolve_curation_proxy_target(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    sa_id: &str,
+    service_id: &str,
+) -> AppResult<ProxyTarget> {
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {"_id": service_id, "is_active": true, "service_type": "http"})
+        .await?
+        .ok_or_else(|| AppError::NotFound("HTTP catalog service not found".into()))?;
+    super::retired_service_service::require_available(&service)?;
+    if service.proxy_operation_policy.is_none() {
+        return Err(AppError::Forbidden(
+            "Curation proxy target requires an explicit proxy operation policy".into(),
+        ));
+    }
+    if service.service_category == "provider" {
+        return Err(AppError::Forbidden(
+            "Provider services cannot be proxied".into(),
+        ));
+    }
+    let connection = db
+        .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+        .find_one(doc! {"user_id": sa_id, "service_id": service_id})
+        .await?;
+    if connection.as_ref().is_some_and(|c| !c.is_active) {
+        return Err(AppError::Forbidden(
+            "Service account connection is disabled".into(),
+        ));
+    }
+    let credential = match connection.and_then(|c| c.credential_encrypted) {
+        Some(encrypted) => decrypt_user_credential(encryption_keys, &encrypted).await?,
+        None if service.auth_method == "none" && !service.requires_user_credential => String::new(),
+        None => {
+            return Err(AppError::Forbidden(
+                "A dedicated service-account connection credential is required".into(),
+            ));
+        }
+    };
+    Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
+        base_url: service.base_url.clone(),
+        auth_method: service.auth_method.clone(),
+        auth_key_name: service.auth_key_name.clone(),
+        credential,
+        catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+        user_service_default_headers: Vec::new(),
+        ws_frame_injections: Vec::new(),
+        connection_id: None,
+        service,
     })
 }
 
@@ -1037,6 +1202,7 @@ pub async fn resolve_proxy_target(
         .await?
         .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
 
+    super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
@@ -1110,6 +1276,9 @@ pub async fn resolve_proxy_target(
         let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
             base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
@@ -1157,6 +1326,10 @@ pub async fn resolve_proxy_target(
     let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
         base_url,
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
@@ -1189,6 +1362,10 @@ async fn resolve_catalog_platform_target(
     service.auth_key_name = auth_key_name.clone();
     service.requires_user_credential = false;
     Ok(ProxyTarget {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method,
         auth_key_name,
@@ -1218,6 +1395,7 @@ pub async fn resolve_proxy_target_lenient(
         .await?
         .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
 
+    super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
@@ -1281,6 +1459,9 @@ pub async fn resolve_proxy_target_lenient(
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
+                workspace_destinations_pending:
+                    super::destination_routing::workspace_destinations_pending(&service),
+                target_id: None,
                 base_url,
                 auth_method: service.auth_method.clone(),
                 auth_key_name: service.auth_key_name.clone(),
@@ -1347,6 +1528,9 @@ pub async fn resolve_proxy_target_lenient(
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
             base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
@@ -1380,6 +1564,8 @@ pub struct UserServiceResolution {
     /// credential (auto-provisioned UserService with no user key), not a
     /// key the user supplied. Drives resale credential classification.
     pub master_credential: bool,
+    /// OAuth app provenance of the resolved UserApiKey, for platform charging.
+    pub credential_source: Option<String>,
     /// Set when the resolved UserService was reached via org membership
     /// (the actor has no personal copy). `None` means personal credentials.
     pub org_routing: Option<OrgRouting>,
@@ -1864,12 +2050,11 @@ pub async fn guard_slug_against_viewer_orgs(
             "user_id": &membership.org_user_id,
             "$or": us_or,
         };
-        let us_hit = db
-            .collection::<crate::models::user_service::UserService>(
-                crate::models::user_service::COLLECTION_NAME,
-            )
-            .count_documents(us_query)
-            .await?;
+        let us_hit = crate::services::service_history::collection::<
+            crate::models::user_service::UserService,
+        >(db, crate::models::user_service::COLLECTION_NAME)
+        .count_documents(us_query)
+        .await?;
         if us_hit > 0 {
             return Err(AppError::OrgRoleInsufficient(
                 "your role in the owning org does not permit using this service".to_string(),
@@ -2389,6 +2574,9 @@ fn is_auto_provisionable_catalog_service(
     service: &DownstreamService,
     has_provider_requirement: bool,
 ) -> bool {
+    if super::retired_service_service::is_retired(service) {
+        return false;
+    }
     let is_truly_no_auth = service.is_active
         && service.auth_method == "none"
         && !service.requires_user_credential
@@ -2529,8 +2717,7 @@ async fn finish_resolution(
     verify_auto_provision_eligibility(db, &user_service, effective_owner_id).await?;
 
     // Load the endpoint
-    let endpoint = db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
+    let endpoint = crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
         .find_one(doc! { "_id": &user_service.endpoint_id })
         .await?
         .ok_or_else(|| {
@@ -2619,6 +2806,9 @@ async fn finish_resolution(
         return Ok(UserServiceResolution {
             target: ProxyTarget {
                 base_url: catalog_service.base_url.clone(),
+                workspace_destinations_pending: catalog_proxy_authorization
+                    .workspace_destinations_pending,
+                target_id: None,
                 auth_method,
                 auth_key_name,
                 credential,
@@ -2635,6 +2825,7 @@ async fn finish_resolution(
             api_key_id: None,
             credential_epoch: 1,
             master_credential: true,
+            credential_source: None,
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2657,6 +2848,9 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+                workspace_destinations_pending: catalog_proxy_authorization
+                    .workspace_destinations_pending,
+                target_id: None,
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
                 auth_key_name: user_service.auth_key_name.clone(),
@@ -2677,6 +2871,7 @@ async fn finish_resolution(
             api_key_id: None,
             credential_epoch: 1,
             master_credential: false,
+            credential_source: None,
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2692,8 +2887,7 @@ async fn finish_resolution(
         AppError::Internal("Data integrity error: api_key_id missing".to_string())
     })?;
 
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": ak_id })
         .await?
         .ok_or_else(|| {
@@ -2704,6 +2898,10 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
+    super::ifttt_oauth_service::validate_credential_route(
+        db, api_key.provider_config_id.as_deref(), &user_service.auth_method,
+        &endpoint.url, user_service.node_id.as_deref(),
+    ).await?;
     let api_key = if materialize_credentials {
         maybe_refresh_provider_backed_api_key(
             db,
@@ -2753,6 +2951,9 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+                workspace_destinations_pending: catalog_proxy_authorization
+                    .workspace_destinations_pending,
+                target_id: None,
                 base_url: endpoint.url.clone(),
                 auth_method: user_service.auth_method.clone(),
                 auth_key_name: user_service.auth_key_name.clone(),
@@ -2770,6 +2971,7 @@ async fn finish_resolution(
             api_key_id: Some(api_key.id.clone()),
             credential_epoch: api_key.credential_epoch,
             master_credential: false,
+            credential_source: api_key.credential_source.clone(),
             org_routing,
             pool_selection,
             is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2815,6 +3017,9 @@ async fn finish_resolution(
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
+            workspace_destinations_pending: catalog_proxy_authorization
+                .workspace_destinations_pending,
+            target_id: None,
             base_url: endpoint.url.clone(),
             auth_method: user_service.auth_method.clone(),
             auth_key_name: user_service.auth_key_name.clone(),
@@ -2832,6 +3037,7 @@ async fn finish_resolution(
         api_key_id: Some(api_key.id.clone()),
         credential_epoch: api_key.credential_epoch,
         master_credential: false,
+        credential_source: api_key.credential_source.clone(),
         org_routing,
         pool_selection,
         is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
@@ -2867,6 +3073,8 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    workspace_destinations_pending: bool,
+    destination_targets: std::collections::BTreeMap<String, String>,
     policy: Option<ProxyOperationPolicy>,
     service_category: Option<String>,
     requires_user_credential: Option<bool>,
@@ -2889,7 +3097,13 @@ async fn load_catalog_proxy_authorization_for_user_service(
         // additive and must not turn that legacy shape into a new outage.
         return Ok(CatalogProxyAuthorization::default());
     };
+    super::destination_routing::validate_credential_source(&service)?;
+    super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
+            &service,
+        ),
+        destination_targets: service.destination_targets,
         policy: service.proxy_operation_policy,
         service_category: Some(service.service_category),
         requires_user_credential: Some(service.requires_user_credential),
@@ -2901,6 +3115,7 @@ fn apply_catalog_proxy_authorization(
     authorization: &CatalogProxyAuthorization,
 ) {
     service.proxy_operation_policy = authorization.policy.clone();
+    service.destination_targets = authorization.destination_targets.clone();
     if let Some(service_category) = authorization.service_category.as_ref() {
         service.service_category = service_category.clone();
     }
@@ -3011,6 +3226,7 @@ pub async fn resolve_agent_credential_override(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<String>> {
     Ok(resolve_agent_credential_override_identity(
@@ -3019,6 +3235,7 @@ pub async fn resolve_agent_credential_override(
         user_id,
         api_key_id,
         user_service_id,
+        target,
         connection_expiry_notifier,
     )
     .await?
@@ -3043,6 +3260,7 @@ pub async fn read_agent_credential_override_identity(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
 ) -> AppResult<Option<AgentCredentialOverrideIdentity>> {
     let Some(override_key_id) = agent_binding_service::resolve_credential_override(
         db,
@@ -3054,11 +3272,18 @@ pub async fn read_agent_credential_override_identity(
     else {
         return Ok(None);
     };
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::Internal("Bound credential not found".to_string()))?;
+    super::ifttt_oauth_service::validate_credential_route(
+        db,
+        api_key.provider_config_id.as_deref(),
+        &target.auth_method,
+        &target.base_url,
+        None,
+    )
+    .await?;
     if api_key.status != "active" || !credential_is_materializable(db, &api_key).await? {
         return Err(AppError::BadRequest(
             "Bound credential is not executable".to_string(),
@@ -3076,6 +3301,7 @@ pub async fn resolve_agent_credential_override_identity(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    target: &ProxyTarget,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<AgentCredentialOverride>> {
     let override_key_id = agent_binding_service::resolve_credential_override(
@@ -3090,8 +3316,7 @@ pub async fn resolve_agent_credential_override_identity(
         return Ok(None);
     };
 
-    let api_key = db
-        .collection::<UserApiKey>(USER_API_KEYS)
+    let api_key = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
         .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| {
@@ -3102,6 +3327,14 @@ pub async fn resolve_agent_credential_override_identity(
             AppError::Internal("Bound credential not found".to_string())
         })?;
 
+    super::ifttt_oauth_service::validate_credential_route(
+        db,
+        api_key.provider_config_id.as_deref(),
+        &target.auth_method,
+        &target.base_url,
+        None,
+    )
+    .await?;
     let api_key = maybe_refresh_provider_backed_api_key(
         db,
         encryption_keys,
@@ -3239,10 +3472,14 @@ async fn maybe_refresh_provider_backed_api_key(
     .await
     {
         Ok(_) => {
-            user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
-                .await?;
+            user_api_key_service::sync_refreshed_provider_token_to_api_keys(
+                db,
+                user_id,
+                provider_config_id,
+            )
+            .await?;
 
-            db.collection::<UserApiKey>(USER_API_KEYS)
+            crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
                 .find_one(doc! { "_id": &api_key.id })
                 .await?
                 .ok_or_else(|| {
@@ -3414,6 +3651,10 @@ fn build_minimal_downstream_service(
         && user_service.catalog_service_id.is_some();
 
     DownstreamService {
+        destination_targets: Default::default(),
+        owner_user_id: None,
+        recommended_skill_refs: None,
+        skills_revision: 0,
         id: user_service
             .catalog_service_id
             .clone()
@@ -3582,12 +3823,16 @@ pub async fn forward_request(
 pub(crate) enum ForwardRequestError {
     Application(AppError),
     Transport(reqwest::Error),
+    OutcomeUnknown,
 }
 
 impl ForwardRequestError {
     pub(crate) fn into_app_error(self) -> AppError {
         match self {
             Self::Application(error) => error,
+            Self::OutcomeUnknown => AppError::Conflict(
+                "Provider outcome is unknown; check the provider before retrying".into(),
+            ),
             Self::Transport(error) => {
                 tracing::error!(
                     timeout = error.is_timeout(),
@@ -3615,6 +3860,28 @@ impl From<reqwest::Error> for ForwardRequestError {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! { pub(crate) static TARGET_HTTP_CLIENT_BUILDER: std::sync::Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>; }
+
+fn target_http_client() -> Client {
+    #[cfg(test)]
+    if let Ok(builder) = TARGET_HTTP_CLIENT_BUILDER.try_with(|build| build()) {
+        return build_target_http_client(builder);
+    }
+    static CLIENT: std::sync::LazyLock<Client> =
+        std::sync::LazyLock::new(|| build_target_http_client(Client::builder()));
+    CLIENT.clone()
+}
+
+fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
+    builder
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build()
+        .expect("target HTTP client")
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_request_with_extra_outbound_headers(
     client: &Client,
@@ -3632,6 +3899,19 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     extra_outbound_headers: Vec<(String, String)>,
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    super::destination_routing::validate_outbound_destination(
+        target,
+        method.as_str(),
+        path,
+        &delegated_credentials,
+    )?;
+    if matches!(
+        target.auth_method.as_str(),
+        nyxid_service_adapters::ifttt::AUTH_METHOD | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
+    ) {
+        validate_ifttt_configuration(target)?;
+    }
+    validate_ifttt_delegation(target, &delegated_credentials)?;
     let mut all_delegated = delegated_credentials;
     extend_with_path_credential(&mut all_delegated, target);
     let prepared = prepare_delegated_request(path, query, &all_delegated)?;
@@ -3656,6 +3936,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         )
     };
 
+    let destination_client;
+    let client = if target.target_id.is_some() {
+        destination_client = target_http_client();
+        &destination_client
+    } else {
+        client
+    };
     let mut request = client.request(method.clone(), &url);
 
     // Build the final outbound header list up front so reqwest's
@@ -3689,6 +3976,52 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         &extra_outbound_headers,
     );
 
+    if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
+        let ProxyBody::Buffered(body) = body;
+        return nyxid_service_adapters::ifttt::client()
+            .forward(
+                &target.base_url,
+                &method,
+                path,
+                query,
+                &target.credential,
+                body.as_deref(),
+                &outbound_headers,
+            )
+            .await
+            .map_err(|error| match error {
+                nyxid_service_adapters::ifttt::Error::Transport(error) => {
+                    ForwardRequestError::Transport(error)
+                }
+                _ => ForwardRequestError::Application(AppError::BadRequest(error.to_string())),
+            });
+    }
+    if target.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
+        let ProxyBody::Buffered(body) = body;
+        return nyxid_service_adapters::ifttt_mcp::client()
+            .forward(
+                &target.base_url,
+                &method,
+                path,
+                query,
+                &target.credential,
+                body.as_deref(),
+            )
+            .await
+            .map_err(|error| match error {
+                nyxid_service_adapters::ifttt_mcp::Error::Transport(error) => {
+                    ForwardRequestError::Transport(error)
+                }
+                nyxid_service_adapters::ifttt_mcp::Error::OutcomeUnknown => {
+                    ForwardRequestError::OutcomeUnknown
+                }
+                nyxid_service_adapters::ifttt_mcp::Error::Request
+                | nyxid_service_adapters::ifttt_mcp::Error::Destination => {
+                    ForwardRequestError::Application(AppError::BadRequest(error.to_string()))
+                }
+                _ => ForwardRequestError::Application(AppError::Internal(error.to_string())),
+            });
+    }
     for (name, value) in &outbound_headers {
         request = request.header(name, value);
     }
@@ -3885,9 +4218,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
 
     // Forward the caller's NyxID access token when the service is configured for it.
     // This is used by platform apps that trust NyxID JWTs directly.
-    if target.service.forward_access_token
-        && let Some(token) = caller_token
-    {
+    if let Some(token) = forwarded_caller_token(target, caller_token, &extra_outbound_headers) {
         request = request.bearer_auth(token);
     }
 
@@ -4153,6 +4484,7 @@ mod tests {
             rules: vec![crate::models::downstream_service::ProxyOperationRule {
                 method: "GET".to_string(),
                 path_template: "/health".to_string(),
+                ..Default::default()
             }],
         }));
         let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
@@ -4726,6 +5058,16 @@ mod tests {
     }
 
     #[test]
+    fn forward_allowlist_accepts_postgrest_request_headers() {
+        for header in ["prefer", "accept-profile", "content-profile", "range-unit"] {
+            assert!(
+                is_allowed_forward_header(header),
+                "PostgREST request header must be forwarded: {header}"
+            );
+        }
+    }
+
+    #[test]
     fn forward_allowlist_accepts_openclaw_scopes_header() {
         // NyxID#161: the raw header name was dropped by the proxy because
         // the allowlist did not include it.
@@ -5268,6 +5610,7 @@ mod tests {
                 updated_at: Some(Utc::now()),
                 description: None,
                 allowed_service_ids: vec![],
+                allowed_platform_service_ids: Vec::new(),
                 allowed_node_ids: vec![],
                 allow_all_services: true,
                 allow_auto_connected_services: false,
@@ -5330,6 +5673,7 @@ mod tests {
             &user_id,
             &api_key_id,
             &user_service_id,
+            &make_proxy_target("https://example.com".into()),
             None,
         )
         .await
@@ -5357,6 +5701,7 @@ mod tests {
             &user_id,
             &api_key_id,
             &user_service_id,
+            &make_proxy_target("https://example.com".into()),
             None,
         )
         .await
@@ -5384,11 +5729,16 @@ mod tests {
             .await
             .unwrap();
 
-        let read_only_identity =
-            read_agent_credential_override_identity(&db, &user_id, &api_key_id, &user_service_id)
-                .await
-                .expect("read-only override authority resolves from durable refresh material")
-                .expect("bound refresh-only override identity");
+        let read_only_identity = read_agent_credential_override_identity(
+            &db,
+            &user_id,
+            &api_key_id,
+            &user_service_id,
+            &make_proxy_target("https://example.com".into()),
+        )
+        .await
+        .expect("read-only override authority resolves from durable refresh material")
+        .expect("bound refresh-only override identity");
         assert_eq!(read_only_identity.api_key_id, override_credential_id);
         assert_eq!(read_only_identity.credential_epoch, 1);
     }
@@ -5478,11 +5828,17 @@ mod tests {
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: "none".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential: String::new(),
             service: DownstreamService {
+                destination_targets: Default::default(),
+                owner_user_id: None,
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Upload Service".to_string(),
                 slug: "upload-service".to_string(),
@@ -5542,6 +5898,225 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ifttt_mcp_preflight_enforces_destination_routing_and_identity() {
+        use nyxid_service_adapters::ifttt_mcp;
+        let mut target = make_proxy_target(ifttt_mcp::BASE_URL.into());
+        target.auth_method = ifttt_mcp::AUTH_METHOD.into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_ok()
+        );
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, true)
+                .is_err()
+        );
+        target.service.forward_access_token = true;
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.forward_access_token = false;
+        target.service.inject_delegation_token = true;
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.inject_delegation_token = false;
+        target.service.identity_propagation_mode = "headers".into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        target.service.identity_propagation_mode = "none".into();
+        target.base_url = "https://other.invalid".into();
+        assert!(
+            validate_ifttt_request(&target, &reqwest::Method::GET, "tools", None, None, false)
+                .is_err()
+        );
+        assert!(
+            validate_ifttt_delegation(
+                &target,
+                &[DelegatedCredential {
+                    provider_slug: "another".into(),
+                    injection_method: "header".into(),
+                    injection_key: "x-key".into(),
+                    credential: "fixture".into(),
+                }]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ifttt_preflight_refuses_unsafe_direct_and_node_calls_and_delegation() {
+        use nyxid_service_adapters::ifttt;
+        let mut target = make_proxy_target(ifttt::BASE_URL.into());
+        target.auth_method = ifttt::AUTH_METHOD.into();
+        for node_routed in [false, true] {
+            assert!(
+                validate_ifttt_request(
+                    &target,
+                    &reqwest::Method::POST,
+                    "trigger/valid_1",
+                    None,
+                    None,
+                    node_routed
+                )
+                .is_ok()
+            );
+            for method in [
+                reqwest::Method::GET,
+                reqwest::Method::HEAD,
+                reqwest::Method::CONNECT,
+            ] {
+                assert!(
+                    validate_ifttt_request(
+                        &target,
+                        &method,
+                        "trigger/valid_1",
+                        None,
+                        None,
+                        node_routed
+                    )
+                    .is_err()
+                );
+            }
+            for path in [
+                "trigger/e/with/key/caller_key",
+                "trigger/e%2F",
+                "trigger/a-b",
+                "other",
+            ] {
+                assert!(
+                    validate_ifttt_request(
+                        &target,
+                        &reqwest::Method::POST,
+                        path,
+                        None,
+                        None,
+                        node_routed
+                    )
+                    .is_err()
+                );
+            }
+        }
+        let delegated = vec![DelegatedCredential {
+            provider_slug: "other".into(),
+            injection_method: "header".into(),
+            injection_key: "X-Other-Provider-Key".into(),
+            credential: "private-provider-key".into(),
+        }];
+        let error = validate_ifttt_delegation(&target, &delegated).unwrap_err();
+        assert!(!error.to_string().contains("private-provider-key"));
+        assert!(validate_ifttt_delegation(&target, &[]).is_ok());
+        target.base_url.clear();
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                false
+            )
+            .is_err()
+        );
+        target.base_url = "https://other.invalid".into();
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.base_url = ifttt::BASE_URL.into();
+        target.service.forward_access_token = true;
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.service.forward_access_token = false;
+        target.service.inject_delegation_token = true;
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                false
+            )
+            .is_err()
+        );
+        target.service.inject_delegation_token = false;
+        target.service.identity_propagation_mode = "headers".into();
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.service.identity_propagation_mode = "none".into();
+        target.ws_frame_injections.push(
+            serde_json::from_value(serde_json::json!({
+                "trigger": "first_frame_from_downstream", "template": "secret frame",
+            }))
+            .unwrap(),
+        );
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::POST,
+                "trigger/e",
+                None,
+                None,
+                true
+            )
+            .is_err()
+        );
+        target.auth_method = "header".into();
+        assert!(validate_ifttt_delegation(&target, &delegated).is_ok());
+        assert!(
+            validate_ifttt_request(
+                &target,
+                &reqwest::Method::GET,
+                "ordinary",
+                None,
+                None,
+                false
+            )
+            .is_ok()
+        );
+    }
+
     #[tokio::test]
     async fn forward_request_preserves_binary_body_and_content_type() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -5587,6 +6162,80 @@ mod tests {
         assert_eq!(captured.body, b"PK\x03\x04");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_supabase_preserves_postgrest_inputs_and_injects_apikey() {
+        use wiremock::matchers::{
+            body_json, header, headers as header_values, method, path, query_param,
+        };
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let row = serde_json::json!({"title": "Review audit log", "done": false});
+        Mock::given(method("POST"))
+            .and(path("/rest/v1/todos"))
+            .and(query_param("select", "id,title,done"))
+            .and(header("apikey", "sb_secret_test"))
+            .and(header("content-type", "application/json"))
+            .and(header_values(
+                "prefer",
+                vec!["return=representation", "count=exact"],
+            ))
+            .and(header("accept-profile", "analytics"))
+            .and(header("content-profile", "analytics"))
+            .and(header("range-unit", "items"))
+            .and(body_json(&row))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!([
+                {"id": 1, "title": "Review audit log", "done": false}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = crate::services::user_endpoint_service::normalize_catalog_endpoint_url(
+            Some("api-supabase"),
+            &server.uri(),
+        )
+        .unwrap();
+        let mut target = make_proxy_target(endpoint);
+        target.auth_method = "header".into();
+        target.auth_key_name = "apikey".into();
+        target.credential = "sb_secret_test".into();
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("authorization", "Bearer caller-nyxid-token"),
+            ("apikey", "caller-supplied-key"),
+            ("content-type", "application/json"),
+            ("prefer", "return=representation,count=exact"),
+            ("accept-profile", "analytics"),
+            ("content-profile", "analytics"),
+            ("range-unit", "items"),
+        ] {
+            headers.insert(name, value.parse().unwrap());
+        }
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "todos",
+            Some("select=id,title,done"),
+            headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::from(serde_json::to_vec(&row).unwrap()))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .expect("Supabase request should succeed");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key("authorization"));
+        assert_eq!(requests[0].headers.get_all("apikey").iter().count(), 1);
     }
 
     #[tokio::test]
@@ -6506,11 +7155,17 @@ mod tests {
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: "token_exchange".to_string(),
             auth_key_name: String::new(),
             credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
             service: DownstreamService {
+                destination_targets: Default::default(),
+                owner_user_id: None,
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Lark Bot".to_string(),
                 slug: "api-lark-bot".to_string(),
@@ -6709,6 +7364,9 @@ mod tests {
 
     fn make_user_service_token_exchange() -> crate::models::user_service::UserService {
         crate::models::user_service::UserService {
+            deleted_at: None,
+            created_by: None,
+            last_change: None,
             id: "us-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "api-lark-bot".to_string(),
@@ -6840,11 +7498,17 @@ mod tests {
     fn make_body_auth_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: "body".to_string(),
             auth_key_name: "app_secret".to_string(),
             credential: "super-secret".to_string(),
             service: DownstreamService {
+                destination_targets: Default::default(),
+                owner_user_id: None,
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Body Auth Service".to_string(),
                 slug: "body-auth-service".to_string(),
@@ -7064,11 +7728,17 @@ mod tests {
     ) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.clone(),
             auth_method: auth_method.to_string(),
             auth_key_name: String::new(),
             credential,
             service: DownstreamService {
+                destination_targets: Default::default(),
+                owner_user_id: None,
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Cloud Billing Test".to_string(),
                 slug: "test-cloud-billing".to_string(),
@@ -7312,6 +7982,10 @@ mod tests {
 
     fn test_minimal_downstream() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "ds-test".into(),
             name: "Test".into(),
             slug: "test".into(),
@@ -7462,6 +8136,8 @@ mod tests {
     #[test]
     fn credential_header_name_bearer_returns_authorization() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "bearer".to_string(),
             auth_key_name: String::new(),
@@ -7481,6 +8157,8 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_custom_name() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "header".to_string(),
             auth_key_name: "X-Api-Key".to_string(),
@@ -7500,6 +8178,8 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_empty_key() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "header".to_string(),
             auth_key_name: "  ".to_string(),
@@ -7516,6 +8196,8 @@ mod tests {
     #[test]
     fn credential_header_name_none_method() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
@@ -7532,6 +8214,8 @@ mod tests {
     #[test]
     fn credential_header_name_query_method() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "query".to_string(),
             auth_key_name: "key".to_string(),
@@ -7548,6 +8232,8 @@ mod tests {
     #[test]
     fn credential_header_name_aws_sigv4() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "aws_sigv4".to_string(),
             auth_key_name: String::new(),
@@ -7598,6 +8284,8 @@ mod tests {
     #[test]
     fn extend_with_path_credential_skips_non_path() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "bearer".to_string(),
             auth_key_name: String::new(),
@@ -7616,6 +8304,8 @@ mod tests {
     #[test]
     fn extend_with_path_credential_appends_for_path() {
         let target = ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: String::new(),
             auth_method: "path".to_string(),
             auth_key_name: "bot".to_string(),
@@ -7829,6 +8519,8 @@ mod tests {
         let mut ds = test_minimal_downstream();
         ds.token_exchange_config = None;
         ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: "https://example.test".into(),
             auth_method: auth_method.into(),
             auth_key_name: auth_key_name.into(),
@@ -7869,6 +8561,55 @@ mod tests {
     fn credential_header_name_header_custom() {
         let t = make_proxy_target_with_auth("header", "X-Api-Key");
         assert_eq!(credential_header_name(&t), Some("X-Api-Key".into()));
+    }
+
+    #[test]
+    fn assistant_authorization_survives_cookie_and_jwt_on_direct_and_node_paths() {
+        let mut target = make_proxy_target_with_auth("none", "");
+        target.service.forward_access_token = true;
+        target.catalog_default_headers = vec![DefaultRequestHeader {
+            name: "Authorization".into(),
+            value: "Bearer catalog".into(),
+            overridable: false,
+            sensitive: true,
+        }];
+        let extra = vec![("aUtHoRiZaTiOn".into(), "Bearer assistant-key".into())];
+        for caller in [None, Some("human-jwt")] {
+            // Direct HTTP assembles shared headers, then applies bearer forwarding.
+            let headers = build_effective_outbound_headers(
+                &target,
+                vec![("AUTHORIZATION".into(), "Bearer caller".into())],
+                &[],
+                &[],
+                &extra,
+            );
+            let mut request = reqwest::Client::new().post("https://example.test/v1/responses");
+            for (name, value) in &headers {
+                request = request.header(name, value);
+            }
+            if let Some(token) = forwarded_caller_token(&target, caller, &extra) {
+                request = request.bearer_auth(token);
+            }
+            let request = request.build().unwrap();
+            assert_eq!(request.headers().get_all("authorization").iter().count(), 1);
+            assert_eq!(request.headers()["authorization"], "Bearer assistant-key");
+            // Node HTTP applies caller forwarding before the shared assembly.
+            let mut node_headers = vec![];
+            if let Some(token) = forwarded_caller_token(&target, caller, &extra) {
+                node_headers.push(("authorization".into(), format!("Bearer {token}")));
+            }
+            let headers = build_effective_outbound_headers(&target, node_headers, &[], &[], &extra);
+            let auth: Vec<_> = headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .collect();
+            assert_eq!(auth.len(), 1);
+            assert_eq!(auth[0].1, "Bearer assistant-key");
+        }
+        assert_eq!(
+            forwarded_caller_token(&target, Some("human-jwt"), &[]),
+            Some("human-jwt")
+        );
     }
 
     #[test]

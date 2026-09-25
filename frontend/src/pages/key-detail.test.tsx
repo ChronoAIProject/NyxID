@@ -4,6 +4,9 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import type { KeyInfo } from "@/types/keys";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
+import type { OwnershipResource } from "@/types/ownership-transfers";
 
 const {
   hooks,
@@ -21,6 +24,8 @@ const {
       error: null as unknown,
       refetch: vi.fn(),
     },
+    canTransfer: false,
+    transferResource: null as OwnershipResource | null,
     updateKey: vi.fn(),
     deleteKey: vi.fn(),
     updateEndpoint: vi.fn(),
@@ -35,7 +40,7 @@ const {
     mockNavigate: vi.fn(),
     mockToastError: vi.fn(),
     mockToastSuccess: vi.fn(),
-    routerState: { search: {} as Record<string, unknown> },
+    routerState: { search: {} as Record<string, unknown>, keyId: "key-1" },
   };
 });
 
@@ -53,7 +58,7 @@ vi.mock("@tanstack/react-router", () => ({
     </a>
   ),
   useNavigate: () => mockNavigate,
-  useParams: () => ({ keyId: "key-1" }),
+  useParams: () => ({ keyId: routerState.keyId }),
   useSearch: () => routerState.search,
 }));
 
@@ -71,6 +76,21 @@ vi.mock("@/hooks/use-keys", () => ({
     isPending: false,
   }),
   useCatalogEntry: () => ({ data: hooks.catalogEntry }),
+}));
+
+vi.mock("@/hooks/use-ownership-transfers", () => ({
+  useOwnershipTransferAuthorization: () => ({
+    data: { can_transfer: hooks.canTransfer, resource: hooks.transferResource },
+  }),
+}));
+
+vi.mock("@/components/shared/ownership-transfer-dialog", () => ({
+  OwnershipTransferDialog: ({ resource }: { readonly resource: OwnershipResource }) => (
+    <div role="dialog" aria-label="Transfer ownership">
+      <span>{resource.id}</span>
+      <span>{resource.owner_user_id}</span>
+    </div>
+  ),
 }));
 
 vi.mock("@/hooks/use-nodes", () => ({
@@ -140,6 +160,8 @@ vi.mock("@/lib/utils", async () => {
   return { ...actual, copyToClipboard: mockCopyToClipboard };
 });
 
+vi.mock("@/components/dashboard/service-history", async () => ({ ...(await vi.importActual<typeof import("@/components/dashboard/service-history")>("@/components/dashboard/service-history")), ServiceHistory: ({ serviceId }: { serviceId: string }) => <div data-testid="history">{serviceId}</div> }));
+
 import { KeyDetailPage } from "./key-detail";
 
 /** A fully-populated, user-managed, non-SSH HTTP key. */
@@ -186,6 +208,16 @@ function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 }
 
 beforeEach(() => {
+  hooks.canTransfer = false;
+  hooks.transferResource = {
+    id: "cat-1",
+    name: "OpenAI",
+    owner_user_id: "catalog-owner",
+    slug: "openai",
+    platform: null,
+  };
+  useAuthStore.setState({ user: { id: "owner-1" } as User });
+  routerState.keyId = "key-1";
   vi.clearAllMocks();
   routerState.search = {};
   hooks.key = {
@@ -200,6 +232,54 @@ beforeEach(() => {
 });
 
 describe("KeyDetailPage — load states", () => {
+  it.each([
+    new TypeError("Failed to fetch"),
+    new ApiError(503, { error: "unavailable", error_code: -1, message: "Temporarily unavailable" }),
+  ])("preserves an endpoint draft through a transient refresh failure: %s", async (error) => {
+    const user = userEvent.setup();
+    const view = render(<KeyDetailPage />);
+    const pencil = screen.getByText("https://api.openai.com/v1").parentElement!.querySelector("button")!;
+    await user.click(pencil);
+    const input = screen.getByDisplayValue("https://api.openai.com/v1");
+    await user.clear(input);
+    await user.type(input, "https://draft.example.com/v1");
+
+    hooks.key.error = error;
+    view.rerender(<KeyDetailPage />);
+    expect(screen.getByDisplayValue("https://draft.example.com/v1")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(hooks.key.refetch).toHaveBeenCalledTimes(1);
+    expect(hooks.updateEndpoint).not.toHaveBeenCalled();
+
+    hooks.key.error = null;
+    hooks.key.data = makeKey({ endpoint_url: "https://updated.example.com/v1" });
+    view.rerender(<KeyDetailPage />);
+    expect(screen.getByDisplayValue("https://draft.example.com/v1")).toBeVisible();
+  });
+
+  it.each(["service", "identity"])("discards drafts and destructive confirmation on a %s switch", async (switchKind) => {
+    const user = userEvent.setup();
+    const view = render(<KeyDetailPage />);
+    await user.click(screen.getByText("https://api.openai.com/v1").parentElement!.querySelector("button")!);
+    const input = screen.getByDisplayValue("https://api.openai.com/v1");
+    await user.clear(input);
+    await user.type(input, "https://old-draft.example.com/v1");
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    if (switchKind === "service") {
+      routerState.keyId = "key-2";
+      hooks.key.data = makeKey({ id: "key-2", label: "Other service", endpoint_id: "ep-2" });
+    } else {
+      act(() => useAuthStore.setState({ user: { id: "owner-2" } as User }));
+    }
+    view.rerender(<KeyDetailPage />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("https://old-draft.example.com/v1")).not.toBeInTheDocument();
+    expect(hooks.deleteKey).not.toHaveBeenCalled();
+    expect(hooks.updateEndpoint).not.toHaveBeenCalled();
+  });
+
   it("renders skeletons while the key query is loading", () => {
     hooks.key = {
       data: undefined,
@@ -231,7 +311,7 @@ describe("KeyDetailPage — load states", () => {
     render(<KeyDetailPage />);
 
     expect(
-      screen.getByRole("heading", { name: "Key Not Found" }),
+      screen.getByRole("heading", { name: "Service details unavailable" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Key does not exist")).toBeInTheDocument();
 
@@ -634,8 +714,11 @@ describe("KeyDetailPage — delete flow", () => {
     });
     expect(mockToastSuccess).toHaveBeenCalledWith(
       "Removed from NyxID. Upstream revocation scheduled.",
+      expect.objectContaining({ action: expect.objectContaining({ label: "View history" }), duration: 15000 }),
     );
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/keys", search: {} });
+    act(() => mockToastSuccess.mock.calls.at(-1)![1].action.onClick());
+    expect(mockNavigate).toHaveBeenLastCalledWith({ to: "/keys/$keyId", params: { keyId: "key-1" } });
   });
 
   it("renders the 11500 payload and retries with token scope", async () => {
@@ -989,4 +1072,57 @@ describe("explicit platform connection cosmetics", () => {
     expect(hooks.updateKey).toHaveBeenCalledWith({ keyId: "key-1", recommended_skills: ["read-docs"] }, expect.anything());
     expect(hooks.updateEndpoint).not.toHaveBeenCalled();
   });
+});
+
+
+it("lets retained UUID history own expected missing details state", () => {
+  routerState.keyId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  hooks.key = { data: undefined, isLoading: false, error: new ApiError(404, { error: "not_found", error_code: 1404, message: "Key does not exist" }), refetch: vi.fn() };
+  render(<KeyDetailPage />);
+  expect(screen.getByRole("heading", { name: "Service history" })).toBeInTheDocument();
+  expect(screen.queryByText("Key does not exist")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+});
+
+it("shows the ownership card in Advanced only when the backend authorizes the catalog owner", async () => {
+  const user = userEvent.setup();
+  const view = render(<KeyDetailPage />);
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+  hooks.canTransfer = true;
+  view.rerender(<KeyDetailPage />);
+  expect(within(screen.getByRole("tabpanel", { name: "Advanced" })).getByText("Ownership transfer")).toBeVisible();
+  hooks.transferResource = null;
+  view.rerender(<KeyDetailPage />);
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+});
+
+it("opens ownership review in Advanced using the catalog resource and owner", async () => {
+  hooks.canTransfer = true;
+  const user = userEvent.setup();
+  render(<KeyDetailPage />);
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  expect(screen.getByText("Transfer the catalog definition for OpenAI to another person or organization.")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Transfer ownership" }));
+  const dialog = screen.getByRole("dialog", { name: "Transfer ownership" });
+  expect(within(dialog).getByText("cat-1")).toBeVisible();
+  expect(within(dialog).getByText("catalog-owner")).toBeVisible();
+  expect(mockNavigate).not.toHaveBeenCalled();
+});
+
+it.each([true, false])("offers Advanced to an authorized catalog owner for a platform connection (auto-connected: %s)", async (autoConnected) => {
+  hooks.key.data = makeKey({ credential_binding: "platform", auto_connected: autoConnected, api_key_id: null });
+  const user = userEvent.setup();
+  const view = render(<KeyDetailPage />);
+  expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
+  hooks.canTransfer = true;
+  view.rerender(<KeyDetailPage />);
+  expect(screen.queryByText("Ownership transfer")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Advanced" }));
+  expect(screen.getByRole("button", { name: "Transfer ownership" })).toBeVisible();
+  hooks.canTransfer = false;
+  view.rerender(<KeyDetailPage />);
+  expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeVisible();
+  expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
 });

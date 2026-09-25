@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  CHANNEL_PLATFORMS,
+  channelPlatformViews,
   managedConnectPlatform,
 } from "@/lib/channel-platforms";
 import {
-  createChannelBotSchema,
+  buildCreateChannelBotSchema,
   conversationPlatformSchema,
 } from "@/schemas/channels";
 import {
@@ -17,6 +17,10 @@ import {
   ManagedOAuthDetail,
 } from "./managed-oauth-connect";
 import { ManagedWhatsApp } from "./managed-whatsapp";
+
+import { platformFixtures } from "@/test/fixtures/channel-platforms";
+const CHANNEL_PLATFORMS = channelPlatformViews(platformFixtures);
+const createChannelBotSchema = buildCreateChannelBotSchema(platformFixtures);
 
 describe("managed flow registry", () => {
   it("resolves every descriptor through a flow component", () => {
@@ -39,10 +43,10 @@ describe("managed flow registry", () => {
   it("supports X deep links and requires no BYO fields", () => {
     expect(managedConnectPlatform("x")).toBe("x");
     expect(managedConnectPlatform("whatsapp")).toBe("whatsapp");
-    expect(managedConnectPlatform("telegram")).toBeUndefined();
+    expect(managedConnectPlatform("telegram")).toBe("telegram");
     expect(managedConnectPlatform("__proto__")).toBeUndefined();
-    expect(CHANNEL_PLATFORMS.x.fields).toEqual([]);
-    expect(CHANNEL_PLATFORMS.x.managedOnly).toBe(true);
+    expect(CHANNEL_PLATFORMS.x!.fields).toEqual([]);
+    expect(CHANNEL_PLATFORMS.x!.managedOnly).toBe(true);
     expect(
       createChannelBotSchema.safeParse({
         platform: "x",

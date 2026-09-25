@@ -1,5 +1,7 @@
 # AI Services Architecture
 
+Admin service creation, provider linking, and legacy vendor retirement are documented in [SERVICE_CONFIGURATION.md](SERVICE_CONFIGURATION.md).
+
 ## Overview
 
 NyxID's AI Services system lets users manage external API credentials, SSH services, and proxy routing through a unified interface. Users interact via the **AI Services page** (`/keys`) or the **`nyxid` CLI**.
@@ -222,9 +224,37 @@ last route to the Enable control, so closing it made Disable a one-way door for
 five months. `get_key_resolves_disabled_service_by_uuid_but_not_by_slug` asserts
 both halves.
 
+### Authentication classes
+
+General API keys can GET `/keys`, `/keys/{id_or_slug}`, `/keys/{id_or_slug}/authorization`,
+`/user-services`, `/endpoints`, `/endpoints/{id}/authorization`,
+`/endpoints/{id}/openapi-endpoints`, `/api-keys/external`, and
+`/api-keys/external/{id}/authorization` under `/api/v1`, without an extra scope.
+API-key reads never auto-provision or reconcile services and never lazily reconcile
+pending OAuth placeholders. Sessions, access JWTs, and delegated `account:read`
+tokens retain their existing behavior, including provisioning and reconciliation.
+
+Restricted keys see only their effective `UserService` allowlist, including the
+existing auto-connected expansion. Endpoint and external-credential reads require
+a backing allowed service. Resolvable out-of-allowlist details return 403
+`ApiKeyScopeForbidden`; missing resources retain their normal 404 behavior.
+Personal keys list personal and org-shared services through active Member/Admin
+memberships and effective role scopes; Viewer-only org services are excluded for
+API keys. Org-owned keys act as the org and list its own rows with the existing
+`credential_source.type: "personal"` tag because the actor is the owner.
+`/endpoints?org_id=` still requires Direct or org-admin access.
+The endpoint and external-credential lists retain their existing owner selection:
+`/endpoints` defaults to the actor's own endpoints, and `/api-keys/external` lists
+the actor's own credentials. Org-shared service discovery uses `/keys` and
+`/user-services`; backing-resource detail reads enforce membership ACLs and key scope.
+
+All inventory writes and the entire NyxID `/api-keys` management router remain
+human-only for API keys. Relay and scheduled-invocation tokens remain denied on inventory reads; delegated read parity is unchanged. CatalogEditor service accounts use standing global role permissions and token/live scopes for `/keys` catalog metadata across all existing and future services; responses use catalog UUIDs and `resource_type: "catalog_service"`, without private connection access or per-resource grants. General and legacy Curation service accounts have separate grant-filtered `GET /keys` and exact-UUID `GET /keys/{id}` metadata projections, requiring `user-services:read`, a live admin-issued key read grant, and current owner access. They perform no credential resolution or reconciliation; other inventory routes remain denied. See `SERVICE_ACCOUNTS.md` → Connection metadata reads.
+
 ### API contract for consumers
 
-`GET /keys` returns disabled services. **Anything consuming it must read
+`GET /keys` returns disabled services, subject to API-key allowlist filtering.
+**Anything consuming it must read
 `is_active`** rather than assuming every row is usable — including when
 rendering status, since `status` is the *credential's* status and stays healthy
 (`active`) while the service is disabled. The CLI centralises this in
@@ -249,6 +279,16 @@ user-facing endpoint or service mutation routes reject changes to these rows.
 Because a disabled row keeps its slug while a new active service may reuse it,
 this listing can contain two rows with the same slug. Consumers that resolve by
 slug should prefer the active row.
+
+Automatic catalog provisioning checks active rows and user-disabled rows whose
+endpoint still exists, for both personal and org owners. Disabled connections
+continue to block provisioning, preserving the user's choice and allowing Enable
+on the original slug. A deleted tombstone (inactive non-auto row with its endpoint
+gone) does not block a fresh automatic connection; the active-only slug lookup and
+partial `(user_id, slug)` index let it reuse the catalog slug. We retain non-auto
+tombstones rather than reviving deleted endpoints or changing a user's binding.
+Inactive automatic rows are reconciled away to release their unique
+`(source, source_id)` before recreation.
 
 ### Known gaps
 
@@ -477,9 +517,12 @@ legacy resolution: no `api_key_id` plus `source=auto_provision` selects the hist
 platform path; other rows use the user path. Catalog `platform_key` grants are live,
 owner-scoped, and independent of catalog provider linkage. Person UUIDs grant that
 person; org UUIDs grant proxy-capable active members and org-owned connections.
-Public grants auto-connect everyone. Restricted grants auto-connect eligible people
-and granted org owners; reconciliation removes stale automatic rows and orphan
-endpoints. Explicit connections remain manageable after revocation but cannot execute.
+Public grants auto-connect active people in their personal section only. Restricted
+grants auto-connect directly allowlisted people and org owners reached through active
+`can_proxy()` memberships. Reconciliation and the idempotent startup sweep remove
+public-audience org automatic rows and orphan endpoints. Explicit org platform
+bindings retain public execution access. Explicit connections remain manageable
+after revocation but cannot execute.
 
 `POST /keys {service_slug, label, use_platform_key:true}` creates a server-held
 connection without credential, OAuth, destination override or node inputs.
@@ -518,7 +561,7 @@ hardening; nodes inject their own credentials only.
 
 ### Org provisioning and reconciliation
 
-Key listing, Agent Key login delivery (login options), and device-code
+Human and delegated key listing, Agent Key login delivery (login options), and device-code
 approval/onboarding for the acting person's own account invoke shared provisioning,
 which may idempotently create org-owned auto-connected rows only through that
 person's own active Member/Admin memberships with `can_proxy()` and explicit
@@ -530,9 +573,18 @@ next owner reconciliation removes automatic rows and orphan endpoints. This side
 effect is limited to explicit platform configurations; inherited legacy no-auth
 provisioning remains personal-only. JWT/API-key authentication itself never provisions rows.
 
-Key listing shares one membership and active-owner grant snapshot across personal/org
-provisioning, stale-row reconciliation, org row loading, and availability rendering.
+Key listing shares one membership and active-owner grant snapshot across org row
+loading and availability rendering. Human and delegated callers also reuse it for
+personal/org provisioning and stale-row reconciliation; API-key reads skip both.
 Provider eligibility is batch-loaded once for the request. Catalog, MCP and LLM
 listings likewise reuse grants and provider rows rather than issuing ACL queries per
 service. These snapshots last for one request only; the next request rechecks live
 membership, owner activity, provider eligibility and catalog configuration.
+
+## Aurinko account credentials
+
+`api-aurinko` is a normal owner-scoped catalog connection backed by an encrypted account bearer credential. Existing active-service, agent-binding, scope, and approval rules apply. The AI Services UI and CLI support account-token entry and the authenticated `/v1/account` probe. The email channel bot stores its own encrypted account token plus the separate application signing secret; credential rotation and deletion are independent across these surfaces. Managed OAuth is not exposed because official Aurinko contracts do not document the PKCE support required by NyxID. See [Aurinko integration](./AURINKO_INTEGRATION.md) for the documented contracts and decision.
+
+## Service authorship and history
+
+Service cards and tables include authorized creator/latest-editor summaries. Instance detail pages, including platform-managed instances, have a History tab. Deleted UUID histories remain discoverable from Services → Deleted service history under current personal-owner/org-admin/resource-scope checks. The transactional journal covers service, endpoint and credential writers; ordinary timestamps, usage and routine refresh do not count as configuration edits. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe values, writer inventory, audit publication and required MongoDB replica-set migration.

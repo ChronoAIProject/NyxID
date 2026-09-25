@@ -2,6 +2,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { PropsWithChildren } from "react";
+import { useAuthStore } from "@/stores/auth-store";
+import { optionsResponse } from "@/test-utils/options";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Issue #787 — CLI-wizard confirm-panels coverage. Each exported panel
@@ -26,6 +28,7 @@ const { mockGet, mockPost, mockUseOrgs, mockUseKeys, mockUseNodes } =
   }));
 
 vi.mock("@/lib/api-client", () => ({
+  apiClient: (path: string) => mockGet(path),
   api: {
     post: mockPost,
     get: mockGet,
@@ -106,6 +109,8 @@ const pairingId = "pair-test-123";
 
 beforeEach(() => {
   mockGet.mockReset();
+  useAuthStore.setState({ user: null, isAuthenticated: false });
+  mockGet.mockImplementation(async (path: string) => path.startsWith("/options/") ? optionsResponse(path) : { id: "current-actor", email: "admin@example.com" });
   mockPost.mockReset();
   mockUseOrgs.mockReset();
   mockUseKeys.mockReset();
@@ -252,6 +257,32 @@ describe("ApiKeyCreateConfirm", () => {
 // ── ApiKeyRotateConfirm ──────────────────────────────────────────────
 
 describe("ApiKeyRotateConfirm", () => {
+  it("retains the managed platform when rotation returns no browser-visible secret", async () => {
+    const user = userEvent.setup();
+    mockPost.mockResolvedValue({
+      id: "successor",
+      full_key: "",
+      platform: "nyxid-assistant",
+    });
+    const onSuccess = vi.fn();
+    render(
+      <ApiKeyRotateConfirm
+        pairingId={pairingId}
+        onSuccess={onSuccess}
+        prefill={{ resource_id: "assistant-key", display_name: "NyxID Assistant" }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await user.click(screen.getByRole("button", { name: /Rotate key/i }));
+    expect(onSuccess).toHaveBeenCalledWith({
+      kind: "api-key-rotate",
+      resource_id: "successor",
+      full_key: "",
+      platform: "nyxid-assistant",
+    });
+  });
+
   it("renders the resource name in the summary and POSTs the rotate endpoint, then fires onSuccess", async () => {
     const user = userEvent.setup();
     mockPost.mockResolvedValue({ id: "key-id-9", full_key: "nyxid_ag_new" });
@@ -471,7 +502,7 @@ describe("ServiceAccountCreateConfirm", () => {
         onSuccess={onSuccess}
         prefill={{
           name: "ci-deploys",
-          scopes: "openid profile",
+          scopes: "proxy",
           description: "CI bot",
           role_ids_csv: "role-a, role-b",
         }}
@@ -481,11 +512,12 @@ describe("ServiceAccountCreateConfirm", () => {
 
     // Prefilled inputs render the CLI-sent summary values.
     expect(screen.getByLabelText("Name")).toHaveValue("ci-deploys");
-    expect(screen.getByLabelText("Allowed scopes")).toHaveValue(
-      "openid profile",
-    );
+    expect(screen.getByRole("button", { name: "Remove proxy" })).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText("Owner"), "org-uuid-1");
+    await waitFor(() => expect(mockGet.mock.calls.some(([path]) => String(path).includes("owner_id=org-uuid-1"))).toBe(true));
+    await user.click(screen.getByRole("combobox", { name: "Allowed scopes" }));
+    await user.click(await screen.findByRole("option", { name: /^roles$/ }));
     await user.click(
       screen.getByRole("button", { name: /Create Service Account/i }),
     );
@@ -494,7 +526,7 @@ describe("ServiceAccountCreateConfirm", () => {
     const body = bodyForCall("/admin/service-accounts");
     expect(body).toMatchObject({
       name: "ci-deploys",
-      allowed_scopes: "openid profile",
+      allowed_scopes: "proxy roles",
       description: "CI bot",
       target_org_id: "org-uuid-1",
     });
@@ -516,7 +548,7 @@ describe("ServiceAccountCreateConfirm", () => {
       <ServiceAccountCreateConfirm
         pairingId={pairingId}
         onSuccess={vi.fn()}
-        prefill={{ scopes: "openid" }}
+        prefill={{ scopes: "roles" }}
       />,
       { wrapper: createWrapper() },
     );
@@ -527,6 +559,41 @@ describe("ServiceAccountCreateConfirm", () => {
     ).toBeDisabled();
     expect(mockPost).not.toHaveBeenCalled();
   });
+  it("submits a custom draft even when the standalone identity lookup fails", async () => {
+    mockGet.mockRejectedValue(new Error("offline"));
+    mockPost.mockResolvedValue({ id: "sa-custom", client_id: "cid", client_secret: "secret" });
+    const user = userEvent.setup();
+    render(<ServiceAccountCreateConfirm pairingId={pairingId} onSuccess={vi.fn()} prefill={{ name: "Custom bot", scopes: "original:scope" }} />, { wrapper: createWrapper() });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to load your account");
+    expect(screen.queryByText("Loading options…")).not.toBeInTheDocument();
+    await user.type(screen.getByRole("combobox", { name: "Allowed scopes" }), "typed:scope");
+    await user.click(screen.getByRole("button", { name: "Create Service Account" }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    expect(bodyForCall("/admin/service-accounts").allowed_scopes).toBe("original:scope typed:scope");
+  });
+
+  it("loads the standalone identity with retry without blocking custom creation", async () => {
+    let failing = true;
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === "/users/me") {
+        if (failing) throw new Error("offline");
+        return { id: "standalone-admin", email: "admin@example.com" };
+      }
+      return optionsResponse(path);
+    });
+    render(<ServiceAccountCreateConfirm pairingId={pairingId} onSuccess={vi.fn()} prefill={{ name: "Standalone" }} />, { wrapper: createWrapper() });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to load your account");
+    expect(screen.getByRole("button", { name: "Create Service Account" })).toBeEnabled();
+    expect(mockGet.mock.calls.some(([path]) => String(path).startsWith("/options/"))).toBe(false);
+    failing = false;
+    await userEvent.click(screen.getByRole("button", { name: "Retry account" }));
+    await userEvent.click(screen.getByRole("combobox", { name: "Allowed scopes" }));
+    expect(await screen.findByRole("option", { name: "proxy" })).toHaveAttribute("aria-selected", "false");
+    expect(useAuthStore.getState().user?.id).toBe("standalone-admin");
+    expect(mockGet.mock.calls.some(([path]) => String(path).includes("owner_id=standalone-admin"))).toBe(true);
+    expect(screen.getByRole("button", { name: "Create Service Account" })).toBeEnabled();
+  });
+
 });
 
 // ── ServiceAccountRotateSecretConfirm ────────────────────────────────

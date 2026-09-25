@@ -1,7 +1,7 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::{
-    ClientSession, Database,
+    Database,
     bson::{self, Document, doc},
 };
 use uuid::Uuid;
@@ -49,15 +49,77 @@ pub(crate) fn validate_openapi_spec_url(url: &str) -> AppResult<()> {
     validate_optional_spec_url(url)
 }
 
+/// Apply service-specific normalization before a catalog endpoint is stored.
+/// Most catalog services accept their URL verbatim; Supabase accepts either
+/// the project root shown in its dashboard or the full PostgREST Data API URL.
+pub fn normalize_catalog_endpoint_url(
+    catalog_service_slug: Option<&str>,
+    raw_url: &str,
+) -> AppResult<String> {
+    if catalog_service_slug != Some("api-supabase") || raw_url.is_empty() {
+        return Ok(raw_url.to_string());
+    }
+
+    let mut parsed = url::Url::parse(raw_url).map_err(|_| {
+        AppError::ValidationError(
+            "Supabase endpoint_url must be a valid project or Data API URL".to_string(),
+        )
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(AppError::ValidationError(
+            "Supabase endpoint_url must be an HTTP(S) project URL without credentials, query, or fragment"
+                .to_string(),
+        ));
+    }
+
+    match parsed.path().trim_end_matches('/') {
+        "" | "/rest/v1" => parsed.set_path("/rest/v1"),
+        _ => {
+            return Err(AppError::ValidationError(
+                "Supabase endpoint_url must be a project URL or end with /rest/v1".to_string(),
+            ));
+        }
+    }
+    Ok(parsed.to_string())
+}
+
+pub async fn normalize_endpoint_url_for_update(
+    db: &Database,
+    user_id: &str,
+    endpoint_id: &str,
+    raw_url: &str,
+) -> AppResult<String> {
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+
+    let endpoint = get_endpoint(db, user_id, endpoint_id).await?;
+    let catalog_slug = if let Some(catalog_id) = endpoint.catalog_service_id.as_deref() {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": catalog_id })
+            .await?
+            .map(|service| service.slug)
+    } else {
+        None
+    };
+    normalize_catalog_endpoint_url(catalog_slug.as_deref(), raw_url)
+}
+
 /// List all endpoints for a user, sorted by created_at descending.
 pub async fn list_endpoints(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<UserEndpoint>> {
-    let endpoints: Vec<UserEndpoint> = db
-        .collection::<UserEndpoint>(COLLECTION_NAME)
-        .find(doc! { "user_id": user_id })
-        .sort(doc! { "created_at": -1 })
-        .await?
-        .try_collect()
-        .await?;
+    let endpoints: Vec<UserEndpoint> =
+        crate::services::service_history::collection::<UserEndpoint>(db, COLLECTION_NAME)
+            .find(doc! { "user_id": user_id })
+            .sort(doc! { "created_at": -1 })
+            .await?
+            .try_collect()
+            .await?;
     Ok(endpoints)
 }
 
@@ -67,7 +129,7 @@ pub async fn get_endpoint(
     user_id: &str,
     endpoint_id: &str,
 ) -> AppResult<UserEndpoint> {
-    db.collection::<UserEndpoint>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserEndpoint>(db, COLLECTION_NAME)
         .find_one(doc! { "_id": endpoint_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))
@@ -109,7 +171,7 @@ pub async fn create_endpoint(
         updated_at: now,
     };
 
-    db.collection::<UserEndpoint>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserEndpoint>(db, COLLECTION_NAME)
         .insert_one(&endpoint)
         .await?;
 
@@ -174,8 +236,7 @@ pub async fn update_endpoint(
 ) -> AppResult<()> {
     let update_doc = build_endpoint_update(url, label, openapi_spec_url, recommended_skills)?;
 
-    let result = db
-        .collection::<UserEndpoint>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserEndpoint>(db, COLLECTION_NAME)
         .update_one(doc! { "_id": endpoint_id, "user_id": user_id }, update_doc)
         .await?;
 
@@ -190,7 +251,7 @@ pub async fn update_endpoint(
 #[allow(clippy::too_many_arguments)]
 pub async fn update_endpoint_in_session(
     db: &Database,
-    session: &mut ClientSession,
+    session: &mut crate::services::service_history::transaction::Transaction,
     user_id: &str,
     endpoint_id: &str,
     url: Option<&str>,
@@ -200,8 +261,7 @@ pub async fn update_endpoint_in_session(
 ) -> AppResult<()> {
     let update_doc = build_endpoint_update(url, label, openapi_spec_url, recommended_skills)?;
 
-    let result = db
-        .collection::<UserEndpoint>(COLLECTION_NAME)
+    let result = crate::services::service_history::collection::<UserEndpoint>(db, COLLECTION_NAME)
         .update_one(doc! { "_id": endpoint_id, "user_id": user_id }, update_doc)
         .session(session)
         .await?;
@@ -301,6 +361,31 @@ pub(crate) fn build_endpoint_update(
     Ok(update_doc)
 }
 
+/// Delete the backing endpoint and retain explicit instance deletion evidence atomically.
+pub async fn delete_service_endpoint(
+    db: &Database,
+    owner: &str,
+    endpoint_id: &str,
+    service_ids: &[String],
+) -> AppResult<()> {
+    let db = db.clone();
+    let owner = owner.to_string();
+    let endpoint_id = endpoint_id.to_string();
+    let service_ids = service_ids.to_vec();
+    crate::services::service_history::transaction::run(&db.clone(), async move |session| {
+        if db.collection::<bson::Document>(USER_SERVICES).count_documents(doc! { "endpoint_id": &endpoint_id, "is_active": true }).session(&mut *session).await? > 0 {
+            return Err(crate::services::api_key_mutation_service::abort_transaction(AppError::Conflict("Endpoint is in use by active services".into())));
+        }
+        crate::services::service_history::collection::<UserEndpoint>(&db, COLLECTION_NAME)
+            .delete_one(doc! { "_id": &endpoint_id, "user_id": &owner }).session(&mut *session).await?;
+        crate::services::service_history::collection::<bson::Document>(&db, USER_SERVICES)
+            .update_many(doc! { "_id": { "$in": &service_ids }, "user_id": &owner, "endpoint_id": &endpoint_id, "deleted_at": null },
+                doc! { "$set": { "deleted_at": bson::DateTime::from_chrono(Utc::now()), "is_active": false } }).session(&mut *session).await?;
+        Ok(())
+    }).await.map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
+    Ok(())
+}
+
 /// Delete endpoint. Fails if any active UserService references it.
 pub async fn delete_endpoint(
     db: &mongodb::Database,
@@ -311,13 +396,13 @@ pub async fn delete_endpoint(
     let _ = get_endpoint(db, user_id, endpoint_id).await?;
 
     // Check for active references
-    let ref_count = db
-        .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .count_documents(doc! {
-            "endpoint_id": endpoint_id,
-            "is_active": true,
-        })
-        .await?;
+    let ref_count =
+        crate::services::service_history::collection::<mongodb::bson::Document>(db, USER_SERVICES)
+            .count_documents(doc! {
+                "endpoint_id": endpoint_id,
+                "is_active": true,
+            })
+            .await?;
 
     if ref_count > 0 {
         return Err(AppError::Conflict(
@@ -325,7 +410,7 @@ pub async fn delete_endpoint(
         ));
     }
 
-    db.collection::<UserEndpoint>(COLLECTION_NAME)
+    crate::services::service_history::collection::<UserEndpoint>(db, COLLECTION_NAME)
         .delete_one(doc! { "_id": endpoint_id, "user_id": user_id })
         .await?;
 
@@ -334,7 +419,8 @@ pub async fn delete_endpoint(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_endpoint_url;
+    use super::{normalize_catalog_endpoint_url, validate_endpoint_url};
+    use crate::errors::AppError;
 
     #[test]
     fn validate_endpoint_url_accepts_empty_and_ssh_urls() {
@@ -383,5 +469,90 @@ mod tests {
         assert!(validate_endpoint_url("").is_ok());
         assert!(validate_endpoint_url("ssh://example.internal:22").is_ok());
         assert!(validate_endpoint_url("https://api.example.com").is_ok());
+    }
+
+    #[test]
+    fn normalize_supabase_project_url_appends_data_api_path() {
+        assert_eq!(
+            normalize_catalog_endpoint_url(Some("api-supabase"), "https://demo.supabase.co")
+                .unwrap(),
+            "https://demo.supabase.co/rest/v1"
+        );
+        assert_eq!(
+            normalize_catalog_endpoint_url(Some("api-supabase"), "https://demo.supabase.co/")
+                .unwrap(),
+            "https://demo.supabase.co/rest/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_supabase_data_api_url_removes_trailing_slash() {
+        assert_eq!(
+            normalize_catalog_endpoint_url(
+                Some("api-supabase"),
+                "https://demo.supabase.co/rest/v1/",
+            )
+            .unwrap(),
+            "https://demo.supabase.co/rest/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_supabase_data_api_url_rejects_other_project_apis() {
+        let error = normalize_catalog_endpoint_url(
+            Some("api-supabase"),
+            "https://demo.supabase.co/storage/v1",
+        )
+        .expect_err("Storage URL must not be accepted by the Data API connector");
+        assert!(
+            matches!(error, AppError::ValidationError(message) if message.contains("/rest/v1"))
+        );
+    }
+
+    #[test]
+    fn normalize_supabase_data_api_url_rejects_postgres_connection_string() {
+        let error = normalize_catalog_endpoint_url(
+            Some("api-supabase"),
+            "postgresql://postgres:secret@db.demo.supabase.co:5432/postgres",
+        )
+        .expect_err("PostgreSQL connection strings are not HTTP endpoints");
+        assert!(matches!(error, AppError::ValidationError(message) if message.contains("HTTP(S)")));
+    }
+
+    #[test]
+    fn normalize_catalog_endpoint_url_leaves_other_services_unchanged() {
+        assert_eq!(
+            normalize_catalog_endpoint_url(
+                Some("llm-openai"),
+                "https://api.example.com/custom/path?query=1",
+            )
+            .unwrap(),
+            "https://api.example.com/custom/path?query=1"
+        );
+    }
+
+    #[test]
+    fn normalize_supabase_url_rejects_credentials_queries_and_fragments() {
+        for url in [
+            "https://user:secret@demo.supabase.co",
+            "https://user@demo.supabase.co",
+            "https://demo.supabase.co?apikey=secret",
+            "https://demo.supabase.co/rest/v1#fragment",
+        ] {
+            assert!(normalize_catalog_endpoint_url(Some("api-supabase"), url).is_err());
+        }
+    }
+
+    #[test]
+    fn normalize_supabase_url_supports_custom_hosts_and_node_managed_endpoints() {
+        assert_eq!(
+            normalize_catalog_endpoint_url(Some("api-supabase"), "https://db.example.com/")
+                .unwrap(),
+            "https://db.example.com/rest/v1"
+        );
+        assert_eq!(
+            normalize_catalog_endpoint_url(Some("api-supabase"), "").unwrap(),
+            ""
+        );
     }
 }

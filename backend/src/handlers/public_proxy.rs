@@ -151,6 +151,8 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
     service.inject_delegation_token = false;
 
     proxy_service::ProxyTarget {
+        workspace_destinations_pending: false,
+        target_id: None,
         base_url: service.base_url.clone(),
         auth_method: "none".to_string(),
         auth_key_name: String::new(),
@@ -277,6 +279,10 @@ mod tests {
 
     fn service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "svc-1".to_string(),
             name: "Public".to_string(),
             slug: "public".to_string(),
@@ -410,6 +416,10 @@ mod tests {
         /// single enabled `GET /public/**` anonymous rule with `daily_quota`.
         fn public_service(slug: &str, base_url: &str, daily_quota: u32) -> DownstreamService {
             DownstreamService {
+                destination_targets: Default::default(),
+                owner_user_id: None,
+                recommended_skill_refs: None,
+                skills_revision: 0,
                 id: Uuid::new_v4().to_string(),
                 name: "Public".to_string(),
                 slug: slug.to_string(),
@@ -765,6 +775,7 @@ mod tests {
             let mut service = public_service("pub", "https://example.test", 100);
             service.billing = Some(ServiceBilling {
                 platform_billable: false,
+                platform_charge_nyxid_credentials_only: false,
                 platform_metric: None,
                 platform_pricing: None,
                 platform_pricing_cleanup_metric_code: None,
@@ -772,6 +783,7 @@ mod tests {
                 platform_key_pricing: None,
                 byok_pricing_cleanup_metric_code: None,
                 platform_key_pricing_cleanup_metric_code: None,
+                component_cleanup_metric_codes: Vec::new(),
                 resale_billable: true,
                 resale_metric: BillingMetric::Tokens,
                 lago_resale_metric_code: Some("resale_tokens".to_string()),

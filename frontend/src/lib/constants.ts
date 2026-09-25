@@ -17,6 +17,8 @@ export const AUTH_TYPE_LABELS: Readonly<Record<string, string>> = {
   bot_bearer: "Bot Token (Discord)",
   body: "JSON Body Injection",
   path: "Path Prefix",
+  ifttt_webhook: "IFTTT Webhooks",
+  ifttt_mcp: "IFTTT OAuth",
   oidc: "OIDC / SSO",
   ssh: "SSH Tunnel",
   header: "API Key",

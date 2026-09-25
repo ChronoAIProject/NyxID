@@ -22,7 +22,10 @@ pub async fn connection_token(
     provider_slug: &str,
     required_scopes: &[&str],
 ) -> AppResult<Zeroizing<String>> {
-    let collection = db.collection::<UserApiKey>(crate::models::user_api_key::COLLECTION_NAME);
+    let collection = crate::services::service_history::collection::<UserApiKey>(
+        db,
+        crate::models::user_api_key::COLLECTION_NAME,
+    );
     let load = || collection.find_one(doc! { "_id": connection_id, "user_id": owner });
     let mut key = load().await?.ok_or_else(|| {
         reconnect("Connected OAuth credential was deleted or belongs to another owner")
@@ -118,6 +121,28 @@ pub async fn resolve_bot_token(
     adapter: &dyn PlatformAdapter,
     bot: &ChannelBot,
 ) -> AppResult<Zeroizing<String>> {
+    if bot.credential_source == "telegram_manager" {
+        let values = super::platform_credential_service::load_decrypted(
+            db,
+            keys,
+            &super::channel_adapters::telegram_new::credential_descriptor(),
+        )
+        .await?;
+        if bot.platform != "telegram"
+            || values.get("manager_bot_id") != Some(bot.platform_bot_id.as_str())
+            || values.get("webhook_ready") != Some("true")
+        {
+            return Err(AppError::Conflict(
+                "The Telegram manager configuration is unavailable.".into(),
+            ));
+        }
+        return values
+            .get(super::channel_adapters::telegram_new::MANAGER_TOKEN)
+            .map(|token| Zeroizing::new(token.to_owned()))
+            .ok_or_else(|| {
+                AppError::Conflict("The Telegram manager token is unavailable.".into())
+            });
+    }
     let CredentialResolution::OAuthConnection {
         provider_slug,
         required_scopes,
@@ -136,7 +161,11 @@ pub async fn resolve_bot_token(
             &bot.user_id,
             connection_id,
             provider_slug,
-            required_scopes,
+            if bot.platform == "x" && super::channel_adapters::x::public_events_enabled(bot) {
+                super::channel_adapters::x::PUBLIC_SCOPES
+            } else {
+                required_scopes
+            },
         )
         .await
     } else {
@@ -235,16 +264,23 @@ pub async fn start_connection(
     )
     .await?;
     // Pin provenance before OAuth initiation so legacy BYO credentials cannot override this app.
-    db.collection::<UserApiKey>(crate::models::user_api_key::COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": &key.id, "user_id": owner },
-            doc! { "$set": { "credential_source": "platform" } },
-        )
-        .await?;
-    let scopes = required_scopes
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>();
+    crate::services::service_history::collection::<UserApiKey>(
+        db,
+        crate::models::user_api_key::COLLECTION_NAME,
+    )
+    .update_one(
+        doc! { "_id": &key.id, "user_id": owner },
+        doc! { "$set": { "credential_source": "platform" } },
+    )
+    .await?;
+    let scopes = if adapter.platform_id() == "x" {
+        super::channel_adapters::x::PUBLIC_SCOPES
+    } else {
+        required_scopes
+    }
+    .iter()
+    .map(|s| s.to_string())
+    .collect::<Vec<_>>();
     let result = super::user_token_service::initiate_oauth_connect(
         db,
         keys,
@@ -267,10 +303,12 @@ pub async fn start_connection(
             attempt_nonce: flow.attempt_nonce,
         }),
         Err(error) => {
-            let _ = db
-                .collection::<UserApiKey>(crate::models::user_api_key::COLLECTION_NAME)
-                .delete_one(doc! { "_id": &key.id, "status": "pending_auth" })
-                .await;
+            let _ = crate::services::service_history::collection::<UserApiKey>(
+                db,
+                crate::models::user_api_key::COLLECTION_NAME,
+            )
+            .delete_one(doc! { "_id": &key.id, "status": "pending_auth" })
+            .await;
             Err(error)
         }
     }

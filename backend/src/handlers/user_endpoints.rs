@@ -31,19 +31,19 @@ async fn load_readable_endpoint(
     state: &AppState,
     actor: &str,
     endpoint_id: &str,
+    api_key_scope: Option<&[String]>,
 ) -> AppResult<UserEndpoint> {
-    let endpoint = state
-        .db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
-        .find_one(doc! { "_id": endpoint_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
+    let endpoint =
+        crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+            .find_one(doc! { "_id": endpoint_id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
 
     let access = org_service::resolve_owner_access(&state.db, actor, &endpoint.user_id).await?;
     if !access.can_read() {
         return Err(AppError::NotFound("Endpoint not found".to_string()));
     }
-    let backing_service_ids = user_service_service::user_service_ids_for_endpoint(
+    let mut backing_service_ids = user_service_service::user_service_ids_for_endpoint(
         &state.db,
         &endpoint.user_id,
         &endpoint.id,
@@ -52,6 +52,15 @@ async fn load_readable_endpoint(
     if !access.allows_any_resource(&backing_service_ids) {
         return Err(AppError::NotFound("Endpoint not found".to_string()));
     }
+    // Both authorities must cover the same backing service; separate matches
+    // on a shared endpoint/credential must not combine disjoint scopes.
+    if api_key_scope.is_some() {
+        backing_service_ids.retain(|id| access.allows_resource(id));
+    }
+    crate::services::key_service::ensure_api_key_service_scope(
+        api_key_scope,
+        &backing_service_ids,
+    )?;
     Ok(endpoint)
 }
 
@@ -63,7 +72,7 @@ async fn resolve_endpoint_write_owner(
     actor: &str,
     endpoint_id: &str,
 ) -> AppResult<String> {
-    let endpoint = load_readable_endpoint(state, actor, endpoint_id).await?;
+    let endpoint = load_readable_endpoint(state, actor, endpoint_id, None).await?;
     let access = org_service::resolve_owner_access(&state.db, actor, &endpoint.user_id).await?;
     if !access.can_write() {
         return Err(AppError::OrgRoleInsufficient(
@@ -78,9 +87,10 @@ async fn endpoint_is_only_node_routed(
     owner_id: &str,
     endpoint_id: &str,
 ) -> AppResult<bool> {
-    let services = state
-        .db
-        .collection::<mongodb::bson::Document>(USER_SERVICES);
+    let services = crate::services::service_history::collection::<mongodb::bson::Document>(
+        &state.db,
+        USER_SERVICES,
+    );
     let total_count = services
         .count_documents(doc! { "user_id": owner_id, "endpoint_id": endpoint_id })
         .await?;
@@ -194,7 +204,8 @@ pub struct EndpointListQuery {
 )]
 /// GET /api/v1/endpoints
 ///
-/// Defaults to listing the caller's personal endpoints. Pass
+/// API-key readable, filtered to allowed backing services for restricted keys.
+/// Org-owned keys act as the org. Defaults to the actor's own endpoints. Pass
 /// `?org_id=<id>` to list endpoints owned by an org (the caller must be
 /// an admin of that org). This is how admins discover orphan endpoints
 /// that block org deletion (issue #365).
@@ -204,18 +215,32 @@ pub async fn list_endpoints(
     Query(query): Query<EndpointListQuery>,
 ) -> AppResult<Json<EndpointListResponse>> {
     let actor = auth_user.user_id.to_string();
-    let user_id_str = if let Some(target_org_id) = query.org_id.as_deref() {
+    let (user_id_str, access) = if let Some(target_org_id) = query.org_id.as_deref() {
         let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
         if !access.can_write() {
             return Err(AppError::OrgRoleInsufficient(
                 "admin access to the target org is required to list its endpoints".to_string(),
             ));
         }
-        target_org_id.to_string()
+        (target_org_id.to_string(), access)
     } else {
-        actor
+        (actor, org_service::OwnerAccess::Direct)
     };
-    let endpoints = user_endpoint_service::list_endpoints(&state.db, &user_id_str).await?;
+    let mut endpoints = user_endpoint_service::list_endpoints(&state.db, &user_id_str).await?;
+    if let Some(scope) = auth_user.api_key_service_scope() {
+        let scope: Vec<String> = scope
+            .iter()
+            .filter(|id| access.allows_resource(id))
+            .cloned()
+            .collect();
+        let references = user_service_service::inventory_references_for_services(
+            &state.db,
+            &user_id_str,
+            &scope,
+        )
+        .await?;
+        endpoints.retain(|endpoint| references.endpoint_ids.contains(&endpoint.id));
+    }
     let auto_connected_ids =
         user_service_service::auto_connected_endpoint_ids(&state.db, &user_id_str).await?;
     let items = endpoints
@@ -249,11 +274,23 @@ pub async fn update_endpoint(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path(endpoint_id): Path<String>,
-    Json(body): Json<UpdateEndpointRequest>,
+    Json(mut body): Json<UpdateEndpointRequest>,
 ) -> AppResult<Json<EndpointResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_endpoint_write_owner(&state, &actor, &endpoint_id).await?;
     user_service_service::ensure_user_managed_endpoint(&state.db, &owner_id, &endpoint_id).await?;
+
+    if let Some(raw_url) = body.url.take() {
+        body.url = Some(
+            user_endpoint_service::normalize_endpoint_url_for_update(
+                &state.db,
+                &owner_id,
+                &endpoint_id,
+                &raw_url,
+            )
+            .await?,
+        );
+    }
 
     if let Some(url) = body.url.as_deref()
         && !endpoint_is_only_node_routed(&state, &owner_id, &endpoint_id).await?
@@ -382,6 +419,8 @@ pub async fn delete_endpoint(
     tag = "Endpoints"
 )]
 /// GET /api/v1/endpoints/{endpoint_id}/authorization
+/// API-key readable under owner/membership ACLs and backing-service scope;
+/// org-owned keys read their own endpoints directly. No provisioning.
 ///
 /// Same ACL as the endpoint detail sibling, projected to the properties an
 /// assistant-action postcondition reader consumes. Delete-shaped verbs prove
@@ -392,7 +431,13 @@ pub async fn get_endpoint_authorization(
     Path(endpoint_id): Path<String>,
 ) -> AppResult<Json<EndpointAuthorizationEvidenceResponse>> {
     let actor = auth_user.user_id.to_string();
-    let endpoint = load_readable_endpoint(&state, &actor, &endpoint_id).await?;
+    let endpoint = load_readable_endpoint(
+        &state,
+        &actor,
+        &endpoint_id,
+        auth_user.api_key_service_scope(),
+    )
+    .await?;
     let auto_connected =
         user_service_service::auto_connected_endpoint_ids(&state.db, &endpoint.user_id)
             .await?
@@ -471,13 +516,21 @@ fn parsed_endpoint_to_response(p: openapi_parser::ParsedEndpoint) -> UserEndpoin
     tag = "Endpoints"
 )]
 /// GET /api/v1/endpoints/{endpoint_id}/openapi-endpoints
+/// API-key readable under owner/membership ACLs and backing-service scope;
+/// org-owned keys read their own endpoints directly. No provisioning.
 pub async fn list_openapi_endpoints(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(endpoint_id): Path<String>,
 ) -> AppResult<Json<UserEndpointOperationsResponse>> {
     let actor = auth_user.user_id.to_string();
-    let endpoint = load_readable_endpoint(&state, &actor, &endpoint_id).await?;
+    let endpoint = load_readable_endpoint(
+        &state,
+        &actor,
+        &endpoint_id,
+        auth_user.api_key_service_scope(),
+    )
+    .await?;
 
     let Some(ref spec_url) = endpoint.openapi_spec_url else {
         return Ok(Json(UserEndpointOperationsResponse {
@@ -507,6 +560,9 @@ pub async fn list_openapi_endpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_endpoint::{COLLECTION_NAME as EP_COLLECTION, UserEndpoint};
     use crate::models::user_service::{
@@ -626,6 +682,60 @@ mod tests {
 
         assert_eq!(updated.id, ep_id);
         assert_eq!(updated.label, "New Label");
+    }
+
+    #[tokio::test]
+    async fn update_supabase_endpoint_normalizes_project_url() {
+        let Some(db) = connect_test_database("h_user_ep_update_supabase").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let ep_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "api-supabase".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(EP_COLLECTION)
+            .insert_one(test_user_endpoint(
+                &ep_id,
+                &user_id,
+                "Supabase",
+                "https://old.supabase.co/rest/v1",
+                None,
+                Some(&catalog_id),
+            ))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let Json(updated) = update_endpoint(
+            State(state),
+            test_auth_user(&user_id),
+            tele(),
+            Path(ep_id),
+            Json(UpdateEndpointRequest {
+                url: Some("https://new.supabase.co".to_string()),
+                label: None,
+                openapi_spec_url: None,
+                recommended_skills: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            updated.url.as_deref(),
+            Some("https://new.supabase.co/rest/v1")
+        );
     }
 
     #[tokio::test]
@@ -750,6 +860,7 @@ mod tests {
     #[test]
     fn parsed_endpoint_to_response_maps_all_fields() {
         let parsed = openapi_parser::ParsedEndpoint {
+            origin: None,
             source_operation_id: Some("list_users".into()),
             name: "list_users".into(),
             description: Some("List all users".into()),
@@ -775,6 +886,7 @@ mod tests {
     #[test]
     fn parsed_endpoint_to_response_with_body() {
         let parsed = openapi_parser::ParsedEndpoint {
+            origin: None,
             source_operation_id: Some("create_user".into()),
             name: "create_user".into(),
             description: None,

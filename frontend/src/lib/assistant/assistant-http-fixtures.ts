@@ -1,3 +1,4 @@
+import { NyxAgentHttpFixtures } from "@/lib/assistant/nyxagent-http-fixtures";
 import type { AssistantHttpMockHandler } from "@/lib/assistant/assistant-http";
 import {
   activeTaskFixture,
@@ -14,6 +15,7 @@ import { useAssistantMockScenariosStore } from "@/stores/assistant-mock-scenario
 type JsonRecord = Record<string, unknown>;
 
 export interface AssistantHttpFixtureFaults {
+  readonly nyxagentEnabled?: boolean;
   readonly historyDelayMs?: number;
   readonly historyErrorStatus?: number;
   readonly sendSilent?: boolean;
@@ -223,6 +225,7 @@ function chunkedSse(
 
 export class AssistantHttpFixtureWorld {
   readonly conversations = new Map<string, AssistantFixtureConversation>();
+  private nyxagent = new NyxAgentHttpFixtures();
   private nextConversation = 1;
   private nextTurn = 1;
   private stateEnvelopeOffset = 0;
@@ -235,6 +238,8 @@ export class AssistantHttpFixtureWorld {
 
   readonly handler: AssistantHttpMockHandler = async ({ endpoint, init }) => {
     const faults = globalThis.__nyxidAssistantHttpFaults ?? {};
+    const nyxagent = await this.nyxagent.handler({ endpoint, init });
+    if (nyxagent) return nyxagent;
     const method = init.method ?? "GET";
     if (faults.unauthorized && faults.historyErrorStatus === 401) {
       return errorResponse(401, faults);

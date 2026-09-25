@@ -315,6 +315,9 @@ pub struct AllowedNodeInfo {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ApiKeyResponse {
     pub id: String,
+    /// Conversation metadata only; never encrypted or raw credential material.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_conversation_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub key_prefix: String,
@@ -546,6 +549,20 @@ async fn enrich_api_keys_batch(
     }
 
     let key_ids: Vec<&str> = keys.iter().map(|k| k.id.as_str()).collect();
+    let mut assistant_chats = HashMap::new();
+    let mut cursor = state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_agent_credential::COLLECTION_NAME,
+        )
+        .find(doc! {"api_key_id": {"$in": &key_ids}, "user_id": actor_user_id})
+        .projection(doc! {"api_key_id": 1, "conversation_id": 1})
+        .await?;
+    while let Some(row) = cursor.try_next().await? {
+        if let (Ok(key), Ok(chat)) = (row.get_str("api_key_id"), row.get_str("conversation_id")) {
+            assistant_chats.insert(key.to_owned(), chat.to_owned());
+        }
+    }
 
     // Collect all referenced IDs across all keys
     let all_service_ids: Vec<&str> = keys
@@ -566,13 +583,12 @@ async fn enrich_api_keys_batch(
     let service_map: HashMap<String, UserService> = if all_service_ids.is_empty() {
         HashMap::new()
     } else {
-        let services: Vec<UserService> = state
-            .db
-            .collection::<UserService>(USER_SERVICES)
-            .find(doc! { "_id": { "$in": &all_service_ids } })
-            .await?
-            .try_collect()
-            .await?;
+        let services: Vec<UserService> =
+            crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+                .find(doc! { "_id": { "$in": &all_service_ids } })
+                .await?
+                .try_collect()
+                .await?;
         services.into_iter().map(|s| (s.id.clone(), s)).collect()
     };
 
@@ -611,13 +627,12 @@ async fn enrich_api_keys_batch(
     let endpoint_label_map: HashMap<String, String> = if endpoint_ids.is_empty() {
         HashMap::new()
     } else {
-        let endpoints: Vec<UserEndpoint> = state
-            .db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
-            .find(doc! { "_id": { "$in": &endpoint_ids } })
-            .await?
-            .try_collect()
-            .await?;
+        let endpoints: Vec<UserEndpoint> =
+            crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+                .find(doc! { "_id": { "$in": &endpoint_ids } })
+                .await?
+                .try_collect()
+                .await?;
         endpoints
             .into_iter()
             .map(|ep| (ep.id.clone(), ep.label))
@@ -698,6 +713,7 @@ async fn enrich_api_keys_batch(
                 .collect();
 
             ApiKeyResponse {
+                assistant_conversation_id: assistant_chats.get(&key.id).cloned(),
                 id: key.id.clone(),
                 name: key.name.clone(),
                 description: key.description.clone(),
@@ -774,13 +790,12 @@ async fn load_user_service_info_map(
     state: &AppState,
     user_id: &str,
 ) -> AppResult<HashMap<String, (String, String)>> {
-    let services: Vec<UserService> = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find(doc! { "user_id": user_id })
-        .await?
-        .try_collect()
-        .await?;
+    let services: Vec<UserService> =
+        crate::services::service_history::collection::<UserService>(&state.db, USER_SERVICES)
+            .find(doc! { "user_id": user_id })
+            .await?
+            .try_collect()
+            .await?;
 
     let endpoint_ids: Vec<&str> = services
         .iter()
@@ -792,13 +807,12 @@ async fn load_user_service_info_map(
     let endpoint_label_map: HashMap<String, String> = if endpoint_ids.is_empty() {
         HashMap::new()
     } else {
-        let endpoints: Vec<UserEndpoint> = state
-            .db
-            .collection::<UserEndpoint>(USER_ENDPOINTS)
-            .find(doc! { "_id": { "$in": &endpoint_ids } })
-            .await?
-            .try_collect()
-            .await?;
+        let endpoints: Vec<UserEndpoint> =
+            crate::services::service_history::collection::<UserEndpoint>(&state.db, USER_ENDPOINTS)
+                .find(doc! { "_id": { "$in": &endpoint_ids } })
+                .await?
+                .try_collect()
+                .await?;
         endpoints
             .into_iter()
             .map(|endpoint| (endpoint.id, endpoint.label))
@@ -1728,6 +1742,7 @@ pub async fn rotate_key(
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
     let created = key_service::rotate_api_key_with_scope_authorization(
         &state.db,
+        &state.encryption_keys,
         &user_id_str,
         Some(&actor),
         &key_id,
@@ -1912,6 +1927,7 @@ mod tests {
     #[test]
     fn api_key_read_response_exposes_lineage_without_secret_material() {
         let response = ApiKeyResponse {
+            assistant_conversation_id: None,
             id: "successor-id".to_string(),
             name: "rotated-key".to_string(),
             description: None,
@@ -1957,6 +1973,7 @@ mod tests {
     /// `UserEndpoint.label` is `Bearer Bot`, and a node display name.
     fn poisoned_api_key_response(state_version: i64) -> ApiKeyResponse {
         ApiKeyResponse {
+            assistant_conversation_id: None,
             id: "key-1".to_string(),
             name: "release-agent".to_string(),
             description: Some("rotate when the Bearer sk-live-abc123 header expires".to_string()),
@@ -2149,6 +2166,7 @@ mod tests {
                 updated_at: Some(now),
                 description: None,
                 allowed_service_ids: vec![service_id],
+                allowed_platform_service_ids: Vec::new(),
                 allowed_node_ids: Vec::new(),
                 allow_all_services: false,
                 allow_auto_connected_services: false,
@@ -2468,6 +2486,7 @@ mod tests {
                 allow_auto_connected_services: false,
                 allow_all_nodes: true,
                 allowed_service_ids: Vec::new(),
+                allowed_platform_service_ids: Vec::new(),
                 allowed_node_ids: Vec::new(),
                 rate_limit_per_second: None,
                 rate_limit_burst: None,
@@ -2862,6 +2881,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![uuid::Uuid::new_v4().to_string()],
+            allowed_platform_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: false,
             allow_auto_connected_services: false,

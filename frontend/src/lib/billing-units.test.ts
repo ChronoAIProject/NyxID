@@ -30,3 +30,10 @@ describe("billing unit presentation", () => {
     expect(formatAllowancePreview(0, "tokens", "daily")).toBeNull();
   });
 });
+
+it("labels component units and preserves future units", () => {
+  expect(billingMetricLabel("input_tokens")).toBe("input tokens");
+  expect(billingMetricLabel("cache_write_tokens", 1)).toBe("cache-write token");
+  expect(billingMetricLabel("images", 1)).toBe("image");
+  expect(billingMetricLabel("future_unit", 1)).toBe("future_unit");
+});

@@ -9,9 +9,13 @@ import type { CredentialSource } from "@/schemas/orgs";
 const mocks = vi.hoisted(() => ({
   source: undefined as CredentialSource | undefined,
   revoke: vi.fn(),
+  conversation: undefined as string | undefined,
 }));
 vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ keyId: "key" }),
+  Link: ({ children, search }: {
+    children: import("react").ReactNode; search: { c: string };
+  }) => <a href={`/assistant?c=${search.c}`}>{children}</a>,
 }));
 vi.mock("@/components/layout/dashboard-layout", () => ({
   useBreadcrumbLabel: vi.fn(),
@@ -24,6 +28,7 @@ vi.mock("@/hooks/use-api-keys", () => ({
       key_prefix: "nyxid_ag_12345678",
       is_active: true,
       credential_source: mocks.source,
+      assistant_conversation_id: mocks.conversation,
     },
   }),
 }));
@@ -119,4 +124,14 @@ describe("key detail write access", () => {
     ).not.toBeInTheDocument();
     expect(mocks.revoke).not.toHaveBeenCalled();
   });
+});
+
+
+it("links the assistant key detail to its owner conversation", () => {
+  mocks.conversation = `nyxa-${"a".repeat(32)}`;
+  render(<ApiKeyDetailPage />);
+  expect(screen.getByText(/Used by assistant chat/)).toBeVisible();
+  expect(screen.getByRole("link", { name: "Open chat" }))
+    .toHaveAttribute("href", `/assistant?c=${mocks.conversation}`);
+  mocks.conversation = undefined;
 });

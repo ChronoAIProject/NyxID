@@ -309,6 +309,8 @@ pub async fn find_matching_enabled_rule(
         .await?
         .ok_or_else(|| AppError::NotFound("Public endpoint not found".to_string()))?;
 
+    super::retired_service_service::require_available(&service)?;
+
     let method = normalize_method(method)?;
     let path = normalize_runtime_path(path)?;
     let rule = service
@@ -496,6 +498,10 @@ mod tests {
 
     fn compatible_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
+            owner_user_id: None,
+            recommended_skill_refs: None,
+            skills_revision: 0,
             id: "svc-1".to_string(),
             name: "Service".to_string(),
             slug: "svc".to_string(),
@@ -595,6 +601,7 @@ mod tests {
         let mut service = compatible_service();
         service.billing = Some(crate::models::service_billing::ServiceBilling {
             platform_billable: false,
+            platform_charge_nyxid_credentials_only: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
@@ -602,6 +609,7 @@ mod tests {
             platform_key_pricing: None,
             byok_pricing_cleanup_metric_code: None,
             platform_key_pricing_cleanup_metric_code: None,
+            component_cleanup_metric_codes: Vec::new(),
             resale_billable: true,
             resale_metric: crate::models::service_billing::BillingMetric::Requests,
             lago_resale_metric_code: Some("resale_requests".to_string()),

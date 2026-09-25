@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { CHANNEL_PLATFORMS } from "@/lib/channel-platforms";
+import { XEventsSettings } from "./x-events-settings";
+import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import {
   openOAuthPopup,
   openOAuthChannel,
@@ -30,18 +31,24 @@ export function ManagedOAuthConnect({
   orgId,
   onConnected,
   botId,
+  fullPage = false,
 }: ManagedFlowProps) {
   const [stage, setStage] = useState<
     "starting" | "authorizing" | "completing" | null
   >(null);
   const [error, setError] = useState<string | null>(null);
+  const [canRetry, setCanRetry] = useState(false);
   const cleanup = useRef<(() => void) | null>(null);
   const queryClient = useQueryClient();
-  const descriptor = CHANNEL_PLATFORMS[platform];
+  const { getPlatform } = useChannelPlatformViews();
+  const descriptor = getPlatform(platform);
   useEffect(() => () => cleanup.current?.(), []);
 
   function connect() {
-    if (cleanup.current || !bootstrap.available) return;
+    if (!bootstrap.available || (cleanup.current && !canRetry)) return;
+    cleanup.current?.();
+    setStage(null);
+    setCanRetry(false);
     setError(null);
     const popup = openOAuthPopup();
     if (!popup) {
@@ -52,6 +59,7 @@ export function ManagedOAuthConnect({
     let channel: BroadcastChannel | null = null;
     let active = true;
     let completing = false;
+    let closeMonitor: number | undefined;
     const timeout = window.setTimeout(
       () => fail("Account sign-in timed out. Please reconnect."),
       10 * 60_000,
@@ -62,11 +70,13 @@ export function ManagedOAuthConnect({
       channel?.close();
       popup.close();
       window.clearTimeout(timeout);
+      window.clearInterval(closeMonitor);
       cleanup.current = null;
     };
     const fail = (message: string) => {
       if (!active) return;
       stop();
+      setCanRetry(false);
       setStage(null);
       setError(message);
     };
@@ -92,6 +102,8 @@ export function ManagedOAuthConnect({
             return;
           }
           completing = true;
+          setCanRetry(false);
+          window.clearInterval(closeMonitor);
           setStage("completing");
           void completeManagedOAuth(
             platform,
@@ -127,6 +139,15 @@ export function ManagedOAuthConnect({
           started.attempt_nonce,
           descriptor.label,
         );
+        if (active && !completing) {
+          closeMonitor = window.setInterval(() => {
+            if (popup.isClosed()) {
+              // COOP can report a live popup as closed; keep listening until retry.
+              setCanRetry(true);
+              window.clearInterval(closeMonitor);
+            }
+          }, 500);
+        }
       })
       .catch((error: unknown) =>
         fail(
@@ -140,33 +161,44 @@ export function ManagedOAuthConnect({
   return (
     <div className="space-y-3">
       {error && <ErrorBanner message={error} />}
+      {canRetry && (
+        <p role="status" className="text-xs text-muted-foreground">
+          Finish authorization in the sign-in window. If you closed it, retry
+          the connection.
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
         <Button
           type="button"
           variant="primary"
-          isLoading={stage !== null}
+          className={fullPage ? "w-full" : undefined}
+          isLoading={stage !== null && !canRetry}
           disabled={
             !bootstrap.available || !label.trim() || label.trim().length > 128
           }
           onClick={connect}
         >
           <ExternalLink className="size-3" />
-          {stage === "starting"
-            ? "Opening sign-in..."
-            : stage === "authorizing"
-              ? "Waiting for authorization..."
-              : stage === "completing"
-                ? "Connecting account..."
-                : botId
-                  ? "Reconnect"
-                  : (descriptor.connectLabel ?? `Connect ${descriptor.label}`)}
+          {canRetry
+            ? "Retry connection"
+            : stage === "starting"
+              ? "Opening sign-in..."
+              : stage === "authorizing"
+                ? "Waiting for authorization..."
+                : stage === "completing"
+                  ? "Connecting account..."
+                  : botId
+                    ? "Reconnect"
+                    : (descriptor.connectLabel ??
+                      `Connect ${descriptor.label}`)}
         </Button>
-        {stage && (
+        {stage && !fullPage && (
           <Button
             type="button"
             variant="ghost"
             onClick={() => {
               cleanup.current?.();
+              setCanRetry(false);
               setStage(null);
             }}
           >
@@ -179,6 +211,7 @@ export function ManagedOAuthConnect({
 }
 
 export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
+  const { getPlatform } = useChannelPlatformViews();
   const bootstrap = useManagedOnboarding(bot.platform);
   return (
     <DetailSection title="Connected account">
@@ -189,22 +222,33 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         copyable
       />
       <DetailRow
-        label="Last polled"
-        value={bot.last_polled_at ?? "Not yet polled"}
+        label="Message delivery"
+        value={bot.webhook_registered ? "Real-time webhooks" : "Polling"}
       />
-      <DetailRow label="Next poll" value={bot.next_poll_at ?? "Paused"} />
-      <DetailRow
-        label="Cursor"
-        value={bot.poll_cursor ?? "Not initialized"}
-        copyable
-      />
-      <DetailRow
-        label="Consecutive errors"
-        value={String(bot.poll_error_count ?? 0)}
-      />
+      {!bot.webhook_registered && (
+        <>
+          <DetailRow
+            label="Last polled"
+            value={bot.last_polled_at ?? "Not yet polled"}
+          />
+          <DetailRow label="Next poll" value={bot.next_poll_at ?? "Paused"} />
+          <DetailRow
+            label="Cursor"
+            value={bot.poll_cursor ?? "Not initialized"}
+            copyable
+          />
+          <DetailRow
+            label="Consecutive errors"
+            value={String(bot.poll_error_count ?? 0)}
+          />
+        </>
+      )}
       <div className="space-y-3 py-3">
-        {bot.last_poll_notice && (
-          <p role="status" className="text-xs text-warning">{bot.last_poll_notice}</p>
+        {bot.platform === "x" && <XEventsSettings bot={bot} />}
+        {!bot.webhook_registered && bot.last_poll_notice && (
+          <p role="status" className="text-xs text-warning">
+            {bot.last_poll_notice}
+          </p>
         )}
         {bot.error && <ErrorBanner message={bot.error} />}
         {bootstrap.isError && (
@@ -226,7 +270,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         {bootstrap.data && !bootstrap.data.available && (
           <p className="text-xs text-muted-foreground">
             Account connection is not available until an admin configures{" "}
-            {CHANNEL_PLATFORMS[bot.platform].label}.
+            {getPlatform(bot.platform).label}.
           </p>
         )}
       </div>

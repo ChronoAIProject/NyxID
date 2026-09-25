@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
-  createChannelBotSchema,
+  channelTestMessageSchema,
+  buildCreateChannelBotSchema,
   updateChannelBotSchema,
   createChannelConversationSchema,
   createDeviceConversationSchema,
   updateChannelConversationSchema,
   conversationPlatformSchema,
 } from "./channels";
+
+import { platformFixtures } from "@/test/fixtures/channel-platforms";
+const createChannelBotSchema = buildCreateChannelBotSchema(platformFixtures);
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -38,7 +42,6 @@ describe("createChannelBotSchema platform-specific superRefine", () => {
     for (const platform of ["lark", "feishu"] as const) {
       const missing = createChannelBotSchema.safeParse({
         platform,
-        bot_token: "t",
         label: "l",
       });
       expect(missing.success).toBe(false);
@@ -52,13 +55,26 @@ describe("createChannelBotSchema platform-specific superRefine", () => {
       expect(
         createChannelBotSchema.safeParse({
           platform,
-          bot_token: "t",
           label: "l",
           app_id: "cli_x",
           app_secret: "secret",
           verification_token: "vtok",
         }).success,
       ).toBe(true);
+    }
+  });
+
+  it.each(["telegram", "discord", "slack", "whatsapp"])("still requires a bot token for %s", (platform) => {
+    const result = createChannelBotSchema.safeParse({
+      platform,
+      label: "Support",
+      public_key: "public-key",
+      app_secret: "app-secret",
+      phone_number_id: "123456",
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.path)).toEqual([["bot_token"]]);
     }
   });
 
@@ -186,8 +202,54 @@ describe("conversation schemas", () => {
 });
 
 describe("conversationPlatformSchema", () => {
-  it("includes device but not slack (read-back set)", () => {
+  it("includes device and slack (read-back set)", () => {
     expect(conversationPlatformSchema.safeParse("device").success).toBe(true);
-    expect(conversationPlatformSchema.safeParse("slack").success).toBe(false);
+    expect(conversationPlatformSchema.safeParse("slack").success).toBe(true);
+  });
+});
+
+describe("agent-initiated message settings", () => {
+  it("preserves default-off and explicit human opt-in values", () => {
+    expect(
+      createChannelConversationSchema.parse({
+        channel_bot_id: UUID,
+        agent_api_key_id: UUID,
+      }).allow_agent_initiated,
+    ).toBeUndefined();
+    for (const enabled of [false, true]) {
+      expect(
+        updateChannelConversationSchema.parse({
+          allow_agent_initiated: enabled,
+        }).allow_agent_initiated,
+      ).toBe(enabled);
+    }
+    expect(
+      updateChannelConversationSchema.safeParse({
+        allow_agent_initiated: "true",
+      }).success,
+    ).toBe(false);
+  });
+  it("rejects blank test messages", () => {
+    expect(channelTestMessageSchema.safeParse({ text: "   " }).success).toBe(
+      false,
+    );
+    expect(channelTestMessageSchema.parse({ text: " hello " }).text).toBe(
+      "hello",
+    );
+  });
+});
+
+
+describe("Aurinko account-token onboarding", () => {
+  const input = { platform: "aurinko", label: "Mailbox", bot_token: "account-token", app_secret: "signing-secret" };
+  it("requires both account token and distinct signing-secret input", () => {
+    expect(createChannelBotSchema.safeParse(input).success).toBe(true);
+    expect(createChannelBotSchema.safeParse({ ...input, app_secret: "" }).success).toBe(false);
+    expect(createChannelBotSchema.safeParse({ ...input, bot_token: "" }).success).toBe(false);
+  });
+  it("accepts mailbox conversations and credential rotation", () => {
+    expect(conversationPlatformSchema.parse("aurinko")).toBe("aurinko");
+    expect(updateChannelBotSchema.safeParse({ bot_token: "replacement", app_secret: "replacement-secret" }).success).toBe(true);
+    expect(createChannelConversationSchema.safeParse({ channel_bot_id: UUID, agent_api_key_id: UUID, platform_conversation_id: `42:${"a".repeat(64)}` }).success).toBe(true);
   });
 });
