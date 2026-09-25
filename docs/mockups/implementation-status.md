@@ -1,7 +1,8 @@
 # Device login implementation status
 
 Updated 2026-09-25 on `fix/device-login-approval`, integrated with main
-`ff089247` (0.30.2). This work supersedes closed, unmerged PR #1569. No deployment
+`ff089247` (0.30.2). Review: [PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666),
+which supersedes closed, unmerged PR #1569. No deployment
 or physical-device validation is claimed. See [the protocol](../DEVICE_LOGIN_PROTOCOL.md)
 for the implemented contract and [ADR-015](../ADR-015-auth-device-login.md) for rollout.
 
