@@ -47,3 +47,58 @@ pub async fn get_usage(
     );
     Ok(Json(response))
 }
+
+#[utoipa::path(
+    get, path = "/api/v1/admin/usage/analytics", tag = "Admin",
+    params(admin_usage_service::analytics::AnalyticsQuery),
+    responses((status = 200, description = "Bounded billing analytics", body = admin_usage_service::analytics::AnalyticsResponse)),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_analytics(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<admin_usage_service::analytics::AnalyticsQuery>,
+) -> AppResult<Json<admin_usage_service::analytics::AnalyticsResponse>> {
+    require_admin_or_operator(&state, &auth, "admin.usage.analytics").await?;
+    Ok(Json(
+        admin_usage_service::analytics::get_analytics(&state.db, query.validate(Utc::now())?)
+            .await?,
+    ))
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/admin/usage/workspace", tag = "Admin",
+    responses((status = 200, description = "Private analytics workspace", body = crate::services::usage_workspace_service::WorkspaceResponse)),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_workspace(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<crate::services::usage_workspace_service::WorkspaceResponse>> {
+    require_admin_or_operator(&state, &auth, "admin.usage.workspace").await?;
+    Ok(Json(
+        crate::services::usage_workspace_service::get(&state.db, &auth.user_id.to_string()).await?,
+    ))
+}
+
+#[utoipa::path(
+    put, path = "/api/v1/admin/usage/workspace", tag = "Admin",
+    request_body = crate::services::usage_workspace_service::SaveWorkspaceRequest,
+    responses((status = 200, description = "Saved workspace", body = crate::services::usage_workspace_service::WorkspaceResponse), (status = 409, description = "Stale revision")),
+    security(("bearer_auth" = []))
+)]
+pub async fn save_workspace(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(request): Json<crate::services::usage_workspace_service::SaveWorkspaceRequest>,
+) -> AppResult<Json<crate::services::usage_workspace_service::WorkspaceResponse>> {
+    super::admin_helpers::require_admin(&state, &auth).await?;
+    Ok(Json(
+        crate::services::usage_workspace_service::save(
+            &state.db,
+            &auth.user_id.to_string(),
+            request,
+        )
+        .await?,
+    ))
+}

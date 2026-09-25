@@ -1694,3 +1694,445 @@ async fn hourly_and_daily_reductions_have_covering_indexes() {
     }
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn analytics_conserves_top_other_and_buckets_before_and_after_folding() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("usage_analytics_fold").await.unwrap();
+    let now = hour(Utc::now());
+    let actor = uuid::Uuid::new_v4().to_string();
+    let owner = uuid::Uuid::new_v4().to_string();
+    db.collection::<Document>("downstream_services")
+        .insert_many([
+            doc! { "_id": "svc-12", "slug": "svc-12", "name": "Shared name" },
+            doc! { "_id": "svc-11", "slug": "svc-11", "name": "Shared name" },
+            doc! { "_id": "svc-10", "slug": "svc-10", "name": "Other" },
+        ])
+        .await
+        .unwrap();
+    for i in 1..=12 {
+        let mut row = meter(&actor, &owner, &format!("svc-{i:02}"), i * 10);
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(now - chrono::Duration::hours(i)),
+        );
+        row.insert("wallet_id", "wallet");
+        row.insert("funding", doc! { "total_charge_micros": i * 100, "wallet_funded_micros": i * 100, "grant_funded_micros": 0_i64, "allowance_funded_micros": 0_i64 });
+        insert(&db, row).await;
+    }
+    let q = || AnalyticsQuery {
+        from: Some((now - chrono::Duration::hours(24)).to_rfc3339()),
+        to: Some(now.to_rfc3339()),
+        actors: Some(actor.clone()),
+        owners: Some(owner.clone()),
+        top: Some(5),
+        ..Default::default()
+    };
+    for folded in [false, true] {
+        if folded {
+            fold_once(&db, now).await.unwrap();
+        }
+        let result = get_analytics(&db, q().validate(now).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.total, Some(7800));
+        assert_eq!(result.points.len(), 24);
+        assert_eq!(
+            result.points.iter().map(|p| p.value.unwrap()).sum::<i64>(),
+            7800
+        );
+        assert_eq!(result.slices.len(), 6);
+        assert_eq!(result.series.len(), 6);
+        assert_eq!(result.slices[0].label, "Shared name (svc-12)");
+        assert_eq!(result.slices[1].label, "Shared name (svc-11)");
+        assert_eq!(result.slices[2].label, "Other (svc-10)");
+        assert_eq!(
+            result.slices.iter().map(|s| &s.label).collect::<Vec<_>>(),
+            result.series.iter().map(|s| &s.label).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            result
+                .series
+                .iter()
+                .flat_map(|s| &s.points)
+                .map(|p| p.value.unwrap())
+                .sum::<i64>(),
+            7800
+        );
+        for (index, total) in result.points.iter().enumerate() {
+            assert_eq!(
+                result
+                    .series
+                    .iter()
+                    .map(|s| s.points[index].value.unwrap())
+                    .sum::<i64>(),
+                total.value.unwrap()
+            );
+        }
+        assert_eq!(
+            result.slices.iter().map(|p| p.value.unwrap()).sum::<i64>(),
+            7800
+        );
+        assert!(result.slices.last().unwrap().is_other);
+        assert_eq!(result.slices.last().unwrap().value, Some(2800));
+        for (actors, owners, expected) in [
+            (actor.clone(), owner.clone(), 2300),
+            (owner.clone(), owner.clone(), 0),
+            (actor.clone(), actor.clone(), 0),
+        ] {
+            let chart = get_analytics(
+                &db,
+                AnalyticsQuery {
+                    services: Some("svc-11,svc-12".into()),
+                    actors: Some(actors.clone()),
+                    owners: Some(owners.clone()),
+                    ..q()
+                }
+                .validate(now)
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let list = get_usage(
+                &db,
+                AdminUsageQuery {
+                    from: q().from,
+                    to: q().to,
+                    services: Some("svc-11,svc-12".into()),
+                    actors: Some(actors),
+                    owners: Some(owners),
+                    ..Default::default()
+                }
+                .validate(now)
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(chart.total, Some(expected));
+            assert_eq!(
+                serde_json::to_value(chart.totals).unwrap(),
+                serde_json::to_value(list.totals).unwrap()
+            );
+        }
+        let empty = AnalyticsQuery {
+            actors: Some(owner.clone()),
+            ..q()
+        };
+        assert_eq!(
+            get_analytics(&db, empty.validate(now).unwrap())
+                .await
+                .unwrap()
+                .totals
+                .requests,
+            0
+        );
+        let one = AnalyticsQuery {
+            services: Some("svc-12".into()),
+            ..q()
+        };
+        assert_eq!(
+            get_analytics(&db, one.validate(now).unwrap())
+                .await
+                .unwrap()
+                .total,
+            Some(1200)
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn analytics_preserves_unknown_cost_gaps_and_aggregate_population() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    let db = connect_test_database("usage_analytics_unknown")
+        .await
+        .unwrap();
+    let actor = uuid::Uuid::new_v4().to_string();
+    let mut row = meter(&actor, &actor, "unknown", 500);
+    row.insert("wallet_id", "missing-rate");
+    insert(&db, row).await;
+    let result = get_analytics(
+        &db,
+        AnalyticsQuery {
+            top: Some(0),
+            ..Default::default()
+        }
+        .validate(Utc::now())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.total, None);
+    assert_eq!(result.slices.len(), 1);
+    assert_eq!(result.slices[0].label, "All usage");
+    assert_eq!(result.slices[0].value, None);
+    assert_eq!(
+        result.points.iter().filter(|p| p.value.is_none()).count(),
+        1
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn analytics_daily_and_hourly_series_match_across_rollup_sources() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::{day, fold_once};
+    let db = connect_test_database("usage_analytics_daily")
+        .await
+        .unwrap();
+    let now = day(Utc::now()) + chrono::Duration::hours(17);
+    let actor = uuid::Uuid::new_v4().to_string();
+    for hours in [1, 4, 18, 26, 31, 50, 57, 72, 80] {
+        let mut row = meter(&actor, &actor, "daily-service", 10);
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(now - chrono::Duration::hours(hours)),
+        );
+        row.insert("wallet_id", "wallet");
+        row.insert("funding", doc! { "total_charge_micros": hours * 10, "wallet_funded_micros": hours * 10, "grant_funded_micros": 0_i64, "allowance_funded_micros": 0_i64 });
+        insert(&db, row).await;
+    }
+    let mut before = Vec::new();
+    for hours in [24, 96] {
+        let query = || AnalyticsQuery {
+            from: Some(
+                (now - chrono::Duration::hours(hours) + chrono::Duration::minutes(12)).to_rfc3339(),
+            ),
+            to: Some(now.to_rfc3339()),
+            ..Default::default()
+        };
+        let response = get_analytics(&db, query().validate(now).unwrap())
+            .await
+            .unwrap();
+        before.push((
+            hours,
+            serde_json::to_value(&response.series).unwrap(),
+            response.total,
+        ));
+    }
+    while fold_once(&db, now).await.unwrap() > 0 {}
+    for (hours, expected, total) in before {
+        let params = AnalyticsQuery {
+            from: Some(
+                (now - chrono::Duration::hours(hours) + chrono::Duration::minutes(12)).to_rfc3339(),
+            ),
+            to: Some(now.to_rfc3339()),
+            ..Default::default()
+        }
+        .validate(now)
+        .unwrap();
+        let response = get_analytics(&db, params).await.unwrap();
+        assert_eq!(serde_json::to_value(&response.series).unwrap(), expected);
+        assert_eq!(response.total, total);
+        assert_eq!(
+            response
+                .points
+                .iter()
+                .map(|p| p.value.unwrap())
+                .sum::<i64>(),
+            total.unwrap()
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn analytics_rejects_unbounded_and_malformed_queries() {
+    use super::analytics::AnalyticsQuery;
+    for query in [
+        AnalyticsQuery {
+            interval: Some("minute".into()),
+            ..Default::default()
+        },
+        AnalyticsQuery {
+            top: Some(100),
+            ..Default::default()
+        },
+        AnalyticsQuery {
+            actors: Some("not-an-id".into()),
+            ..Default::default()
+        },
+        AnalyticsQuery {
+            owners: Some("".into()),
+            ..Default::default()
+        },
+        AnalyticsQuery {
+            services: Some(vec!["service"; 21].join(",")),
+            ..Default::default()
+        },
+        AnalyticsQuery {
+            measure: Some("$where".into()),
+            ..Default::default()
+        },
+        AnalyticsQuery {
+            breakdown: Some("password".into()),
+            ..Default::default()
+        },
+    ] {
+        assert!(query.validate(Utc::now()).is_err());
+    }
+}
+
+#[tokio::test]
+async fn analytics_calendar_intervals_and_token_measures_conserve_folded_usage() {
+    use super::analytics::{AnalyticsQuery, get_analytics};
+    use crate::services::billing::usage_rollup::fold_once;
+    use chrono::{Datelike, Timelike};
+    let db = connect_test_database("usage_calendar").await.unwrap();
+    let parse = |date: &str| {
+        DateTime::parse_from_rfc3339(date)
+            .unwrap()
+            .with_timezone(&Utc)
+    };
+    let now = parse("2024-03-02T01:00:00Z");
+    let actor = uuid::Uuid::new_v4().to_string();
+    for (index, date) in [
+        "2024-02-25T23:30:00Z",
+        "2024-02-29T23:30:00Z",
+        "2024-03-01T00:30:00Z",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut row = meter(&actor, &actor, "calendar-service", 100);
+        row.insert("created_at", bson::DateTime::from_chrono(parse(date)));
+        row.insert(
+            "credential_class",
+            if index == 0 {
+                "nyxid_managed_master"
+            } else {
+                "user_owned"
+            },
+        );
+        row.insert("token_breakdown", doc! { "prompt_tokens": 80_i64, "completion_tokens": 20_i64, "cached_tokens": 30_i64, "cache_creation_tokens": 5_i64 });
+        row.insert("wallet_id", "wallet");
+        row.insert("funding", doc! { "total_charge_micros": 100_i64, "wallet_funded_micros": 100_i64, "grant_funded_micros": 0_i64, "allowance_funded_micros": 0_i64 });
+        insert(&db, row).await;
+    }
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, now).await.unwrap() > 0 {}
+        }
+        for interval in ["hour", "day", "week", "month"] {
+            for (measure, expected) in [
+                ("cost", 300),
+                ("requests", 3),
+                ("events", 3),
+                ("exact_cost_events", 3),
+                ("legacy_cost_events", 0),
+                ("unknown_cost_events", 0),
+                ("prompt_tokens", 240),
+                ("completion_tokens", 60),
+                ("total_tokens", 300),
+                ("cached_tokens", 90),
+                ("cache_creation_tokens", 15),
+            ] {
+                let response = get_analytics(
+                    &db,
+                    AnalyticsQuery {
+                        from: Some("2024-02-25T23:15:00Z".into()),
+                        to: Some(now.to_rfc3339()),
+                        measure: Some(measure.into()),
+                        interval: Some(interval.into()),
+                        breakdown: Some("credential_class".into()),
+                        ..Default::default()
+                    }
+                    .validate(now)
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    response.total,
+                    Some(expected),
+                    "{interval}/{measure}/{folded}"
+                );
+                assert_eq!(
+                    response
+                        .points
+                        .iter()
+                        .map(|p| p.value.unwrap())
+                        .sum::<i64>(),
+                    expected
+                );
+                assert_eq!(
+                    response
+                        .slices
+                        .iter()
+                        .map(|s| s.value.unwrap())
+                        .sum::<i64>(),
+                    expected
+                );
+                assert!(response.slices.iter().all(|s| {
+                    ["User's own key (BYOK)", "NyxID platform key"].contains(&s.label.as_str())
+                }));
+                for (i, point) in response.points.iter().enumerate() {
+                    assert_eq!(
+                        point.value,
+                        Some(
+                            response
+                                .series
+                                .iter()
+                                .map(|s| s.points[i].value.unwrap())
+                                .sum()
+                        )
+                    );
+                    assert!(point.bucket < now);
+                    if interval == "week" {
+                        assert_eq!(point.bucket.weekday().num_days_from_monday(), 0);
+                    }
+                    if interval == "month" {
+                        assert_eq!(point.bucket.day(), 1);
+                    }
+                    if interval != "hour" {
+                        assert_eq!(point.bucket.hour(), 0);
+                    }
+                }
+            }
+        }
+    }
+    let feb = get_analytics(
+        &db,
+        AnalyticsQuery {
+            from: Some("2024-02-01T00:00:00Z".into()),
+            to: Some("2024-03-01T00:00:00Z".into()),
+            interval: Some("month".into()),
+            ..Default::default()
+        }
+        .validate(now)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(feb.points.len(), 1);
+    assert_eq!(feb.total, Some(200));
+    assert_eq!(feb.points[0].bucket, parse("2024-02-01T00:00:00Z"));
+    let three_months = get_analytics(
+        &db,
+        AnalyticsQuery {
+            from: Some("2024-01-31T01:00:00Z".into()),
+            to: Some(now.to_rfc3339()),
+            interval: Some("month".into()),
+            ..Default::default()
+        }
+        .validate(now)
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(three_months.total, Some(300));
+    assert_eq!(
+        three_months
+            .points
+            .iter()
+            .map(|p| (p.bucket, p.value))
+            .collect::<Vec<_>>(),
+        vec![
+            (parse("2024-01-01T00:00:00Z"), Some(0)),
+            (parse("2024-02-01T00:00:00Z"), Some(200)),
+            (parse("2024-03-01T00:00:00Z"), Some(100)),
+        ]
+    );
+    db.drop().await.unwrap();
+}

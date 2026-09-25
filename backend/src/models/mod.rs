@@ -118,3 +118,4 @@ pub mod service_change_event;
 pub mod usage_rollup_daily;
 pub mod usage_rollup_hourly;
 pub mod usage_rollup_state;
+pub mod usage_workspace;
