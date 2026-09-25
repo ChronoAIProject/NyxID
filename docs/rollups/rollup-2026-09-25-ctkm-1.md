@@ -2,7 +2,8 @@
 
 This rollup starts from `main` commit
 `1b031c77062880e572ec375041a4c029241a86f1` and presents the configurable
-billing analytics integration for review before it lands in `main`.
+billing analytics, device-login, and CI changes for review before they land in
+`main`.
 
 ## Summary
 
@@ -111,3 +112,27 @@ standalone HTML prototype and its supporting artifacts.
 See [the device login contribution record](rollup-2026-09-25-ctkm-1-device-login.md)
 for behavior, verification and rollout constraints. Its source PR records the
 reviewed revision, final checks and landed squash.
+
+## CI latency contribution
+
+[PR #1669](https://github.com/ChronoAIProject/NyxID/pull/1669) was reviewed at
+`3587afd60dc03a232a37f5c1fbb1c4beb8dbe1ea` and squash merged as
+`02c86d0c72a91f60b57dc44c5301ba3df887a605`. It addresses the serial
+backend validation job that had taken about 34 minutes on recent PRs.
+
+The full backend test suite, standalone billing smoke, and production backend
+build plus embedded-input guard now run on separate runners and all remain in
+the `CI Pipeline` gate. The PR-head coverage threshold stays at 73%, while an
+informational base comparison runs in parallel and reuses a report only for an
+exact base commit and CI workflow hash. Rollup pushes measure backend coverage
+even for documentation-only changes so each branch tip can seed that cache.
+The existing four CodeQL languages scan in parallel. Publish-image digests
+build alongside CI, but release tags still wait for the gate and builds.
+
+On the combined billing and device-login tree, the source PR's
+[CI run](https://github.com/ChronoAIProject/NyxID/actions/runs/36125774429)
+passed in 19m43s, including a 19m27s correctness gate. Its
+[CodeQL run](https://github.com/ChronoAIProject/NyxID/actions/runs/36125774417)
+passed in 17m35s. Backend line coverage was 87.54% against the unchanged 73%
+threshold; CLI was 71.50% and frontend was 70.41%. The coverage comment,
+base report, production build guard, and conflict checks passed.
