@@ -43,6 +43,7 @@ pub struct CreateInput {
     pub use_platform_key: Option<bool>,
     pub scopes: Vec<String>,
     pub label: Option<String>,
+    pub endpoint_url: Option<String>,
     pub requested_by: Option<String>,
     pub callback_url: Option<String>,
     pub ttl_secs: Option<i64>,
@@ -170,6 +171,23 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         ));
     }
     let label = normalize_optional(input.label, MAX_LABEL_LEN, "label")?;
+    let endpoint_url = normalize_optional(input.endpoint_url, 2048, "endpoint_url")?;
+    if let Some(url) = endpoint_url.as_deref() {
+        let parsed = url::Url::parse(url).map_err(|_| {
+            AppError::ValidationError("endpoint_url must be an absolute HTTP(S) URL".to_string())
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(AppError::ValidationError(
+                "endpoint_url must be an absolute HTTP(S) URL without credentials or a fragment"
+                    .to_string(),
+            ));
+        }
+    }
     let supplied_requested_by =
         normalize_optional(input.requested_by, MAX_REQUESTED_BY_LEN, "requested_by")?;
     let (callback_url, requesting_app) = resolve_requesting_app(
@@ -197,6 +215,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         service_id: service.service_id.clone(),
         scopes,
         label,
+        endpoint_url,
         requested_by,
         requesting_app_id: requesting_app.as_ref().map(|client| client.id.clone()),
         requesting_app_name: requesting_app
@@ -1548,6 +1567,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await
@@ -1635,6 +1655,7 @@ mod tests {
             callback_url: None,
             ttl_secs: None,
             oauth_client_id: None,
+            endpoint_url: None,
         }
     }
 
@@ -1832,6 +1853,7 @@ mod tests {
                     use_platform_key: None,
                     scopes: vec!["read:org, public_repo".to_string()],
                     label: None,
+                    endpoint_url: None,
                     requested_by: None,
                     callback_url: None,
                     expires_in: None,
@@ -1999,6 +2021,7 @@ mod tests {
                 callback_url: Some(callback.to_string()),
                 ttl_secs: None,
                 oauth_client_id: Some(client.id.clone()),
+                endpoint_url: None,
             },
         )
         .await
@@ -2036,6 +2059,7 @@ mod tests {
                 callback_url: Some(callback.to_string()),
                 ttl_secs: None,
                 oauth_client_id: Some(client.id),
+                endpoint_url: None,
             },
         )
         .await
@@ -2067,6 +2091,7 @@ mod tests {
                 callback_url: Some("https://other.example.test/return".to_string()),
                 ttl_secs: None,
                 oauth_client_id: Some(client.id),
+                endpoint_url: None,
             },
         )
         .await;
@@ -2734,6 +2759,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await
@@ -2776,6 +2802,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await
@@ -2820,6 +2847,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await
@@ -2861,6 +2889,7 @@ mod tests {
                 callback_url: None,
                 ttl_secs: None,
                 oauth_client_id: None,
+                endpoint_url: None,
             },
         )
         .await

@@ -3,7 +3,11 @@ import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
 import { Suspense } from "react";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
-import { channelBotSetupRewrite, parseChannelBotSetupSearch, parseChannelBotSetupPageSearch } from "@/schemas/channel-bot-setup";
+import {
+  channelBotSetupRewrite,
+  parseChannelBotSetupPageSearch,
+  parseChannelBotSetupSearch,
+} from "@/schemas/channel-bot-setup";
 import {
   createRouter,
   createRoute,
@@ -322,16 +326,15 @@ const sshTerminalRoute = createRoute({
   component: SshTerminalPage,
 });
 
-// Shared by every /assistant* route. Keep this auth mirror aligned with
-// dashboardLayout.beforeLoad below; the Assistant shell intentionally lives
-// outside DashboardLayout.
+// Shared by authenticated pages outside DashboardLayout. Keep this auth
+// mirror aligned with dashboardLayout.beforeLoad below.
 //
 // The assistant surface is deliberately not flag-gated here: both a reactive
 // component guard and a server-verified beforeLoad gate raced the auth store
 // (boot `checkAuth`, transient 401 `setUser(null)`) and bounced users whose
 // permission had simply not loaded yet. Reachability is nav-level only (the
 // sidebar link honours the flag) and the backend authorizes every API call.
-const assistantBeforeLoad = async ({
+const standaloneAuthBeforeLoad = async ({
   location,
 }: {
   location: { pathname: string; searchStr: string };
@@ -362,21 +365,21 @@ const assistantRoute = createRoute({
   // `?draft` means; a param dropped here makes the optimistic "New chat"
   // navigation a silent no-op.
   validateSearch: parseAssistantSearch,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: AssistantPage,
 });
 
 const assistantPluginsRoute = createRoute({
   path: "/assistant/plugins",
   getParentRoute: () => rootRoute,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="plugins" />,
 });
 
 const assistantApprovalsRoute = createRoute({
   path: "/assistant/approvals",
   getParentRoute: () => rootRoute,
-  beforeLoad: assistantBeforeLoad,
+  beforeLoad: standaloneAuthBeforeLoad,
   component: () => <AssistantPage view="approvals" />,
 });
 
@@ -762,17 +765,9 @@ const channelBotSetupLinksRoute = createRoute({
 
 export const channelBotSetupRoute = createRoute({
   path: "/channel-bots/connect/$platform",
-  validateSearch: parseChannelBotSetupPageSearch,
   getParentRoute: () => rootRoute,
-  beforeLoad: ({ location }) => {
-    const { isAuthenticated, isLoading } = useAuthStore.getState();
-    if (!isAuthenticated && !isLoading) {
-      throw redirect({
-        to: "/login",
-        search: { return_to: `${window.location.origin}${location.pathname}${location.searchStr}` },
-      });
-    }
-  },
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: parseChannelBotSetupPageSearch,
   component: ChannelBotSetupPage,
 });
 

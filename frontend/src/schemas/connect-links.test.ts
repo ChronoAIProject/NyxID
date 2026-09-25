@@ -26,11 +26,13 @@ describe("connect link schemas", () => {
       requires_gateway_url: false,
       api_key_url: null,
       api_key_instructions: null,
+      endpoint_url: "https://gateway.example.test",
       callback_url:
         "desktop-app://connect/return?status=cancelled&connect_link_id=65dd8fe8-9ee8-4c89-af1e-b283a17bcf37",
     });
     expect(parsed.service_slug).toBe("github");
     expect(parsed.scopes).toEqual(["public_repo", "read:org"]);
+    expect(parsed.endpoint_url).toBe("https://gateway.example.test");
     expect(parsed).not.toHaveProperty("token");
     expect(parsed.callback_url).toContain("status=cancelled");
   });
@@ -75,7 +77,9 @@ describe("connect link schemas", () => {
       oauth_client_secret: "",
     });
     expect(validateConnectOAuthForm(empty, false, false)).toBeNull();
-    expect(validateConnectOAuthForm(empty, true, false)).toMatch(/Endpoint URL/);
+    expect(validateConnectOAuthForm(empty, true, false)).toMatch(
+      /Endpoint URL/,
+    );
     expect(validateConnectOAuthForm(empty, false, true)).toMatch(
       /ID and secret are required/,
     );
@@ -124,6 +128,8 @@ describe("connect link schemas", () => {
       oauth_client_id: "client-id",
       oauth_client_secret: "",
     });
-    expect(validateConnectCredentialForm(values, true)).toMatch(/supplied together/);
+    expect(validateConnectCredentialForm(values, true)).toMatch(
+      /supplied together/,
+    );
   });
 });

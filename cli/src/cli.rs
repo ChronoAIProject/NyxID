@@ -219,6 +219,9 @@ pub struct ConnectArgs {
     /// Human-readable label shown on the hosted connection page
     #[arg(long)]
     pub label: Option<String>,
+    /// Prefill the service URL in the hosted connection form
+    #[arg(long)]
+    pub endpoint_url: Option<String>,
     /// Additional OAuth scopes to request on top of the provider's defaults
     /// (repeatable, comma- or space-separated). The upstream provider decides
     /// whether to grant them. Example: --scope "public_repo,read:org"
