@@ -116,7 +116,7 @@ Content-Type: application/json
 }
 ```
 
-Scope changes affect future token issuance. CatalogEditor also checks live account scopes and assigned global role permissions on every request; removing either removes that authority from existing tokens. Legacy Curation checks live scopes and its grant.
+Scope changes affect future token issuance. CatalogEditor also checks live account scopes on every request; removing a scope removes that authority from existing tokens. Legacy editors additionally check their assigned global role permissions. Legacy Curation checks live scopes and its grant.
 
 ### Rotating the Secret
 
@@ -496,14 +496,14 @@ class NyxIDClient:
 | `proxy:*` | Existing alias of `proxy`; grants the same access, not additional access |
 | `llm:proxy` | Passes the LLM gateway scope check, including status |
 | `roles` | Includes assigned roles and permissions in OAuth userinfo |
-| `catalog:skills:read` | CatalogEditor discovery, skills, and history with the matching global role permission; legacy Curation uses its grant |
-| `catalog:skills:write` | CatalogEditor recommendation changes and restore with the matching global role permission; legacy Curation uses its grant |
-| `user-services:read` | Nonsecret `GET /keys` and `GET /keys/{uuid}`; CatalogEditor returns catalog records with catalog read authority, while General/Curation use connection grants |
+| `catalog:skills:read` | Catalog metadata, key metadata, skills, and history after a platform admin saves the scope; legacy Curation uses its grant |
+| `catalog:skills:write` | Catalog recommendation changes and restore after a platform admin saves the scope; legacy Curation uses its grant |
+| `user-services:read` | Nonsecret private connection metadata with General/Curation connection grants; also required by legacy role-based editors for key GETs |
 | `groups` | Includes groups in OAuth userinfo; service accounts have no group memberships, so the list is empty |
 
-The default suggestion menu includes all eight values in the table, even before an account exists. The `proxy:*` alias and empty `groups` behavior are labeled explicitly. New service-account scope checks must be added to the suggestions registry. CatalogEditor requires the matching global role permission. Legacy Curation instead requires a platform-admin-issued grant for selected catalog services. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
+The default suggestion menu includes all eight values in the table, even before an account exists. The `proxy:*` alias and empty `groups` behavior are labeled explicitly. New service-account scope checks must be added to the suggestions registry. A platform administrator saving catalog scopes grants CatalogEditor access. Legacy editors retain their matching global role requirement until an explicit scope save. Legacy Curation instead requires a platform-admin-issued grant for selected catalog services. Additional values found on the owner's service accounts are labeled as custom/configured suggestions. This does not reinterpret their meaning. `llm:status`, `connections:read/write`, and `providers:read/write` do not establish separate permission checks in the current implementation. Per-service scope strings such as `proxy:<service_id>` are not supported as service restrictions.
 
-General account create/update continue storing free-form scope strings. CatalogEditor accounts accept only `catalog:skills:read`, `catalog:skills:write`, `user-services:read`, and `proxy`. Legacy Curation accounts restrict scopes to their grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation. Curation and key metadata reads additionally check the live configured scope on every request.
+General accounts support free-form scope strings; an explicit platform-admin save containing catalog scopes grants CatalogEditor authority. CatalogEditor accounts accept only `catalog:skills:read`, `catalog:skills:write`, `user-services:read`, and `proxy`. Legacy Curation accounts restrict scopes to their grant contract below. A requested token scope must be an exact whitespace-separated subset of the stored values; for example, configuring only `proxy:*` does not allow requesting the different string `proxy`. Changing an account's configured scopes affects subsequent token issuance. Existing tokens retain their issued scopes until expiry or explicit revocation. Curation and key metadata reads additionally check the live configured scope on every request.
 
 ### Routes Accessible to Service Accounts
 
@@ -515,7 +515,7 @@ The general route table below does not widen CatalogEditor or Curation access. C
 | `ANY /api/v1/llm/gateway/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
 | `GET /api/v1/llm/status` | `proxy`, `proxy:*`, or `llm:proxy` |
 | `ANY /api/v1/proxy/{service_id}/*` | `proxy` or `proxy:*`; Curation additionally requires the exact live Ornn target |
-| `GET /api/v1/keys` | CatalogEditor: `user-services:read`, catalog read scope and role; General/Curation: live connection grant and owner access |
+| `GET /api/v1/keys` | CatalogEditor: catalog read scope (legacy role-based editors also need `user-services:read` and a catalog read role); General/Curation: live connection grant and owner access |
 | `GET /api/v1/keys/{uuid}` | Same authority as list; catalog UUID for CatalogEditor, connection UUID for General/Curation |
 | `GET /api/v1/mcp/config` | `proxy` or `proxy:*`; General SAs only, using their own discovery identity |
 | Connection/provider management | Existing route authentication and ownership checks; no separate connections/providers scope enforcement |
@@ -653,49 +653,46 @@ All service account operations are logged:
 
 ## Platform catalog editors
 
-Aevatar's platform catalog workflow uses a standing global role and OAuth scopes. It covers all existing and future catalog services without connection grants, service UUID allowlists, grant expiry, or per-change approval.
+A platform administrator grants catalog access by saving `catalog:skills:read` and/or `catalog:skills:write` in the ordinary service account create/edit form. These scopes cover all existing and future catalog services. There is no separate catalog role, activation action, connection grant, or service UUID allowlist.
 
-A platform administrator configures the account once:
+For Aevatar, save `catalog:skills:read catalog:skills:write proxy` in **Allowed Scopes**. Keep its existing Ornn role assigned for package content operations. Then request a client-credentials token with these scopes. The existing account and secret can be used.
 
-1. Create or update a **global role** (no OAuth client association) with `nyxid:catalog:skills:read` and `nyxid:catalog:skills:write`. Include `ornn:skill:read`, `ornn:skill:create`, and `ornn:skill:update` for Ornn package content operations. Omit Ornn delete/admin permissions.
-2. Assign that role through Admin → Service Accounts. On an existing account, use **Catalog access → Apply catalog access**, review, and confirm. This explicitly submits the assigned roles even when they have not changed, and adds the catalog read/write scopes supported by those roles (`user-services:read` is included for reads). Keep `proxy` configured for Ornn. Existing Ornn roles remain assigned.
-3. Obtain a fresh client-credentials token carrying those scopes. Secret rotation is unnecessary.
+| Operation | Required scope on token and live account |
+| --- | --- |
+| `GET /api/v1/keys` | `catalog:skills:read` |
+| `GET /api/v1/keys/{catalog_uuid}` | `catalog:skills:read` |
+| Catalog discovery, skills, history, OpenAPI contract | `catalog:skills:read` |
+| Catalog recommendation PUT or restore | `catalog:skills:write` |
 
-Assigning a qualifying global role through platform-admin account create/update atomically sets `purpose: "catalog_editor"` and `platform_protected: true`. Adding a permission to a role already assigned to a General account does not silently convert it; use **Apply catalog access** on the intended account to activate catalog editing. The ordinary edit form only submits changed fields, so saving an unrelated field does not reapply unchanged roles. Ordinary account input cannot directly set purpose or protection. Removing the role revokes its catalog authority while protection remains, so owner or organization administrators cannot take custody or restore access. Client-associated roles and wildcard permission strings do not authorize catalog editing.
+Read and write are independent. Read alone authorizes both key GETs; `user-services:read` is unnecessary for this catalog metadata path. Write alone does not grant reads. The scopes authorize catalog metadata and recommendations, not execution against the services or access to private connections.
 
-The catalog access section checks assigned global role permissions and account scopes. It reports read and write settings separately; an activated account without the read role is not ready for either key GET. A successful settings update is not a live-token test. Legacy grant controls remain available until activation succeeds; activated CatalogEditor accounts show catalog access instead. Applying catalog access includes the reviewed original roles, scopes, purpose, protection, and enabled state as an atomic precondition. A concurrent change returns HTTP 409 and requires reloading, so stale setup cannot restore revoked account roles or scopes. Ordinary account updates without this optional precondition retain their existing behavior. Deploy the updated backend before using the guarded UI action; older backends reject the unknown precondition field without updating the account.
-
-An administrator can also activate an existing account with the deployed CLI, without creating a new SA or rotating its secret:
+The same grant can be saved with the CLI using a platform administrator's identity:
 
 ```sh
 nyxid service-account update "$SA_ID" \
-  --role-ids "$EXISTING_ROLE_IDS" \
-  --scopes 'catalog:skills:read catalog:skills:write user-services:read proxy' \
+  --scopes 'catalog:skills:read catalog:skills:write proxy' \
   --output json
 ```
 
-`EXISTING_ROLE_IDS` is a comma-separated list containing the qualifying global role and every role to retain, including Ornn roles. This command uses the signed-in platform administrator's credentials and intentionally replaces the listed roles and scopes. Inspect the latest account first; the CLI does not send the UI activation precondition. Use the guarded UI action when concurrent administrators may edit the account. Verify the response reports `purpose: "catalog_editor"` and `platform_protected: true`, then test both GETs with the SA token. A token refresh alone does not activate the account.
+This replaces the allowed scopes and preserves assigned roles. The backend records `catalog_scope_authorized: true`, `purpose: "catalog_editor"`, and `platform_protected: true` atomically with the scopes. These are server-controlled fields; ordinary request bodies cannot set them. Organization administrators cannot grant platform catalog authority. Accounts remain under platform-admin management after scope removal, so owners cannot restore revoked access or obtain unrestricted account routes.
 
-| Operation | Token and live account scopes | Live global role permission |
-| --- | --- | --- |
-| `GET /api/v1/keys` | `user-services:read catalog:skills:read` | `nyxid:catalog:skills:read` |
-| `GET /api/v1/keys/{catalog_uuid}` | `user-services:read catalog:skills:read` | `nyxid:catalog:skills:read` |
-| Catalog discovery, skills, history, OpenAPI contract | `catalog:skills:read` | `nyxid:catalog:skills:read` |
-| Catalog recommendation PUT or restore | `catalog:skills:write` | `nyxid:catalog:skills:write` |
+The ordinary edit form also supports saving catalog scopes already present on an older account. Its usual change review includes the resulting platform-wide catalog grant. Access updates include the account's original roles, scopes, purpose, protection, authorization marker, and enabled state as an atomic precondition. A concurrent change returns HTTP 409; reload before saving. The CLI and existing API clients can omit this optional precondition and should inspect current account settings before replacing scopes.
 
-For CatalogEditor, `/keys` returns `{"keys":[...]}` with `resource_type: "catalog_service"` on every row. Both `id` and `catalog_service_id` are **catalog UUIDs**. Use the `id` returned by this list for detail and `/catalog-curation/services/{id}/skills`; personal/org connection UUIDs are a separate namespace. Existing and disabled catalog entries are included; inspect `is_active`. Responses contain names, identifiers, type, active status, recommendations, references, revision, and manifest digest. Queries project these metadata fields and do not load credentials or private connection settings. GET responses use `Cache-Control: private, no-store`.
+Existing CatalogEditor accounts keep their previous role-based authority until an administrator explicitly saves catalog scopes. In that legacy mode, live global `nyxid:catalog:skills:read/write` permissions remain required, and key GETs additionally require `user-services:read`. Removing a legacy authorizing role still revokes access. A scope save deliberately converts the account to scope authority; subsequent catalog revocation uses the allowed scopes. Existing General or Curation accounts are not upgraded merely because their stored scopes contain these strings. Role-only and metadata-only API updates do not convert them.
 
-Writes use the [machine recommendation API](#machine-recommendation-api) and retain revision conflicts, request replay protection, history, token revocation, and credential-generation checks. Account and authorizing role changes conflict with in-flight mutation transactions and force revalidation. A persisted per-account write window applies across replicas: 60 changed writes per second by default, or `rate_limit_override`. Unchanged writes and committed retries do not consume additional budget. Removing a scope or matching role permission blocks the next authorized request, including with a previously issued token.
+For CatalogEditor, `/keys` returns `{"keys":[...]}` with `resource_type: "catalog_service"` on every row. Both `id` and `catalog_service_id` are **catalog UUIDs**. Use an `id` from this list for detail and `/catalog-curation/services/{id}/skills`; personal/org connection UUIDs are a separate namespace. Existing and disabled catalog entries are included; inspect `is_active`. Responses contain names, identifiers, type, active status, recommendations, references, revision, and manifest digest. Queries project these metadata fields without loading credentials or private connection settings. GET responses use `Cache-Control: private, no-store`.
 
-Ornn HTTP requests require `proxy` and an assigned catalog editor role. A converted legacy Curation account retains its administrator-selected Ornn target; a fresh editor uses the active HTTP catalog service with slug `ornn-api`. That target must have the explicit operation policy described below. Downstream authentication uses the SA's own credential, unless the target is configured for identity-only/no-auth access; role assignment cannot replace a downstream credential. Configure JWT or Both identity propagation so Ornn receives the SA UUID and live Ornn role permissions. This is standing service configuration, independent of catalog inventory growth. Ornn still enforces ownership/sharing for edits to package content.
+Writes use the [machine recommendation API](#machine-recommendation-api) and retain revision conflicts, request replay protection, history, token revocation, and credential-generation checks. Scope, account, and token changes conflict with in-flight mutation transactions and force revalidation; legacy role authority is also fenced. A persisted per-account write window applies across replicas: 60 changed writes per second by default, or `rate_limit_override`. Unchanged writes and committed retries do not consume additional budget. Removing a scope blocks subsequent requests with existing tokens; a newly added scope must also be present on the token.
+
+Ornn HTTP requests require `proxy`. Keep the assigned Ornn role permissions `ornn:skill:read`, `ornn:skill:create`, and `ornn:skill:update` for package content operations. A converted legacy Curation account retains its administrator-selected Ornn target; a fresh editor uses the active HTTP catalog service with slug `ornn-api`. That target must have the explicit operation policy described below. Downstream authentication uses the SA's own credential, unless the target is configured for identity-only/no-auth access. Configure JWT or Both identity propagation so Ornn receives the SA UUID and live Ornn permissions. Ornn still enforces ownership/sharing for package edits. Revoking catalog scopes does not revoke the separate `proxy` capability; remove `proxy`, revoke tokens, or disable the account to stop Ornn access.
 
 The account is confined to these metadata/skill routes and its Ornn HTTP target. It cannot manage service definitions, use other proxy targets, select instances, upgrade to WebSocket, or use MCP/LLM/general account administration. Legacy exact grants cannot change a CatalogEditor's purpose or grant fallback authority.
 
-**Deployment order:** upgrade every serving backend replica before assigning an editor role. Old binaries cannot deserialize `catalog_editor`; mixed versions are unsupported. Before rollback, disable editor accounts and revoke tokens, and retain binaries that understand the stored purpose until accounts are migrated. After deployment and the one-time role assignment, verify both GETs with a fresh token and an ID returned by the list. Code tests alone do not establish production readiness.
+**Deployment order:** upgrade every serving backend replica before using scope grants and deploy the frontend after the backend. Older catalog-editor binaries ignore the new marker and still require roles, so newly scope-authorized requests can fail during a mixed deployment. Existing legacy editors retain their old behavior. Binaries predating CatalogEditor cannot deserialize its purpose. Before rollback, disable affected accounts and revoke tokens; retain binaries that understand their purpose until accounts are migrated. After deployment, verify both GETs with the intended SA and a catalog ID returned by its list.
 
 ## Catalog skill curation
 
-The following exact-grant setup remains available for deliberately limited legacy Curation workloads. Platform-wide Aevatar editors use the role setup above and skip grant issuance; both modes share the recommendation API and Ornn content semantics below.
+The following exact-grant setup remains available for deliberately limited legacy Curation workloads. Platform-wide Aevatar editors use the scope setup above; both modes share the recommendation API and Ornn content semantics below.
 
 A dedicated service account can autonomously assign, replace, remove, clear, and restore recommended skills for exact permitted catalog services. The account has one embedded live grant and a persisted write budget shared by all backend replicas. There is no per-change approval or semantic review gate.
 
@@ -711,7 +708,7 @@ Before rolling back to a backend without these checks, disable the Curation acco
 
 ### Legacy Curation platform administration
 
-Create the account with `catalog:skills:read catalog:skills:write`. In Allowed Scopes, choose **catalog: → skills: → read/write**, or paste the complete scopes. These suggestions come from `/options/service-scope` and do not require previously configured accounts. After creation, issue the separate grant from **Catalog skill curation** on the account detail page; selecting scopes alone does not grant access. If it also needs Ornn content authoring, include `proxy` and configure exactly one Ornn catalog UUID when issuing the grant. The grant endpoint rejects other scopes and org-owned accounts. For an existing protected account with a live grant, scope updates must stay within this set. After revocation, metadata updates and disable remain available to platform admins.
+Existing legacy Curation accounts retain their exact grants and token/live scope requirements. Manage their grants from **Catalog skill curation** on the account detail page or through the routes below. Saving catalog scopes through platform-admin create/update now grants platform-wide CatalogEditor access instead; it is the supported setup for new catalog editors. Do not use an ordinary scope save to maintain exact Curation authority. Existing grant revocation, metadata updates, disable, and token revocation remain available to platform admins.
 
 Use the existing Admin → Service Accounts detail page, or:
 
@@ -822,7 +819,7 @@ and the CRUD
 and
 [`service.ts`](https://github.com/ChronoAIProject/Ornn/blob/e7e21e9b7279ccc28ef7d4a40523da40b8cabc25/ornn-api/src/domains/skills/crud/service.ts).
 
-The Ornn role controls downstream authorization. It does not add OAuth scopes, attach a credential, or configure NyxID operation policy. The following checklist is for legacy Curation; CatalogEditor uses the standing role setup above:
+The Ornn role controls downstream authorization. It does not add OAuth scopes, attach a credential, or configure NyxID operation policy. The following checklist is for legacy Curation; CatalogEditor uses the scope setup above:
 
 1. The NyxID account must be Curation-protected with `catalog:skills:read`,
    `catalog:skills:write`, and `proxy` in its configured scopes. The client-
@@ -984,7 +981,7 @@ Human metadata side effects remain after commit. Idempotent retries complete OID
 
 ## Connection metadata reads
 
-This section describes private connection metadata for General and legacy Curation accounts. CatalogEditor uses the catalog projection and standing role described above; it does not need these grants.
+This section describes private connection metadata for General and legacy Curation accounts. CatalogEditor uses the catalog projection and scope grant described above; it does not need these grants.
 
 General and Curation service accounts may call `GET /api/v1/keys` and `GET /api/v1/keys/{uuid}` with `user-services:read` in both the issued token and the live SA scopes, plus a platform-admin-issued **key read grant**. The list contains only currently readable connections named in that grant; detail requires the exact UserService UUID. Ornn role permissions, `proxy`, and catalog grants do not authorize these reads. General accounts retain their purpose; they do not need a Curation grant. A Curation account still needs its live Curation grant in addition to the key read grant.
 

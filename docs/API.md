@@ -3204,7 +3204,7 @@ Create a new key from catalog or custom endpoint. Auto-provisions all 3 records 
 
 #### GET /api/v1/keys
 
-List all user's keys (combined endpoint + key + service view) for existing human/API-key/delegated callers. CatalogEditor service accounts receive all platform catalog entries with `resource_type: "catalog_service"` and catalog UUIDs when token/live scopes include `user-services:read catalog:skills:read` and an assigned global role contains `nyxid:catalog:skills:read`. No resource grants are required. General/Curation service accounts with `user-services:read` in both the token and live account scopes and a live key read grant receive `{"keys":[...]}` containing only the grant's currently readable, nonsecret metadata entries. See the detail response below for the SA entry fields. Curation accounts also require their live Curation grant.
+List all user's keys (combined endpoint + key + service view) for existing human/API-key/delegated callers. CatalogEditor service accounts receive all platform catalog entries with `resource_type: "catalog_service"` and catalog UUIDs when a platform administrator has saved `catalog:skills:read` on the account and the token/live account scopes include it. No catalog role, additional `user-services:read`, or resource grant is required for this scope-granted mode. Existing role-based editors retain their previous role and additional read scope checks until an explicit admin scope save. General/Curation service accounts with `user-services:read` in both the token and live account scopes and a live key read grant receive `{"keys":[...]}` containing only the grant's currently readable, nonsecret metadata entries. See the detail response below for the SA entry fields. Curation accounts also require their live Curation grant.
 
 **Auth:** Required
 
@@ -3212,7 +3212,7 @@ List all user's keys (combined endpoint + key + service view) for existing human
 
 Get a single key's combined view for existing human/API-key/delegated callers. Service accounts receive a smaller nonsecret metadata response. CatalogEditor must use a catalog UUID returned by its `/keys` list; General/Curation must use an exact UserService UUID.
 
-**CatalogEditor auth:** token/live `user-services:read catalog:skills:read` and live global role permission `nyxid:catalog:skills:read`. The response additionally contains `resource_type: "catalog_service"`. See [Platform catalog editors](SERVICE_ACCOUNTS.md#platform-catalog-editors) for one-time setup.
+**CatalogEditor auth:** platform-admin scope grant plus token/live `catalog:skills:read`. Existing role-based editors additionally require token/live `user-services:read` and global role permission `nyxid:catalog:skills:read` until an admin saves catalog scopes. The response contains `resource_type: "catalog_service"`. See [Platform catalog editors](SERVICE_ACCOUNTS.md#platform-catalog-editors) for scope setup and compatibility.
 
 **General/Curation SA auth:** `user-services:read` in both the token and live account scopes, an unexpired exact key read grant, and current SA-owner access. Curation accounts also require their live Curation grant. Slug access, HEAD, upgrades, and key writes are not included.
 
@@ -8091,7 +8091,7 @@ Default limits:
 
 ### Catalog Skill Curation
 
-CatalogEditor and legacy Curation service accounts use the `/catalog-curation` runtime routes below. CatalogEditor requires matching token/live scopes and exact global role permissions `nyxid:catalog:skills:read` or `nyxid:catalog:skills:write`, covering all existing and future catalog entries without grants. The remaining grant requirements in this section apply only to legacy Curation. Legacy Curation runtime requests require the verified SA token, the live unexpired embedded grant, and the exact token/live account scope; their reads reveal only grant-listed catalog services. Both modes deny human credentials, API keys, delegated tokens, and relay tokens. The separate `/admin/service-accounts/{id}/curation-grant` management routes require a human platform admin.
+CatalogEditor and legacy Curation service accounts use the `/catalog-curation` runtime routes below. A platform administrator grants CatalogEditor authority by saving `catalog:skills:read` and/or `catalog:skills:write` on the service account. Matching token/live scopes then cover all existing and future catalog entries. Existing role-based editors retain exact global `nyxid:catalog:skills:read/write` permission checks until an explicit admin scope save. The remaining grant requirements in this section apply only to legacy Curation. Legacy Curation runtime requests require the verified SA token, the live unexpired embedded grant, and the exact token/live account scope; their reads reveal only grant-listed catalog services. Both modes deny human credentials, API keys, delegated tokens, and relay tokens. The separate `/admin/service-accounts/{id}/curation-grant` management routes require a human platform admin.
 
 | Method | Path | Scope or authority |
 | --- | --- | --- |

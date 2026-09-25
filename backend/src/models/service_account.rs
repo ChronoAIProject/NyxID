@@ -67,6 +67,8 @@ pub struct ServiceAccount {
     #[serde(default)]
     pub platform_protected: bool,
     #[serde(default)]
+    pub catalog_scope_authorized: bool,
+    #[serde(default)]
     pub purpose: ServiceAccountPurpose,
     #[serde(default)]
     pub curation_grant: Option<CurationGrant>,
@@ -119,6 +121,7 @@ mod tests {
             client_id: "sa_abcdef0123456789abcdef01".to_string(),
             client_secret_hash: "deadbeef".repeat(8),
             platform_protected: false,
+            catalog_scope_authorized: false,
             purpose: crate::models::service_account::ServiceAccountPurpose::General,
             curation_grant: None,
             credential_generation: 0,

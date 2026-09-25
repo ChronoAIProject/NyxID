@@ -1,6 +1,7 @@
 export interface ServiceAccount {
   readonly purpose?: "general" | "curation" | "catalog_editor";
   readonly platform_protected?: boolean;
+  readonly catalog_scope_authorized?: boolean;
   readonly credential_generation?: number;
   readonly curation_grant?: CurationGrant | null;
   readonly id: string;
@@ -53,6 +54,7 @@ export interface UpdateServiceAccountRequest {
     readonly allowed_scopes: string;
     readonly purpose: "general" | "curation" | "catalog_editor";
     readonly platform_protected: boolean;
+    readonly catalog_scope_authorized: boolean;
     readonly is_active: boolean;
   };
   readonly name?: string;
