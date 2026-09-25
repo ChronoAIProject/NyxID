@@ -136,3 +136,7 @@ passed in 19m43s, including a 19m27s correctness gate. Its
 passed in 17m35s. Backend line coverage was 87.54% against the unchanged 73%
 threshold; CLI was 71.50% and frontend was 70.41%. The coverage comment,
 base report, production build guard, and conflict checks passed.
+
+A follow-up stabilizes the expired device-code approval test by disabling the
+MongoDB TTL index only in that test's isolated database before asserting the
+persisted expired status. Production expiry and test assertions are unchanged.
