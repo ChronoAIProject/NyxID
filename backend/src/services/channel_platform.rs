@@ -728,6 +728,19 @@ pub trait PlatformAdapter: Send + Sync {
     /// Parse the raw webhook body into zero or more normalized inbound messages.
     async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>>;
 
+    /// Acknowledge transport UI only; failure must not discard an admitted user event.
+    fn requires_inbound_ack(&self, _message: &InboundMessage) -> bool {
+        false
+    }
+    async fn acknowledge_inbound(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _message: &InboundMessage,
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
     /// Send a reply back to the platform conversation.
     /// A returned ID proves platform acceptance, not that a recipient saw the message.
     /// An adapter that cannot dispatch must return an explicit error, never Ok(None).

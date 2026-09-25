@@ -554,6 +554,21 @@ pub async fn get_outbound_message_by_platform_id(
         })
 }
 
+/// Exact locator for platforms whose message IDs are only unique inside a chat.
+pub async fn get_exact_outbound_message(
+    db: &mongodb::Database,
+    id: &str,
+    api_key_id: &str,
+    platform_message_id: &str,
+) -> AppResult<ChannelMessage> {
+    if uuid::Uuid::parse_str(id).is_err() {
+        return Err(AppError::ValidationError(
+            "Invalid outbound message ID".into(),
+        ));
+    }
+    db.collection::<ChannelMessage>(COLLECTION_NAME).find_one(doc!{"_id":id,"direction":"outbound","agent_api_key_id":api_key_id,"platform_message_id":platform_message_id}).await?.ok_or_else(||AppError::NotFound("Outbound message not found".into()))
+}
+
 /// Resolve a single outbound message editable by an assigned agent API key.
 pub async fn get_outbound_message_for_api_key(
     db: &mongodb::Database,
@@ -746,6 +761,61 @@ pub fn build_callback_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exact_outbound_locator_distinguishes_chat_local_telegram_ids() {
+        let db = crate::test_utils::connect_test_database("relay_exact_outbound")
+            .await
+            .expect("test database");
+        let key = uuid::Uuid::new_v4().to_string();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let first = store_outbound_message(
+            &db,
+            "bot",
+            "route",
+            &owner,
+            "telegram",
+            &key,
+            None,
+            Some("42"),
+            Some("chat-a"),
+            "text",
+            None,
+        )
+        .await
+        .unwrap();
+        let second = store_outbound_message(
+            &db,
+            "bot",
+            "route",
+            &owner,
+            "telegram",
+            &key,
+            None,
+            Some("42"),
+            Some("chat-b"),
+            "text",
+            None,
+        )
+        .await
+        .unwrap();
+        let found = get_exact_outbound_message(&db, &second.id, &key, "42")
+            .await
+            .unwrap();
+        assert_eq!(found.platform_conversation_id.as_deref(), Some("chat-b"));
+        assert_ne!(found.id, first.id);
+        assert!(
+            get_exact_outbound_message(&db, &second.id, "other-key", "42")
+                .await
+                .is_err()
+        );
+        assert!(
+            get_exact_outbound_message(&db, &second.id, &key, "43")
+                .await
+                .is_err()
+        );
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn inbound_retry_lookup_is_scoped_to_bot_platform_and_direction() {

@@ -310,6 +310,100 @@ fn parse_message(msg: &serde_json::Value, raw: serde_json::Value) -> Option<Inbo
     })
 }
 
+/// Only ordinary chat callbacks with bounded opaque callback data are relayed.
+fn parse_callback(callback: &serde_json::Value, raw: serde_json::Value) -> Option<InboundMessage> {
+    let id = callback.get("id")?.as_str()?;
+    let data = callback.get("data")?.as_str()?;
+    if id.is_empty() || id.len() > 256 || data.is_empty() || data.len() > 64 {
+        return None;
+    }
+    let message = callback.get("message")?;
+    let chat = message.get("chat")?;
+    let from = callback.get("from")?;
+    if from.get("is_bot")?.as_bool()?
+        || !matches!(
+            chat.get("type")?.as_str()?,
+            "private" | "group" | "supergroup"
+        )
+    {
+        return None;
+    }
+    Some(InboundMessage {
+        platform_message_id: format!("callback:{id}"),
+        conversation_id: chat.get("id")?.as_i64()?.to_string(),
+        conversation_type: map_conversation_type(chat.get("type")?.as_str()?).into(),
+        sender_platform_id: from.get("id")?.as_i64()?.to_string(),
+        sender_display_name: sender_display_name(from),
+        content_type: "interaction".into(),
+        text: None,
+        attachments: vec![],
+        reply_to_platform_message_id: Some(message.get("message_id")?.as_i64()?.to_string()),
+        thread_id: message
+            .get("message_thread_id")
+            .and_then(|v| v.as_i64())
+            .map(|v| v.to_string()),
+        raw_data: raw,
+    })
+}
+
+/// Whitelist the small inline-keyboard transport surface; never forward arbitrary Bot API JSON.
+fn inline_keyboard(metadata: Option<&serde_json::Value>) -> AppResult<Option<serde_json::Value>> {
+    let Some(markup) = metadata.and_then(|m| m.get("reply_markup")) else {
+        return Ok(None);
+    };
+    let invalid = || AppError::ValidationError("Invalid Telegram inline keyboard".into());
+    let object = markup.as_object().ok_or_else(invalid)?;
+    if object.len() != 1 {
+        return Err(invalid());
+    }
+    let rows = object
+        .get("inline_keyboard")
+        .and_then(|v| v.as_array())
+        .ok_or_else(invalid)?;
+    if rows.len() > 100 {
+        return Err(invalid());
+    }
+    let mut count = 0;
+    for row in rows {
+        let buttons = row
+            .as_array()
+            .filter(|r| !r.is_empty() && r.len() <= 8)
+            .ok_or_else(invalid)?;
+        count += buttons.len();
+        if count > 100 {
+            return Err(invalid());
+        }
+        for button in buttons {
+            let b = button.as_object().ok_or_else(invalid)?;
+            if b.len() != 2
+                || b.get("text")
+                    .and_then(|v| v.as_str())
+                    .is_none_or(|s| s.is_empty() || s.len() > 256)
+            {
+                return Err(invalid());
+            }
+            match (b.get("callback_data"), b.get("url")) {
+                (Some(data), None)
+                    if data
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty() && s.len() <= 64) => {}
+                (None, Some(url))
+                    if url.as_str().is_some_and(|s| {
+                        s.len() <= 4096
+                            && url::Url::parse(s).is_ok_and(|u| {
+                                u.scheme() == "https"
+                                    && u.host_str().is_some()
+                                    && u.username().is_empty()
+                                    && u.password().is_none()
+                            })
+                    }) => {}
+                _ => return Err(invalid()),
+            }
+        }
+    }
+    Ok(Some(markup.clone()))
+}
+
 // ---------------------------------------------------------------------------
 // PlatformAdapter implementation
 // ---------------------------------------------------------------------------
@@ -356,12 +450,11 @@ fn build_edit_message_body(
     let message_id = platform_message_id
         .parse::<i64>()
         .map_err(|_| AppError::ValidationError("Telegram message_id must be an i64".to_string()))?;
-    Ok(serde_json::json!({
-        "chat_id": conversation_id,
-        "message_id": message_id,
-        "text": edit.text.as_deref().unwrap_or(""),
-        "parse_mode": "Markdown",
-    }))
+    let mut body = serde_json::json!({"chat_id":conversation_id,"message_id":message_id,"text":edit.text.as_deref().unwrap_or(""),"parse_mode":"Markdown"});
+    if let Some(markup) = inline_keyboard(edit.metadata.as_ref())? {
+        body["reply_markup"] = markup;
+    }
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -466,6 +559,14 @@ impl PlatformAdapter for TelegramAdapter {
         let update: serde_json::Value = serde_json::from_slice(body)
             .map_err(|e| AppError::BadRequest(format!("invalid Telegram update JSON: {e}")))?;
 
+        if let Some(callback) = update.get("callback_query") {
+            if extract_message(&update).is_some() {
+                return Err(AppError::BadRequest("Ambiguous Telegram update".into()));
+            }
+            return Ok(parse_callback(callback, update.clone())
+                .into_iter()
+                .collect());
+        }
         let msg = match extract_message(&update) {
             Some(m) => m,
             None => return Ok(Vec::new()),
@@ -475,6 +576,42 @@ impl PlatformAdapter for TelegramAdapter {
             Some(inbound) => Ok(vec![inbound]),
             None => Ok(Vec::new()),
         }
+    }
+
+    fn requires_inbound_ack(&self, message: &InboundMessage) -> bool {
+        message.content_type == "interaction"
+    }
+    async fn acknowledge_inbound(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        message: &InboundMessage,
+    ) -> AppResult<()> {
+        let id = message
+            .raw_data
+            .get("callback_query")
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::ValidationError("Missing callback ID".into()))?;
+        // Empty acknowledgment clears the spinner without claiming an action succeeded.
+        let response = http
+            .post(format!(
+                "{}{}/answerCallbackQuery",
+                self.base_url, credentials.token
+            ))
+            .timeout(std::time::Duration::from_secs(2))
+            .json(&serde_json::json!({"callback_query_id":id}))
+            .send()
+            .await
+            .map_err(|_| {
+                AppError::ChannelPlatformError("Callback acknowledgment unavailable".into())
+            })?;
+        if !response.status().is_success() {
+            return Err(AppError::ChannelPlatformError(
+                "Callback acknowledgment unavailable".into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn fetch_attachment(
@@ -528,6 +665,7 @@ impl PlatformAdapter for TelegramAdapter {
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        let markup = inline_keyboard(reply.metadata.as_ref())?;
         if !reply.attachments.is_empty() {
             if reply.text.as_deref().is_some_and(|s| !s.is_empty()) {
                 let mut text = reply.clone();
@@ -573,7 +711,10 @@ impl PlatformAdapter for TelegramAdapter {
             return Ok(last);
         }
         let bot_token = credentials.token;
-        let body = build_message_body(conversation_id, reply);
+        let mut body = build_message_body(conversation_id, reply);
+        if let Some(markup) = markup {
+            body["reply_markup"] = markup;
+        }
 
         let url = format!("{}{bot_token}/sendMessage", self.base_url);
         let resp: serde_json::Value = http
@@ -662,12 +803,16 @@ impl PlatformAdapter for TelegramAdapter {
                 && description == "Bad Request: there is no text in the message to edit"
             {
                 method = "editMessageCaption";
+                let markup = body.get("reply_markup").cloned();
                 body = serde_json::json!({
                     "chat_id": conversation_id,
                     "message_id": body["message_id"],
                     "caption": body["text"],
                     "parse_mode": "Markdown",
                 });
+                if let Some(markup) = markup {
+                    body["reply_markup"] = markup;
+                }
                 continue;
             }
             // Telegram rejects identical edits, while the relay's edit is idempotent.
@@ -694,7 +839,7 @@ impl PlatformAdapter for TelegramAdapter {
         let body = serde_json::json!({
             "url": webhook_url,
             "secret_token": secret,
-            "allowed_updates": ["message", "edited_message", "channel_post"],
+            "allowed_updates": ["message", "edited_message", "channel_post", "callback_query"],
         });
 
         let url = format!("{}{bot_token}/setWebhook", self.base_url);
@@ -799,6 +944,95 @@ impl PlatformAdapter for TelegramAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_callback_keeps_actor_card_chat_and_unique_click_identity() {
+        let adapter = TelegramAdapter::new();
+        let raw = serde_json::json!({"update_id":33,"callback_query":{"id":"unique-click","data":"ce1:opaque:0","from":{"id":7,"first_name":"Alice","is_bot":false},"message":{"message_id":42,"chat":{"id":99,"type":"supergroup"},"message_thread_id":8,"from":{"id":55,"is_bot":true},"text":"Choose"}}});
+        let messages = adapter
+            .parse_inbound(&serde_json::to_vec(&raw).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.platform_message_id, "callback:unique-click");
+        assert_eq!(message.sender_platform_id, "7");
+        assert_eq!(message.conversation_id, "99");
+        assert_eq!(message.reply_to_platform_message_id.as_deref(), Some("42"));
+        assert_eq!(message.thread_id.as_deref(), Some("8"));
+        assert_eq!(message.content_type, "interaction");
+        assert!(message.text.is_none());
+        assert_eq!(message.raw_data, raw);
+        let mut long = raw.clone();
+        long["callback_query"]["data"] = "x".repeat(65).into();
+        assert!(
+            adapter
+                .parse_inbound(&serde_json::to_vec(&long).unwrap())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn native_inline_keyboard_whitelists_actions_and_bounds_callback_bytes() {
+        let valid = serde_json::json!({"reply_markup":{"inline_keyboard":[[{"text":"Select","callback_data":"opaque"}],[{"text":"Login","url":"https://nyx.example/login"}]]}});
+        assert_eq!(
+            inline_keyboard(Some(&valid)).unwrap(),
+            Some(valid["reply_markup"].clone())
+        );
+        let edit = OutboundEdit {
+            text: Some("Choose".into()),
+            metadata: Some(valid.clone()),
+        };
+        assert_eq!(
+            build_edit_message_body("99", "42", &edit).unwrap()["reply_markup"],
+            valid["reply_markup"]
+        );
+        for button in [
+            serde_json::json!({"text":"x","callback_data":"x".repeat(65)}),
+            serde_json::json!({"text":"x","url":"http://insecure"}),
+            serde_json::json!({"text":"x","url":"https://safe.example","callback_data":"x"}),
+            serde_json::json!({"text":"x","web_app":{"url":"https://safe.example"}}),
+        ] {
+            assert!(
+                inline_keyboard(Some(
+                    &serde_json::json!({"reply_markup":{"inline_keyboard":[[button]]}})
+                ))
+                .is_err()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn native_callback_ack_clears_spinner_without_business_success_text() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bottest-token/answerCallbackQuery"))
+            .and(body_json(serde_json::json!({"callback_query_id":"click"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let adapter = TelegramAdapter::media_test_adapter(&server.uri());
+        let raw = serde_json::json!({"callback_query":{"id":"click","data":"opaque","from":{"id":7,"is_bot":false},"message":{"message_id":42,"chat":{"id":7,"type":"private"}}}});
+        let message = parse_callback(&raw["callback_query"], raw.clone()).unwrap();
+        adapter
+            .acknowledge_inbound(
+                &reqwest::Client::new(),
+                &crate::services::channel_platform::BotCredentials {
+                    billing: None,
+                    token: "test-token",
+                    platform_bot_id: None,
+                    platform_secrets: None,
+                },
+                &message,
+            )
+            .await
+            .unwrap();
+    }
 
     // -- parse_inbound -------------------------------------------------------
 
@@ -1055,12 +1289,14 @@ mod tests {
     fn edit_message_body_uses_numeric_id_and_markdown() {
         let edit = OutboundEdit {
             text: Some("*updated*".into()),
-            metadata: Some(serde_json::json!({"message_thread_id": 99, "reply_markup": {}})),
+            metadata: Some(
+                serde_json::json!({"message_thread_id": 99, "reply_markup": {"inline_keyboard":[]}}),
+            ),
         };
         assert_eq!(
             build_edit_message_body("-100123", "42", &edit).unwrap(),
             serde_json::json!({
-                "chat_id": "-100123", "message_id": 42, "text": "*updated*", "parse_mode": "Markdown"
+                "chat_id": "-100123", "message_id": 42, "text": "*updated*", "parse_mode": "Markdown", "reply_markup":{"inline_keyboard":[]}
             })
         );
         for id in ["invalid", "9223372036854775808"] {

@@ -64,6 +64,37 @@ pub(crate) async fn process_inbound_messages(
 
     let mut complete = true;
     for inbound in messages {
+        if adapter.requires_inbound_ack(inbound) {
+            // Payload has already passed platform verification and parsing. No content is logged.
+            let acknowledgment = async {
+                let token = super::channel_credentials::resolve_bot_token(
+                    state.db,
+                    state.encryption_keys,
+                    adapter,
+                    bot,
+                )
+                .await?;
+                adapter
+                    .acknowledge_inbound(
+                        state.http_client,
+                        &super::channel_platform::BotCredentials {
+                            billing: None,
+                            token: &token,
+                            platform_bot_id: Some(&bot.platform_bot_id),
+                            platform_secrets: None,
+                        },
+                        inbound,
+                    )
+                    .await
+            };
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), acknowledgment).await,
+                Ok(Ok(()))
+            ) {
+                tracing::debug!(bot_id=%bot.id,"channel interaction acknowledgment unavailable");
+            }
+        }
+
         if let Some(billing) = super::channel_billing_service::ChannelBilling::for_bot(
             state.db,
             state.billing,

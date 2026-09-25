@@ -57,6 +57,8 @@ pub struct AsyncReplyRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateReplyRequest {
     pub message_id: String,
+    #[serde(default)]
+    pub outbound_message_id: Option<String>,
     pub reply: AsyncReplyBody,
 }
 
@@ -737,12 +739,22 @@ async fn resolve_reply_token_edit_context(
         ));
     }
 
-    let outbound = channel_relay_service::get_outbound_message_by_platform_id(
-        &state.db,
-        &claims.platform,
-        &body.message_id,
-    )
-    .await?;
+    let outbound = if let Some(id) = &body.outbound_message_id {
+        channel_relay_service::get_exact_outbound_message(
+            &state.db,
+            id,
+            &claims.api_key_id,
+            &body.message_id,
+        )
+        .await?
+    } else {
+        channel_relay_service::get_outbound_message_by_platform_id(
+            &state.db,
+            &claims.platform,
+            &body.message_id,
+        )
+        .await?
+    };
 
     if outbound.reply_to_message_id.as_deref() != Some(claims.inbound_message_id.as_str()) {
         return Err(AppError::Unauthorized(
@@ -789,12 +801,22 @@ async fn resolve_api_key_edit_context(
         AppError::Forbidden("This endpoint requires API key authentication".to_string())
     })?;
 
-    let outbound = channel_relay_service::get_outbound_message_for_api_key(
-        &state.db,
-        caller_api_key_id,
-        &body.message_id,
-    )
-    .await?;
+    let outbound = if let Some(id) = &body.outbound_message_id {
+        channel_relay_service::get_exact_outbound_message(
+            &state.db,
+            id,
+            caller_api_key_id,
+            &body.message_id,
+        )
+        .await?
+    } else {
+        channel_relay_service::get_outbound_message_for_api_key(
+            &state.db,
+            caller_api_key_id,
+            &body.message_id,
+        )
+        .await?
+    };
     let conversation = load_active_conversation(state, &outbound.conversation_id).await?;
 
     if conversation.agent_api_key_id != caller_api_key_id {
@@ -2965,6 +2987,7 @@ mod tests {
             }
             let auth = api_key_auth_user(&fixture.api_key);
             let request = UpdateReplyRequest {
+                outbound_message_id: None,
                 message_id: fixture
                     .outbound_message
                     .platform_message_id
@@ -3090,6 +3113,7 @@ mod tests {
         let auth = api_key_auth_user(&fixture.api_key);
         let request = UpdateReplyRequest {
             message_id: "initiated-receipt".into(),
+            outbound_message_id: None,
             reply: body(Some("Updated digest"), None),
         };
         let context =
@@ -3435,6 +3459,7 @@ mod tests {
     fn update_reply_request(platform_message_id: &str) -> UpdateReplyRequest {
         UpdateReplyRequest {
             message_id: platform_message_id.to_string(),
+            outbound_message_id: None,
             reply: body(Some("hello"), None),
         }
     }
@@ -4819,6 +4844,7 @@ mod tests {
                 OptionalAuthUser(Some(auth)),
                 Json(UpdateReplyRequest {
                     message_id: "platform".into(),
+                    outbound_message_id: None,
                     reply: media_body()
                 })
             )
