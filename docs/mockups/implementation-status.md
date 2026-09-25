@@ -27,9 +27,11 @@ Verification after integration with main:
   permission dropdown keyboard/mixed state and desktop/mobile overflow.
 - Mobile: 50 tests, TypeScript and native dependency checks pass. The installed
   scanner fixture matches the pre-#1544 parser byte for byte.
-- Rust: integrated compile, backend/CLI tests, Clippy, feature builds and coverage
-  are being verified for the new PR; historical results from #1569 are not
-  reported as results for this revision.
+- Rust: backend and CLI compile checks including test targets, and formatting,
+  pass locally. Full backend/CLI tests, Clippy, feature builds, coverage and
+  security results are recorded against the current head in
+  [PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666). Historical
+  results from #1569 are not reported as results for this revision.
 
 Physical iPhone acceptance remains a rollout check. The HTML preview and parser
 fixture do not establish it. Enable eight-character v2 issuance only after every
