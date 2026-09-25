@@ -86,6 +86,7 @@ pub mod key_service;
 pub mod lark_permission;
 pub mod llm_gateway_service;
 pub mod llm_usage_service;
+pub mod login_approval_service;
 pub mod login_client_context;
 pub mod login_code_service;
 pub mod mcp_approval;

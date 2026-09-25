@@ -181,7 +181,11 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
       const body = pollBodySchema.parse({
         device_code: activeRequest.device_code,
       });
-      const response = await api.post<unknown>("/auth/device/v2/poll-web", body);
+      // The ordinary browser login is deliberately legacy/full-account. The
+      // grant-capable v2 protocol is reserved for /login/device requests so
+      // an installed older iOS app can approve this flow without a protocol
+      // upgrade and a browser cannot accidentally receive a restricted key.
+      const response = await api.post<unknown>("/auth/device/poll-web", body);
       if (!isCurrent()) return;
       const delivery = pollWebResponseSchema.parse(response);
       consecutiveFailuresRef.current = 0;
@@ -272,7 +276,9 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
       }
       const body = requestBodySchema.parse(browserContext);
       const response = requestResponseSchema.parse(
-        await api.post<unknown>("/auth/device/v2/request", body),
+        // Keep /login's app sign-in on the legacy protocol. Restricted Agent
+        // Key choices are exposed only by the explicit /login/device surface.
+        await api.post<unknown>("/auth/device/request", body),
       );
       if (requestGenerationRef.current !== requestGeneration) return;
       requestRef.current = response;

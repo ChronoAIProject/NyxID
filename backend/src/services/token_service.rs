@@ -162,7 +162,7 @@ pub async fn create_session(
     create_session_with_transaction(db, user_id, ip_address, user_agent, None).await
 }
 
-async fn create_session_with_transaction(
+pub(crate) async fn create_session_with_transaction(
     db: &mongodb::Database,
     user_id: &str,
     ip_address: Option<&str>,

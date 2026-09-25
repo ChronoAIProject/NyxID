@@ -2,8 +2,8 @@
 
 This rollup starts from `main` commit
 `1b031c77062880e572ec375041a4c029241a86f1` and presents the configurable
-billing analytics and typed X channel activity integrations for review before
-they land in `main`.
+billing analytics, device login, and typed X channel activity integrations for
+review before they land in `main`.
 
 ## Summary
 
@@ -23,6 +23,8 @@ they land in `main`.
   after receiver capability declaration and owner consent.
 - Repair oversized CI test summaries while retaining complete test-result
   artifacts.
+- Restore device-code compatibility with installed clients and provide scoped
+  approval of account access or an Agent Key during web device login.
 
 ## Included changes and provenance
 
@@ -33,6 +35,7 @@ record.
 | Source PR | Reviewed source head | Landed squash | Intended behavior / scope |
 | --- | --- | --- | --- |
 | [#1662](https://github.com/ChronoAIProject/NyxID/pull/1662) | `99a063906bedd56874e1ff89ee3b1cbaccb7031f` | `2018b7a9b10966b710a126c3bb3efc7e13bc5cdd` | Add the configurable admin Usage analytics workspace, persisted workspace state, saved views, three layout templates, Recharts visualizations, draggable/resizable panels, real usage aggregation, and the supporting route, API, tests, and documentation. |
+| [#1666](https://github.com/ChronoAIProject/NyxID/pull/1666) | Recorded in the source PR's final checks | `89d133de895292913f1961ebd1f11764f4302437` | Restore device-code compatibility, add account/scoped Agent Key approval, retain production login flows and regression coverage, and document the staged compatibility rollout. |
 | [#1668](https://github.com/ChronoAIProject/NyxID/pull/1668) | Implementation `529358860e0ce2306476453ae909413782b4a7b5`; subsequent rollup integration is recorded on the PR | Linked in the source PR's merge record | Add typed X activity accounting and UI, opt-in signed agent notifications, preserved legacy callbacks and reply authority, webhook subscription reconciliation, regression coverage, receiver documentation, and the CI summary repair. |
 
 The starting `main` commit already contains the separately merged hosted
@@ -148,3 +151,14 @@ retains both the usage workspace and channel activity model registrations.
 - [x] Source CI, coverage, CodeQL, release integrity, and local targeted checks
   pass.
 - [ ] Complete the required review and merge this rollup into `main`.
+
+## Device login contribution
+
+[PR #1666](https://github.com/ChronoAIProject/NyxID/pull/1666) adds eight-character
+device-code compatibility and web approval-time selection of account access or
+a scoped Agent Key. It retains the production implementation and removes the
+standalone HTML prototype and its supporting artifacts.
+
+See [the device login contribution record](rollup-2026-09-25-ctkm-1-device-login.md)
+for behavior, verification and rollout constraints. Its source PR records the
+reviewed revision, final checks and landed squash.

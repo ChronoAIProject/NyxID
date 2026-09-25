@@ -1,10 +1,10 @@
 # NyxID AI Agent Playbook
 
-This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.) to help users configure services, credentials, providers, nodes, and integrations on a running NyxID deployment. It uses placeholder URLs that the server replaces with real values when served via `/llms-full.txt`.
+This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.) to help users configure services, credentials, providers, nodes, and integrations on a running NyxID deployment. It uses placeholder URLs that the server replaces with real values when served via either `/llms.txt` or `/llms-full.txt`. Both endpoints serve the same playbook without authentication.
 
 **Audience:** AI coding assistants helping developers use NyxID.
 
-**Server URLs (replaced dynamically when served via /llms-full.txt):**
+**Server URLs (replaced dynamically when served via /llms.txt or /llms-full.txt):**
 - Backend API: `http://localhost:3001`
 - Frontend Dashboard: `http://localhost:3000`
 
@@ -104,7 +104,7 @@ nyxid --help
 > 1. **You, the human.** You authenticate **once** with `nyxid login`, which writes your session to `~/.nyxid/`. Selectable device-code v2 is the desktop and headless default: the human reviews requester attribution and chooses full account access or a restricted Agent Key. `--callback` opts into legacy browser SSO with full account access and no requester review; `--clipboard` copies the device code for pasting.
 > 2. **Your agent.** A separate identity, represented by a scoped API key (`nyxid_ag_…`) you mint **from your authenticated session**. The agent reads it from `NYXID_API_KEY` and uses it for every proxy call.
 >
-> **Agents must never run `nyxid login` themselves.** Device-code requires a human to approve a code in a browser; an autonomous agent has nothing to "approve" on its own. If an agent attempts `nyxid login` in CI it short-circuits with an api-key hint; in an interactive shell it would block forever. The correct agent action is to read the pre-issued `NYXID_API_KEY` from its environment.
+> **Agents should use an existing scoped credential when available.** If the user requests a new login, an agent may start `nyxid login --agent-key --no-wait`, share the approval link with the human, then resume the request after approval. The human makes the authorization decision; an agent must not approve its own request. See [Human-approved agent login links](#human-approved-agent-login-links). Bare interactive login waits for approval and is unsuitable for unattended automation.
 
 Step 1 — **you** authenticate:
 
@@ -136,6 +136,82 @@ export NYXID_API_KEY=nyxid_ag_...
 ```
 
 > **Note:** After `nyxid login --base-url <URL>`, the URL is persisted at `~/.nyxid/base_url`. You do not need to pass `--base-url` on subsequent commands.
+
+### Human-approved agent login links
+
+First discover the deployment's public services and provider permission menu:
+
+```bash
+nyxid catalog list --public --all --base-url http://localhost:3001 --output json
+nyxid catalog show api-google-gmail --public --base-url http://localhost:3001 --output json
+nyxid catalog endpoints api-google-gmail --public --base-url http://localhost:3001 --output json
+```
+
+These commands send no credentials. Use actual catalog slugs and
+`scope_catalog[].scope` values. The catalog describes supported services; it does
+not reveal a human's connected accounts or establish the agent's access.
+
+Request a human-approved Agent Key with preferences directly in the CLI command:
+
+```bash
+nyxid login --base-url http://localhost:3001 --agent-key --no-wait --output json \
+  --profile mail-agent --key-source new --key-name "Mail assistant" \
+  --scopes read,proxy \
+  --service-permission 'api-google-gmail::https://www.googleapis.com/auth/gmail.readonly' \
+  --expiry-days 30 --platform codex
+```
+
+Share **`verification_uri_complete`** from the JSON result. The CLI constructs and
+encodes the link; no JavaScript wrapper is needed. It also returns the public
+`user_code`, bare `verification_uri`, local `request_id`, expiry and poll interval.
+The polling secret stays local; `--no-wait` neither opens a browser nor polls.
+
+`--scopes` requests NyxID permissions. `--service` requests catalog slugs;
+`--service-permission` requests `catalog-slug::provider-scope`. These accept repeated
+or CSV values. Key source, name, expiry and platform are editable preferences, as
+are the requested permissions. They do not downscope an existing connection.
+
+Use `--device` instead of `--agent-key` only when full account access is also an
+acceptable result. `--login-type agent` is a suggestion on a selectable request;
+`--agent-key` enforces restricted delivery. Preferences default the suggested login
+type to `agent`, cannot limit a `full` grant, and cannot accompany `--password`,
+`--callback`, `--code` or `login resume`.
+
+A signed-out human signs into NyxID and returns to the original request with hints
+preserved. Sign-in creates a normal session in that browser, and **does not approve
+the requester**. They must explicitly review and approve afterward. An expired
+browser session or changed approving identity clears the earlier selection and
+returns to verification. There is no special approval-only browser session or
+automatic logout. A human who cannot sign in cannot approve; an Agent Key or
+third-party OAuth credential cannot approve or elevate another login either.
+Missing connection or organization rights require an eligible alternative or help
+from the owner, never a silent switch to full access.
+
+After explicit human approval, resume using the local `request_id`, not `user_code`:
+
+```bash
+nyxid login resume <request_id> --once --output json
+nyxid whoami --profile mail-agent --output json
+nyxid mcp discover --profile mail-agent --output json
+```
+
+`--once` returns `login_pending` when still waiting; respect the poll interval before
+retrying. Without `--once`, resume waits. The saved request retains its profile.
+Inspect the delivered `auth_kind` and grant; denial or expiry needs a new request
+and human approval.
+
+`mcp discover` returns the server's current services and operations filtered by
+that credential's service/node scope, including operation IDs, input schemas,
+recommended skills and diagnostics. Use these to choose calls; live execution
+still applies provider permissions, approval policy and availability checks.
+`mcp config` separately generates client connection configuration.
+
+For parameter bounds, direct API construction and consent semantics, see the
+[device login protocol](https://github.com/ChronoAIProject/NyxID/blob/main/docs/DEVICE_LOGIN_PROTOCOL.md)
+and the NyxID skill's `references/device-login.md`. These commands require the
+updated CLI and approval frontend. Eight-character v2 issuance separately requires
+the staged server gate in ADR-015. Normal `/login` remains account-only. The
+`/devices/code/*` hardware-provisioning protocol is separate.
 
 **Updating the CLI:**
 

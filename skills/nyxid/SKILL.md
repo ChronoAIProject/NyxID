@@ -37,6 +37,8 @@ Credential nodes can be personal or org-owned. Org admins manage org-owned nodes
 
 For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth client integration, service accounts), load `references/playbook.md` (populated at install time from the NyxID server's `/llms.txt` endpoint), or fetch the latest directly from `<NYXID_BASE_URL>/llms.txt`.
 
+For device login, approval-time Agent Key choice and safe URL hints, read `references/device-login.md`.
+
 ## CLI setup (optional)
 
 Install the NyxID CLI when a shell is available. This is the default "install NyxID" path; do not run the Docker backend setup unless the user explicitly asks to self-host. HTTP-only clients can instead call the authenticated Web API described in the reference pages.
@@ -125,6 +127,7 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 | "which services can this app access", "Authorized Apps", "OAuth consent", "consent service access", "restrict this app to service X", "legacy grant", "resource indicators", "RFC 8707", OAuth `resource` parameter, "app default services", `default_service_catalog_slugs`, "consent defaults" | `references/oauth-consent.md` |
 | Anything mentioning "org", "organization", "shared credentials", "family / company key", invites, role scopes, primary-org tiebreaker, org-level approval policies, `--via-service`, CLI profiles | `references/organizations.md` |
 | "set up a node", "credentials on my own machine", org-owned/shared nodes, node daemon (install/start/stop/logs), node credentials add/setup/list, remote credential injection / `node-credential inject` / "push a secret to a node from my laptop or browser without SSH" / fingerprint verification / browser accept page, SSH node-key credentials, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
+| "device login", "login approval link", "prefill permissions", "choose an Agent Key at login", "choose connected accounts", "login scope flags", `nyxid mcp discover`, `nyxid catalog list --public`, `nyxid login --device/--agent-key/--no-wait`, `nyxid login resume`, `/login/device`, `/login/agent-key` | `references/device-login.md` |
 | "provision a headless device", "approve a device", "ESP32", "factory key", "nyxprov QR", "device-code grant", `nyxid device approve/onboard/factory-key`, `/devices/code/*`, `/devices/onboard` | `references/devices.md` |
 | "approve / deny", "set up notifications", Telegram link, push notifications, approval grants, per-service approval configs, granular approval rules (method/path/verb), allow-list or deny specific endpoints, `default_effect`, scoped grants | `references/notifications.md` |
 | "channel bot", "register a bot", conversation routing, proactive / unprompted messages, `/channel-relay/send`, `/channel-relay/conversations`, `/channel-relay/reply`, callback / reply tokens, ADR-013 passthrough semantics, device events / HTTP Event Gateway, `/channel-events/{id}` | `references/channels.md` |
