@@ -135,6 +135,7 @@ async fn x_webhook_setup_uses_app_token_for_management_and_user_token_for_privat
             },
             &bot(),
             url,
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -202,6 +203,7 @@ async fn x_webhook_repair_reuses_subscriptions_and_delete_preserves_other_channe
             },
             &bot(),
             url,
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -226,7 +228,8 @@ async fn x_webhooks_reject_unsafe_callback_urls_before_provider_effects() {
                         platform_secrets: Some(&secrets()),
                     },
                     &bot(),
-                    url
+                    url,
+                    &Default::default(),
                 )
                 .await
                 .is_err()
@@ -283,6 +286,7 @@ async fn x_webhook_repoint_requires_provider_confirmation() {
                 },
                 &bot(),
                 url,
+                &Default::default(),
             )
             .await;
         assert_eq!(result.is_ok(), confirmed);
@@ -436,6 +440,7 @@ async fn event_selection_reconciles_subscriptions_without_touching_other_channel
             },
             &bot,
             url,
+            &Default::default(),
         )
         .await
         .unwrap();

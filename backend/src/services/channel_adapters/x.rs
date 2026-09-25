@@ -887,6 +887,7 @@ impl PlatformAdapter for XAdapter {
         credentials: &BotCredentials<'_>,
         bot: &ChannelBot,
         webhook_url: &str,
+        progress: &super::super::channel_platform::WebhookSetupProgress,
     ) -> AppResult<()> {
         webhooks::setup(
             self,
@@ -895,6 +896,7 @@ impl PlatformAdapter for XAdapter {
             &bot.id,
             selected_events(bot),
             webhook_url,
+            progress,
         )
         .await
     }

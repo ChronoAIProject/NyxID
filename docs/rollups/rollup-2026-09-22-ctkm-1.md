@@ -210,3 +210,32 @@ documents the extension contract and verification workflow. Fable independently
 reviewed the implementation twice and found no remaining blocking issues after
 the fixes; its final focused checks passed 95 unit tests and 29 browser scenarios.
 Provider browser tests use fixtures and do not create real external bots.
+
+## Compatibility corrections after combined review
+
+The combined review of rollup head `730d1c14` against main `6f633320`
+identified two corrections before integration. Latest `origin/main` was fetched
+and merged into the corrective branch before implementation; the rollup already
+contained that commit, so no main merge changes were necessary.
+
+An existing X DM-only bot with billing disabled could stop receiving after a
+transient Verify/Reconnect failure while reading subscriptions. Setup now tracks
+whether a subscription change has been attempted. Failures before that point
+preserve an already registered DM-only bot, including an unavailable setup lease
+or app-token error. Credential revocation still stops delivery; billing/public
+channels and uncertain subscription changes retain their failure handling.
+
+Organization role-scope writes now share the organization revision with the
+ownership-transfer transaction. A first restriction of an inherited default
+scope therefore conflicts with an older transfer snapshot, just as a change to
+an existing scope row does. Clearing a scope retains the existing implicit-default
+representation. Credential-reference owner changes return HTTP 409 instead of a
+server error, and Google activation/contract and X admission documentation match
+the final behavior.
+
+Regression coverage exercises the real webhook setup service and org scope writer,
+including pre-effect errors, partial provider effects, scope restriction after a
+transaction snapshot, denied stale transfers, and restored default scopes. The
+corrective PR records final validation and Fable's independent review. Exact-email
+destination lookup and recipient acceptance remain a separate product-policy
+question; this correction introduces no mobile approval requirement.

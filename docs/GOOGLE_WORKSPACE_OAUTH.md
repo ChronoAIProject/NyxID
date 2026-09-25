@@ -100,7 +100,7 @@ provider; creating a sign-in client alone does not provision managed services.
 
 1. Startup seeds the seven service rows and their operation catalogs. This
    product addition creates Docs, Sheets, and Slides catalog entries. Drive and Workspace
-   receive the same editor operations when the shared temporary activation gate is enabled. Existing
+   receive the same editor operations automatically during startup. Existing
    Google service IDs, slugs, endpoints, credentials, agent bindings, node
    configuration, resource URIs, grants, and audit/billing identities stay in
    place. Repeated startup does not duplicate entries. Legacy Google token
@@ -149,9 +149,10 @@ upgrade an existing token.
 ## Docs, Sheets, and Slides operations
 
 Each separate editor service has one origin. Drive and Workspace also expose these
-operations after multi-origin activation. Existing `api-google`, Drive, Calendar,
-Gmail, and Workspace operations retain their original paths and request contracts;
-none are retargeted to these hosts. Connect Drive, Workspace, or an individual editor
+operations after automatic multi-origin activation. Existing `api-google`, Drive, Calendar,
+Gmail, and Workspace operation IDs and paths remain stable; none are retargeted to
+these hosts. Six Drive request contracts shared with Workspace are corrected,
+with the approval effects described under **Rollout prerequisites and approval drift**. Connect Drive, Workspace, or an individual editor
 product according to the required scope. An existing connection with full `drive`
 access needs no additional OAuth scope for these editor operations; the Google Cloud
 project must have the corresponding APIs enabled.

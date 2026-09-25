@@ -57,7 +57,7 @@ pub fn map_transaction_error(error: mongodb::error::Error) -> AppError {
     let app_error = error
         .get_custom::<TransactionAppError>()
         .and_then(|custom| custom.0.lock().ok()?.take());
-    app_error.unwrap_or(AppError::DatabaseError(error))
+    app_error.unwrap_or_else(|| error.into())
 }
 
 pub fn transaction_result<T>(result: AppResult<T>) -> mongodb::error::Result<T> {

@@ -43,6 +43,8 @@ described below.
    platform authority, Agent Key permissions, destination, dependencies, and bot
    capacity before committing. Actor, key and membership writes participate in
    the ownership transaction so revocation cannot be bypassed by an old preview.
+   Organization role-scope changes share the organization fence with transfer,
+   including the first restriction of an inherited default scope.
 
 After a bot transfer, the UI returns to Channel Bots because the actor may no
 longer have access to the bot. The destination creates its own routes. After a
