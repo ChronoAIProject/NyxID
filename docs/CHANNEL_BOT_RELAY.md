@@ -278,6 +278,46 @@ sequenceDiagram
 { "message_id": "<platform_message_id>", "reply": { "text": "Updated response", "metadata": null } }
 ```
 
+When a platform message ID is not globally unique, include the exact NyxID outbound row ID returned as `message_id` by `/reply` or `/send`:
+
+```json
+{
+  "message_id": "<platform_message_id>",
+  "outbound_message_id": "<nyxid-outbound-uuid>",
+  "reply": { "text": "Updated response", "metadata": null }
+}
+```
+
+`outbound_message_id` is optional for backward compatibility. The response's `message_id` is the NyxID outbound row UUID; its `platform_message_id` is the value sent as the update request's `message_id`. When `outbound_message_id` is supplied, NyxID requires that the UUID belongs to the authenticated assigned agent (or the consumed reply token) and that its platform message ID equals `message_id`. The exact lookup also scopes the edit to the assigned API key, so equal Telegram message IDs in different chats cannot select one another's outbound message. If it is omitted, NyxID retains the legacy platform/message lookup and applies the existing authorization checks.
+
+### Telegram inline keyboards and callback queries
+
+Telegram sends and edits accept the bounded inline-keyboard subset in `reply.metadata.reply_markup`:
+
+```json
+{
+  "reply": {
+    "text": "Choose an option",
+    "metadata": {
+      "reply_markup": {
+        "inline_keyboard": [[
+          { "text": "Continue", "callback_data": "opaque-handle" },
+          { "text": "Open help", "url": "https://example.com/help" }
+        ]]
+      }
+    }
+  }
+}
+```
+
+NyxID forwards only `inline_keyboard` objects. Each button has exactly a non-empty `text` plus either `callback_data` (maximum 64 bytes) or an HTTPS `url` (maximum 4096 bytes). A row has at most eight buttons; the keyboard has at most 100 rows and 100 buttons; button text is limited to 256 bytes. Other Telegram markup fields are rejected. The same whitelist is applied to `/reply/update`, so an edit can replace or remove the keyboard.
+
+URL buttons open directly in Telegram and do not create an inbound event. Callback buttons create a normalized inbound `interaction` message. Its `platform_message_id` is `callback:<callback-id>`, `reply_to_platform_message_id` is the Telegram message containing the keyboard, and the signed callback payload retains the raw callback data for the assigned agent or gateway to interpret. The callback's chat, sender, thread and message identity are taken from the Telegram update and are covered by the normal callback signature and JWT bindings; callback data is not treated as an authorization credential by NyxID.
+
+NyxID calls Telegram `answerCallbackQuery` before normal routing and callback delivery, which clears the Telegram client spinner. This acknowledgment is transport-level only: it does not claim that the agent accepted the event or that a business action succeeded. A temporary acknowledgment failure is logged at debug level and does not discard the already verified interaction; the normalized event continues through billing, routing and callback delivery. Agents still return HTTP `202` and use `POST /api/v1/channel-relay/reply` for any user-visible result.
+
+Webhook registration includes `callback_query` in Telegram's `allowed_updates`. Existing Telegram channel bots are updated when Verify/Reconnect registers their webhook; no second webhook or shared secret is introduced.
+
 An assigned agent API key can edit both anchored replies and agent-initiated messages. A per-callback reply token can edit only replies anchored to its bound inbound message, and only after its JTI has been consumed by `/reply`; it cannot edit initiated rows. The existing authorization and per-message rate limit apply to every edit, with rate limiting before authentication. Discovery exposes native support as `capabilities.edit`.
 
 - **Telegram / telegram-new:** text messages use `editMessageText`; media captions use `editMessageCaption` after Telegram returns exactly `Bad Request: there is no text in the message to edit`. Both use the chat ID, numeric message ID, and `parse_mode: "Markdown"`, matching sends. Ordinary bot messages are subject to Telegram's 48-hour edit window. An identical edit (`message is not modified`) succeeds idempotently.
