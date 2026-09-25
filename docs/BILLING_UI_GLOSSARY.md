@@ -1,7 +1,6 @@
 # Billing UI Glossary
 
-What every term on `/billing` actually means, where the number comes from, and where the label
-lies to you.
+What every term on `/billing` actually means, where the number comes from, and how it is grouped, and which details are expandable.
 
 **Scope:** the logged-in Billing page (https://nyx.chrono-ai.fun/billing). Source of truth is the
 code in this worktree — `frontend/src/pages/billing.tsx` + `backend/src/handlers/billing.rs`.
@@ -22,7 +21,7 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 | Term | Meaning |
 |---|---|
 | **Credit** | The billing unit. **1 credit = 1 USD.** NyxID creates every Lago wallet in USD with `rate_amount: "1"`, so credits are 1:1 with the wallet currency (`services/billing/lago_client.rs:93-95`, `:272-278`). Wallet amounts are always whole integers. |
-| **Credit micros** | One millionth of a credit — fixed-point, no floating point. Any field ending in `_credits_micros` is divided by 1,000,000 for display, with up to 6 decimals (`billing.tsx:584-591`). 4,200 micros → `0.0042 credits`. Usage costs and funding splits use micros; wallet balances and debits use whole credits. The wallet debit rounds its exact funded cost up to a whole credit, so the Usage cost is not the wallet balance change. |
+| **Credit micros** | One millionth of a credit — fixed-point, no floating point. Any field ending in `_credits_micros` is divided by 1,000,000 for display, with up to 6 decimals (`lib/billing-display.ts`). 4,200 micros → `0.0042 credits`. Usage costs and funding splits use micros; wallet balances and debits use whole credits. The wallet debit rounds its exact funded cost up to a whole credit, so the Usage cost is not the wallet balance change. |
 | **Layer** | Which of two independent charges produced a usage row. One request can produce several platform component rows and one resale row. |
 
 | Layer | What is being charged |
@@ -78,15 +77,24 @@ previous user-token price lane.
 
 ---
 
-## 1. Page header and period selector
+## 1. Billing & Usage tabs and filters
+
+`/billing` is the actual application page. **Billing** contains Wallet, Credit grants &
+free usage, and Top-up history. **Usage** contains the filters, Spend / Activity / Tokens
+summary, and expandable service records. The page uses live billing APIs and inherits
+the application's fonts and theme.
 
 | UI element | Meaning | Source |
 |---|---|---|
-| **"Wallet balance, credits, and service usage."** | Page subtitle. Static copy. | `billing.tsx:107-109` |
-| **Period dropdown** (24 hours / 7 days / 30 days / 90 days / All time) | Rolling windows measured back from the server's current UTC time — not calendar periods. Filters **both** the Usage card and the Top-up history card. Defaults to **30 days**; an unrecognized value also falls back to 30 days. | `billing.tsx:56`, `:111-125`; `handlers/billing.rs:706-715` |
-| ↳ **"All time"** | Means two different things. For **Usage** it is the last **3,650 days** (~10 years). For **Top-up history** it genuinely drops the date filter. | `handlers/billing.rs:712`, `:445-450` |
+| **Billing / Usage** | Defaults to Billing. Tab, usage period and service selection persist in the URL and browser history. | `schemas/billing.ts`, `pages/billing.tsx` |
+| **Service filter** | Defaults to All active services: services with recorded usage in the selected period. Options use catalog display names. Unused catalog services are excluded. A selection absent from a newly loaded period resets to all. | `lib/billing-usage.ts`, `pages/billing.tsx` |
+| **Time filter** (24 hours / 7 days / 30 days / 90 days / All time) | Rolling windows measured back from the server's current UTC time. Filters usage summaries and all usage details. Defaults to 30 days. | `pages/billing.tsx`, `handlers/billing.rs` |
+| **Top-up history period** | Independent from Usage, defaults to 30 days. Changing it resets history to page 1. | `components/billing/billing-topup-history.tsx` |
+| **All time** | Usage means the last 3,650 days; Top-up history drops the date filter. | `handlers/billing.rs` |
 
-Changing the period remounts the top-up history card (`key={period}`), resetting it to page 1.
+Wallet and benefits always show current balances, independently of either history filter.
+Dates use the viewer's local timezone. The personal usage API has no time buckets or arbitrary
+date ranges; the time filter does not imply daily or hourly charts.
 
 **Page access and rollout:**
 - Capability: `user.capabilities.billing_available` requires billing enabled + Lago configured + the user's billing feature flag.
@@ -167,41 +175,48 @@ Legacy single-row API clients remain supported. Bundle mutations use the same
 MongoDB transaction requirement as the repository's other atomic multi-document
 mutations, so standalone deployments fail closed instead of writing partial grants.
 
-### Header
+### Visible balance and expandable breakdown
+
+The Wallet card retains its existing Add credits dialog, balance, freshness and
+View breakdown interaction. A help icon beside Wallet explains funding order and
+why the available balance can differ from the provider balance. A Suspended badge
+appears when applicable. Owner IDs and normal collection-state badges are not displayed.
 
 | Label | Meaning | API field |
 |---|---|---|
-| **Owner `<uuid>`** | The billing owner id — on this page, always your own person UUID. Rendered raw, with no display name. | `owner_id` |
-| **Status badge** ("Good" / "Past Due" / "Suspended") | The wallet's collection state, title-cased. The badge has no heading, so nothing on screen says it is a *collection* state. | `collection_state` (text) / `suspended` (color) |
+| **Available** | Credits spendable now, excluding reservations, unsettled charges and expiry holds. Does not include overdraft. | `available_credits` |
+| **Updated** | Relative age of the provider-synced balance. Does not describe usage freshness. | `balance_synced_at` |
+| **Balance** | Last provider-synced balance; whole credits. | `balance_credits` |
+| **Reserved** | Whole-credit holds for in-flight requests. | `reserved_credits` |
+| **Pending** | Charged locally, awaiting provider sync. | `pending_lago_debits` |
+| **Expiring** | Credits held while expired purchases are removed; shown when nonzero. | `pending_topup_expiry_credits` |
+| **Overdraft** | Configured extra capacity, shown when nonzero. Actual eligibility also depends on plan and payment instrument. | `overdraft_cap_credits` |
+| **Plan** | Configured plan kind. | `plan_kind` |
 
-| Badge value | Meaning |
-|---|---|
-| **Good** | Normal. Every new wallet starts here. |
-| **Past Due** | An unpaid invoice, service continues. **Nothing in the codebase ever writes this value** — the enum exists in the model and the Zod schema and nowhere else. Aspirational today. |
-| **Suspended** | Requests are refused (`WalletSuspended`, error 11307). Set when the overdraft cap is breached (`services/billing/reservation.rs:1194`). |
+All rows after Updated are in the expandable breakdown. Its formula reads
+`Available = Balance - Reserved - Pending - Expiring`. The API's
+`available_with_overdraft_credits` is not used as the spendable balance.
 
-### The three big numbers
+### Credit grants & free usage
 
-| Label | Meaning | Formula / source |
-|---|---|---|
-| **Available** | What you can spend right now, excluding overdraft. The number the prepaid gate checks. | `balance − reserved − pending_lago_debits`, saturating (`models/billing_wallet.rs:56-60`) |
-| **Balance** | Your Lago wallet balance **as last cached locally** — not a live read at render time. The client prefers Lago's `credits_ongoing_balance` and rounds decimals to whole credits. Because OSS Lago's balance clock job is premium-gated, the reconciler *itself* subtracts the current period's accrued usage, rounding partial credits up against you (`services/billing/reconcile.rs:166-180`). | `balance_credits` |
-| **Reserved** | Whole-credit holds for in-flight requests. NyxID reserves a pessimistic estimate *before* forwarding, then trues it up on settle. Money not yet spent but not spendable twice. | `reserved_credits` |
+One compact card uses `GET /billing/grants`, `GET /billing/allowances` and catalog names.
+Grant rows group by eligible service scope and show available credits (remaining minus
+reserved), a used/original gauge and Details. The short amount rounds to two decimals;
+hover/focus and Details retain exact microcredit precision.
 
-The card does **not** display two fields the API returns and Available depends on:
+Free usage groups by service, with separate Tokens, Cache and Other coverage values.
+Only identical metrics, recurrence and period boundaries share a subtotal. Unlike units
+and different windows never share one balance. A subtle grayscale bar gives each allowance
+an equal-width segment; each segment's consumed, reserved and remaining portions are
+relative to its own limit. One tooltip explains percentage used, excluding reservations,
+and lists each metric's percentage. Zero usage stays zero.
 
-| Hidden field | Meaning |
-|---|---|
-| `pending_lago_debits` | Charges settled locally but not yet reflected in a trusted Lago balance refresh. Subtracted immediately so the next request cannot reserve the same money (spec §3.3, R3.1). **This is why `Balance − Reserved` often does not equal `Available` on screen.** The CLI shows it as "Pending Debits" (`cli/src/commands/billing.rs:278`); the web page hides it. |
-| `available_with_overdraft_credits` | Available plus the full overdraft cap. Returned by the API, parsed by the Zod schema, never rendered. |
-
-### The three details
-
-| Label | Meaning | Reality check |
-|---|---|---|
-| **Plan** (`Prepaid` / `Subscription` / `Hybrid`) | *Prepaid* = hard stop when Available hits zero. *Subscription* / *Hybrid* = the non-prepaid gate branch, which may reserve into overdraft. | **Provisioning always writes `Prepaid` and nothing ever updates it** (`services/billing/provisioning.rs:73` is the only production writer). `Subscription` and `Hybrid` cannot currently appear. |
-| **Overdraft** | The configured cap on extra spend — a *capacity*, not current debt, and not included in Available. Requires the hidden `has_payment_instrument = true` and a non-prepaid plan. Defaults to `BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS` = 0. | **Inert today.** `has_payment_instrument` is only ever written `false` (`provisioning.rs:77`); no production code sets it true. Combined with the always-`Prepaid` plan, the overdraft branch is unreachable. |
-| **Synced** | When `balance_credits` was last refreshed from Lago — by webhook or by the reconcile sweep (`BILLING_RECONCILE_INTERVAL_SECS`, default 300s). | Applies to **Balance only**. Reserved and every usage number are NyxID-local and live. |
+Details retain each grant's original, used, remaining and reserved amount, expiry,
+issuance, status and activation; and each allowance's limit, consumed, reserved, remaining,
+recurrence, period start and reset/expiry. Expiry dates stay in these expansions.
+Help beside Credit grants and Free usage derives scope and cadence from the API response.
+Funding remains matching platform allowances first, then eligible grants in expiry order,
+then wallet credits. Empty benefits are omitted; loading, retry and rollout states remain.
 
 ### Empty / error states
 
@@ -218,13 +233,13 @@ not "you have no wallet", since `GET /billing/wallet` auto-provisions when Lago 
 
 ---
 
-## 4. Top Up card
+## 4. Add credits dialog
 
 | UI element | Meaning |
 |---|---|
 | **"Add credits through hosted checkout."** | Payment runs through Stripe *underneath Lago*; NyxID never touches card data. |
 | **Credits input** | Whole credits to buy = whole USD. Range **1 to 10,000,000**, step 1, default 100 — enforced on both sides (`billing.tsx:69-75`; `services/billing/provisioning.rs:119-128`). Not an invoice total: no fees or tax shown. |
-| **Checkout** | `POST /billing/topup` with a fresh browser-generated UUID as `idempotency_key`, then **navigates the current tab** to the hosted `checkout_url` (`openExternal` = `window.location.assign`, `lib/navigation.ts:4-6`). Clicking it does not mean payment succeeded. |
+| **Continue to payment** | `POST /billing/topup` with a fresh browser-generated UUID as `idempotency_key`, then **navigates the current tab** to the hosted `checkout_url` (`openExternal` = `window.location.assign`, `lib/navigation.ts:4-6`). Clicking it does not mean payment succeeded. |
 
 | Concept | Meaning |
 |---|---|
@@ -242,7 +257,7 @@ distinct from the history table's (`models/billing_topup_session.rs:7-13`):
 
 ---
 
-## 5. Usage card
+## 5. Usage tab
 
 Backed by `GET /api/v1/billing/usage?period=`, aggregated from `usage_meter`.
 The API groups by service × layer × metric code × model × API key × ack state × billable state;
@@ -254,25 +269,26 @@ In-flight work and non-forwarded dead letters are excluded. `billable` is determ
 whether `wallet_id` exists. Non-billable meters report zero for every cost/funding field, are
 never sent to Lago, and render **Free** with **—** cost.
 
-### Totals strip
+### Summary and expandable details
 
-| Label | Meaning |
+| Group | Meaning |
 |---|---|
-| **Est. cost** | Sum of visible row costs in microcredits, displayed to 6 decimals. The same row costs are summed for each service. Missing estimates are skipped by `sum_optional`; a known zero counts, and all-unknown/empty costs show `-`. |
-| **Tokens / Requests / Bytes / component units** | Quantities summed separately by metric. A token-metered LLM call contributes tokens, not a request count. |
-| **Funding line** | Appears when grants or allowances funded usage: **Funded by grants … · Funded by allowances … · Charged to wallet …**. These are exact pre-rounding costs for new settlements, not whole-credit wallet debits. |
+| **Spend** | Estimated credits, covered by benefits (grants + allowances), and wallet-funded cost. Any unknown component makes that total Unavailable; known records remain readable. Empty usage totals are zero. |
+| **Activity** | Metered request quantity, services used, images and bytes. These are metric quantities, not unique HTTP request counts. |
+| **Tokens** | Total-token metric plus separate input/output and cache-read/write metrics. Missing classes show a dash, not a fabricated count. Token totals and classes may overlap and are never added together. |
+| **All metrics & funding** | Exact quantities grouped into Tokens, Cache, and Requests & other units. Funding shows all three sources; allowance-covered units stay separate by metric. All-service API request/byte/event totals remain available here. |
+| **Service rows** | Catalog display name, quantities, estimated cost and settlement status. Services are grouped under AI models, Connected apps, or Other services using catalog inference metadata. |
+| **Service expansion** | Metered quantities and funding, then Models, agents & billing layers, with every returned aggregate record accessible. |
+| **Full metering & funding details** | Per-record costs, funding, allowance-covered units, requests, bytes, events, original provider token breakdown, meter code and agent-key identity. |
 
-### Table columns
+Estimated cost is the gross cost of the full finalized quantity, including benefit-covered
+units. New settlements use persisted exact gross costs; historical rows use current cached
+model/metric rates. Funding is an exact pre-rounding cost, not a whole-credit wallet debit.
 
-| Column | Meaning |
-|---|---|
-| **Service** | `service_slug`, else `service_id`, else **Unknown**. Expand for model, agent and layer details. |
-| **Usage** | Quantity with its metric. A service spanning multiple metrics says how many metrics; expanded rows show each quantity and provider-reported token breakdown. |
-| **Est. cost** | **Gross cost of the full finalized quantity**, including allowance-covered units and grant-funded costs. New settlements use `funding.total_charge_micros`, persisted at settlement time. Historical rows without that field use `quantity × current cached rate`, selecting the row's model-specific rate before the generic metric rate. Repricing affects historical fallback estimates only. |
-| **Funding beneath cost** | **grants … · allowance … (1,200 tokens) · wallet …** when any non-wallet funding exists. Uses persisted `grant_funded_micros`, `allowance_funded_micros`, `wallet_funded_micros`, and `allowance_funded_quantity`. Allowance units appear only when the row/service has one metric, avoiding addition of unlike units. |
-| **Status → Acked** | Lago accepted the charged usage event or reported a duplicate. It does not mean an invoice was paid. |
-| **Status → Pending** | A charged row has not been acknowledged. Forwarded dead-letter rows can remain pending until operator action. |
-| **Status → Free** | Metered without cost, never pushed to Lago. A service with charged and free rows labels **Includes free usage** and computes Acked/Pending from its charged rows only. |
+**Acknowledged** means Lago accepted a billable event or duplicate, not that an invoice was
+paid. **Pending** means a charged row is unacknowledged; forwarded dead-letter rows can stay
+pending until operator action. **Free** rows have no charge and display a dash for cost.
+Mixed groups say Includes free usage and compute acknowledgement from charged rows only.
 
 For pre-change funded rows, grant funding is the sum of `grant_consumptions.amount_micros`;
 allowance units are the sum of `allowance_consumptions.quantity`, valued at the current rate.
@@ -403,13 +419,16 @@ timeouts return HTTP 503 and the client does not automatically retry.
 ## 6. Top-up history card
 
 Backed by `GET /api/v1/billing/topups?page=&per_page=&period=` (`handlers/billing.rs:429-558`),
-newest first, 10 per page. NyxID stores only that a checkout was created; the payment outcome is read
+newest first, 10 per page, with its own period selector and server pagination. Loading
+failures show a retry action rather than an empty history. On phones, the same fields
+stack into purchase rows. NyxID stores only that a checkout was created; the payment outcome is read
 live from Lago's credit invoices on each request.
 
 | Column | Meaning |
 |---|---|
 | **Date** | When the **checkout was created** (`created_at`) — not when payment completed, and not Lago's invoice issuing date, even on a Paid row. |
 | **Credits** | Credits requested (= USD). |
+| **Credit expiry** | Purchased-credit expiry date, or expired date and exact expired amount. Paid purchases awaiting expiry synchronization show Pending sync. |
 | **Invoice** | Lago's human-facing invoice number. `—` while unresolved — invoice attachment is asynchronous, and the handler backfills the link through Lago's wallet transactions when it can. |
 | **Status** | See below. |
 | **Actions** | **Resume payment** (pending only; **navigates the current tab** to the stored checkout URL). **Download receipt** (paid only; resolves a signed Lago URL and opens it in a **new tab** — `window.open(_blank)`, `use-billing.ts:103`). `—` otherwise. |
@@ -438,78 +457,21 @@ numbers and no receipts.
 
 ---
 
-## 7. Gaps and naming issues
+## 7. Limits to keep in mind
 
-Ranked by how likely a user is to be misled.
-
-1. **Overdraft is inert, but the card shows it as a live capability.** `has_payment_instrument` is
-   only ever written `false` (`provisioning.rs:77`) and `plan_kind` is only ever written `Prepaid`
-   (`provisioning.rs:73`) — the two conditions the overdraft branch requires
-   (`reservation.rs:162-179`). The Overdraft row is a number that can never be spent. Either hide it
-   until a payment instrument exists, or label it "not available".
-
-2. **Plan and collection state advertise values the system cannot produce.** `Subscription` /
-   `Hybrid` have no writer; `past_due` has **no writer anywhere in the tree** (only the enum and the
-   Zod schema). The UI implies a state machine that is not implemented.
-
-3. **The "Provision Wallet" empty state is a dead end — its button is always disabled.** It renders
-   only on 11301 (`billing.tsx:604-606`). `GET /billing/wallet` auto-provisions on miss, so 11301
-   there means Lago is unconfigured — which is exactly what makes `billingReady` false and disables
-   the button (`billing.tsx:382`). The one screen offering "Provision Wallet" is the one where
-   provisioning cannot work. It needs an explanation, not a disabled button.
-
-4. **Resolved: metered free usage is visible.** Observability-only meters are included, carry
-   zero cost and funding values, and render Free / —. Mixed services retain meaningful charged status.
-
-5. **Platform-key usage is personal; org BYOK usage remains outside this page.** Platform-key
-   grants to organizations authorize their members to use NyxID's key; each requesting person
-   pays and sees that usage here. Org-owned BYOK credentials still bill the org wallet, whose
-   usage is not exposed on this personal page. There is no owner switcher.
-
-6. **"Quantity" totals add incompatible units.** Tokens + requests + bytes summed into one unitless
-   number (`billing.tsx:477`, `handlers/billing.rs:282`). Bytes dominate by orders of magnitude, so
-   for any mixed account the number is meaningless.
-
-7. **"Requests" and "Bytes" totals undercount.** They sum only rows whose *metric* is that unit
-   (`handlers/billing.rs:264-273`). The Requests tile is not "requests you made".
-
-8. **Totals can be partial when historical rates are missing.** New settlements persist exact
-   gross cost and funding splits; older rows are recomputed from the current model/metric rate.
-   A group containing historical usage with no cached rate has null gross, wallet, and allowance
-   costs even when some of its settlements have exact figures; known grant micros are retained.
-   `sum_optional` skips unknown costs, includes known zeroes, and shows `-` only if all are
-   unknown. The table and totals consistently say Est. cost and sum the same visible rows.
-
-9. **`Balance − Reserved ≠ Available` on screen.** `pending_lago_debits` is subtracted but never
-   shown. The CLI displays it; the web page should too, or explain the gap in a tooltip.
-
-10. **Usage "Pending" can be permanent.** Forwarded `dead_letter` rows are included in the query and
-    never become Acked without operator action (`handlers/billing.rs:199-207`). They look like
-    normal in-flight rows.
-
-11. **Top-up history has no error state.** The component never checks `historyQuery.isError` and
-    retries are disabled, so a failed load renders **"No top-ups yet."** (`billing.tsx:216-266`).
-    A payment history that silently reads "empty" on failure is the worst possible default.
-
-12. **History status can regress to "Expired".** `credit_invoices` fetches `per_page=100` with no
-    pagination and turns any fetch error into an empty list (`lago_client.rs:496-502`,
-    `handlers/billing.rs:470-476`). With no matching invoice, age alone relabels an old **paid**
-    top-up as Expired.
-
-13. **Inconsistent navigation.** Checkout and Resume payment **replace the current tab**
-    (`window.location.assign`); Download receipt opens a **new** tab (`window.open(_blank)`). Leaving
-    the app mid-session to pay should at minimum be consistent, and probably a new tab.
-
-14. **"All time" means two different things** — 10 years for Usage, unbounded for Top-up history
-    (`handlers/billing.rs:712`, `:445-450`) — from a single shared selector.
-
-15. **"Synced" reads as if it covers the whole card.** It sits beside Plan and Overdraft but applies
-    only to Balance.
-
-16. **Owner is a raw UUID** with no display name.
-
-17. **The total cost is unlabeled and looks like a control** — it sits next to a `RefreshCw` icon
-    with no caption (`billing.tsx:470-473`). Label it, and either wire up or remove the icon.
-
-18. **`lago_metric_code` is fetched but never shown** (`schemas/billing.ts:28`) — the one field that
-    would let a user reconcile a line against their Lago invoice.
+- This is the personal billing page. Organization BYOK usage needs a separate owner-scoped view.
+- The personal usage API returns period aggregates, not hourly/daily time buckets. All time
+  is capped at 3,650 days for Usage but unbounded for Top-up history.
+- Metered requests and bytes are not unique traffic counts. Each metric keeps its own units;
+  reported request/byte/event counts remain in expanded details.
+- Historical usage can have unknown costs. The page marks affected totals Unavailable instead
+  of displaying a partial sum as complete.
+- Estimated gross cost, settled funding and rounded wallet debits need not be equal.
+- Catalog lookup failures have an explicit retry state; a readable slug fallback remains until
+  names load. Catalog names are authoritative even when an administrator chooses a slug-like name.
+- Forwarded dead-letter usage can remain Pending until operator action.
+- Receipt availability means eligible, not already generated. Receipt generation can require retry.
+- When Lago is unreachable, top-up history may use its existing local-session fallback and omit
+  invoice/receipt data. The frontend does not infer that missing provider information is payment success.
+- The existing wallet provisioning/unconfigured behavior is retained; billing readiness must be
+  verified before payment or provisioning actions become available.
