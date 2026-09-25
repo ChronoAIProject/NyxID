@@ -12,6 +12,8 @@ use crate::cli::{ConnectArgs, OutputFormat};
 struct CreateConnectLinkRequest<'a> {
     service_slug: &'a str,
     label: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint_url: Option<&'a str>,
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     scopes: &'a [String],
 }
@@ -65,6 +67,7 @@ pub async fn run(args: ConnectArgs) -> Result<()> {
             &CreateConnectLinkRequest {
                 service_slug: &args.service_slug,
                 label: args.label.as_deref(),
+                endpoint_url: args.endpoint_url.as_deref(),
                 scopes: &scopes,
             },
         )
@@ -298,6 +301,7 @@ mod tests {
         run(ConnectArgs {
             service_slug: "github".to_string(),
             label: None,
+            endpoint_url: None,
             scopes: vec![
                 "public_repo, read:org".to_string(),
                 "public_repo".to_string(),
@@ -369,6 +373,7 @@ mod tests {
             service_slug: "github".to_string(),
             scopes: Vec::new(),
             label: Some("Coding agent".to_string()),
+            endpoint_url: None,
             no_wait: true,
             timeout: 30,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
@@ -413,6 +418,7 @@ mod tests {
             service_slug: "github".to_string(),
             scopes: Vec::new(),
             label: None,
+            endpoint_url: None,
             no_wait: false,
             timeout: 30,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),

@@ -3470,6 +3470,9 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
 
 `scopes` is an optional array of additional OAuth scopes (default `[]`). Each entry may contain comma- or whitespace-separated scopes; NyxID trims and deduplicates them in order, preserving case. The shared OAuth scope limits apply across the entire request: at most 32 scopes before deduplication, at most 256 characters per scope, and only `[A-Za-z0-9._:/~+*=-]` characters. Scopes supplement the provider defaults for OAuth and RFC 8628 device-code flows; they do not replace defaults, and the provider decides which permissions to grant. Stored scopes survive provider denial and retry.
 
+`endpoint_url` is an optional HTTP(S) service URL prefill for connectors that require a gateway URL. It appears as an editable Service URL on the hosted page; the user confirms the final value during completion. It is ignored when the user selects a NyxID platform key.
+The CLI accepts the same value through `nyxid connect <service_slug> --endpoint-url <url>`.
+
 Creation returns HTTP 400 (`AppError::ValidationError`) for malformed/oversized scopes or non-empty scopes on API-key/no-auth services, providers with `supports_oauth_scopes = false`, and OpenAI-format device-code providers. An empty list preserves the existing behavior for every connection method.
 
 **Public preview:** `POST /api/v1/connect-links/preview` with `{ "token": "nyx_clk_<opaque-secret>" }` returns service and request details, including `connect_method` (`oauth`, `device_code`, `api_key`, or `none`) and `scopes: ["public_repo"]`. The `scopes` array is always present, possibly empty, including for legacy stored links. The hosted page displays these creator-selected permissions for human review; completion cannot edit them.

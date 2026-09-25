@@ -20,7 +20,7 @@ describe("channel setup URL values", () => {
     );
     url.searchParams.set("field1", value);
     const rewritten = channelBotSetupRewrite.input({ url });
-      expect(defaultParseSearch(rewritten.search)).toEqual({ field1: value });
+    expect(defaultParseSearch(rewritten.search)).toEqual({ field1: value });
   });
 
   it("leaves query parsing on other routes unchanged", () => {

@@ -26,6 +26,7 @@ export const connectLinkPreviewSchema = z.object({
   status: connectLinkStatusSchema,
   connect_method: connectMethodSchema,
   auth_key_name: z.string(),
+  endpoint_url: z.string().url().nullable().optional(),
   credential_mode: z.string().nullable(),
   has_platform_oauth_credentials: z.boolean(),
   requires_gateway_url: z.boolean(),
@@ -61,11 +62,7 @@ export const connectOAuthFormSchema = z.object({
 
 export const completeConnectLinkResponseSchema = z.object({
   id: z.string().uuid(),
-  status: z.enum([
-    "completed",
-    "oauth_required",
-    "device_code_required",
-  ]),
+  status: z.enum(["completed", "oauth_required", "device_code_required"]),
   service_slug: z.string().min(1),
   user_service_id: z.string().nullable().optional(),
   authorization_url: z.string().url().nullable().optional(),
@@ -139,7 +136,8 @@ export function validateConnectOAuthForm(
   }
   if (
     requiresClientCredentials &&
-    (values.oauth_client_id.length === 0 || values.oauth_client_secret.length === 0)
+    (values.oauth_client_id.length === 0 ||
+      values.oauth_client_secret.length === 0)
   ) {
     return "OAuth client ID and secret are required for this service";
   }
