@@ -22,6 +22,7 @@ import { AppRouteError } from "@/components/shared/app-route-error";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
+import { CreditsDeniedHost } from "@/components/billing/credits-denied-host";
 import { billingSearchSchema } from "@/schemas/billing";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite, hasAdminRead } from "@/types/api";
@@ -125,6 +126,7 @@ const rootRoute = createRootRoute({
         <Outlet />
       </Suspense>
       <Toaster />
+      <CreditsDeniedHost />
     </TooltipProvider>
   ),
 });

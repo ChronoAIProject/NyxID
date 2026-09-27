@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { continuationForAll, continuationText, useNyxAgentAssistantChat } from "./use-assistant-nyxagent";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { useAuthStore } from "@/stores/auth-store";
+import { useCreditsDenialStore } from "@/stores/credits-denial-store";
 import type { NyxAgentHistory } from "@/schemas/assistant-nyxagent";
 
 const id = `nyxa-${"a".repeat(32)}`;
@@ -197,6 +198,7 @@ it("polls pending acknowledgements after settlement, throttles decisions, and re
       id,
       "Approved: account management for this chat. Continue.",
       expect.any(Function),
+      expect.any(Function),
     );
     expect(requests.some((r) => r.startsWith("POST"))).toBe(false);
   }, 8000,
@@ -244,6 +246,7 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
       id,
       "Approved: this chat may use GitHub. Continue.\n" +
         "Approved: account management for this chat. Continue.",
+      expect.any(Function),
       expect.any(Function),
     );
     rerender();
@@ -301,4 +304,124 @@ it("phrases continuation turns per acknowledgement kind", () => {
   expect(continuationText({ ...base, kind: "action", tool_name: "delete_agent_key" })).toBe(
     `Confirmed: Delete agent key ci-bot (acknowledgement_id ${base.id}). Retry it now.`,
   );
+});
+
+function failedReply(turnId: string, code: string, seq = 2) {
+  return {
+    id: `assistant-${turnId}`,
+    turn_id: turnId,
+    seq,
+    role: "assistant" as const,
+    text: "",
+    status: "failed" as const,
+    error_code: code,
+    created_at: "2026-09-17T00:00:01Z",
+    activities: [],
+    attachments: [],
+  };
+}
+
+function sse(events: readonly Record<string, unknown>[]) {
+  return new Response(
+    events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  );
+}
+
+it("opens the credits dialog once when a live turn fails, across SSE and the poll", async () => {
+  useCreditsDenialStore.getState().reset();
+  page.conversation.active_turn = null;
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (request.endpoint === "/assistant/nyxagent/turns") {
+      page.messages.push(failedReply("live", "insufficient_credits"));
+      return sse([
+        {
+          cursor: 1,
+          event: "turn.status",
+          conversation_id: id,
+          turn_id: "live",
+          status: "running",
+        },
+        {
+          cursor: 2,
+          event: "turn.completed",
+          turn_id: "live",
+          status: "failed",
+          error: { code: "insufficient_credits", message: "No credits" },
+        },
+      ]);
+    }
+    return mock(request);
+  };
+  const { result, unmount } = renderHook(
+    () =>
+      useNyxAgentAssistantChat({
+        selectedConversationId: id,
+        onConversationAdopted: vi.fn(),
+      }),
+    { wrapper },
+  );
+  await waitFor(() => expect(result.current.isLoading).toBe(false));
+  await act(() => result.current.send("Question"));
+  expect(useCreditsDenialStore.getState().current).toMatchObject({
+    key: `assistant:nyxagent:${id}:live`,
+    payer: "self",
+  });
+  useCreditsDenialStore.getState().dismiss();
+  // The refreshed history now also shows the failure; it must not reopen.
+  await act(() => client.invalidateQueries());
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(useCreditsDenialStore.getState().current).toBeNull();
+  unmount();
+});
+
+it("opens for a turn seen running that the history poll reports failed", async () => {
+  useCreditsDenialStore.getState().reset();
+  const { result, unmount } = renderHook(
+    () =>
+      useNyxAgentAssistantChat({
+        selectedConversationId: id,
+        onConversationAdopted: vi.fn(),
+      }),
+    { wrapper },
+  );
+  await waitFor(() => expect(result.current.isStreaming).toBe(true));
+  page.conversation.active_turn = null;
+  page.messages.push(failedReply("turn", "insufficient_credits"));
+  await waitFor(
+    () =>
+      expect(useCreditsDenialStore.getState().current?.key).toBe(
+        `assistant:nyxagent:${id}:turn`,
+      ),
+    { timeout: 4000 },
+  );
+  unmount();
+}, 8000);
+
+it("never opens for failures already in the transcript or in older pages", async () => {
+  useCreditsDenialStore.getState().reset();
+  page.conversation.active_turn = null;
+  page.messages.push(failedReply("old", "insufficient_credits"));
+  page.before_seq = 1;
+  const { result, unmount } = renderHook(
+    () =>
+      useNyxAgentAssistantChat({
+        selectedConversationId: id,
+        onConversationAdopted: vi.fn(),
+      }),
+    { wrapper },
+  );
+  await waitFor(() =>
+    expect(result.current.session.messages.at(-1)?.status).toBe("error"),
+  );
+  expect(result.current.session.messages.at(-1)?.error).toBe(
+    "There aren't enough credits to run this turn.",
+  );
+  page.messages = [failedReply("older", "insufficient_credits", 1)];
+  page.before_seq = null;
+  await act(() => result.current.loadOlder());
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(useCreditsDenialStore.getState().current).toBeNull();
+  unmount();
 });

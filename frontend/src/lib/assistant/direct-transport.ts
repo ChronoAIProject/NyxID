@@ -12,6 +12,12 @@ import {
   parseJsonErrorResponse,
 } from "@/lib/assistant/direct-http-error";
 import { useAuthStore } from "@/stores/auth-store";
+import {
+  currentCreditsActor,
+  isInsufficientCreditsCode,
+  isInsufficientCreditsHttp,
+  notifyCreditsDenied,
+} from "@/lib/credits-denial";
 import type { Conversation } from "@/types/assistant";
 
 const DIRECT_COMPLETIONS_URL = "/api/v1/assistant/direct/completions";
@@ -300,6 +306,8 @@ interface RunningTurn {
   readonly turnId: string;
   readonly controller: AbortController;
   readonly onEvent: (event: DirectTurnEvent) => void;
+  /** Signed-in identity when the turn was sent (credits-denial fence). */
+  readonly actorId: string | null;
   cursor: number;
   currentMessageId: string | null;
   currentBlockId: string | null;
@@ -638,6 +646,7 @@ export class DirectAssistantTransport {
       turnId: newId("turn"),
       controller: new AbortController(),
       onEvent,
+      actorId: currentCreditsActor(),
       cursor: 0,
       currentMessageId: null,
       currentBlockId: null,
@@ -786,6 +795,10 @@ export class DirectAssistantTransport {
       );
       if (!response.ok) {
         const body = await parseJsonErrorResponse(response);
+        // Before the generic `http_402` rewrite below discards the symbol.
+        if (isInsufficientCreditsHttp(response.status, body)) {
+          this.notifyCredits(conversationId, run);
+        }
         if (
           response.status >= 400 &&
           response.status < 500 &&
@@ -909,6 +922,9 @@ export class DirectAssistantTransport {
       return false;
     }
     if (chunk.error) {
+      if (isInsufficientCreditsCode(chunk.error.code)) {
+        this.notifyCredits(conversationId, run);
+      }
       run.sawUpstreamError = true;
       this.closeOpenMessage(conversationId, run);
       this.finishUi(conversationId, run, "failed", {
@@ -938,6 +954,13 @@ export class DirectAssistantTransport {
       this.finishUi(conversationId, run, "completed", null);
     }
     return false;
+  }
+
+  private notifyCredits(conversationId: string, run: RunningTurn): void {
+    notifyCreditsDenied(
+      { key: `assistant:direct:${conversationId}:${run.turnId}`, payer: "unknown" },
+      run.actorId,
+    );
   }
 
   private openMessage(conversationId: string, run: RunningTurn): void {

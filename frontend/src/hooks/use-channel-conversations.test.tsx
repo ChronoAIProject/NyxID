@@ -31,6 +31,9 @@ vi.mock("@/lib/api-client", () => ({
     post: mockPost,
     put: mockPut,
   },
+  // The relay send uses apiClient for the out-of-credits opt-in.
+  apiClient: (endpoint: string, options: { body?: unknown } = {}) =>
+    mockPost(endpoint, options.body),
 }));
 
 function createWrapper() {

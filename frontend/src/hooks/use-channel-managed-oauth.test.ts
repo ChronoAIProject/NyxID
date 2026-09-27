@@ -41,6 +41,10 @@ describe("managed OAuth transport", () => {
         method: "POST",
         body: { connection_id: connection, label: "Support" },
         signal,
+        creditsDenial: {
+          key: expect.stringMatching(/^op:channel-managed-x-complete:/),
+          payer: "unknown",
+        },
       },
     );
     await completeManagedOAuth(
@@ -53,6 +57,10 @@ describe("managed OAuth transport", () => {
       method: "POST",
       body: { connection_id: connection },
       signal,
+      creditsDenial: {
+        key: expect.stringMatching(/^op:channel-bot-reconnect:bot:/),
+        payer: "unknown",
+      },
     });
   });
   it("rejects malformed connection IDs before making a request", async () => {

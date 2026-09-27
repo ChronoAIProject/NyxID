@@ -207,11 +207,14 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
 
 export function InitiatedMessageSettings({
   conversation,
+  botOwnerId,
 }: {
   readonly conversation: ChannelConversationItem;
+  /** Owner of the backing bot, whose credits a send would spend. */
+  readonly botOwnerId?: string;
 }) {
   const update = useUpdateChannelConversation();
-  const send = useSendChannelMessage();
+  const send = useSendChannelMessage({ creditsOwnerId: botOwnerId });
   const attempt = useRef<{ text: string; key: string } | null>(null);
   const settings = useAppForm<ChannelInitiatedSettingsFormData>({
     resolver: zodResolver(channelInitiatedSettingsSchema),
@@ -442,7 +445,11 @@ export function ChannelConversationDetailPage() {
         </>
       )}
       {conversation && (
-        <InitiatedMessageSettings key={conversation.id} conversation={conversation} />
+        <InitiatedMessageSettings
+          key={conversation.id}
+          conversation={conversation}
+          botOwnerId={bot?.user_id}
+        />
       )}
       {activities.length > 0 && <h2 className="text-lg font-medium">Message history</h2>}
       {/* Message list */}

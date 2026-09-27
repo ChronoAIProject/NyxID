@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, apiClient } from "@/lib/api-client";
+import { mutationCreditsDenial } from "@/lib/credits-denial";
 import type {
   ChannelConversationListResponse,
   ChannelConversationItem,
@@ -156,11 +157,24 @@ export function useChannelConversation(id: string) {
   });
 }
 
-export function useSendChannelMessage() {
+/** `creditsOwnerId` is the bot owner whose credits a send would spend. */
+export function useSendChannelMessage({
+  creditsOwnerId,
+}: { readonly creditsOwnerId?: string } = {}) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: SendChannelMessageRequest) =>
-      api.post<SendChannelMessageResponse>("/channel-relay/send", data),
+      apiClient<SendChannelMessageResponse>("/channel-relay/send", {
+        method: "POST",
+        body: data,
+        creditsDenial: mutationCreditsDenial(
+          "channel-relay-send",
+          data.conversation_id,
+          creditsOwnerId,
+          // A retry of the same message is the same operation.
+          data.idempotency_key,
+        ),
+      }),
     retry: false,
     onSuccess: (_response, variables) => {
       void queryClient.invalidateQueries({

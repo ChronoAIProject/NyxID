@@ -76,6 +76,7 @@ function storedError(code: string | null): string {
   }
   if (code === "credential_invalid") return "The assistant credential could not be accepted.";
   if (code === "model_not_configured") return "This assistant profile is unavailable.";
+  if (code === "insufficient_credits") return "There aren't enough credits to run this turn.";
   if (code === "session_busy" || code === "capacity_exceeded") {
     return "The assistant is busy. Try again shortly.";
   }
@@ -340,6 +341,17 @@ export class NyxAgentTransport {
     // The server settles/persists before we remove the live state. No resend.
   }
 
+  /** The turn this page currently sees running, live or polled. */
+  getActiveTurnId(id?: string): string | undefined {
+    const key = id ?? "draft";
+    return (
+      this.live.get(key)?.conversation.active_turn?.turn_id ??
+      this.histories.get(key)?.conversation.active_turn?.turn_id ??
+      this.index.get(key)?.active_turn?.turn_id ??
+      undefined
+    );
+  }
+
   session(id?: string): ChatSessionState {
     const history = this.getHistory(id);
     const live = this.live.get(id ?? "draft");
@@ -450,7 +462,12 @@ export class NyxAgentTransport {
     };
   }
 
-  async send(id: string | undefined, text: string, onAdopt: (id: string) => void) {
+  async send(
+    id: string | undefined,
+    text: string,
+    onAdopt: (id: string) => void,
+    onTurnFailed?: (conversationId: string, turnId: string, code: string) => void,
+  ) {
     const generation = this.identity();
     if (this.isRunning(id)) throw new Error("A turn is already active.");
     if (!text.trim() || [...text].length > 32768) {
@@ -512,6 +529,10 @@ export class NyxAgentTransport {
           },
           headers: { Accept: "text/event-stream" },
           signal: controller.signal,
+          creditsDenial: {
+            key: `assistant:nyxagent:${key}:${userMessageId}`,
+            payer: "self",
+          },
         }),
         45_000,
         controller,
@@ -590,7 +611,12 @@ export class NyxAgentTransport {
             }
             turn.state = applyDirectTurnEvent(turn.state, event);
             this.changed();
-            if (event.event === "turn.completed") terminal = true;
+            if (event.event === "turn.completed") {
+              terminal = true;
+              if (event.status === "failed" && event.error) {
+                onTurnFailed?.(key, event.turn_id, event.error.code);
+              }
+            }
           }
           if (terminal) break;
         }

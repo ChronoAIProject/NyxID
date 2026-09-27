@@ -15,7 +15,7 @@ import {
 import type { ChannelBotDetail, XChannelEvent } from "@/types/channels";
 
 export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
-  const update = useUpdateChannelBot();
+  const update = useUpdateChannelBot({ creditsOwnerId: bot.user_id });
   const catalog = useChannelPlatforms();
   const choices =
     catalog.data?.platforms.find((entry) => entry.platform === bot.platform)

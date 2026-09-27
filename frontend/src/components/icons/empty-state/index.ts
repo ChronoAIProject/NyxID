@@ -8,6 +8,7 @@ export { CogsIcon } from "./cogs";
 export { CrystalLatticeIcon } from "./crystal-lattice";
 export { CyberEyeIcon } from "./cyber-eye";
 export { DishAntennaIcon } from "./dish-antenna";
+export { DrainedCreditsIcon } from "./drained-credits";
 export { EngineerCapIcon } from "./engineer-cap";
 export { GemstoneIcon } from "./gemstone";
 export { HierarchyIcon } from "./hierarchy";
