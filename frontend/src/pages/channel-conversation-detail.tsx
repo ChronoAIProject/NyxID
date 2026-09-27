@@ -208,10 +208,15 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
 export function InitiatedMessageSettings({
   conversation,
   botOwnerId,
+  botOwnerError = false,
+  onRetryBotOwner,
 }: {
   readonly conversation: ChannelConversationItem;
   /** Owner of the backing bot, whose credits a send spends; required to send. */
   readonly botOwnerId: string | undefined;
+  /** The bot could not be loaded, so its owner is unknown until a retry. */
+  readonly botOwnerError?: boolean;
+  readonly onRetryBotOwner?: () => void;
 }) {
   const update = useUpdateChannelConversation();
   const send = useSendChannelMessage({ creditsOwnerId: botOwnerId });
@@ -333,7 +338,12 @@ export function InitiatedMessageSettings({
             }
             placeholder="Your test message"
           />
-          {!conversation.allow_agent_initiated ? (
+          {!botOwnerId && botOwnerError ? (
+            <ErrorBanner
+              message="This bot's details could not be loaded, so test messages can't be sent."
+              onRetry={onRetryBotOwner}
+            />
+          ) : !conversation.allow_agent_initiated ? (
             <p className="text-[12px] text-muted-foreground">
               Save the setting above before sending a test message.
             </p>
@@ -382,7 +392,11 @@ export function ChannelConversationDetailPage() {
   const [page, setPage] = useState(1);
   const perPage = 50;
 
-  const { data: bot } = useChannelBot(botId);
+  const {
+    data: bot,
+    isError: botError,
+    refetch: refetchBot,
+  } = useChannelBot(botId);
   const { getPlatform } = useChannelPlatformViews();
   const activities = getPlatform(bot?.platform ?? "").activities;
   const { data: conversation, error: conversationError } =
@@ -459,6 +473,8 @@ export function ChannelConversationDetailPage() {
           key={conversation.id}
           conversation={conversation}
           botOwnerId={bot?.user_id}
+          botOwnerError={botError && !bot}
+          onRetryBotOwner={() => void refetchBot()}
         />
       )}
       {activities.length > 0 && <h2 className="text-lg font-medium">Message history</h2>}

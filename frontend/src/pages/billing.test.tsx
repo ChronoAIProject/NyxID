@@ -344,6 +344,49 @@ describe("BillingPage", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     },
   );
+  it("never replays a pending top-up link after the user navigates away, including on Back", async () => {
+    let wallet: ReturnType<typeof query> = {
+      ...query(undefined),
+      isLoading: true,
+      isSuccess: false,
+    };
+    const listeners = new Set<() => void>();
+    mocks.wallet.mockImplementation(() =>
+      useSyncExternalStore(
+        (listener) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        () => wallet,
+      ),
+    );
+    const { history } = await renderPage("/billing?tab=billing&action=topup");
+    // The user picks Usage while the wallet is still loading.
+    await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
+    await waitFor(() => expect(history.location.search).toContain("tab=usage"));
+    expect(history.location.search).not.toContain("action");
+    act(() => {
+      wallet = query(billingWallet());
+      listeners.forEach((listener) => listener());
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // Back lands on the original entry, whose pending action was consumed.
+    await act(() => history.back());
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Billing" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
+    );
+    expect(history.location.search).not.toContain("action");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await act(() => history.forward());
+    await act(() => history.back());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
   it("lands on the Billing tab without a dialog when top-up is impossible", async () => {
     mocks.usage.mockReturnValue(
       query({

@@ -71,12 +71,25 @@ export function BillingPage() {
     billingCapability?.charging_enabled && billingCapability?.lago_configured,
   );
 
-  // Preserves `action`: only the top-up consumer below clears it, so filter
-  // cleanup that settles before the wallet cannot swallow the deep link.
+  // Automatic replace cleanup preserves `action`, so filter cleanup that
+  // settles before the wallet cannot swallow the deep link. A user-initiated
+  // (pushed) navigation abandons a pending top-up: it is consumed in the
+  // current entry first and never copied forward, so Back cannot replay it.
   function updateSearch(patch: Partial<BillingSearch>, replace = false) {
+    if (!replace && search.action) {
+      void navigate({
+        to: "/billing",
+        search: billingUrlSearch({ ...search, action: undefined }),
+        replace: true,
+      });
+    }
     void navigate({
       to: "/billing",
-      search: billingUrlSearch({ ...search, ...patch }),
+      search: billingUrlSearch({
+        ...search,
+        ...(replace ? {} : { action: undefined }),
+        ...patch,
+      }),
       replace,
     });
   }
