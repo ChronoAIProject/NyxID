@@ -45,6 +45,45 @@ const bot = {
   user_id: "test-user",
 };
 
+for (const width of [1440, 390]) {
+  test(`X shows encrypted activity with zero ordinary messages at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await mockDashboard(page);
+    const conversation = { id: "route", channel_bot_id: bot.id, platform: "x", platform_conversation_id: "*", platform_conversation_type: "private", agent_api_key_id: "agent", default_agent: true, allow_agent_initiated: false, is_active: true, created_at: bot.created_at, updated_at: bot.updated_at };
+    const activity = { id: "activity", conversation_id: "route", platform_conversation_id: "chat:20:10", platform_event_id: "e4f4d3fc-8bbf-4928-92eb-e5058d6bb6f6", sender_platform_id: "20", kind: "encrypted_chat", provider_event_type: "chat.received", content_availability: "encrypted", reply_supported: false, callback_status: "not_enabled", received_at: new Date().toISOString(), occurred_at: null };
+    const response = { activities: [activity], total: 1, retention_days: 30, routes: [{ conversation_id: "route", count: 1, last_activity: activity }], page: 1, per_page: 20 };
+    await page.route("**/api/v1/channel-bots/connected-x", (route) => route.fulfill({ json: { ...bot, conversations_count: 1, x_events: ["dm", "chat"], webhook_registered: true, webhook_ingestion: true } }));
+    await page.route("**/api/v1/channel-conversations?*", (route) => route.fulfill({ json: { conversations: [conversation], total: 1 } }));
+    await page.route("**/api/v1/channel-conversations/route", (route) => route.fulfill({ json: conversation }));
+    await page.route("**/api/v1/channel-conversations/route/messages?*", (route) => route.fulfill({ json: { messages: [], total: 0, page: 1, per_page: 50 } }));
+    await page.route("**/api/v1/**/activities?*", (route) => route.fulfill({ json: response }));
+    let enabled = false;
+    await page.route("**/api/v1/channel-conversations/route/activity-callback", async (route) => {
+      if (route.request().method() === "PUT") { enabled = route.request().postDataJSON().enabled as boolean; await route.fulfill({ status: 204 }); }
+      else await route.fulfill({ json: { declared: true, enabled, version: 1, kinds: ["encrypted_chat"] } });
+    });
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.goto("/channel-bots/connected-x");
+    await expect(page.getByText("1 received activity in the last 30 days")).toBeVisible();
+    await expect(page.getByText("Agent notification not enabled")).toBeVisible();
+    await expect(page.getByText(/Encrypted chat ·/).filter({ visible: true })).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: "Encrypted chat notifications" })).toBeChecked();
+    await page.screenshot({ path: `/tmp/nyx-typed-activity-bot-${width}.png`, fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.goto("/channel-bots/connected-x/conversations/route");
+    await expect(page.getByRole("heading", { name: "Channel activity", exact: true })).toBeVisible();
+    await expect(page.getByText("1 received activity in the last 30 days")).toBeVisible();
+    await expect(page.getByText(/No ordinary messages in this route/)).toBeVisible();
+    await page.getByRole("button", { name: "Enable typed callbacks" }).click();
+    await expect(page.getByRole("button", { name: "Disable typed callbacks" })).toBeVisible();
+    expect(enabled).toBe(true);
+    await page.screenshot({ path: `/tmp/nyx-typed-activity-route-${width}.png`, fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    expect(errors).toEqual([]);
+  });
+}
+
 for (const viewport of [
   { width: 1440, height: 1000 },
   { width: 390, height: 844 },

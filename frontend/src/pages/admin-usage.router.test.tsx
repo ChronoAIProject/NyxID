@@ -1,11 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
+import {
+  createMemoryHistory,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { router as appRouter } from "@/router";
 import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
+import { newView } from "@/lib/usage-analytics";
 import { usageFixture } from "@/test/admin-usage-fixture";
 
 // Keep the production route tree, guards, search validation, lazy page, query
@@ -21,7 +26,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("reads usage controls from a real admin route and rewrites its URL", async () => {
+it("keeps the dashboard and list on one route with a shared saved time range", async () => {
   useAuthStore.setState({
     isAuthenticated: true,
     isLoading: false,
@@ -37,35 +42,73 @@ it("reads usage controls from a real admin route and rewrites its URL", async ()
       created_at: "2026-09-19T00:00:00Z",
     },
   });
-  const get = vi.spyOn(api, "get").mockResolvedValue(usageFixture());
+  const config = { version: 1, draft: newView(), saved_views: [] };
+  const get = vi.spyOn(api, "get").mockImplementation(async (path) => {
+    if (path === "/admin/usage/workspace") return { revision: 1, config };
+    return usageFixture();
+  });
+  vi.spyOn(api, "put").mockImplementation(async (_path, body) => ({
+    ...(body as object),
+    revision: 2,
+  }));
   const history = createMemoryHistory({
-    initialEntries: ["/admin/usage?period=7d&sort=cost"],
+    initialEntries: ["/admin/usage?tab=list&period=7d&sort=cost"],
   });
   const router = createRouter({ routeTree: appRouter.routeTree, history });
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   const view = render(
     <QueryClientProvider client={client}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
   await act(() => router.load());
-  expect(await screen.findByRole("combobox", { name: "Usage period" }))
-    .toHaveTextContent("Last 7 days");
-  expect(await screen.findByRole("combobox", { name: "Ranking sort" }))
-    .toHaveTextContent("Gross cost");
-  expect(get).toHaveBeenCalledWith(expect.stringContaining("period=7d&sort=cost"));
+  expect(
+    await screen.findByRole("combobox", { name: "Time range" }),
+  ).toHaveTextContent("Last 7 days");
+  expect(
+    await screen.findByRole("combobox", { name: "Ranking sort" }),
+  ).toHaveTextContent("Gross cost");
+  expect(get).toHaveBeenCalledWith(
+    expect.stringContaining("period=7d&sort=cost"),
+  );
 
-  await userEvent.click(screen.getByRole("combobox", { name: "Usage period" }));
+  await userEvent.click(screen.getByRole("combobox", { name: "Time range" }));
   await userEvent.click(screen.getByRole("option", { name: "Last 30 days" }));
   await waitFor(() => {
     expect(history.location.pathname).toBe("/admin/usage");
     const search = new URLSearchParams(history.location.search);
-    expect(search.get("period")).toBe("30d");
+    expect(search.get("tab")).toBe("list");
     expect(search.get("sort")).toBe("cost");
-    expect(screen.getByRole("combobox", { name: "Usage period" }))
-      .toHaveTextContent("Last 30 days");
+    expect(search.has("period")).toBe(false);
+    expect(
+      screen.getByRole("combobox", { name: "Time range" }),
+    ).toHaveTextContent("Last 30 days");
   });
-  expect(get).toHaveBeenCalledWith(expect.stringContaining("period=30d&sort=cost"));
+  expect(get).toHaveBeenCalledWith(
+    expect.stringContaining("period=30d&sort=cost"),
+  );
+  expect(screen.getByRole("tab", { name: "Dashboard" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "List" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  expect(
+    screen.getAllByRole("heading", { name: /^Usage$/ }),
+  ).toHaveLength(1);
+  await waitFor(() =>
+    expect(api.put).toHaveBeenCalledWith(
+      "/admin/usage/workspace",
+      expect.objectContaining({
+        config: expect.objectContaining({
+          draft: expect.objectContaining({
+            filters: expect.objectContaining({ period: "30d" }),
+          }),
+        }),
+      }),
+    ),
+  );
   view.unmount();
   client.clear();
 });

@@ -305,23 +305,27 @@ Include:
 
 ### CI Checks
 
-Every pull request runs the following checks automatically via GitHub Actions. Jobs are gated on path filters so a PR only runs the suites whose files actually changed -- e.g. an SDK-only PR skips backend, CLI, and frontend jobs. The single required status check is **CI Pipeline**, an aggregator that always runs and treats `success` and `skipped` as passing.
+Every pull request runs the following checks automatically via GitHub Actions. Jobs are gated on path filters so a PR only runs the suites whose files actually changed -- e.g. an SDK-only PR skips backend, CLI, and frontend jobs. **CI Pipeline** aggregates the required jobs and treats `success` and `skipped` as passing. Branch rules must require this status check to enforce the gate at merge time.
 
 | Job | What it does | Triggers on |
 |-----|--------------|-------------|
 | **Rust Format** | `cargo fmt --all -- --check` -- ensures consistent formatting | any Rust change (backend, cli, mcp-demo, root Cargo files) |
 | **Rust Clippy** | `cargo clippy --workspace --all-targets -- -D warnings` -- catches common mistakes and enforces idioms | any Rust change |
-| **Backend Test** | `cargo nextest run -p nyxid` against a MongoDB 8.0 service container -- handler, service, and integration tests | `backend/**` or shared workspace files |
+| **Backend Test** | `cargo nextest run -p nyxid -p nyxid-service-adapters` against a MongoDB 8.0 replica set -- handler, service, and integration tests | `backend/**` or shared workspace files |
+| **Backend Billing Smoke** | Runs the standalone billing route smoke test with its original Cargo feature set | backend changes |
+| **Backend Image Inputs** | Builds the production backend binary and checks that Docker stages every embedded input | backend changes |
+| **Coverage (Backend)** | Measures PR-head coverage and enforces the line threshold | backend changes |
+| **Coverage (Backend Base)** | Reuses an exact-commit report or measures the base branch for the informational PR delta | backend PRs |
 | **CLI Test** | `cargo nextest run -p nyxid-cli` -- CLI + node-agent unit and integration tests | `cli/**` or shared workspace files |
 | **Rust Features** | Builds with `--features aws-kms`, `gcp-kms`, and both -- ensures KMS providers compile | `backend/**` or shared workspace files |
 | **Frontend** | `npm run lint`, `npm run test`, `npm run build` -- lint, test, and type-check | `frontend/**` or `.node-version` |
 | **CLI Wizard Bundle Freshness** | Re-hashes the wizard's source closure (from `cli/src/wizard/bundle-meta/index.manifest`) and fails if it no longer matches the committed hash. No npm install or vite rebuild in CI. See [CLI Wizard Bundle](#cli-wizard-bundle). | `frontend/**`, `cli/src/wizard/**`, or `.node-version` |
 | **SDK Build** | `npm run build` across all SDK packages -- ensures TypeScript compiles | `sdk/**` or `.node-version` |
-| **CI Pipeline** | Aggregator that depends on all of the above and reports a single pass/fail to branch protection. Treats `skipped` as success. | always |
+| **CI Pipeline** | Aggregator for all correctness checks above; the base coverage comparison is informational. Treats `skipped` as success. | always |
 
-A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI Test` because they share the workspace lock file. A change under `.github/workflows/**` forces every job to run.
+A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI Test` because they share the workspace lock file. A change under `.github/workflows/**` or `.github/scripts/**` forces every job to run.
 
-All checks must pass before a PR can be merged. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
+Wait for a green `CI Pipeline` before merging. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
 
 ### Rollup Health Triage
 

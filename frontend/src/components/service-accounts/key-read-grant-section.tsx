@@ -55,7 +55,7 @@ export function KeyReadGrantSection({ saId }: { readonly saId: string }) {
         <p className="text-[12px] text-muted-foreground">
           Optional access to selected private connections owned by a person or
           organization. Catalog editors read the platform catalog through their
-          assigned roles and do not need this grant. For private connection
+          catalog scopes granted by a platform administrator and do not need this grant. For private connection
           reads, the account needs user-services:read and a platform
           administrator must grant the connection UUIDs below. Connections must
           remain accessible to the account owner.

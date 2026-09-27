@@ -1,3 +1,6 @@
+import { ChannelActivities, LatestActivity } from "@/components/channels/channel-activities";
+import { useChannelActivities } from "@/hooks/use-channel-activities";
+import type { ChannelActivityDescriptor, ChannelActivityItem } from "@/types/channels";
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "@tanstack/react-router";
@@ -101,11 +104,19 @@ function ConversationRow({
   apiKeyNames,
   botId,
   onDelete,
+  activities,
+  latest,
+  activityError,
+  activityLoading,
 }: {
   readonly conversation: ChannelConversationItem;
   readonly apiKeyNames: ReadonlyMap<string, string>;
   readonly botId: string;
   readonly onDelete: (id: string) => void;
+  readonly activities: readonly ChannelActivityDescriptor[];
+  readonly latest?: ChannelActivityItem;
+  readonly activityError: boolean;
+  readonly activityLoading: boolean;
 }) {
   const agentName =
     apiKeyNames.get(conversation.agent_api_key_id) ??
@@ -139,7 +150,7 @@ function ConversationRow({
         )}
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
-        {conversation.last_message_at
+        {activities.length ? <LatestActivity activity={latest} descriptors={activities} unavailable={activityError} loading={activityLoading} /> : conversation.last_message_at
           ? formatRelativeTime(conversation.last_message_at)
           : "Never"}
       </TableCell>
@@ -176,12 +187,14 @@ function ConversationRow({
 
 function ConversationsSection({
   botId,
+  platform,
   apiKeyNames,
   ownerOrgId,
   ownerLabel,
   isTelegramManager,
 }: {
   readonly botId: string;
+  readonly platform: string;
   readonly apiKeyNames: ReadonlyMap<string, string>;
   /** When the parent bot is org-owned, the org id (a user_id). Used to
    *  scope the conversation list and pre-fill `target_org_id` on create.
@@ -194,12 +207,17 @@ function ConversationsSection({
     botId,
     orgId: ownerOrgId,
   });
+  const { getPlatform } = useChannelPlatformViews();
+  const activities = getPlatform(platform).activities;
+  const activityQuery = useChannelActivities("bot", botId, activities.length > 0);
+  const latest = (id: string) => activityQuery.data?.routes.find((entry) => entry.conversation_id === id)?.last_activity;
   const keys = useApiKeys({ orgId: ownerOrgId });
   const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   return (
     <div className="space-y-4">
+      {activities.length > 0 && <ChannelActivities scope="bot" id={botId} descriptors={activities} />}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h3 className="text-lg font-medium">Conversation Routes</h3>
@@ -265,7 +283,7 @@ function ConversationsSection({
                     {conv.default_agent && <Badge variant="info">Default</Badge>}
                   </div>
                   <div className="mt-3 text-[11px] text-muted-foreground">
-                    {conv.last_message_at ? `Last message ${formatRelativeTime(conv.last_message_at)}` : "No messages"}
+                    {activities.length ? <LatestActivity activity={latest(conv.id)} descriptors={activities} unavailable={!!activityQuery.error} loading={activityQuery.isPending} /> : conv.last_message_at ? `Last message ${formatRelativeTime(conv.last_message_at)}` : "No messages"}
                   </div>
                 </div>
               );
@@ -282,7 +300,7 @@ function ConversationsSection({
                   <TableHead>Agent</TableHead>
                   <TableHead>Default</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Last Message</TableHead>
+                  <TableHead>{activities.length ? "Latest activity" : "Last Message"}</TableHead>
                   <TableHead className="w-10">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -294,6 +312,10 @@ function ConversationsSection({
                     apiKeyNames={apiKeyNames}
                     botId={botId}
                     onDelete={setDeleteTarget}
+                    activities={activities}
+                    latest={latest(conv.id)}
+                    activityError={!!activityQuery.error}
+                    activityLoading={activityQuery.isPending}
                   />
                 ))}
               </TableBody>
@@ -1049,6 +1071,8 @@ export function ChannelBotDetailPage() {
   const { data: orgs } = useOrgs();
 
   const { data: bot, isLoading, error, refetch } = useChannelBot(botId);
+  const activityTypes = getPlatform(bot?.platform ?? "").activities;
+  const activitySummary = useChannelActivities("bot", botId, activityTypes.length > 0);
 
   // The bot's owner is an org when `bot.user_id` doesn't match the
   // current user's id. We pass that org id (a user_id in the backend
@@ -1212,9 +1236,10 @@ export function ChannelBotDetailPage() {
         <DetailRow label="Created" value={formatDate(bot.created_at)} />
         <DetailRow label="Updated" value={formatRelativeTime(bot.updated_at)} />
         <DetailRow
-          label="Conversations"
+          label="Configured routes"
           value={String(bot.conversations_count)}
         />
+        {activityTypes.length > 0 && <DetailRow label="Received activities (30 days)" value={activitySummary.error ? "Unavailable" : activitySummary.data ? String(activitySummary.data.total) : "Loading…"} />}
       </DetailSection>
 
       {Boolean(bot.setup_instructions?.length) && (
@@ -1267,6 +1292,7 @@ export function ChannelBotDetailPage() {
 
       {/* Conversation Routes */}
       <ConversationsSection
+        platform={bot.platform}
         botId={botId}
         apiKeyNames={apiKeyNames}
         ownerOrgId={ownerOrgId}

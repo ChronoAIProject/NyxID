@@ -393,6 +393,17 @@ The approval system works without Telegram -- users can always approve/reject vi
 |----------|---------|-------------|
 | `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS` | `60` | Interval between sweeps that claim overdue app-bound connect links and dispatch `connect_link.expired`. Effective deadlines include the pinned OAuth/device finalization grace. `0` disables the sweep; query-time expiry remains active. |
 
+## Device Login Code Compatibility
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_DEVICE_EIGHT_CHAR_CODES` | `false` | Issue eight-character public codes for v2 device requests. Enable only after every backend reader and writer supports the shared public-code namespace. Legacy account requests always use eight characters. |
+
+Deploy with this flag off, drain older servers, then enable it across the upgraded
+fleet. Turning it off stops new eight-character v2 issuance but does not make older
+binaries able to read outstanding v2 codes. Keep the compatibility readers during
+rollback. See [ADR-015](ADR-015-auth-device-login.md) for the rollout order.
+
 ## Agent Key Login
 
 | Variable | Default | Description |

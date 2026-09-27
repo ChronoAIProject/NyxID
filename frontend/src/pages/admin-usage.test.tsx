@@ -4,8 +4,8 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { usageFixture } from "@/test/admin-usage-fixture";
 import { useAdminUsage } from "@/hooks/use-admin-usage";
-import { useAdminUsers } from "@/hooks/use-admin";
-import { AdminUsagePage } from "./admin-usage";
+import { EMPTY_FILTERS } from "@/lib/usage-analytics";
+import { AdminUsageList as AdminUsagePage } from "@/components/billing-analytics/usage-list";
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   refetch: vi.fn(),
@@ -16,11 +16,10 @@ vi.mock("@tanstack/react-router", () => ({
   useSearch: () => mocks.search,
 }));
 vi.mock("@/hooks/use-admin-usage", () => ({ useAdminUsage: vi.fn() }));
-vi.mock("@/hooks/use-admin", () => ({ useAdminUsers: vi.fn() }));
 function renderPage() {
   return render(
     <TooltipProvider>
-      <AdminUsagePage />
+      <AdminUsagePage filters={EMPTY_FILTERS} />
     </TooltipProvider>,
   );
 }
@@ -38,31 +37,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.search = {};
   setUsage();
-  vi.mocked(useAdminUsers).mockReturnValue({
-    data: {
-      users: [
-        {
-          id: usageFixture().ranking[0]!.user.id,
-          display_name: "Alice",
-          email: "alice@example.test",
-        },
-        {
-          id: "33333333-3333-4333-8333-333333333333",
-          display_name: null,
-          email: "no-name@example.test",
-        },
-      ],
-      total: 2,
-    },
-    isPending: false,
-    isError: false,
-  } as unknown as ReturnType<typeof useAdminUsers>);
 });
 it("renders totals, token classes, costs, user names and org attribution without bare IDs", () => {
   renderPage();
-  expect(screen.getByRole("heading", { name: "Usage" })).toBeInTheDocument();
-  expect(screen.getByText("Total tokens")).toBeInTheDocument();
-  expect(screen.getByText("120")).toBeInTheDocument();
+  expect(
+    screen.getByRole("heading", { name: "By service" }),
+  ).toBeInTheDocument();
   expect(screen.getAllByText("Alice").length).toBeGreaterThan(0);
   expect(screen.getAllByText("alice@example.test").length).toBeGreaterThan(0);
   expect(screen.getAllByText("Research team").length).toBeGreaterThan(0);
@@ -73,52 +53,19 @@ it("renders totals, token classes, costs, user names and org attribution without
     screen.getByRole("heading", { name: "Platform key vs own key" }),
   ).toBeInTheDocument();
 });
-it("writes period, service, user, ranking and pagination changes into URL state", async () => {
+it("writes ranking and pagination changes into the list URL", async () => {
   const user = userEvent.setup();
   renderPage();
-  await user.click(screen.getByRole("combobox", { name: "Usage period" }));
-  await user.click(screen.getByRole("option", { name: "Last 7 days" }));
-  expect(mocks.navigate).toHaveBeenLastCalledWith({
-    to: "/admin/usage",
-    search: expect.objectContaining({ period: "7d", page: 1 }),
-  });
-  await user.click(screen.getByRole("combobox", { name: "Filter by service" }));
-  await user.click(
-    screen.getByRole("option", { name: "Example model · llm-example" }),
-  );
-  expect(mocks.navigate).toHaveBeenLastCalledWith({
-    to: "/admin/usage",
-    search: expect.objectContaining({ service: "llm-example", page: 1 }),
-  });
-  await user.click(screen.getByRole("button", { name: "Filter by user" }));
-  await user.type(
-    screen.getByRole("textbox", { name: "Search users by name or email" }),
-    "alice",
-  );
-  await waitFor(() =>
-    expect(useAdminUsers).toHaveBeenLastCalledWith(1, 50, "alice", undefined, {
-      enabled: true,
-    }),
-  );
-  await user.click(
-    screen.getByRole("button", { name: "Alice alice@example.test" }),
-  );
-  expect(mocks.navigate).toHaveBeenLastCalledWith({
-    to: "/admin/usage",
-    search: expect.objectContaining({
-      user: usageFixture().ranking[0]!.user.id,
-    }),
-  });
   await user.click(screen.getByRole("combobox", { name: "Ranking sort" }));
   await user.click(screen.getByRole("option", { name: "Gross cost" }));
   expect(mocks.navigate).toHaveBeenLastCalledWith({
     to: "/admin/usage",
-    search: expect.objectContaining({ sort: "cost" }),
+    search: expect.objectContaining({ tab: "list", sort: "cost" }),
   });
   await user.click(screen.getByRole("button", { name: "Next page" }));
   expect(mocks.navigate).toHaveBeenLastCalledWith({
     to: "/admin/usage",
-    search: expect.objectContaining({ page: 2 }),
+    search: expect.objectContaining({ tab: "list", page: 2 }),
   });
 });
 it("expands user services against the exact response window", async () => {
@@ -126,9 +73,7 @@ it("expands user services against the exact response window", async () => {
   await userEvent.click(
     screen.getAllByRole("button", { name: "Services" })[0]!,
   );
-  expect(screen.getAllByText("All services for Alice").length).toBeGreaterThan(
-    0,
-  );
+  expect(screen.getAllByText("Services for Alice").length).toBeGreaterThan(0);
   expect(useAdminUsage).toHaveBeenCalledWith(
     expect.objectContaining({
       user: usageFixture().ranking[0]!.user.id,
@@ -146,7 +91,7 @@ it("shows the billing prerequisite in the empty state", () => {
   setUsage({ data });
   renderPage();
   expect(screen.getByText("No usage in this window.")).toBeInTheDocument();
-  expect(screen.getByText(/BILLING_ENABLED/)).toBeInTheDocument();
+  expect(screen.getByText(/usage metering enabled/)).toBeInTheDocument();
 });
 it("renders loading, retryable errors and invalid ranges distinctly", async () => {
   setUsage({ isPending: true, data: undefined });
@@ -159,20 +104,23 @@ it("renders loading, retryable errors and invalid ranges distinctly", async () =
   });
   view.rerender(
     <TooltipProvider>
-      <AdminUsagePage />
+      <AdminUsagePage filters={EMPTY_FILTERS} />
     </TooltipProvider>,
   );
   expect(screen.getByText("Usage query timed out")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(mocks.refetch).toHaveBeenCalledOnce();
-  mocks.search = {
-    period: "custom",
-    from: "2026-01-01T00:00:00Z",
-    to: "2026-03-01T00:00:00Z",
-  };
+
   view.rerender(
     <TooltipProvider>
-      <AdminUsagePage />
+      <AdminUsagePage
+        filters={{
+          ...EMPTY_FILTERS,
+          period: "custom",
+          from: "2026-01-01T00:00:00Z",
+          to: "2026-03-01T00:00:00Z",
+        }}
+      />
     </TooltipProvider>,
   );
   expect(screen.getByRole("alert")).toHaveTextContent("31 days");
@@ -183,25 +131,8 @@ it("keeps a future metric visible and exposes partial historical pricing", () =>
   data.totals.unknown_cost_events = 3;
   setUsage({ data });
   renderPage();
-  expect(screen.getByText("future_units")).toBeInTheDocument();
-  expect(screen.getByText(/Costs are partial: 3/)).toBeInTheDocument();
-});
 
-it("shows an email as the label for a user with no display name", async () => {
-  renderPage();
-  await userEvent.click(screen.getByRole("button", { name: "Filter by user" }));
-  const option = screen.getByRole("button", {
-    name: "no-name@example.test no-name@example.test",
-  });
-  expect(option).toBeInTheDocument();
-  expect(screen.queryByText("Unnamed user")).not.toBeInTheDocument();
-  await userEvent.click(option);
-  expect(mocks.navigate).toHaveBeenLastCalledWith({
-    to: "/admin/usage",
-    search: expect.objectContaining({
-      user: "33333333-3333-4333-8333-333333333333",
-    }),
-  });
+  expect(screen.getByText(/Costs are partial: 3/)).toBeInTheDocument();
 });
 
 it.each([
@@ -230,4 +161,37 @@ it("labels totals that could not be validated during a fold", () => {
   setUsage({ data });
   renderPage();
   expect(screen.getByText(/Updating totals/)).toBeInTheDocument();
+});
+
+it("applies the shared dashboard filters and resets list pagination when they change", async () => {
+  mocks.search = { page: 4 };
+  const page = renderPage();
+  const filters = {
+    ...EMPTY_FILTERS,
+    services: ["llm-example"],
+    actors: [usageFixture().ranking[0]!.user.id],
+    owners: ["33333333-3333-4333-8333-333333333333"],
+  };
+  page.rerender(
+    <TooltipProvider>
+      <AdminUsagePage filters={filters} />
+    </TooltipProvider>,
+  );
+  expect(useAdminUsage).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      ...filters,
+      from: undefined,
+      to: undefined,
+      page: 4,
+    }),
+  );
+  await waitFor(() =>
+    expect(mocks.navigate).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        to: "/admin/usage",
+        replace: true,
+        search: expect.objectContaining({ tab: "list", page: 1 }),
+      }),
+    ),
+  );
 });

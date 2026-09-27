@@ -93,9 +93,9 @@ export const updateChannelBotSchema = z.object({
 export type UpdateChannelBotFormData = z.infer<typeof updateChannelBotSchema>;
 
 export const xChannelEventsSchema = z.object({
-  events: z.array(z.enum(["dm", "mentions", "replies"]))
+  events: z.array(z.enum(["dm", "chat", "mentions", "replies", "posts"]))
     .min(1, "Select at least one event type")
-    .max(3)
+    .max(5)
     .refine((events) => new Set(events).size === events.length, "Select each event only once"),
 });
 

@@ -18,6 +18,7 @@ pub(crate) const INITIATING_ORIGIN_MAX_LEN: usize = 256;
 
 #[derive(Clone, PartialEq)]
 pub struct PreviewOutput {
+    pub supports_grant_choice: bool,
     pub requested_profile: Option<String>,
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
@@ -86,6 +87,7 @@ pub(crate) fn context_preview(
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     status: AuthDeviceCodeStatus,
+    supports_grant_choice: bool,
     viewer_ip: Option<&str>,
     viewer_ip_attribution: AuthDeviceClientIpAttribution,
 ) -> PreviewOutput {
@@ -112,6 +114,7 @@ pub(crate) fn context_preview(
         .flatten();
 
     PreviewOutput {
+        supports_grant_choice,
         requested_profile: row.requested_profile,
         client_label: row.client_label,
         client_user_agent: row.client_user_agent,

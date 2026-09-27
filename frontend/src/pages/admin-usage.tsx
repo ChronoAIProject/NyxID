@@ -1,862 +1,526 @@
-import { Fragment, useDeferredValue, useState, type ReactNode } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { ChevronDown, ChevronLeft, ChevronRight, Search } from "lucide-react";
-import { useAdminUsage } from "@/hooks/use-admin-usage";
-import { useAdminUsers } from "@/hooks/use-admin";
-import { MetricBlock } from "@/components/shared/metric-block";
-import { credentialClassLabel } from "@/lib/billing-units";
-import { PageHeader } from "@/components/shared/page-header";
-import { ErrorBanner } from "@/components/shared/error-banner";
-import { ArticleIcon } from "@/components/icons/empty-state";
-import { Badge } from "@/components/ui/badge";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  ChartNoAxesCombined,
+  Check,
+  Copy,
+  LayoutDashboard,
+  RefreshCw,
+  Save,
+  Search,
+  Trash2,
+} from "lucide-react";
+import { useAuthStore } from "@/stores/auth-store";
+import {
+  useAutosavedWorkspace,
+  useUsageWorkspace,
+} from "@/hooks/use-usage-workspace";
+import { newView, TEMPLATE_COPY } from "@/lib/usage-analytics";
+import {
+  LAYOUTS,
+  type AnalyticsLayout,
+  type WorkspaceResponse,
+} from "@/schemas/usage-analytics";
+import {
+  AnalyticsCanvas,
+  type AnalyticsSample,
+} from "@/components/billing-analytics/analytics-canvas";
+import {
+  FilterBar,
+  type SampleOptions,
+} from "@/components/billing-analytics/controls";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { DataTableBadgeCell } from "@/components/data-table/data-table-columns";
-import { formatNumber, formatEstimatedCredits } from "@/lib/billing-format";
-import { BILLING_METRICS, metricLabel } from "@/schemas/billing-metrics";
-import {
-  normalizeAdminUsageSearch,
-  usageRangeError,
-  USAGE_SORTS,
-} from "@/schemas/admin-usage";
-import type {
-  AdminUsageIdentity,
-  AdminUsageRanking,
-  AdminUsageSearch,
-  AdminUsageService,
-  AdminUsageStats,
-} from "@/types/admin";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { AdminUsageList } from "@/components/billing-analytics/usage-list";
+import { PageHeader } from "@/components/shared/page-header";
+import { cn } from "@/lib/utils";
 
-const SORT_LABELS: Record<AdminUsageSearch["sort"], string> = {
-  requests: "Requests",
-  quantity: "Metric quantity",
-  cost: "Gross cost",
-  total_tokens: "Total tokens",
-  prompt_tokens: "Input tokens",
-  completion_tokens: "Output tokens",
-  cached_tokens: "Cache-read tokens",
-  cache_creation_tokens: "Cache-write tokens",
-};
-
-function Choice({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  options: { value: string; label: string }[];
-}) {
+const SamplePage =
+  import.meta.env.DEV && import.meta.env.MODE === "test"
+    ? lazy(() =>
+        import("@/components/billing-analytics/samples").then((module) => ({
+          default: module.AnalyticsSamples,
+        })),
+      )
+    : null;
+export function AdminUsagePage() {
+  const search = useSearch({ from: "/dashboard/admin/usage" });
+  const { sample, tab = "dashboard" } = search;
+  const navigate = useNavigate();
+  if (SamplePage && sample)
+    return (
+      <Suspense fallback={<Skeleton className="h-96" />}>
+        <SamplePage layout={sample} />
+      </Suspense>
+    );
   return (
-    <Select value={value} onValueChange={onChange}>
-      <SelectTrigger
-        aria-label={label}
-        className="w-full sm:w-auto sm:min-w-40"
-      >
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {options.map((option) => (
-          <SelectItem key={option.value} value={option.value}>
-            {option.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-}
-function Identity({ user }: { user: AdminUsageIdentity }) {
-  return (
-    <div className="min-w-0">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="text-[12px] font-medium">{user.display_name}</span>
-        </TooltipTrigger>
-        <TooltipContent>{user.id}</TooltipContent>
-      </Tooltip>
-      {user.email && (
-        <div className="break-all text-[11px] text-muted-foreground">
-          {user.email}
-        </div>
-      )}
-      {user.user_type === "org" && (
-        <Badge variant="secondary">Organization</Badge>
-      )}
-    </div>
-  );
-}
-function UserPicker({
-  selected,
-  onChange,
-}: {
-  selected: AdminUsageIdentity | null;
-  onChange: (user?: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const deferred = useDeferredValue(search);
-  const users = useAdminUsers(1, 50, deferred || undefined, undefined, {
-    enabled: open,
-  });
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          variant="outline"
-          aria-label="Filter by user"
-          className="h-auto min-h-8 justify-between text-left"
-        >
-          {selected ? (
-            <span>
-              {selected.display_name}
-              {selected.email && (
-                <span className="ml-2 text-muted-foreground">
-                  {selected.email}
-                </span>
-              )}
-            </span>
-          ) : (
-            "All users"
-          )}
-          <ChevronDown className="size-3" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="start" className="w-80 space-y-2 p-3">
-        <div className="relative">
-          <Search className="absolute left-3 top-2 size-4 text-text-tertiary" />
-          <Input
-            aria-label="Search users by name or email"
-            placeholder="Search name or email"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            className="pl-9"
-          />
-        </div>
-        <Button
-          variant="ghost"
-          className="w-full justify-start"
-          onClick={() => {
-            onChange();
-            setOpen(false);
-          }}
-        >
-          All users
-        </Button>
-        {users.isPending ? (
-          <Skeleton className="h-12" />
-        ) : users.isError ? (
-          <ErrorBanner
-            message="Could not load users."
-            onRetry={() => void users.refetch()}
-          />
-        ) : (
-          <div className="max-h-64 overflow-y-auto">
-            {users.data?.users.map((user) => (
-              <Button
-                key={user.id}
-                variant="ghost"
-                className="h-auto w-full justify-start py-2 text-left"
-                onClick={() => {
-                  onChange(user.id);
-                  setOpen(false);
-                }}
-              >
-                <span>
-                  {user.display_name || user.email}
-                  <span className="block break-all text-[11px] text-muted-foreground">
-                    {user.email}
-                  </span>
-                </span>
-              </Button>
-            ))}
-            {users.data?.users.length === 0 && (
-              <p className="p-2 text-[12px] text-muted-foreground">
-                No matching users.
-              </p>
-            )}
-            {(users.data?.total ?? 0) > 50 && (
-              <p className="p-2 text-[11px] text-muted-foreground">
-                Search to narrow the first 50 matches.
-              </p>
-            )}
-          </div>
-        )}
-      </PopoverContent>
-    </Popover>
-  );
-}
-function Quantities({ usage }: { usage: AdminUsageStats }) {
-  return (
-    <div className="space-y-1 font-mono text-[11px] tabular-nums">
-      {Object.entries(usage.quantities).map(([metric, quantity]) => (
-        <div key={metric}>
-          {formatNumber(quantity)} {metricLabel(metric)}
-        </div>
-      ))}
-      {usage.total_tokens > 0 && (
-        <div className="text-muted-foreground">
-          {formatNumber(usage.total_tokens)} total tokens · in{" "}
-          {formatNumber(usage.prompt_tokens)} · out{" "}
-          {formatNumber(usage.completion_tokens)}
-          <br />
-          cache read {formatNumber(usage.cached_tokens)} · cache write{" "}
-          {formatNumber(usage.cache_creation_tokens)}
-        </div>
-      )}
-    </div>
-  );
-}
-function Cost({ usage }: { usage: AdminUsageStats }) {
-  return (
-    <div className="space-y-1 font-mono text-[11px] tabular-nums">
-      <span>{formatEstimatedCredits(usage.gross_cost_micros)}</span>
-      <div className="text-muted-foreground">
-        Wallet {formatEstimatedCredits(usage.wallet_cost_micros)}
-        <br />
-        Grants {formatEstimatedCredits(usage.grant_cost_micros)}
-        <br />
-        Allowance {formatEstimatedCredits(usage.allowance_cost_micros)}
-      </div>
-      {usage.unknown_cost_events > 0 && (
-        <Badge variant="warning">Partial estimate</Badge>
-      )}
-    </div>
-  );
-}
-function ServiceName({
-  service,
-}: {
-  service: Pick<AdminUsageService, "service_name" | "service_slug">;
-}) {
-  return (
-    <div className="text-[12px] font-medium">
-      {service.service_name}
-      {service.service_slug && (
-        <div className="text-[11px] font-normal text-muted-foreground">
-          {service.service_slug}
-        </div>
-      )}
-    </div>
-  );
-}
-function StatsTable({
-  rows,
-  firstHeading = "Service",
-}: {
-  rows: { key: string; label: ReactNode; usage: AdminUsageStats }[];
-  firstHeading?: string;
-}) {
-  return (
-    <>
-      <div className="hidden overflow-hidden rounded-lg border border-border bg-card md:block">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{firstHeading}</TableHead>
-              <TableHead>Requests</TableHead>
-              <TableHead>Usage</TableHead>
-              <TableHead>Gross cost</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.key}>
-                <TableCell>{row.label}</TableCell>
-                <TableCell className="font-mono tabular-nums">
-                  {formatNumber(row.usage.requests)}
-                </TableCell>
-                <TableCell>
-                  <Quantities usage={row.usage} />
-                </TableCell>
-                <TableCell>
-                  <Cost usage={row.usage} />
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-      <div className="flex flex-col gap-3 md:hidden">
-        {rows.map((row) => (
-          <div
-            key={row.key}
-            className="space-y-3 rounded-lg border border-border bg-card p-4"
-          >
-            {row.label}
-            <div className="font-mono text-[11px]">
-              {formatNumber(row.usage.requests)} requests
-            </div>
-            <Quantities usage={row.usage} />
-            <Cost usage={row.usage} />
-          </div>
-        ))}
-      </div>
-    </>
-  );
-}
-function ServiceTable({ services }: { services: AdminUsageService[] }) {
-  return (
-    <StatsTable
-      rows={services.map((service) => ({
-        key: `${service.service_id}:${service.service_slug}`,
-        label: (
-          <div className="space-y-2">
-            <ServiceName service={service} />
-            <span className="text-[11px] text-muted-foreground">
-              {formatNumber(service.unique_users)} users
-            </span>
-            <DataTableBadgeCell>
-              {service.by_credential_class.map((lane) => (
-                <Badge key={lane.credential_class} variant="secondary">
-                  {credentialClassLabel(lane.credential_class)}:{" "}
-                  <span className="font-mono">
-                    {formatNumber(lane.requests)}
-                  </span>
-                </Badge>
-              ))}
-            </DataTableBadgeCell>
-          </div>
-        ),
-        usage: service,
-      }))}
+    <LiveAnalytics
+      tab={tab}
+      onTabChange={(next) =>
+        void navigate({ to: "/admin/usage", search: { ...search, tab: next } })
+      }
     />
   );
 }
-function UserServices({
-  user,
-  search,
+function LiveAnalytics({
+  tab,
+  onTabChange,
 }: {
-  user: AdminUsageIdentity;
-  search: AdminUsageSearch;
+  tab: "dashboard" | "list";
+  onTabChange: (tab: "dashboard" | "list") => void;
 }) {
-  const usage = useAdminUsage({
-    ...search,
-    user: user.id,
-    service: undefined,
-    page: 1,
-  });
-  return (
-    <div className="space-y-3 p-3">
-      <p className="text-[12px] font-medium">
-        All services for {user.display_name}
-      </p>
-      {usage.isPending ? (
+  const user = useAuthStore((state) => state.user);
+  const query = useUsageWorkspace(user?.id ?? "");
+  if (query.isPending || query.isFetching)
+    return (
+      <div className="space-y-4">
         <Skeleton className="h-20" />
-      ) : usage.isError ? (
-        <ErrorBanner
-          message="Could not load user breakdown."
-          onRetry={() => void usage.refetch()}
-        />
-      ) : (
-        usage.data && <ServiceTable services={usage.data.by_service} />
-      )}
-    </div>
+        <Skeleton className="h-96" />
+      </div>
+    );
+  if (query.isError)
+    return (
+      <ErrorBanner
+        message="Could not load your analytics workspace."
+        onRetry={() => void query.refetch()}
+      />
+    );
+  return (
+    <AnalyticsWorkspace
+      key={user?.id}
+      initial={query.data}
+      userId={user?.id ?? ""}
+      editable={user?.role === "admin" || user?.is_admin === true}
+      tab={tab}
+      onTabChange={onTabChange}
+    />
   );
 }
-function RankingTable({
-  rows,
-  search,
+export function AnalyticsWorkspace({
+  initial,
+  userId,
+  editable,
+  sample,
+  options,
+  initialLayout,
+  tab,
+  onTabChange,
 }: {
-  rows: AdminUsageRanking[];
-  search: AdminUsageSearch;
+  initial: WorkspaceResponse;
+  userId: string;
+  editable: boolean;
+  sample?: AnalyticsSample;
+  options?: SampleOptions;
+  initialLayout?: AnalyticsLayout;
+  tab?: "dashboard" | "list";
+  onTabChange?: (tab: "dashboard" | "list") => void;
 }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const rowKey = (row: AdminUsageRanking) =>
-    `${row.user.id}:${row.billing_owner?.id}:${row.service_id}:${row.service_slug}`;
-  const person = (row: AdminUsageRanking) => (
-    <div className="space-y-2">
-      <Identity user={row.user} />
-      {row.billing_owner && (
-        <div className="border-l border-border pl-2">
-          <span className="text-[10px] text-muted-foreground">Billed to</span>
-          <Identity user={row.billing_owner} />
-        </div>
-      )}
-      {!search.service && (
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-expanded={expanded === rowKey(row)}
-          onClick={() =>
-            setExpanded(expanded === rowKey(row) ? null : rowKey(row))
-          }
-        >
-          Services <ChevronDown className="size-3" />
-        </Button>
-      )}
-    </div>
-  );
-  return (
-    <>
-      <div className="hidden overflow-hidden rounded-lg border border-border bg-card md:block">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>User</TableHead>
-              <TableHead>Service</TableHead>
-              <TableHead>Usage</TableHead>
-              <TableHead>Requests</TableHead>
-              <TableHead>Gross cost</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <Fragment key={rowKey(row)}>
-                <TableRow>
-                  <TableCell>{person(row)}</TableCell>
-                  <TableCell>
-                    <ServiceName service={row} />
-                  </TableCell>
-                  <TableCell>
-                    <Quantities usage={row} />
-                  </TableCell>
-                  <TableCell className="font-mono tabular-nums">
-                    {formatNumber(row.requests)}
-                  </TableCell>
-                  <TableCell>
-                    <Cost usage={row} />
-                  </TableCell>
-                </TableRow>
-                {expanded === rowKey(row) && (
-                  <TableRow>
-                    <TableCell colSpan={5}>
-                      <UserServices user={row.user} search={search} />
-                    </TableCell>
-                  </TableRow>
-                )}
-              </Fragment>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-      <div className="flex flex-col gap-3 md:hidden">
-        {rows.map((row) => (
-          <div
-            key={rowKey(row)}
-            className="space-y-3 rounded-lg border border-border bg-card p-4"
-          >
-            {person(row)}
-            <ServiceName service={row} />
-            <p className="font-mono text-[11px]">
-              {formatNumber(row.requests)} requests
-            </p>
-            <Quantities usage={row} />
-            <Cost usage={row} />
-            {expanded === rowKey(row) && (
-              <UserServices user={row.user} search={search} />
-            )}
-          </div>
-        ))}
-      </div>
-    </>
-  );
-}
-function localTime(value?: string) {
-  if (!value || !Number.isFinite(Date.parse(value))) return "";
-  const date = new Date(value);
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16);
-}
-function isoTime(value: string) {
-  return value && Number.isFinite(Date.parse(value))
-    ? new Date(value).toISOString()
-    : undefined;
-}
-
-export function AdminUsagePage() {
-  const search = normalizeAdminUsageSearch(
-    useSearch({ from: "/dashboard/admin/usage" }),
-  );
-  const navigate = useNavigate();
-  const usage = useAdminUsage(search);
-  const data = usage.data;
-  const change = (patch: Partial<AdminUsageSearch>) =>
-    void navigate({
-      to: "/admin/usage",
-      search: { ...search, page: 1, ...patch },
-    });
-  const rangeError =
-    search.period === "custom" ? usageRangeError(search.from, search.to) : null;
-  const periodChange = (period: string) => {
-    const now = new Date();
-    change({
-      period: period as AdminUsageSearch["period"],
-      from:
-        period === "custom"
-          ? new Date(now.getTime() - 86_400_000).toISOString()
-          : undefined,
-      to: period === "custom" ? now.toISOString() : undefined,
-    });
-  };
-  const pages = Math.max(
-    1,
-    Math.ceil((data?.ranking_total ?? 0) / search.per_page),
-  );
-  const selectedUser =
-    data?.selected_user ??
-    (search.user
+  const [starting] = useState<WorkspaceResponse>(() =>
+    initialLayout && !initial.config
       ? {
-          id: search.user,
-          display_name: "Selected user",
-          email: null,
-          user_type: "unknown",
+          ...initial,
+          config: {
+            version: 1,
+            draft: newView(initialLayout),
+            saved_views: [],
+          },
         }
-      : null);
-  // Expansion reads the exact response window so an interaction cannot shift
-  // a rolling boundary between the summary and the user's detail.
-  const detailSearch: AdminUsageSearch = data
-    ? {
-        ...search,
-        period: "custom",
-        from: data.window.from,
-        to: data.window.to,
-      }
-    : search;
+      : initial,
+  );
+  const workspace = useAutosavedWorkspace(
+    starting,
+    userId,
+    editable,
+    Boolean(sample),
+  );
+  const { config, setConfig } = workspace;
+  const view = sample
+    ? config.draft
+    : { ...config.draft, layout: "operations" as const };
+  const [localTab, setLocalTab] = useState<"dashboard" | "list">("dashboard");
+  const activeTab = tab ?? localTab;
+  const client = useQueryClient();
+  const [name, setName] = useState("");
+  const [viewsOpen, setViewsOpen] = useState(false);
+  const saved = config.saved_views.find((saved) => saved.id === view.id);
+  const savedChanged = JSON.stringify(saved) !== JSON.stringify(view);
+  const status = !editable
+    ? "Read-only account · settings not saved"
+    : workspace.pendingRecovery
+      ? "Recovered draft available"
+      : workspace.error
+        ? "Save failed"
+        : !workspace.valid
+          ? "Complete settings to save"
+          : workspace.saving
+            ? "Saving…"
+            : workspace.dirty
+              ? "Unsaved changes…"
+              : sample
+                ? "Saved in this browser"
+                : "All changes saved";
+  const nameValid =
+    name.trim().length > 0 &&
+    new TextEncoder().encode(name.trim()).length <= 100;
   return (
-    <div className="space-y-6">
+    <div className="space-y-5 pb-6">
       <PageHeader
         title="Usage"
-        description="Platform-wide service usage across all users and credential types."
-      />
-      <div className="flex flex-wrap items-center gap-2">
-        <Choice
-          label="Usage period"
-          value={search.period}
-          onChange={periodChange}
-          options={[
-            { value: "24h", label: "Last 24 hours" },
-            { value: "7d", label: "Last 7 days" },
-            { value: "30d", label: "Last 30 days" },
-            { value: "custom", label: "Custom range" },
-          ]}
-        />
-        <UserPicker
-          selected={selectedUser}
-          onChange={(user) => change({ user })}
-        />
-        <Choice
-          label="Filter by service"
-          value={search.service ?? "all"}
-          onChange={(service) =>
-            change({ service: service === "all" ? undefined : service })
-          }
-          options={[
-            { value: "all", label: "All services" },
-            ...(data?.services ?? []).flatMap((service) => {
-              const value = service.service_slug ?? service.service_id;
-              return value
-                ? [
-                    {
-                      value,
-                      label: `${service.service_name}${service.service_slug ? ` · ${service.service_slug}` : ""}`,
-                    },
-                  ]
-                : [];
-            }),
-            ...(search.service &&
-            !data?.services.some(
-              (service) =>
-                (service.service_slug ?? service.service_id) === search.service,
-            )
-              ? [{ value: search.service, label: "Selected service" }]
-              : []),
-          ]}
-        />
-        <Button
-          variant="ghost"
-          onClick={() =>
-            void navigate({
-              to: "/admin/usage",
-              search: normalizeAdminUsageSearch({}),
-            })
-          }
-        >
-          Reset filters
-        </Button>
-      </div>
-      {search.period === "custom" && (
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="space-y-1 text-[11px] text-muted-foreground">
-            From (local time)
-            <Input
-              aria-label="Usage from"
-              type="datetime-local"
-              value={localTime(search.from)}
-              onChange={(event) =>
-                change({ from: isoTime(event.target.value) })
+        description="Understand what you use, where credits go, and who drives spend."
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() =>
+                void Promise.all([
+                  client.invalidateQueries({
+                    queryKey: [
+                      "usage-analytics",
+                      useAuthStore.getState().user?.id,
+                    ],
+                  }),
+                  client.invalidateQueries({ queryKey: ["admin", "usage"] }),
+                ])
               }
-            />
-          </label>
-          <label className="space-y-1 text-[11px] text-muted-foreground">
-            To (local time)
-            <Input
-              aria-label="Usage to"
-              type="datetime-local"
-              value={localTime(search.to)}
-              onChange={(event) => change({ to: isoTime(event.target.value) })}
-            />
-          </label>
-          <span className="text-[11px] text-muted-foreground">
-            Maximum 31 days
+            >
+              <RefreshCw className="size-3" />
+              Refresh
+            </Button>
+          </div>
+        }
+      />
+      {import.meta.env.DEV &&
+        import.meta.env.VITE_USAGE_SEEDED === "true" &&
+        !sample && (
+          <p className="text-[12px] text-muted-foreground" role="note">
+            <strong className="font-medium text-foreground">
+              Local seed data.
+            </strong>{" "}
+            Sample usage for reviewing analytics. No real charges.
+          </p>
+        )}
+      {sample && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-info/25 bg-info/5 px-4 py-2.5 text-[11px] text-info">
+          <span>
+            <strong>Automated test fixture.</strong> Synthetic data for browser
+            tests only.
           </span>
+          <span>Interactive filters · charts · saved views</span>
         </div>
       )}
-      {rangeError ? (
-        <p role="alert" className="text-[12px] text-destructive">
-          {rangeError}
-        </p>
-      ) : usage.isError ? (
-        <ErrorBanner
-          message={
-            usage.error instanceof Error
-              ? usage.error.message
-              : "Failed to load usage."
-          }
-          onRetry={() => void usage.refetch()}
-        />
-      ) : usage.isPending ? (
-        <div aria-label="Loading usage" className="space-y-3">
-          <Skeleton className="h-28" />
-          <Skeleton className="h-64" />
-        </div>
-      ) : (
-        data && (
-          <>
-            <p className="text-[11px] text-muted-foreground">
-              {new Date(data.window.from).toLocaleString()} –{" "}
-              {new Date(data.window.to).toLocaleString()} ·{" "}
-              {data.freshness && (
-                <>
-                  {new Date(data.freshness.rolled_up_through) <
-                  new Date(data.window.from)
-                    ? `Backfilling history · rollups complete through ${new Date(data.freshness.rolled_up_through).toLocaleString()}`
-                    : `Live · includes ${data.freshness.tail_rows.toLocaleString()} unfolded rows`}
-                  {data.freshness.validated === false && " · Updating totals"}{" "}
-                  ·{" "}
-                </>
+      <Tabs
+        value={activeTab}
+        onValueChange={(value) => {
+          const next = value === "list" ? "list" : "dashboard";
+          setLocalTab(next);
+          onTabChange?.(next);
+        }}
+      >
+        <TabsList aria-label="Usage view">
+          <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
+          <TabsTrigger value="list">List</TabsTrigger>
+        </TabsList>
+        {sample && (
+          <div
+            className="mt-5 flex flex-wrap gap-2"
+            aria-label="Analytics layout"
+          >
+            {LAYOUTS.map((layout) => {
+              const Icon =
+                layout === "overview"
+                  ? ChartNoAxesCombined
+                  : layout === "operations"
+                    ? LayoutDashboard
+                    : Search;
+              return (
+                <Button
+                  type="button"
+                  variant="outline"
+                  key={layout}
+                  aria-pressed={view.layout === layout}
+                  disabled={Boolean(workspace.pendingRecovery)}
+                  title={TEMPLATE_COPY[layout].description}
+                  onClick={() => {
+                    if (view.layout !== layout)
+                      setConfig({
+                        ...config,
+                        draft: newView(layout, view.filters),
+                      });
+                  }}
+                  className={cn(
+                    "min-w-0",
+                    view.layout === layout
+                      ? "border-nyx-secondary-400/40 bg-nyx-secondary-400/10 text-foreground"
+                      : "bg-card",
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    <Icon
+                      className={cn(
+                        "size-4",
+                        view.layout === layout
+                          ? "text-nyx-secondary-400"
+                          : "text-muted-foreground",
+                      )}
+                    />
+                    <span className="text-[13px] font-semibold">
+                      {TEMPLATE_COPY[layout].name}
+                    </span>
+                    <span className="sr-only">
+                      {TEMPLATE_COPY[layout].reference}
+                    </span>
+                    {TEMPLATE_COPY[layout].recommended && (
+                      <span className="rounded-md border border-nyx-secondary-400/30 bg-nyx-secondary-400/10 px-1.5 py-0.5 text-[10px] font-medium text-nyx-secondary-400">
+                        Recommended
+                      </span>
+                    )}
+                  </div>
+                </Button>
+              );
+            })}
+          </div>
+        )}
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <h2 className="truncate text-[15px] font-semibold">
+              {activeTab === "dashboard" ? view.name : "Usage records"}
+            </h2>
+            <span
+              role="status"
+              aria-label="Workspace save status"
+              className={cn(
+                "flex items-center gap-1.5 text-[10px]",
+                workspace.error ? "text-warning" : "text-muted-foreground",
               )}
-              {formatNumber(data.totals.events)} metered events ·{" "}
-              {formatNumber(data.totals.unique_services)} services
-            </p>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <MetricBlock
-                label="Requests"
-                value={formatNumber(data.totals.requests)}
-              />
-              <MetricBlock
-                label="Unique users"
-                value={formatNumber(data.totals.unique_users)}
-              />
-              <MetricBlock
-                label="Total tokens"
-                value={formatNumber(data.totals.total_tokens)}
-                detail={
-                  <span className="font-mono">
-                    Input {formatNumber(data.totals.prompt_tokens)} · Output{" "}
-                    {formatNumber(data.totals.completion_tokens)}
-                    <br />
-                    Cache read {formatNumber(data.totals.cached_tokens)} · Cache
-                    write {formatNumber(data.totals.cache_creation_tokens)}
-                  </span>
-                }
-              />
-              <MetricBlock
-                label="Gross cost"
-                value={formatEstimatedCredits(data.totals.gross_cost_micros)}
-                detail={`${formatNumber(data.totals.exact_cost_events)} exact events · ${formatNumber(data.totals.legacy_cost_events)} legacy events`}
-              />
-              <MetricBlock
-                label="Images"
-                value={formatNumber(data.totals.quantities.images ?? 0)}
-              />
-              {Object.entries(data.totals.quantities)
-                .filter(
-                  ([metric]) =>
-                    ![
-                      "tokens",
-                      "requests",
-                      "images",
-                      "input_tokens",
-                      "output_tokens",
-                      "cache_read_tokens",
-                      "cache_write_tokens",
-                    ].includes(metric),
-                )
-                .map(([metric, quantity]) => (
-                  <MetricBlock
-                    key={metric}
-                    label={metricLabel(metric)}
-                    value={formatNumber(quantity)}
-                  />
-                ))}
-            </div>
-            {data.totals.events === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-                <ArticleIcon className="h-48 w-48 text-muted-foreground/30" />
-                <p className="text-[12px] font-medium text-muted-foreground">
-                  No usage in this window.
-                </p>
-                <p className="text-[12px] text-muted-foreground">
-                  Usage is recorded only while BILLING_ENABLED is on. Try
-                  another window or clear filters.
-                </p>
-              </div>
-            ) : (
-              <>
-                {data.totals.unknown_cost_events > 0 && (
-                  <p className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
-                    Costs are partial:{" "}
-                    {formatNumber(data.totals.unknown_cost_events)} historical
-                    events have no cached rate.
-                  </p>
+            >
+              {!workspace.dirty &&
+                !workspace.error &&
+                !workspace.pendingRecovery && (
+                  <Check className="size-3 text-success" />
                 )}
-                <p className="text-[11px] text-muted-foreground">
-                  Gross costs use settled amounts or current rates for legacy
-                  events. Wallet{" "}
-                  {formatEstimatedCredits(data.totals.wallet_cost_micros)} ·
-                  Grants {formatEstimatedCredits(data.totals.grant_cost_micros)}{" "}
-                  · Allowances{" "}
-                  {formatEstimatedCredits(data.totals.allowance_cost_micros)}.
-                  Token total is input + output; provider cache counts can
-                  overlap input. Quantities include each billing component and
-                  resale event.
-                </p>
-                <section className="space-y-3">
-                  <h2 className="text-[15px] font-semibold">By service</h2>
-                  <ServiceTable services={data.by_service} />
-                </section>
-                <section className="space-y-3">
-                  <h2 className="text-[15px] font-semibold">
-                    Platform key vs own key
-                  </h2>
-                  <StatsTable
-                    firstHeading="Credential type"
-                    rows={data.by_credential_class.map((lane) => ({
-                      key: lane.credential_class,
-                      label: (
-                        <Badge variant="secondary">
-                          {credentialClassLabel(lane.credential_class)}
-                        </Badge>
+              {status}
+            </span>
+          </div>
+          {activeTab === "dashboard" && (
+            <div className="flex flex-wrap gap-2">
+              {saved && (
+                <Button
+                  variant="outline"
+                  disabled={
+                    !editable ||
+                    !savedChanged ||
+                    !workspace.valid ||
+                    Boolean(workspace.pendingRecovery)
+                  }
+                  onClick={() =>
+                    setConfig({
+                      ...config,
+                      saved_views: config.saved_views.map((item) =>
+                        item.id === view.id ? structuredClone(view) : item,
                       ),
-                      usage: lane,
-                    }))}
-                  />
-                </section>
-                <section className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-[15px] font-semibold">Top users</h2>
-                      <p className="text-[11px] text-muted-foreground">
-                        Ranked by user, service, and billing owner.
+                    })
+                  }
+                >
+                  <Save className="size-3" />
+                  Update saved view
+                </Button>
+              )}
+              <Popover open={viewsOpen} onOpenChange={setViewsOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    disabled={Boolean(workspace.pendingRecovery)}
+                  >
+                    <Copy className="size-3" />
+                    Saved views
+                    <span className="ml-1 text-muted-foreground">
+                      {config.saved_views.length}
+                    </span>
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="end" className="w-80 space-y-4 p-4">
+                  <div>
+                    <h3 className="text-[13px] font-semibold">
+                      Your saved views
+                    </h3>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Private to your account. Exploring never overwrites a
+                      named view.
+                    </p>
+                  </div>
+                  <div className="max-h-64 space-y-1 overflow-auto">
+                    {config.saved_views.length === 0 && (
+                      <p className="py-3 text-[12px] text-muted-foreground">
+                        Save a starting point to return to later.
                       </p>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <Choice
-                        label="Ranking sort"
-                        value={search.sort}
-                        onChange={(sort) =>
-                          change({ sort: sort as AdminUsageSearch["sort"] })
-                        }
-                        options={USAGE_SORTS.map((value) => ({
-                          value,
-                          label: SORT_LABELS[value],
-                        }))}
-                      />
-                      {search.sort === "quantity" && (
-                        <Choice
-                          label="Ranking metric"
-                          value={search.metric}
-                          onChange={(metric) =>
-                            change({
-                              metric: metric as AdminUsageSearch["metric"],
+                    )}
+                    {config.saved_views.map((item) => (
+                      <div key={item.id} className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          className="min-w-0 flex-1 justify-start"
+                          onClick={() => {
+                            setConfig({
+                              ...config,
+                              draft: structuredClone(item),
+                            });
+                            setViewsOpen(false);
+                          }}
+                        >
+                          <span className="truncate">{item.name}</span>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Delete saved view ${item.name}`}
+                          disabled={!editable}
+                          onClick={() =>
+                            setConfig({
+                              ...config,
+                              saved_views: config.saved_views.filter(
+                                (current) => current.id !== item.id,
+                              ),
                             })
                           }
-                          options={BILLING_METRICS.map((value) => ({
-                            value,
-                            label: metricLabel(value),
-                          }))}
-                        />
-                      )}
-                    </div>
+                        >
+                          <Trash2 className="size-3 text-muted-foreground" />
+                        </Button>
+                      </div>
+                    ))}
                   </div>
-                  <RankingTable rows={data.ranking} search={detailSearch} />
-                  {data.ranking.length === 0 && (
-                    <p className="text-[12px] text-muted-foreground">
-                      No ranking rows on this page.
-                    </p>
-                  )}
-                  <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-text-tertiary">
-                    <span>
-                      {formatNumber(data.ranking_total)} user/service entries
-                    </span>
-                    <Choice
-                      label="Rows per page"
-                      value={String(search.per_page)}
-                      onChange={(value) => change({ per_page: Number(value) })}
-                      options={[25, 50, 100].map((value) => ({
-                        value: String(value),
-                        label: `${value} per page`,
-                      }))}
+                  <div className="space-y-2 border-t border-border pt-3">
+                    <Input
+                      aria-label="New saved view name"
+                      placeholder="e.g. Weekly platform spend"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      maxLength={100}
                     />
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        aria-label="Previous page"
-                        disabled={search.page <= 1 || usage.isFetching}
-                        onClick={() => change({ page: search.page - 1 })}
-                      >
-                        <ChevronLeft className="size-3" />
-                      </Button>
-                      <span>
-                        Page {search.page} of {pages}
-                      </span>
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        aria-label="Next page"
-                        disabled={search.page >= pages || usage.isFetching}
-                        onClick={() => change({ page: search.page + 1 })}
-                      >
-                        <ChevronRight className="size-3" />
-                      </Button>
-                    </div>
+                    <Button
+                      className="w-full"
+                      disabled={
+                        !editable ||
+                        !nameValid ||
+                        !workspace.valid ||
+                        config.saved_views.length >= 20
+                      }
+                      onClick={() => {
+                        const copy = {
+                          ...structuredClone(view),
+                          id: crypto.randomUUID(),
+                          name: name.trim(),
+                        };
+                        setConfig({
+                          ...config,
+                          draft: copy,
+                          saved_views: [...config.saved_views, copy],
+                        });
+                        setName("");
+                        setViewsOpen(false);
+                      }}
+                    >
+                      <Save className="size-3" />
+                      Save as new view
+                    </Button>
                   </div>
-                </section>
-              </>
-            )}
-          </>
-        )
-      )}
+                </PopoverContent>
+              </Popover>
+            </div>
+          )}
+        </div>
+        {workspace.pendingRecovery && (
+          <div
+            role="status"
+            aria-label="Recovered workspace"
+            className="mt-3 space-y-3 rounded-lg border border-border bg-card p-3 text-[12px]"
+          >
+            <p>
+              Showing your saved view. An older or incomplete draft is still
+              available in this browser. Choose which version to use before
+              editing further.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" onClick={() => void workspace.reload()}>
+                Use saved view
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void workspace.reload(true)}
+              >
+                Restore recovered draft
+              </Button>
+            </div>
+          </div>
+        )}
+        {workspace.error && (
+          <div
+            role="alert"
+            className="flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 p-3 text-[12px]"
+          >
+            <p className="mr-auto">{workspace.error}</p>
+            <Button size="sm" onClick={workspace.retry}>
+              Retry
+            </Button>
+            <Button size="sm" onClick={() => void workspace.reload()}>
+              Reload saved
+            </Button>
+            <Button size="sm" onClick={() => void workspace.reload(true)}>
+              Keep my changes
+            </Button>
+          </div>
+        )}
+        {workspace.storageError && (
+          <p role="alert" className="text-[11px] text-warning">
+            Browser recovery storage is unavailable. Keep this page open until
+            changes are saved.
+          </p>
+        )}
+        {workspace.validationError && (
+          <p role="alert" className="text-[11px] text-warning">
+            {workspace.validationError}
+          </p>
+        )}
+        <fieldset
+          disabled={Boolean(workspace.pendingRecovery)}
+          className="min-w-0"
+        >
+          <div className="mt-5">
+            <FilterBar
+              filters={view.filters}
+              sample={options}
+              onChange={(filters) =>
+                setConfig({ ...config, draft: { ...view, filters } })
+              }
+            />
+          </div>
+          <TabsContent value="dashboard" className="mt-6">
+            <AnalyticsCanvas
+              view={view}
+              disabled={Boolean(workspace.pendingRecovery)}
+              onChange={(draft) => setConfig({ ...config, draft })}
+              sample={sample}
+            />
+          </TabsContent>
+          <TabsContent value="list" className="mt-6">
+            <AdminUsageList filters={view.filters} />
+          </TabsContent>
+        </fieldset>
+      </Tabs>
+      <p className="text-[10px] leading-relaxed text-muted-foreground">
+        Usage windows are UTC and end-exclusive. Gross cost includes wallet,
+        grant, and allowance funding. Billing-account filters select who paid;
+        acting-user filters select who made the request.
+      </p>
     </div>
   );
 }

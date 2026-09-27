@@ -22,7 +22,9 @@ pub async fn authorized_target(
         ));
     }
     super::curation_grant_service::require_scope(sa, scope, "proxy")?;
-    if !super::catalog_editor_service::role_has_editor_permissions(db, &sa.role_ids).await? {
+    if !sa.catalog_scope_authorized
+        && !super::catalog_editor_service::role_has_editor_permissions(db, &sa.role_ids).await?
+    {
         return Err(AppError::Forbidden(
             "Catalog editor role permission required".into(),
         ));

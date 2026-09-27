@@ -7,6 +7,7 @@ use crate::redaction::RedactedLen;
 
 pub const COLLECTION_NAME: &str = "auth_device_codes";
 pub const V2_COLLECTION_NAME: &str = "auth_device_codes_v2";
+pub const RESERVATION_COLLECTION_NAME: &str = "auth_device_code_reservations";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

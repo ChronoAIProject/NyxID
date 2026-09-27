@@ -125,7 +125,9 @@ pub async fn list_keys(
     let sa =
         service_account_service::get_service_account(&state.db, &auth.user_id.to_string()).await?;
     let keys = if sa.purpose == ServiceAccountPurpose::CatalogEditor {
-        grants::require_scope(&sa, &auth.scope, reads::READ_SCOPE)?;
+        if !sa.catalog_scope_authorized {
+            grants::require_scope(&sa, &auth.scope, reads::READ_SCOPE)?;
+        }
         editor::authorize(&state.db, &sa, &auth.scope, grants::READ_SCOPE).await?;
         catalog::list(&state.db)
             .await?
@@ -167,7 +169,9 @@ pub async fn get_key(
     let sa =
         service_account_service::get_service_account(&state.db, &auth.user_id.to_string()).await?;
     let data: KeyMetadataResponse = if sa.purpose == ServiceAccountPurpose::CatalogEditor {
-        grants::require_scope(&sa, &auth.scope, reads::READ_SCOPE)?;
+        if !sa.catalog_scope_authorized {
+            grants::require_scope(&sa, &auth.scope, reads::READ_SCOPE)?;
+        }
         editor::authorize(&state.db, &sa, &auth.scope, grants::READ_SCOPE).await?;
         catalog::read(&state.db, &id).await?.into()
     } else {

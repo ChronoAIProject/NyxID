@@ -2201,7 +2201,7 @@ mod x_events_tests {
         Mock::given(method("PATCH"))
             .and(path("/api/v1/channel-bots/bot"))
             .and(body_json(
-                serde_json::json!({"x_events": ["dm", "mentions", "replies"]}),
+                serde_json::json!({"x_events": ["dm", "chat", "mentions", "replies", "posts"]}),
             ))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "bot"})),
@@ -2215,7 +2215,7 @@ mod x_events_tests {
             "update",
             "bot",
             "--x-events",
-            "dm,mentions,replies",
+            "dm,chat,mentions,replies,posts",
         ])
         .unwrap();
         if let crate::cli::Commands::ChannelBot {

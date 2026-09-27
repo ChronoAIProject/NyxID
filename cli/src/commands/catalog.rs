@@ -2,19 +2,18 @@ use anyhow::Result;
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 
-use crate::api::ApiClient;
-use crate::cli::{CatalogCommands, OutputFormat};
+use crate::api::{ApiClient, ApiError, build_credential_http_client};
+use crate::cli::{AuthArgs, CatalogCommands, OutputFormat};
 
 pub async fn run(command: CatalogCommands) -> Result<()> {
     match command {
-        CatalogCommands::List { all, auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
+        CatalogCommands::List { all, public, auth } => {
             let path = if all {
                 "/catalog?include_all=true"
             } else {
                 "/catalog"
             };
-            let catalog: Value = api.get(path).await?;
+            let catalog = fetch_catalog(&auth, public, path).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -100,9 +99,13 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
             }
             Ok(())
         }
-        CatalogCommands::Show { slug, auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let item: Value = api.get(&format!("/catalog/{slug}")).await?;
+        CatalogCommands::Show { slug, public, auth } => {
+            let item = fetch_catalog(
+                &auth,
+                public,
+                &format!("/catalog/{}", urlencoding::encode(&slug)),
+            )
+            .await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -314,9 +317,13 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
             }
             Ok(())
         }
-        CatalogCommands::Endpoints { slug, auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let result: Value = api.get(&format!("/catalog/{slug}/endpoints")).await?;
+        CatalogCommands::Endpoints { slug, public, auth } => {
+            let result = fetch_catalog(
+                &auth,
+                public,
+                &format!("/catalog/{}/endpoints", urlencoding::encode(&slug)),
+            )
+            .await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -367,6 +374,27 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
     }
 }
 
+async fn fetch_catalog(auth: &AuthArgs, public: bool, path: &str) -> Result<Value> {
+    if !public {
+        return ApiClient::from_auth_checked(auth).await?.get(path).await;
+    }
+    let base = crate::auth::login_exchange::normalized_destination(&auth.resolved_base_url()?)?;
+    let response = build_credential_http_client(auth.profile.as_deref())?
+        .get(format!("{base}/api/v1{path}"))
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(ApiError::new(
+            path,
+            response.status(),
+            response.text().await.unwrap_or_default(),
+        )
+        .into());
+    }
+    Ok(response.json().await?)
+}
+
 fn truncate_line(s: &str, max: usize) -> String {
     let first_line = s.lines().next().unwrap_or(s);
     if first_line.chars().count() > max {
@@ -397,6 +425,7 @@ mod tests {
             .await;
 
         run(CatalogCommands::List {
+            public: false,
             all: false,
             auth: mock_auth(server.uri()),
         })
@@ -418,6 +447,7 @@ mod tests {
             .await;
 
         run(CatalogCommands::List {
+            public: false,
             all: true,
             auth: mock_auth(server.uri()),
         })
@@ -438,6 +468,7 @@ mod tests {
             .await;
 
         run(CatalogCommands::Show {
+            public: false,
             slug: "openai".to_string(),
             auth: mock_auth(server.uri()),
         })
@@ -461,6 +492,7 @@ mod tests {
             .await;
 
         run(CatalogCommands::Endpoints {
+            public: false,
             slug: "openai".to_string(),
             auth: mock_auth(server.uri()),
         })
@@ -511,6 +543,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::List {
+            public: false,
             all: false,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -544,6 +577,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::Show {
+            public: false,
             slug: "openai".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -567,6 +601,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::Endpoints {
+            public: false,
             slug: "openai".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -584,6 +619,7 @@ mod table_tests {
             .await;
 
         let result = run(CatalogCommands::Show {
+            public: false,
             slug: "nonexistent".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
@@ -603,6 +639,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::Endpoints {
+            public: false,
             slug: "empty".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -622,6 +659,7 @@ mod table_tests {
             .await;
 
         run(CatalogCommands::List {
+            public: false,
             all: false,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })

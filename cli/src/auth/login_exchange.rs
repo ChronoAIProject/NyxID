@@ -127,7 +127,7 @@ enum Delivery {
     },
 }
 
-pub(super) fn normalized_destination(raw: &str) -> Result<String> {
+pub(crate) fn normalized_destination(raw: &str) -> Result<String> {
     let url = url::Url::parse(raw).map_err(|_| LoginError::DestinationMismatch)?;
     if !matches!(url.scheme(), "https" | "http")
         || url.host_str().is_none()
@@ -227,6 +227,8 @@ fn schedule_next_poll(
 }
 
 pub async fn run(args: LoginArgs) -> Result<()> {
+    args.hints.validate_mode(&args)?;
+    let hints = args.hints.query_pairs(args.agent_key)?;
     if let Some(profile) = args.profile.as_deref() {
         super::validate_profile_name(profile)?;
     }
@@ -276,7 +278,11 @@ pub async fn run(args: LoginArgs) -> Result<()> {
         .json(&serde_json::json!({"client_label": super::client_label(), "client_user_agent": device_login_user_agent(), "requested_profile": args.profile.as_deref().unwrap_or("default")}))
         .send().await.map_err(|_| LoginError::Unavailable)?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
-        if flow == "device/v2" && !args.no_wait && !matches!(args.output, OutputFormat::Json) {
+        if flow == "device/v2"
+            && hints.is_empty()
+            && !args.no_wait
+            && !matches!(args.output, OutputFormat::Json)
+        {
             return super::run_browser_login(&base_url, args.profile.as_deref())
                 .await
                 .map_err(Into::into);
@@ -297,6 +303,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
     }
     verification.set_query(None);
     verification.set_fragment(None);
+    let complete = super::login_hints::approval_url(&verification, &challenge.user_code, &hints)?;
     let id = uuid::Uuid::new_v4().to_string();
     let pending = PendingLogin {
         version: 1,
@@ -316,13 +323,13 @@ pub async fn run(args: LoginArgs) -> Result<()> {
         println!(
             "{}",
             serde_json::json!({"request_id": id, "user_code": challenge.user_code,
-            "verification_uri": verification.as_str(), "expires_at": pending.expires_at - Duration::seconds(60),
+            "verification_uri": verification.as_str(), "verification_uri_complete": complete.as_str(), "expires_at": pending.expires_at - Duration::seconds(60),
             "interval": pending.interval, "profile": pending.profile, "auth_kind": "pending"})
         );
     } else {
         eprintln!(
-            "One-time code: {}\nOpen {} and enter the code.\nResume: nyxid login resume {}",
-            challenge.user_code, verification, id
+            "One-time code: {}\nOpen {} to review and approve.\nResume: nyxid login resume {}",
+            challenge.user_code, complete, id
         );
     }
     if args.no_wait {
@@ -347,7 +354,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
         } else {
             false
         };
-        if open && crate::browser::open_browser(verification.as_str()).is_err() {
+        if open && crate::browser::open_browser(complete.as_str()).is_err() {
             eprintln!("Could not open a browser. Open the displayed URL on another device.");
         }
     }

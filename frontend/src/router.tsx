@@ -29,6 +29,7 @@ import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
 
@@ -137,8 +138,9 @@ const authLayout = createRoute({
       const returnTo = new URLSearchParams(window.location.search).get(
         "return_to",
       );
-      if (returnTo && returnTo.startsWith(window.location.origin + "/")) {
-        window.location.assign(returnTo);
+      const trusted = resolveTrustedAuthReturnTo(returnTo ?? undefined);
+      if (trusted) {
+        window.location.assign(trusted);
         return;
       }
       throw redirect({ to: "/dashboard" });
@@ -910,11 +912,58 @@ const adminAuditLogRoute = createRoute({
   validateSearch: normalizeAdminAuditLogSearch,
 });
 
+const adminAnalyticsRoute = createRoute({
+  path: "analytics",
+  getParentRoute: () => adminLayout,
+  beforeLoad: ({ search }) => {
+    throw redirect({
+      to: "/admin/usage",
+      search: { ...search, tab: "dashboard" },
+      replace: true,
+    });
+  },
+  validateSearch: (search: Record<string, unknown>) => usagePageSearch(search),
+});
+
+function usagePageSearch(search: Record<string, unknown>): Partial<Pick<
+  ReturnType<typeof normalizeAdminUsageSearch>,
+  "sort" | "metric" | "page" | "per_page"
+>> & {
+  tab?: "dashboard" | "list";
+  sample?: "overview" | "operations" | "explorer";
+  mock?: string;
+} {
+  const { sort, metric, page, per_page } = normalizeAdminUsageSearch(search);
+  return {
+    sort,
+    metric,
+    page,
+    per_page,
+    tab: search.tab === "list" ? ("list" as const) : ("dashboard" as const),
+    sample:
+      import.meta.env.DEV &&
+      import.meta.env.MODE === "test" &&
+      ["overview", "operations", "explorer"].includes(String(search.sample))
+        ? (search.sample as "overview" | "operations" | "explorer")
+        : undefined,
+    mock: import.meta.env.DEV && search.mock ? String(search.mock) : undefined,
+  };
+}
 const adminUsageRoute = createRoute({
   path: "usage",
   getParentRoute: () => adminLayout,
   component: AdminUsagePage,
-  validateSearch: normalizeAdminUsageSearch,
+  validateSearch: usagePageSearch,
+  beforeLoad: ({ search, location }) => {
+    const params = new URLSearchParams(location.searchStr);
+    if (["period", "from", "to", "user", "service"].some((key) => params.has(key))) {
+      throw redirect({
+        to: "/admin/usage",
+        search: usagePageSearch(search),
+        replace: true,
+      });
+    }
+  },
 });
 
 const adminIntegrityRoute = createRoute({
@@ -1044,6 +1093,7 @@ const routeTree = rootRoute.addChildren([
       adminNodesRoute,
       adminAuditLogRoute,
       adminUsageRoute,
+      adminAnalyticsRoute,
       adminIntegrityRoute,
       adminCreditsRoute,
       adminInviteCodesRoute,

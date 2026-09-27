@@ -62,6 +62,7 @@ export async function mockDashboard(page: Page) {
     else if (path === "/channel-platforms") body = { platforms: channelPlatforms };
     else if (path === "/channel-bots") body = { bots: [], total: 0 };
     else if (path === "/channel-bots/managed-whatsapp") body = managedBot;
+    else if (path.endsWith("/activities")) body = { activities: [], total: 0, routes: [], retention_days: 30, page: 1, per_page: 20 };
     else if (path.includes("conversations"))
       body = { conversations: [], total: 0 };
     else if (path === "/orgs") body = { organizations: [], orgs: [] };

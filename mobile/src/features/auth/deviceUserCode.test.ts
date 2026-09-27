@@ -5,7 +5,6 @@ import {
   extractAuthDeviceUserCodeFromQr,
   normalizeAuthDeviceUserCode,
   formatAuthDeviceUserCode,
-  supportsRestrictedDeviceLogin,
   type AuthDeviceQrTrustPolicy,
 } from "./deviceUserCode";
 
@@ -21,13 +20,10 @@ const developmentTrust: AuthDeviceQrTrustPolicy = {
   allowHttp: true,
 };
 
-test("v2 QR and manual codes preserve protocol and restricted grant eligibility", () => {
-  const code = extractAuthDeviceUserCodeFromQr("https://app.nyxid.test/login/device?user_code=2-ABCD-EFGH", productionTrust);
-  assert.equal(code, "2ABCDEFGH");
-  assert.equal(formatAuthDeviceUserCode(code!), "2-ABCD-EFGH");
-  assert.equal(supportsRestrictedDeviceLogin(code!), true);
-  assert.equal(supportsRestrictedDeviceLogin("ABCD-EFGH"), false);
-  assert.equal(supportsRestrictedDeviceLogin("3-ABCD-EFGH"), false);
+test("eight-character QR codes retain the installed public format", () => {
+  const code = extractAuthDeviceUserCodeFromQr("https://app.nyxid.test/login/device?user_code=ABCD-EFGH", productionTrust);
+  assert.equal(code, "ABCDEFGH");
+  assert.equal(formatAuthDeviceUserCode(code!), "ABCD-EFGH");
 });
 
 test("extracts a code from the trusted HTTPS device-login URL", () => {

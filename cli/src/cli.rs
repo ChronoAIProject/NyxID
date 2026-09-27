@@ -634,6 +634,8 @@ pub struct LoginArgs {
     /// Redeem a one-time code created in the web console or mobile app; omit its value for a hidden prompt
     #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["password", "device", "agent_key"])]
     pub code: Option<String>,
+    #[command(flatten)]
+    pub hints: crate::auth::login_hints::LoginHintArgs,
     #[command(subcommand)]
     pub command: Option<LoginCommands>,
 }
@@ -830,6 +832,9 @@ pub enum CatalogCommands {
         /// Include all active services (including system services without auth)
         #[arg(long)]
         all: bool,
+        /// Discover catalog metadata without sending credentials or starting login
+        #[arg(long)]
+        public: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -837,6 +842,9 @@ pub enum CatalogCommands {
     Show {
         /// Service slug (e.g., llm-openai)
         slug: String,
+        /// Discover catalog metadata without sending credentials or starting login
+        #[arg(long)]
+        public: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -844,6 +852,9 @@ pub enum CatalogCommands {
     Endpoints {
         /// Service slug (e.g., llm-openai)
         slug: String,
+        /// Discover catalog metadata without sending credentials or starting login
+        #[arg(long)]
+        public: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -4170,6 +4181,11 @@ pub enum OpenClawCommands {
 
 #[derive(Subcommand)]
 pub enum McpCommands {
+    /// Discover services and operations visible to the current credential, including input schemas
+    Discover {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Generate MCP configuration for AI tools
     Config {
         /// Target tool: cursor, claude-code, vscode, generic
@@ -4919,8 +4935,8 @@ pub enum ChannelBotCommands {
     Update {
         /// Bot ID
         id: String,
-        /// X events to receive: dm, mentions, replies (replaces the selection)
-        #[arg(long, value_delimiter = ',', num_args = 1.., value_parser = ["dm", "mentions", "replies"])]
+        /// X events to receive: dm, chat, mentions, replies, posts (replaces the selection)
+        #[arg(long, value_delimiter = ',', num_args = 1.., value_parser = ["dm", "chat", "mentions", "replies", "posts"])]
         x_events: Vec<String>,
         /// New label
         #[arg(long)]

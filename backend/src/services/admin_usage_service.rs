@@ -13,6 +13,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::COLLECTION_NAME;
 
+pub mod analytics;
+
 const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 const TOKEN_FIELDS: &[&str] = &[
     "prompt_tokens",
@@ -44,6 +46,10 @@ pub struct AdminUsageQuery {
     pub to: Option<String>,
     pub user: Option<String>,
     pub service: Option<String>,
+    /// Comma-separated service, acting-user, and billing-account filters.
+    pub services: Option<String>,
+    pub actors: Option<String>,
+    pub owners: Option<String>,
     /// Ranking quantity unit; defaults to tokens. Never adds unlike units.
     pub metric: Option<String>,
     /// quantity, requests, cost, total_tokens, prompt_tokens, completion_tokens,
@@ -153,6 +159,8 @@ pub struct AdminUsageResponse {
 }
 
 pub struct UsageParams {
+    pub analytics: Option<analytics::AnalyticsOptions>,
+    pub selection: analytics::UsageSelection,
     pub window: UsageWindow,
     pub user: Option<String>,
     pub service: Option<String>,
@@ -244,6 +252,12 @@ impl AdminUsageQuery {
             .and_then(|offset| i64::try_from(offset).ok())
             .ok_or_else(|| invalid("page is too large"))?;
         Ok(UsageParams {
+            analytics: None,
+            selection: analytics::UsageSelection {
+                services: analytics::filter_values(self.services, false)?,
+                actors: analytics::filter_values(self.actors, true)?,
+                owners: analytics::filter_values(self.owners, true)?,
+            },
             window,
             user,
             service,
@@ -267,8 +281,17 @@ fn meter_filter(params: &UsageParams, include_service: bool) -> Document {
     if let Some(user) = &params.user {
         clauses.push(doc! { "$or": [{ "actor_user_id": user }, { "billing_owner_id": user }] });
     }
+    params
+        .selection
+        .filter(&mut filter, "actor_user_id", "billing_owner_id");
     if include_service && let Some(service) = &params.service {
         clauses.push(doc! { "$or": [{ "service_slug": service }, { "service_id": service }] });
+    }
+    if include_service && !params.selection.services.is_empty() {
+        clauses.push(doc! { "$or": [
+            { "service_slug": { "$in": &params.selection.services } },
+            { "service_id": { "$in": &params.selection.services } },
+        ] });
     }
     if !clauses.is_empty() {
         filter.insert("$and", clauses);
@@ -743,6 +766,7 @@ fn source_filter(
     if let Some(user) = &params.user {
         filter.insert("$or", vec![doc! { "actor": user }, doc! { "owner": user }]);
     }
+    params.selection.filter(&mut filter, "actor", "owner");
     filter
 }
 
@@ -775,6 +799,12 @@ fn fast_pipeline(
         "tail_rows",
         doc! { "$sum": { "$cond": [{ "$eq": ["$rollup_pending", false] }, 0_i64, 1_i64] } },
     );
+    if let Some(options) = &params.analytics {
+        raw_group
+            .get_document_mut("_id")
+            .expect("group key")
+            .insert("bucket", options.bucket("$created_at"));
+    }
     // BSON object key order is significant to grouping. Rebuild one canonical
     // key for both raw groups and unfolded summaries before legacy rounding.
     let canonical_key: Document = raw_group
@@ -789,6 +819,9 @@ fn fast_pipeline(
     }
     let mut initial_group = regroup.clone();
     initial_group.insert("_id", "$single_display_key");
+    if let Some(options) = &params.analytics {
+        initial_group.insert("_id", doc! { "$mergeObjects": ["$single_display_key", { "bucket": options.bucket(doc! { "$ifNull": ["$hour", "$day"] }) }] });
+    }
     initial_group.remove("rows_folded");
     initial_group.insert("tail_rows", doc! { "$sum": 0_i64 });
     let mut partition_group = regroup.clone();
@@ -815,6 +848,14 @@ fn fast_pipeline(
         })
         .collect();
     let mut unfold = doc! { "_id": { "$mergeObjects": [key, { "$ifNull": ["$part.key", {}] }] }, "tail_rows": 0_i64 };
+    if let Some(options) = &params.analytics {
+        unfold
+            .get_document_mut("_id")
+            .expect("unfold key")
+            .get_array_mut("$mergeObjects")
+            .expect("merge objects")
+            .push(doc! { "bucket": options.bucket(doc! { "$ifNull": ["$hour", "$day"] }) }.into());
+    }
     for field in MEASURES {
         unfold.insert(*field, format!("$part.{field}"));
     }
@@ -855,7 +896,13 @@ fn fast_pipeline(
     let last_day = day(params.window.to).min(day(end));
     let hourly = crate::models::usage_rollup_hourly::COLLECTION_NAME;
     let daily = crate::models::usage_rollup_daily::COLLECTION_NAME;
-    let ranges = if daily_ready && first_day < last_day {
+    let ranges = if daily_ready
+        && first_day < last_day
+        && params
+            .analytics
+            .as_ref()
+            .is_none_or(|options| options.granularity != "hour")
+    {
         vec![
             (hourly, "hour", start, first_day),
             (daily, "day", first_day, last_day),
@@ -902,7 +949,17 @@ fn fast_pipeline(
     price[0].get_document_mut("$set").expect("price set").insert("unknown", doc! { "$and": ["$_id.billable", { "$gt": ["$legacy_quantity", 0] }, { "$eq": [{ "$ifNull": ["$rate", null] }, null] }] });
     pipeline.extend(price);
     let selected = || -> Vec<Document> {
-        params.service.as_ref().map(|s| vec![doc! { "$match": { "$or": [{ "_id.service_id": s }, { "_id.service_slug": s }] } }]).unwrap_or_default()
+        let mut stages = Vec::new();
+        if let Some(service) = &params.service {
+            stages.push(doc! { "$match": { "$or": [{ "_id.service_id": service }, { "_id.service_slug": service }] } });
+        }
+        if !params.selection.services.is_empty() {
+            stages.push(doc! { "$match": { "$or": [
+                { "_id.service_id": { "$in": &params.selection.services } },
+                { "_id.service_slug": { "$in": &params.selection.services } },
+            ] } });
+        }
+        stages
     };
     let reduced = |dimensions: &[&str]| {
         let mut stages = selected();
@@ -914,6 +971,10 @@ fn fast_pipeline(
         "cost" => "gross_cost_micros".into(),
         value => value.into(),
     };
+    if let Some(options) = &params.analytics {
+        pipeline.push(doc! { "$facet": options.facets(&reduced) });
+        return pipeline;
+    }
     let mut ranking = reduced(&["actor", "owner", "service_id", "service_slug"]);
     ranking.extend([doc! { "$sort": { sort: -1, "_id.actor": 1, "_id.owner": 1, "_id.service_slug": 1, "_id.service_id": 1 } }, doc! { "$skip": params.offset }, doc! { "$limit": params.per_page as i64 }]);
     let mut total = reduced(&["actor", "owner", "service_id", "service_slug"]);

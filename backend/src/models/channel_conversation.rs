@@ -7,6 +7,8 @@ pub const COLLECTION_NAME: &str = "channel_conversations";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelConversation {
+    #[serde(default)]
+    pub activity_callback: Option<super::channel_activity::ActivityCallback>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -51,6 +53,7 @@ mod tests {
 
     fn make_conversation() -> ChannelConversation {
         ChannelConversation {
+            activity_callback: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),

@@ -4,9 +4,13 @@ import {
   adminUsageResponseSchema,
   usageRangeError,
 } from "@/schemas/admin-usage";
+import type { AnalyticsFilters } from "@/schemas/usage-analytics";
 import type { AdminUsageSearch } from "@/types/admin";
 
-export function adminUsagePath(params: AdminUsageSearch): string {
+export type AdminUsageParams = AdminUsageSearch &
+  Partial<Pick<AnalyticsFilters, "services" | "actors" | "owners">>;
+
+export function adminUsagePath(params: AdminUsageParams): string {
   const query = new URLSearchParams();
   if (params.period === "custom") {
     if (params.from) query.set("from", params.from);
@@ -16,13 +20,17 @@ export function adminUsagePath(params: AdminUsageSearch): string {
   }
   if (params.user) query.set("user", params.user);
   if (params.service) query.set("service", params.service);
+  for (const key of ["services", "actors", "owners"] as const) {
+    if (params[key]?.length)
+      query.set(key, [...new Set(params[key])].sort().join(","));
+  }
   query.set("sort", params.sort);
   query.set("metric", params.metric);
   query.set("page", String(params.page));
   query.set("per_page", String(params.per_page));
   return `/admin/usage?${query.toString()}`;
 }
-export function useAdminUsage(params: AdminUsageSearch, enabled = true) {
+export function useAdminUsage(params: AdminUsageParams, enabled = true) {
   return useQuery({
     queryKey: ["admin", "usage", params],
     queryFn: async () =>

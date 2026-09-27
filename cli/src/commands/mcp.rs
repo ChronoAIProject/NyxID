@@ -5,6 +5,39 @@ use crate::cli::{McpCommands, OutputFormat};
 
 pub async fn run(command: McpCommands) -> Result<()> {
     match command {
+        McpCommands::Discover { auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let catalog: serde_json::Value = api.get("/mcp/config").await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&catalog)?),
+                OutputFormat::Table => {
+                    let mut table = comfy_table::Table::new();
+                    table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
+                    table.set_header(["Service", "Slug", "Operations", "Generic proxy"]);
+                    if let Some(services) = catalog["services"].as_array() {
+                        for service in services {
+                            table.add_row([
+                                service["service_name"].as_str().unwrap_or("-").to_owned(),
+                                service["service_slug"].as_str().unwrap_or("-").to_owned(),
+                                service["endpoints"]
+                                    .as_array()
+                                    .map_or(0, Vec::len)
+                                    .to_string(),
+                                service["is_generic_proxy"]
+                                    .as_bool()
+                                    .unwrap_or(false)
+                                    .to_string(),
+                            ]);
+                        }
+                    }
+                    println!("{table}");
+                    eprintln!(
+                        "Use --output json for operation IDs, schemas, recommended skills and discovery diagnostics. Execution still checks live permissions and provider availability."
+                    );
+                }
+            }
+            Ok(())
+        }
         McpCommands::Config { tool, auth } => {
             let api = ApiClient::from_auth(&auth)?;
             let base = api.base_url_root();

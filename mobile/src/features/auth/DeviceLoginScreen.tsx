@@ -827,7 +827,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
 
               {isAuthenticated ? (
                 <View style={{ gap: spacing.md }}>
-                  {normalizeAuthDeviceUserCode(confirmedCode ?? userCode)?.length === 9 && <PrimaryButton label="Restricted Agent Key" kind="ghost"
+                  {preview.supports_grant_choice && <PrimaryButton label="Restricted Agent Key" kind="ghost"
                     disabled={isPending || isExpired}
                     onPress={() => navigation.navigate("AgentKeyLogin", {
                       user_code: confirmedCode ?? userCode, flow: "device",

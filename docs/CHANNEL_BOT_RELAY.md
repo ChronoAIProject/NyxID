@@ -20,6 +20,8 @@ These callbacks deliberately omit `X-NyxID-User-Token` for every route: a public
 
 ## X accounts: DMs, mentions and replies
 
+X also supports separately selected encrypted chat and own-post metadata notifications. See [Typed channel activity](CHANNEL_ACTIVITY.md) for activity counts, event selection, receiver capability declarations and the callback compatibility contract.
+
 X is managed-only: users connect their own X account with OAuth and provide no developer credentials. NyxID uses the account's user-context token to subscribe to selected unencrypted DMs, explicit @mentions and direct replies to the account's posts through the X Activity API and deliver the routed agent's asynchronous reply. Existing polling connections can switch through Verify or Reconnect after an admin configures the webhook credentials. With `BILLING_ENABLED=false`, connections without those credentials retain the existing polling path. Billing-enabled X channels require webhooks and never fall back to paid DM polling. App-only bearer tokens cannot access private DMs. Although X also supports legacy OAuth 1.0a user-context credentials, a BYO path would require users to supply and maintain developer credentials, so this channel deliberately does not expose one.
 
 ### X Activity webhook delivery

@@ -7,6 +7,127 @@ use wiremock::{
     matchers::{body_json, header, method, path, query_param},
 };
 
+#[tokio::test]
+async fn encrypted_activity_is_account_selected_and_strips_crypto_material() {
+    let adapter = XAdapter::default();
+    let mut bot: ChannelBot = bson::from_document(bson::doc! {
+        "_id": "bot", "user_id": "owner", "platform": "x", "platform_bot_id": "10", "platform_bot_username": "test",
+        "label": "test", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
+        "webhook_secret_hash": "", "webhook_registered": true, "is_active": true, "status": "active",
+        "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(), "x_events": ["chat"],
+    }).unwrap();
+    let original = json!({"data": {"event_type": "chat.received", "filter": {"user_id": "10"}, "tag": "nyxid:bot", "payload": {
+        "id": "e4f4d3fc-8bbf-4928-92eb-e5058d6bb6f6", "sender_id": "20", "conversation_id": "20:10", "created_at_msec": "1784841183370",
+        "conversation_token": "secret", "encoded_event": "ciphertext", "message_event_signature": {"signature": "crypto"}
+    }}});
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let sign = |bytes: &[u8]| {
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"api-secret").unwrap();
+        mac.update(bytes);
+        HeaderMap::from_iter([(
+            "x-twitter-webhooks-signature".parse().unwrap(),
+            format!("sha256={}", STANDARD.encode(mac.finalize().into_bytes()))
+                .parse()
+                .unwrap(),
+        )])
+    };
+    adapter
+        .verify_webhook(&bot, Some(&secrets()), &sign(&bytes), &bytes)
+        .await
+        .unwrap();
+    let parsed = adapter.parse_inbound(&bytes).await.unwrap();
+    assert_eq!(parsed.len(), 1);
+    let message = &parsed[0];
+    assert_eq!(message.conversation_id, "chat:20:10");
+    assert!(message.text.is_none() && message.attachments.is_empty());
+    let raw = message.raw_data.to_string();
+    for field in ["secret", "ciphertext", "crypto", "conversation_token"] {
+        assert!(!raw.contains(field));
+    }
+    let metadata = adapter.activity_metadata(message).unwrap();
+    assert_eq!(metadata.kind, "encrypted_chat");
+    assert_eq!(metadata.content_availability, "encrypted");
+    assert!(!metadata.reply_supported);
+    assert_eq!(
+        metadata.occurred_at.unwrap().timestamp_millis(),
+        1784841183370
+    );
+    assert!(
+        adapter
+            .verify_webhook(&bot, Some(&secrets()), &HeaderMap::new(), &bytes)
+            .await
+            .is_err()
+    );
+    for (key, value) in [
+        ("tag", json!("nyxid:other")),
+        ("filter", json!({"user_id":"999"})),
+    ] {
+        let mut altered = original.clone();
+        altered["data"][key] = value;
+        let altered = serde_json::to_vec(&altered).unwrap();
+        assert!(
+            adapter
+                .verify_webhook(&bot, Some(&secrets()), &sign(&altered), &altered)
+                .await
+                .is_err()
+        );
+    }
+    bot.x_events = Some(vec![XChannelEvent::Dm]);
+    assert!(
+        adapter
+            .verify_webhook(&bot, Some(&secrets()), &sign(&bytes), &bytes)
+            .await
+            .is_err()
+    );
+    for (key, value) in [
+        ("id", "123"),
+        ("id", "../../invalid"),
+        ("sender_id", "abc"),
+        ("conversation_id", "20:99"),
+        ("conversation_id", "https://evil.test"),
+    ] {
+        let mut altered = original.clone();
+        altered["data"]["payload"][key] = json!(value);
+        assert!(
+            adapter
+                .parse_inbound(&serde_json::to_vec(&altered).unwrap())
+                .await
+                .is_err(),
+            "{key}={value}"
+        );
+    }
+    let mut self_sent = original.clone();
+    self_sent["data"]["payload"]["sender_id"] = json!("10");
+    assert!(
+        adapter
+            .parse_inbound(&serde_json::to_vec(&self_sent).unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn own_posts_are_distinct_metadata_notifications_without_reply_authority() {
+    let event = json!({"data": {"event_type": "post.create", "filter": {"user_id": "10"}, "payload": {
+        "id": "400", "author_id": "10", "conversation_id": "300", "text": "own content", "created_at": "2026-09-25T01:00:00Z"
+    }}});
+    let parsed = webhooks::parse(&serde_json::to_vec(&event).unwrap()).unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].conversation_id, "post:300");
+    assert!(parsed[0].text.is_none());
+    let activity = XAdapter::default().activity_metadata(&parsed[0]).unwrap();
+    assert_eq!(activity.kind, "post");
+    assert!(!activity.reply_supported);
+    let mut other = event;
+    other["data"]["payload"]["author_id"] = json!("20");
+    assert!(
+        webhooks::parse(&serde_json::to_vec(&other).unwrap())
+            .unwrap()
+            .is_empty()
+    );
+}
+
 fn secrets() -> PlatformVerifySecrets {
     [
         ("consumer_secret", "api-secret"),
@@ -76,7 +197,7 @@ fn x_activity_normalizes_recipient_bound_messages_and_media() {
             .unwrap()
             .is_empty()
     );
-    payload["data"]["event_type"] = json!("chat.received");
+    payload["data"]["event_type"] = json!("chat.sent");
     assert!(
         webhooks::parse(&serde_json::to_vec(&payload).unwrap())
             .unwrap()
@@ -423,8 +544,20 @@ async fn event_selection_reconciles_subscriptions_without_touching_other_channel
         .and(body_json(json!({"event_type":"post.reply.create", "filter":{"user_id":"10"}, "webhook_id":"100", "tag":"nyxid:channel"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"subscription_id":"203"}})))
         .expect(1).mount(&server).await;
+    for (name, id) in [("chat.received", "205"), ("post.create", "206")] {
+        Mock::given(method("POST")).and(path("/2/activity/subscriptions"))
+            .and(header("authorization", "Bearer user-token"))
+            .and(body_json(json!({"event_type":name, "filter":{"user_id":"10"}, "webhook_id":"100", "tag":"nyxid:channel"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"subscription_id":id}})))
+            .expect(1).mount(&server).await;
+    }
     let mut bot = bot();
-    bot.x_events = Some(vec![XChannelEvent::Mentions, XChannelEvent::Replies]);
+    bot.x_events = Some(vec![
+        XChannelEvent::Mentions,
+        XChannelEvent::Replies,
+        XChannelEvent::Chat,
+        XChannelEvent::Posts,
+    ]);
     adapter
         .setup_connection_webhook(
             &reqwest::Client::new(),
@@ -440,7 +573,7 @@ async fn event_selection_reconciles_subscriptions_without_touching_other_channel
         .await
         .unwrap();
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 7);
 }
 
 #[tokio::test]

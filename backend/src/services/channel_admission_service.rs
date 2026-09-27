@@ -2,7 +2,9 @@
 
 use super::coordination_service::{EventDedupClaim, EventDedupClaimResult, EventDedupStore};
 use crate::errors::{AppError, AppResult};
-use crate::models::channel_message::{COLLECTION_NAME, ChannelMessage};
+#[cfg(test)]
+use crate::models::channel_message::COLLECTION_NAME;
+use crate::models::channel_message::ChannelMessage;
 use crate::models::coordination::EVENT_DEDUP_COLLECTION_NAME;
 use bson::{Document, doc};
 
@@ -15,7 +17,20 @@ pub(crate) async fn claim(
         "whatsapp" if super::channel_delivery_service::valid_message_id(event) => {
             "whatsapp-inbound"
         }
-        "x" if !event.is_empty()
+        "x" if message
+            .activity
+            .as_ref()
+            .is_some_and(|activity| activity.kind == "encrypted_chat")
+            && event.len() == 36
+            && uuid::Uuid::parse_str(event).is_ok() =>
+        {
+            "x-chat-inbound"
+        }
+        "x" if message
+            .activity
+            .as_ref()
+            .is_none_or(|activity| activity.kind != "encrypted_chat")
+            && !event.is_empty()
             && event.len() <= 32
             && event.bytes().all(|b| b.is_ascii_digit()) =>
         {
@@ -56,13 +71,13 @@ pub(crate) async fn admit(
                             vec![doc! {"$set":{"state":"committed", "updated_at":"$$NOW", "expires_at":{"$dateAdd":{"startDate":"$$NOW", "unit":"day", "amount":30}}}}],
                         ).session(&mut *session).await?;
                     if fenced.matched_count != 1 { return Ok(false); }
-                    let existing = db.collection::<ChannelMessage>(COLLECTION_NAME)
+                    let existing = db.collection::<ChannelMessage>(super::channel_activity_service::collection(message))
                         .find_one(doc! {
                             "channel_bot_id":&message.channel_bot_id, "user_id":&message.user_id,
                             "platform":&message.platform, "direction":"inbound", "platform_message_id":&message.platform_message_id,
                         }).session(&mut *session).await?;
                     if existing.is_some() { return Ok(false); }
-                    db.collection::<ChannelMessage>(COLLECTION_NAME)
+                    db.collection::<ChannelMessage>(super::channel_activity_service::collection(message))
                         .insert_one(&*message).session(&mut *session).await?;
                     Ok(true)
                 })

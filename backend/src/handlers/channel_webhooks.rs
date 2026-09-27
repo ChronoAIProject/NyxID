@@ -1099,6 +1099,7 @@ mod tests {
     ) -> crate::config::AppConfig {
         crate::config::AppConfig {
             port: 3001,
+            auth_device_eight_char_codes: false,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
@@ -1424,6 +1425,7 @@ mod tests {
         };
 
         let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
             id: conversation_id.clone(),
             user_id: user_id.clone(),
             channel_bot_id: Some(bot_id.clone()),

@@ -966,6 +966,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
         .route("/usage", get(handlers::admin_usage::get_usage))
+        .route(
+            "/usage/analytics",
+            get(handlers::admin_usage::get_analytics),
+        )
+        .route(
+            "/usage/workspace",
+            get(handlers::admin_usage::get_workspace).put(handlers::admin_usage::save_workspace),
+        )
         .route("/audit-log/verify", get(handlers::admin::verify_audit_log))
         .route(
             "/billing-ledger/verify",
@@ -1487,6 +1495,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let channel_bot_routes = Router::new()
         .route(
+            "/{id}/activities",
+            get(handlers::channel_activities::bot_activities),
+        )
+        .route(
             "/",
             get(handlers::channel_bots::list_bots).post(handlers::channel_bots::create_bot),
         )
@@ -1499,6 +1511,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/verify", post(handlers::channel_bots::verify_bot));
 
     let channel_conversation_routes = Router::new()
+        .route(
+            "/{id}/activities",
+            get(handlers::channel_activities::route_activities),
+        )
+        .route(
+            "/{id}/activity-callback",
+            get(handlers::channel_activities::callback_support)
+                .put(handlers::channel_activities::enable_callback),
+        )
         .route(
             "/",
             get(handlers::channel_conversations::list_conversations)
@@ -1516,6 +1537,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let channel_relay_routes = Router::new()
+        .route(
+            "/conversations/{id}/activity-capability",
+            put(handlers::channel_activities::declare_callback),
+        )
         .route(
             "/send",
             post(handlers::channel_relay::send_message).layer(DefaultBodyLimit::max(
@@ -1639,7 +1664,20 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let device_onboard_public_routes =
         Router::new().route("/redeem", post(handlers::devices::redeem_onboard_device));
 
+    let login_approval_routes = Router::new()
+        .route("/", post(handlers::login_approval::begin))
+        .route(
+            "/{id}",
+            get(handlers::login_approval::status).delete(handlers::login_approval::cancel),
+        )
+        .route("/{id}/password", post(handlers::login_approval::password))
+        .route("/{id}/mfa", post(handlers::login_approval::mfa))
+        .route("/{id}/inventory", get(handlers::login_approval::inventory))
+        .route("/{id}/approve", post(handlers::login_approval::approve))
+        .route("/{id}/deny", post(handlers::login_approval::deny));
+
     let api_v1_public = Router::new()
+        .nest("/auth/approval", login_approval_routes)
         .route(
             "/auth/agent-key/request",
             post(handlers::auth_agent_key::request),

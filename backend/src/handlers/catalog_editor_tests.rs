@@ -46,6 +46,16 @@ async fn editor(label: &str) -> (Fixture, String, String) {
     assert_eq!(account["purpose"], "catalog_editor");
     assert_eq!(account["platform_protected"], true);
     assert!(account["curation_grant"].is_null());
+    // Preserve coverage of existing role-authorized editors after migration.
+    f.state
+        .db
+        .collection::<Document>(ACCOUNTS)
+        .update_one(
+            doc! {"_id": &f.sa.id},
+            doc! {"$set": {"catalog_scope_authorized": false}},
+        )
+        .await
+        .unwrap();
     let bearer = token(&f, None).await;
     (f, role_id, bearer)
 }
@@ -500,16 +510,15 @@ async fn editor_cannot_mutate_keys_or_read_unrelated_account_routes() {
 #[tokio::test]
 async fn general_account_scope_without_editor_role_stays_unprivileged() {
     let f = fixture("catalog_editor_general_scope", false).await;
-    let (status, account) = request(
-        &f.state,
-        "PUT",
-        &format!("/api/v1/admin/service-accounts/{}", f.sa.id),
-        &f.human_token,
-        Some(json!({"allowed_scopes": SCOPES})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(account["purpose"], "general");
+    f.state
+        .db
+        .collection::<Document>(ACCOUNTS)
+        .update_one(
+            doc! {"_id": &f.sa.id},
+            doc! {"$set": {"allowed_scopes": SCOPES}},
+        )
+        .await
+        .unwrap();
     let bearer = token(&f, None).await;
     assert_eq!(
         request(&f.state, "GET", "/api/v1/keys", &bearer, None)
@@ -635,7 +644,8 @@ async fn editor_proxy_permits_ornn_skill_cru_with_only_sa_credential() {
         matchers::{header, method, path},
     };
 
-    let (f, role_id, bearer) = editor("catalog_editor_ornn_cru").await;
+    let (f, role_id, _) = editor("catalog_editor_ornn_cru").await;
+    let bearer = token(&f, Some("proxy")).await;
     let role_path = format!("/api/v1/admin/roles/{role_id}");
     let (status, role) = request(
         &f.state,
@@ -643,13 +653,24 @@ async fn editor_proxy_permits_ornn_skill_cru_with_only_sa_credential() {
         &role_path,
         &f.human_token,
         Some(json!({"permissions": [
-            READ_PERMISSION, WRITE_PERMISSION,
             "ornn:skill:read", "ornn:skill:create", "ornn:skill:update",
         ]})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{role}");
 
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            &format!("/api/v1/admin/service-accounts/{}", f.sa.id),
+            &f.human_token,
+            Some(json!({"allowed_scopes":"catalog:skills:read catalog:skills:write proxy"}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
     let upstream = MockServer::start().await;
     let mut service = f.service.clone();
     service.slug = "ornn-api".into();
@@ -779,15 +800,15 @@ async fn editor_proxy_permits_ornn_skill_cru_with_only_sa_credential() {
             "{path}"
         );
     }
-    let (status, role) = request(
+    let (status, _) = request(
         &f.state,
         "PUT",
-        &role_path,
+        &format!("/api/v1/admin/service-accounts/{}", f.sa.id),
         &f.human_token,
-        Some(json!({"permissions": ["ornn:skill:read", "ornn:skill:create", "ornn:skill:update"]})),
+        Some(json!({"allowed_scopes":"catalog:skills:read"})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{role}");
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
         request(
             &f.state,
@@ -899,5 +920,309 @@ async fn activation_precondition_rejects_stale_access_and_accepts_unchanged_assi
         .await
         .0,
         StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn admin_scope_save_grants_catalog_reads_without_roles_and_revokes_live() {
+    let f = fixture("scope_editor_save", false).await;
+    let accounts = f.state.db.collection::<Document>(ACCOUNTS);
+    accounts
+        .update_one(
+            doc! {"_id": &f.sa.id},
+            doc! {"$set": {"allowed_scopes":"catalog:skills:read", "role_ids": []}},
+        )
+        .await
+        .unwrap();
+    let path = format!("/api/v1/admin/service-accounts/{}", f.sa.id);
+    let old_token = token(&f, None).await;
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &old_token, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, saved) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"allowed_scopes":"catalog:skills:read"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["catalog_scope_authorized"], true);
+    assert_eq!(saved["purpose"], "catalog_editor");
+    assert!(saved["role_ids"].as_array().unwrap().is_empty());
+    let (status, list) = request(&f.state, "GET", "/api/v1/keys", &old_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = list["keys"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            &format!("/api/v1/keys/{id}"),
+            &old_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(request(&f.state,"PUT",&format!("/api/v1/catalog-curation/services/{id}/skills"),&old_token,Some(json!({"recommended_skills":["test"],"base_revision":0,"request_id":Uuid::new_v4().to_string()}))).await.0,StatusCode::FORBIDDEN);
+    let private_id = add_personal_connection(&f).await;
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            &format!("/api/v1/keys/{private_id}"),
+            &old_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, saved) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"allowed_scopes":"catalog:skills:write"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["catalog_scope_authorized"], true);
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &old_token, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let writer = token(&f, None).await;
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &writer, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status,_) = request(&f.state,"PUT",&format!("/api/v1/catalog-curation/services/{id}/skills"),&writer,Some(json!({"recommended_skills":["test"],"base_revision":0,"request_id":Uuid::new_v4().to_string()}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            &path,
+            &f.human_token,
+            Some(json!({"allowed_scopes":"proxy"}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(request(&f.state,"PUT",&format!("/api/v1/catalog-curation/services/{id}/skills"),&writer,Some(json!({"recommended_skills":[],"base_revision":1,"request_id":Uuid::new_v4().to_string()}))).await.0,StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn admin_scope_create_without_roles_and_legacy_role_save_do_not_cross_modes() {
+    let f = fixture("scope_editor_create", false).await;
+    let (status, created) = request(
+        &f.state,
+        "POST",
+        "/api/v1/admin/service-accounts",
+        &f.human_token,
+        Some(json!({"name":"Scope editor","allowed_scopes":"catalog:skills:read","role_ids":[]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = created["id"].as_str().unwrap();
+    let (status, stored) = request(
+        &f.state,
+        "GET",
+        &format!("/api/v1/admin/service-accounts/{id}"),
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["catalog_scope_authorized"], true);
+    let created_account =
+        crate::services::service_account_service::get_service_account(&f.state.db, id)
+            .await
+            .unwrap();
+    let created_fixture = Fixture {
+        state: f.state.clone(),
+        sa: created_account,
+        secret: created["client_secret"].as_str().unwrap().to_owned(),
+        service: f.service.clone(),
+        owner: f.owner.clone(),
+        human_token: f.human_token.clone(),
+    };
+    let bearer = token(&created_fixture, None).await;
+    let (status, list) = request(&f.state, "GET", "/api/v1/keys", &bearer, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed_id = list["keys"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            &format!("/api/v1/keys/{listed_id}"),
+            &bearer,
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (legacy, role, _) = editor("scope_editor_legacy").await;
+    let path = format!("/api/v1/admin/service-accounts/{}", legacy.sa.id);
+    let (status, saved) = request(
+        &legacy.state,
+        "PUT",
+        &path,
+        &legacy.human_token,
+        Some(json!({"role_ids":[role]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["catalog_scope_authorized"], false);
+    let (status, saved) = request(
+        &legacy.state,
+        "PUT",
+        &path,
+        &legacy.human_token,
+        Some(json!({"allowed_scopes":SCOPES})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["catalog_scope_authorized"], true);
+}
+
+#[tokio::test]
+async fn org_admin_and_machine_cannot_issue_scope_authority() {
+    use crate::models::{
+        org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgRole},
+        user::{COLLECTION_NAME as USERS, UserType},
+    };
+    let f = fixture("scope_editor_unprivileged", false).await;
+    let org = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .insert_one(bson::to_document(&test_utils::test_user(&org, UserType::Org)).unwrap())
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(MEMBERSHIPS)
+        .insert_one(
+            bson::to_document(&test_utils::test_membership(
+                &org,
+                &f.owner,
+                OrgRole::Admin,
+                None,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(ACCOUNTS)
+        .update_one(doc! {"_id":&f.sa.id}, doc! {"$set":{"owner_user_id":&org}})
+        .await
+        .unwrap();
+    let machine = token(&f, None).await;
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id":&f.owner},
+            doc! {"$set":{"is_admin":false,"role_ids":[]}},
+        )
+        .await
+        .unwrap();
+    let path = format!("/api/v1/admin/service-accounts/{}", f.sa.id);
+    let (status, saved) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"allowed_scopes":"catalog:skills:read"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["catalog_scope_authorized"], false);
+    assert_eq!(saved["purpose"], "general");
+    let bearer = token(&f, None).await;
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &bearer, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            &path,
+            &machine,
+            Some(json!({"allowed_scopes":"catalog:skills:read"}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status,saved)=request(&f.state,"POST","/api/v1/admin/service-accounts",&f.human_token,Some(json!({"name":"Org scopes", "target_org_id":&org,"allowed_scopes":"catalog:skills:read"}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, stored) = request(
+        &f.state,
+        "GET",
+        &format!(
+            "/api/v1/admin/service-accounts/{}",
+            saved["id"].as_str().unwrap()
+        ),
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["catalog_scope_authorized"], false);
+    let operator = crate::services::role_service::get_platform_role_ids(&f.state.db)
+        .await
+        .unwrap()
+        .operator;
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(doc! {"_id":&f.owner}, doc! {"$set":{"role_ids":[operator]}})
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(ACCOUNTS)
+        .update_one(
+            doc! {"_id":&f.sa.id},
+            doc! {"$set":{"owner_user_id":&f.owner}},
+        )
+        .await
+        .unwrap();
+    let (status, saved) = request(
+        &f.state,
+        "PUT",
+        &path,
+        &f.human_token,
+        Some(json!({"allowed_scopes":"catalog:skills:read"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["catalog_scope_authorized"], false);
+    assert_eq!(saved["purpose"], "general");
+    let bearer = token(&f, None).await;
+    assert_eq!(
+        request(&f.state, "GET", "/api/v1/keys", &bearer, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
     );
 }

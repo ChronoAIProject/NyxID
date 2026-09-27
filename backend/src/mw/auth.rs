@@ -365,11 +365,13 @@ async fn ensure_catalog_editor_route(
     if *method == Method::GET
         && crate::services::service_account_key_read_service::is_key_metadata_path(path)
     {
-        curation_grant_service::require_scope(
-            sa,
-            scope,
-            crate::services::service_account_key_read_service::READ_SCOPE,
-        )?;
+        if !sa.catalog_scope_authorized {
+            curation_grant_service::require_scope(
+                sa,
+                scope,
+                crate::services::service_account_key_read_service::READ_SCOPE,
+            )?;
+        }
         return catalog_editor_service::authorize(
             db,
             sa,

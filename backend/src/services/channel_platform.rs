@@ -371,6 +371,18 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
 pub trait PlatformAdapter: Send + Sync {
+    fn activity_descriptors(
+        &self,
+    ) -> &'static [super::channel_activity_service::ActivityDescriptor] {
+        &[]
+    }
+    fn activity_metadata(
+        &self,
+        _inbound: &InboundMessage,
+    ) -> Option<crate::models::channel_activity::ActivityMetadata> {
+        None
+    }
+
     fn atomic_inbound_admission(&self) -> bool {
         false
     }

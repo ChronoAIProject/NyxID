@@ -112,10 +112,6 @@ export function normalizeAuthDeviceUserCode(raw: string): string | null {
   return normalized;
 }
 
-export function supportsRestrictedDeviceLogin(raw: string): boolean {
-  return normalizeAuthDeviceUserCode(raw)?.length === 9;
-}
-
 export function formatAuthDeviceUserCode(raw: string): string {
   const compact = raw
     .replace(/[- \t]/g, "")

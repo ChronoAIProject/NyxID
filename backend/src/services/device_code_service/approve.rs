@@ -908,6 +908,11 @@ mod tests {
         else {
             return;
         };
+        // Keep the expired row available to assert the service's status update.
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .drop_index("expires_at_1")
+            .await
+            .expect("disable TTL for expiry assertion");
         db.collection::<DeviceCode>(DEVICE_CODES)
             .update_one(
                 doc! { "device_code_hash": hash_token(&response.device_code) },

@@ -39,6 +39,112 @@ pub(super) async fn provider_setup(server: &MockServer, bot: &ChannelBot) {
 }
 
 #[tokio::test]
+async fn x_notification_events_require_webhooks_without_public_reply_scopes() {
+    use crate::models::channel_bot::XChannelEvent;
+
+    for event in [XChannelEvent::Chat, XChannelEvent::Posts] {
+        for configured in [false, true] {
+            let (state, adapter, server, owner, connection) = fixture().await;
+            let mut bot = insert_bot(&state, &owner, &connection).await;
+            bot.x_events = Some(vec![event]);
+            bot.poll_cursor = None;
+            state
+                .db
+                .collection::<ChannelBot>(BOTS)
+                .replace_one(doc! {"_id": &bot.id}, &bot)
+                .await
+                .unwrap();
+            assert!(!super::super::channel_adapters::x::public_events_enabled(
+                &bot
+            ));
+            assert!(super::super::channel_adapters::x::webhook_events_enabled(
+                &bot
+            ));
+            // The fixture grants the DM scopes, without tweet.write.
+            channel_credentials::resolve_bot_token(
+                &state.db,
+                &state.encryption_keys,
+                &adapter,
+                &bot,
+            )
+            .await
+            .unwrap();
+            identity(&server, "10").await;
+            channel_bot_service::reconnect_bot(
+                &state.db,
+                &state.billing,
+                &state.encryption_keys,
+                &state.http_client,
+                &adapter,
+                &bot,
+                &connection,
+            )
+            .await
+            .unwrap();
+            let bot = channel_bot_service::get_bot(&state.db, &bot.id)
+                .await
+                .unwrap();
+            assert!(bot.poll_cursor.is_none());
+            if configured {
+                credentials(&state, &adapter, &owner).await;
+                Mock::given(path("/2/webhooks"))
+                    .respond_with(ResponseTemplate::new(403))
+                    .mount(&server)
+                    .await;
+            }
+            assert!(
+                webhooks::configure(
+                    &state.db,
+                    &state.billing,
+                    &state.encryption_keys,
+                    &state.http_client,
+                    &adapter,
+                    &bot,
+                    "https://nyx.example",
+                )
+                .await
+                .is_err()
+            );
+            let failed = channel_bot_service::get_bot(&state.db, &bot.id)
+                .await
+                .unwrap();
+            assert_eq!(failed.status, "failed");
+            assert_eq!(failed.webhook_registered, configured);
+            channel_poll_service::poll_bot(&state, &adapter, &bot.id, 60)
+                .await
+                .unwrap();
+            // A reconnect can reactivate a row before Verify establishes the webhook.
+            // The polling worker must also reject that transitional state.
+            state
+                .db
+                .collection::<ChannelBot>(BOTS)
+                .update_one(
+                    doc! {"_id": &bot.id},
+                    doc! {"$set": {"status": "active", "webhook_registered": false}},
+                )
+                .await
+                .unwrap();
+            channel_poll_service::poll_bot(&state, &adapter, &bot.id, 60)
+                .await
+                .unwrap();
+            let current = channel_bot_service::get_bot(&state.db, &bot.id)
+                .await
+                .unwrap();
+            assert_eq!(current.status, "failed");
+            assert!(current.poll_cursor.is_none());
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|request| request.url.path() != "/2/dm_events")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn x_webhook_onboarding_avoids_polling_and_failed_setup_can_initialize_fallback() {
     for setup_ok in [true, false] {
         let (mut state, adapter, server, owner, connection) = fixture().await;

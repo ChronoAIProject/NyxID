@@ -42,6 +42,7 @@ fn generate_client_secret() -> String {
 ///
 /// Note: Duplicate names are intentionally allowed. The `client_id` is the
 /// unique identifier; names are for human display only.
+#[cfg(test)]
 pub async fn create_service_account(
     db: &Database,
     name: &str,
@@ -67,6 +68,7 @@ pub async fn create_service_account(
 
 /// Create a service account with a caller-reserved UUID.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn create_service_account_with_id(
     db: &Database,
     id: &str,
@@ -76,6 +78,32 @@ pub async fn create_service_account_with_id(
     role_ids: &[String],
     rate_limit_override: Option<u64>,
     created_by: &str,
+) -> AppResult<(ServiceAccount, String)> {
+    create_service_account_with_authority(
+        db,
+        id,
+        name,
+        description,
+        allowed_scopes,
+        role_ids,
+        rate_limit_override,
+        created_by,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_service_account_with_authority(
+    db: &Database,
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    allowed_scopes: &str,
+    role_ids: &[String],
+    rate_limit_override: Option<u64>,
+    created_by: &str,
+    platform_admin: bool,
 ) -> AppResult<(ServiceAccount, String)> {
     if name.is_empty() || name.len() > 100 {
         return Err(AppError::ValidationError(
@@ -121,7 +149,7 @@ pub async fn create_service_account_with_id(
     }
 
     let catalog_editor =
-        super::catalog_editor_service::role_has_editor_permissions(db, role_ids).await?;
+        platform_admin && super::catalog_editor_service::has_catalog_scopes(allowed_scopes);
     if catalog_editor {
         super::catalog_editor_service::validate_scopes(allowed_scopes)?;
     }
@@ -138,6 +166,7 @@ pub async fn create_service_account_with_id(
         client_id,
         client_secret_hash: secret_hash,
         platform_protected: catalog_editor,
+        catalog_scope_authorized: catalog_editor,
         purpose: if catalog_editor {
             crate::models::service_account::ServiceAccountPurpose::CatalogEditor
         } else {
@@ -233,6 +262,8 @@ pub struct ExpectedAccessState {
     pub purpose: crate::models::service_account::ServiceAccountPurpose,
     pub platform_protected: bool,
     pub is_active: bool,
+    #[serde(default)]
+    pub catalog_scope_authorized: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -250,12 +281,8 @@ pub async fn update_service_account(
 ) -> AppResult<ServiceAccount> {
     // Verify it exists first
     let existing = get_service_account(db, sa_id).await?;
-    let activate_editor = if let Some(roles) = role_ids {
-        platform_admin
-            && super::catalog_editor_service::role_has_editor_permissions(db, roles).await?
-    } else {
-        false
-    };
+    let activate_editor = platform_admin
+        && allowed_scopes.is_some_and(super::catalog_editor_service::has_catalog_scopes);
     if activate_editor
         || existing.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor
     {
@@ -311,15 +338,16 @@ pub async fn update_service_account(
         set_doc.insert("allowed_scopes", s);
     }
 
+    if activate_editor {
+        set_doc.insert("platform_protected", true);
+        set_doc.insert("purpose", "catalog_editor");
+        set_doc.insert("catalog_scope_authorized", true);
+    }
     if let Some(roles) = role_ids {
         if !platform_admin {
             return Err(AppError::Forbidden(
                 "Role assignment requires platform admin".into(),
             ));
-        }
-        if activate_editor {
-            set_doc.insert("platform_protected", true);
-            set_doc.insert("purpose", "catalog_editor");
         }
         if !roles.is_empty() {
             let existing_count = db
@@ -381,6 +409,7 @@ pub async fn update_service_account(
             {"$eq": [{"$ifNull": ["$purpose", "general"]}, bson::to_bson(&expected.purpose).map_err(|e| AppError::Internal(e.to_string()))?]},
             {"$eq": [{"$ifNull": ["$platform_protected", false]}, expected.platform_protected]},
             {"$eq": ["$is_active", expected.is_active]},
+            {"$eq": [{"$ifNull": ["$catalog_scope_authorized", false]}, expected.catalog_scope_authorized]},
         ]});
     }
     let mut update = doc! {"$set": set_doc};

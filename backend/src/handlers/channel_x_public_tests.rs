@@ -13,7 +13,7 @@ use wiremock::{
 
 #[tokio::test]
 async fn x_public_webhook_to_agent_to_bound_reply_is_deduplicated_and_metered() {
-    for billing_enabled in [false, true] {
+    for (billing_enabled, typed) in [(false, false), (true, false), (false, true), (true, true)] {
         let (mut state, adapter, server, owner, connection) = channel_x_tests::fixture().await;
         if billing_enabled {
             channel_x_tests::billing::enable_billing(&mut state, &owner).await;
@@ -53,6 +53,33 @@ async fn x_public_webhook_to_agent_to_bound_reply_is_deduplicated_and_metered() 
         "agent_api_key_id": &agent, "default_agent": true, "is_active": true,
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
     }).await.unwrap();
+        if typed {
+            crate::services::channel_activity_callback_service::declare(
+                &state.db,
+                &conversation_id,
+                &owner,
+                &agent,
+                crate::services::channel_activity_callback_service::Declaration {
+                    version: 1,
+                    kinds: vec!["mention".into(), "reply".into()],
+                },
+                &adapter,
+            )
+            .await
+            .unwrap();
+            let declared = state
+                .db
+                .collection::<ChannelConversation>(CONVERSATIONS)
+                .find_one(doc! {"_id": &conversation_id})
+                .await
+                .unwrap()
+                .unwrap();
+            crate::services::channel_activity_callback_service::set_enabled(
+                &state.db, &declared, true,
+            )
+            .await
+            .unwrap();
+        }
         Mock::given(method("POST"))
             .and(path("/callback"))
             .respond_with(ResponseTemplate::new(202))
@@ -82,17 +109,21 @@ async fn x_public_webhook_to_agent_to_bound_reply_is_deduplicated_and_metered() 
         let mention_headers = sign(&mention);
         let reply_headers = sign(&reply);
         let (a, b) = tokio::join!(
-            crate::handlers::channel_webhooks::dispatch_platform_webhook(
-                &state,
-                "x",
-                &mention_headers,
-                &mention
+            Box::pin(
+                crate::handlers::channel_webhooks::dispatch_platform_webhook(
+                    &state,
+                    "x",
+                    &mention_headers,
+                    &mention
+                )
             ),
-            crate::handlers::channel_webhooks::dispatch_platform_webhook(
-                &state,
-                "x",
-                &reply_headers,
-                &reply
+            Box::pin(
+                crate::handlers::channel_webhooks::dispatch_platform_webhook(
+                    &state,
+                    "x",
+                    &reply_headers,
+                    &reply
+                )
             ),
         );
         a.unwrap();
@@ -115,6 +146,17 @@ async fn x_public_webhook_to_agent_to_bound_reply_is_deduplicated_and_metered() 
         assert!(!callbacks[0].headers.contains_key("x-nyxid-user-token"));
         assert!(callbacks[0].headers.contains_key("x-nyxid-callback-token"));
         let callback: serde_json::Value = callbacks[0].body_json().unwrap();
+        if typed {
+            assert_eq!(callback["activity"]["version"], 1);
+            assert!(matches!(
+                callback["activity"]["kind"].as_str(),
+                Some("mention" | "reply")
+            ));
+            assert_eq!(callback["activity"]["reply_supported"], true);
+            assert_eq!(callback["activity"]["content_availability"], "available");
+        } else {
+            assert!(callback.get("activity").is_none());
+        }
         assert_eq!(callback["content"]["text"], "@support public question");
         assert_eq!(callback["thread_id"], "550");
         assert_eq!(callback["reply_to_platform_message_id"], "550");

@@ -14,6 +14,12 @@ use crate::{
 pub const READ_PERMISSION: &str = "nyxid:catalog:skills:read";
 pub const WRITE_PERMISSION: &str = "nyxid:catalog:skills:write";
 
+pub fn has_catalog_scopes(scopes: &str) -> bool {
+    scopes
+        .split_whitespace()
+        .any(|scope| matches!(scope, "catalog:skills:read" | "catalog:skills:write"))
+}
+
 pub async fn role_has_editor_permissions(db: &Database, role_ids: &[String]) -> AppResult<bool> {
     Ok(db
         .collection::<Document>(ROLES)
@@ -57,6 +63,9 @@ pub async fn authorize(
     required_scope: &str,
 ) -> AppResult<()> {
     let required_permission = permission(sa, token_scope, required_scope)?;
+    if sa.catalog_scope_authorized {
+        return Ok(());
+    }
     let allowed = db
         .collection::<Document>(ROLES)
         .find_one(doc! {
@@ -81,6 +90,9 @@ pub async fn authorize_in_session(
     required_scope: &str,
 ) -> AppResult<()> {
     let required_permission = permission(sa, token_scope, required_scope)?;
+    if sa.catalog_scope_authorized {
+        return Ok(());
+    }
     db.collection::<Document>(ROLES)
         .find_one(doc! {
             "_id": {"$in": &sa.role_ids}, "client_id": null, "permissions": required_permission,
@@ -107,6 +119,9 @@ pub async fn fence_write_in_session(
     session: &mut ClientSession,
     sa: &ServiceAccount,
 ) -> AppResult<()> {
+    if sa.catalog_scope_authorized {
+        return Ok(());
+    }
     let result = db
         .collection::<Document>(ROLES)
         .update_one(

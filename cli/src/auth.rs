@@ -15,6 +15,7 @@ use crate::cli::{AuthArgs, LoginArgs};
 
 pub mod agent_key;
 pub mod login_exchange;
+pub mod login_hints;
 
 /// Default NyxID base URL used when prompting for re-login on a session that
 /// was never associated with a saved base URL. Mirrors the `LoginArgs::base_url`
@@ -940,6 +941,7 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
 // ---- Login ----
 
 pub async fn run_login(args: LoginArgs) -> Result<()> {
+    args.hints.validate_mode(&args)?;
     if args.callback
         && (matches!(args.output, crate::cli::OutputFormat::Json) || args.command.is_some())
     {
@@ -950,6 +952,7 @@ pub async fn run_login(args: LoginArgs) -> Result<()> {
     }
     if !args.password
         && (args.no_wait
+            || !args.hints.is_empty()
             || args.agent_key
             || args.code.is_some()
             || args.command.is_some()

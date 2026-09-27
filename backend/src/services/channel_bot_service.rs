@@ -737,7 +737,7 @@ async fn reconnect_bot_inner(
     let (cursor, backoff, last_polled_at) = if bot.webhook_registered
         || (bot.platform == "x"
             && (billing.billing_enabled()
-                || super::channel_adapters::x::public_events_enabled(bot)))
+                || super::channel_adapters::x::webhook_events_enabled(bot)))
     {
         (
             bot.poll_cursor.clone(),

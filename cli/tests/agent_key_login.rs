@@ -113,7 +113,16 @@ async fn full_login_stores_only_restricted_credential_and_safe_metadata() {
         "Services: 1 explicit + all auto-connected platform services (allow all: false)"
     ));
     assert!(text.contains("ABCD-EFGH"));
-    assert!(!text.contains("user_code="));
+    let link = text
+        .split_whitespace()
+        .find(|value| value.starts_with(&server.uri()))
+        .expect("approval link is displayed");
+    let link = url::Url::parse(link).unwrap();
+    assert_eq!(link.path(), "/login/agent-key");
+    assert_eq!(
+        link.query_pairs().collect::<Vec<_>>(),
+        vec![("user_code".into(), "ABCD-EFGH".into())]
+    );
     assert!(!text.contains(SECRET));
     assert!(!text.contains("nyx_akl_requester-only"));
     assert_eq!(std::fs::read_to_string(dir.join("token")).unwrap(), SECRET);

@@ -3,6 +3,7 @@ import {
   describeChanges,
   hasFieldConflicts,
   normalizedSet,
+  sameValue,
 } from "@/lib/form-changes";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
@@ -22,10 +23,13 @@ import {
 } from "@/schemas/service-accounts";
 import { formatDate, copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
-import { useRoles } from "@/hooks/use-rbac";
 import { useAuthStore } from "@/stores/auth-store";
 import { SaConnectedServices } from "@/components/dashboard/sa-connected-services";
-import type { RotateSecretResponse } from "@/types/service-accounts";
+import type {
+  RotateSecretResponse,
+  ServiceAccount,
+  UpdateServiceAccountRequest,
+} from "@/types/service-accounts";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
@@ -63,7 +67,28 @@ import {
 import { toast } from "sonner";
 import { CurationGrantSection } from "./curation-grant-section";
 import { KeyReadGrantSection } from "./key-read-grant-section";
-import { CatalogAccessSection } from "./catalog-access-section";
+
+type AccessState = NonNullable<UpdateServiceAccountRequest["expected_access"]>;
+
+function accessState(account: ServiceAccount): AccessState {
+  return {
+    role_ids: [...account.role_ids],
+    allowed_scopes: account.allowed_scopes,
+    purpose: account.purpose ?? "general",
+    platform_protected: account.platform_protected ?? false,
+    catalog_scope_authorized: account.catalog_scope_authorized ?? false,
+    is_active: account.is_active,
+  };
+}
+
+function hasCatalogScopes(scopes: string): boolean {
+  return scopes
+    .split(/\s+/)
+    .some(
+      (scope) =>
+        scope === "catalog:skills:read" || scope === "catalog:skills:write",
+    );
+}
 
 type ConfirmAction = "delete" | "revoke-tokens" | null;
 
@@ -88,7 +113,7 @@ function ServiceAccountDetailEditor({
 
   const { data: sa, isLoading } = useServiceAccount(saId);
   const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
-  const roles = useRoles({ enabled: isAdmin });
+  const [editAccess, setEditAccess] = useState<AccessState | null>(null);
 
   const updateMutation = useUpdateServiceAccount();
   const deleteMutation = useDeleteServiceAccount();
@@ -156,33 +181,78 @@ function ServiceAccountDetailEditor({
   function openEditDialog() {
     if (!sa) return;
     form.reset(editValues());
+    setEditAccess(accessState(sa));
     editReview.cancel();
     setEditOpen(true);
   }
 
   const editReview = useChangeReview<
-    Parameters<typeof updateMutation.mutateAsync>[0] & { before: object }
+    Parameters<typeof updateMutation.mutateAsync>[0] & {
+      before: object;
+      grantsCatalog: boolean;
+    }
   >(
-    async ({ before: _before, ...variables }) => {
+    async ({ before: _before, grantsCatalog, ...variables }) => {
       void _before;
-      await updateMutation.mutateAsync(variables);
+      const result = await updateMutation.mutateAsync(variables);
+      if (grantsCatalog && !result.catalog_scope_authorized) {
+        throw new Error(
+          "Catalog access was not granted. Reload the account and verify the backend supports catalog scope grants.",
+        );
+      }
       toast.success("Service account updated");
       setEditOpen(false);
     },
     (pending) =>
       !sa ||
-      hasFieldConflicts(pending.before, normalize(editValues()), pending.data),
+      hasFieldConflicts(
+        pending.before,
+        normalize(editValues()),
+        pending.data,
+      ) ||
+      (pending.data.expected_access !== undefined &&
+        !sameValue(pending.data.expected_access, accessState(sa))),
     saId,
   );
+
+  const grantsCatalog =
+    isAdmin &&
+    editAccess !== null &&
+    !editAccess.catalog_scope_authorized &&
+    hasCatalogScopes(form.watch("allowed_scopes"));
 
   function handleEdit(formData: UpdateServiceAccountFormData) {
     const before = normalize(
       form.formState.defaultValues as UpdateServiceAccountFormData,
     );
     const patch = changedFields(before, normalize(formData));
+    const changes = describeChanges(before, patch);
+    if (grantsCatalog) {
+      patch.allowed_scopes = formData.allowed_scopes;
+      changes.push({
+        field: "Catalog access",
+        before: "Not granted through scopes",
+        after:
+          "Selected catalog scopes authorize all current and future catalog services; managed by platform administrators",
+      });
+    }
+    const changesAccess =
+      patch.allowed_scopes !== undefined ||
+      patch.role_ids !== undefined ||
+      patch.is_active !== undefined;
     editReview.review(
-      { saId, data: patch, before },
-      describeChanges(before, patch),
+      {
+        saId,
+        data: {
+          ...patch,
+          ...(changesAccess && editAccess
+            ? { expected_access: editAccess }
+            : {}),
+        },
+        before,
+        grantsCatalog,
+      },
+      changes,
     );
   }
 
@@ -322,53 +392,25 @@ function ServiceAccountDetailEditor({
 
       <Separator />
 
-      {isAdmin &&
-        (roles.isError ? (
-          <DetailSection title="Catalog skill editing">
-            <div className="space-y-3 px-4 py-3">
-              <p role="alert">
-                Could not check the account's catalog role permissions.
-              </p>
-              <Button variant="outline" onClick={() => void roles.refetch()}>
-                Retry role check
-              </Button>
-            </div>
-          </DetailSection>
-        ) : roles.data ? (
-          <CatalogAccessSection
-            account={sa}
-            roles={roles.data.roles}
-            onEditAccount={openEditDialog}
-          />
-        ) : (
-          <DetailSection title="Catalog skill editing">
-            <p className="px-4 py-3 text-[12px] text-muted-foreground">
-              Checking catalog role permissions…
-            </p>
-          </DetailSection>
-        ))}
-
-      {sa.purpose === "catalog_editor" && !isAdmin && (
-        <DetailSection title="Catalog skill editing">
+      {sa.purpose === "catalog_editor" && (
+        <DetailSection title="Catalog access">
           <DetailRow
             label="Catalog coverage"
             value="All current and future catalog services"
           />
-          <DetailRow
-            label="Access"
-            value="Live catalog skill role and matching token scopes required"
-          />
           <p className="px-4 py-3 text-[12px] text-muted-foreground">
-            GET /keys requires catalog:skills:read and user-services:read. Skill
-            changes require catalog:skills:write. The role must retain the
-            matching NyxID catalog permissions.
+            {sa.catalog_scope_authorized
+              ? "Catalog read and write access follows the allowed scopes and the scopes on each token. Manage access with Edit."
+              : "This account uses its existing catalog roles. A platform administrator can save its catalog scopes in Edit to manage catalog access through scopes."}
           </p>
         </DetailSection>
       )}
 
       {sa.purpose !== "catalog_editor" && (
         <>
-          {showProviderSections && <CurationGrantSection account={sa} />}
+          {showProviderSections && sa.purpose === "curation" && (
+            <CurationGrantSection account={sa} />
+          )}
           {showKeyReadGrantSection && <KeyReadGrantSection saId={saId} />}
         </>
       )}
@@ -537,7 +579,10 @@ function ServiceAccountDetailEditor({
                   variant="primary"
                   type="submit"
                   isLoading={updateMutation.isPending}
-                  disabled={!form.formState.isDirty || updateMutation.isPending}
+                  disabled={
+                    (!form.formState.isDirty && !grantsCatalog) ||
+                    updateMutation.isPending
+                  }
                 >
                   Save Changes
                 </Button>

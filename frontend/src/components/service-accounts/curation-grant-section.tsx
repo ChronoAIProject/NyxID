@@ -178,9 +178,9 @@ export function CurationGrantSection({
           <Form {...form}>
             <form onSubmit={form.handleSubmit(submit)} className="space-y-4">
               <p className="text-[12px] text-muted-foreground">
-                Set account scopes to catalog:skills:read and
-                catalog:skills:write. Add proxy only when an exact Ornn target
-                is configured. Org-owned accounts cannot receive a grant.
+                This legacy grant limits access to selected catalog services.
+                Saving catalog scopes in Edit switches the account to platform-wide
+                catalog access. Org-owned accounts cannot receive a legacy grant.
               </p>
               {(
                 [

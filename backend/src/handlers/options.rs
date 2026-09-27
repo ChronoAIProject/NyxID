@@ -478,7 +478,7 @@ mod tests {
                         assert_eq!(matches[0]["disabled"], false);
                         let description = matches[0]["description"].as_str().unwrap();
                         if scope.starts_with("catalog:") {
-                            assert!(description.contains("curation grant"));
+                            assert!(description.contains("saved by a platform administrator"));
                         } else if scope == "proxy:*" {
                             assert!(description.contains("alias of proxy"));
                         } else if scope == "groups" {

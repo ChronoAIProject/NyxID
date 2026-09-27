@@ -326,6 +326,7 @@ mod tests {
             client_id: format!("sa_{}", hex::encode([2u8; 12])),
             client_secret_hash: "0".repeat(64),
             platform_protected: false,
+            catalog_scope_authorized: false,
             purpose: crate::models::service_account::ServiceAccountPurpose::General,
             curation_grant: None,
             credential_generation: 0,

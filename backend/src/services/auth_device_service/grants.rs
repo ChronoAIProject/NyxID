@@ -6,23 +6,24 @@ use crate::services::{
 };
 use futures::TryStreamExt;
 
-async fn pending_request(db: &Database, hmac_key: &[u8], code: &str) -> AppResult<AuthDeviceCode> {
+async fn pending_request(
+    db: &Database,
+    hmac_key: &[u8],
+    code: &str,
+) -> AppResult<(Collection<AuthDeviceCode>, AuthDeviceCode)> {
     let normalized = normalize_user_code(code)?;
-    if !is_v2_user_code(&normalized) {
+    let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
+    let (collection, row) = find_by_user_code(db, &user_code_hmac).await?;
+    if !row.supports_grant_choice {
         return Err(AppError::ValidationError("This legacy request supports account login only. Start a new login with an updated CLI.".into()));
     }
-    let row = collection_for_user_code(db, &normalized)
-        .find_one(doc! {"user_code_hmac": hmac_hex(hmac_key, normalized.as_bytes())})
-        .sort(doc! {"created_at": -1})
-        .await?
-        .ok_or(AppError::AuthDeviceUserCodeInvalid)?;
     if row.status != AuthDeviceCodeStatus::Pending {
         return Err(non_pending_approve_error(row.status));
     }
     if row.expires_at <= Utc::now() {
         return Err(AppError::AuthDeviceCodeExpired);
     }
-    Ok(row)
+    Ok((collection, row))
 }
 
 pub async fn options(
@@ -44,10 +45,9 @@ pub async fn approve_with_agent_key(
     selection: agent::Selection,
     credential_expires_at: Option<DateTime<Utc>>,
 ) -> AppResult<()> {
-    let row = pending_request(db, hmac_key, &input.user_code).await?;
-    let collection = collection_for_protocol(db, row.supports_grant_choice);
+    let (collection, row) = pending_request(db, hmac_key, &input.user_code).await?;
     let key_id = match &selection {
-        agent::Selection::Existing { api_key_id } => {
+        agent::Selection::Existing { api_key_id, .. } => {
             agent::eligible_key(db, &input.user_id, api_key_id)
                 .await?
                 .id
@@ -128,7 +128,7 @@ pub async fn poll_agent_key(
         return Err(non_pending_approve_error(row.status));
     }
     if row.expires_at <= Utc::now() {
-        expire(db, &row).await?;
+        expire(db, &collection, &row).await?;
         return Err(AppError::AuthDeviceCodeExpired);
     }
     let grant = row
@@ -170,8 +170,11 @@ pub async fn poll_agent_key(
     Ok(delivery)
 }
 
-pub(super) async fn expire(db: &Database, row: &AuthDeviceCode) -> AppResult<()> {
-    let collection = collection_for_protocol(db, row.supports_grant_choice);
+pub(super) async fn expire(
+    db: &Database,
+    collection: &Collection<AuthDeviceCode>,
+    row: &AuthDeviceCode,
+) -> AppResult<()> {
     let now = Utc::now();
     let claimed = collection
         .find_one_and_update(
@@ -207,10 +210,11 @@ pub(super) async fn expire(db: &Database, row: &AuthDeviceCode) -> AppResult<()>
 
 pub async fn sweep_expired(db: &Database) -> AppResult<()> {
     for supports_grant_choice in [false, true] {
-        let mut rows = collection_for_protocol(db, supports_grant_choice).find(doc! {"status": {"$in": ["pending", "approved", "expired"]},
+        let collection = collection_for_protocol(db, supports_grant_choice);
+        let mut rows = collection.find(doc! {"status": {"$in": ["pending", "approved", "expired"]},
         "expires_at": {"$lte": bson::DateTime::from_chrono(Utc::now())}, "purge_at": Bson::Null}).await?;
         while let Some(row) = rows.try_next().await? {
-            if let Err(error) = expire(db, &row).await {
+            if let Err(error) = expire(db, &collection, &row).await {
                 tracing::error!(request_id = %row.id, error_code = error.error_code(), "auth_device expiry cleanup failed");
             }
         }

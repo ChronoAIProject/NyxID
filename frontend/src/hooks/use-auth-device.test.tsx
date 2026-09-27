@@ -271,7 +271,7 @@ describe("useWebAuthDeviceLogin", () => {
 
     await waitFor(() => expect(result.current.phase).toBe("pending"));
     expect(mockPost).toHaveBeenCalledWith(
-      "/auth/device/v2/request",
+    "/auth/device/request",
       expect.objectContaining({
         client_label: expect.stringMatching(/ on /),
         client_user_agent: expect.any(String),

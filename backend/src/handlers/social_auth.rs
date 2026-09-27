@@ -31,6 +31,7 @@ const COOKIE_SAMESITE_NONE: &str = "None";
 
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
+    pub approval_id: Option<String>,
     pub client: Option<String>,
     pub redirect_uri: Option<String>,
     /// OAuth flow return_to URL. After social login, the user is redirected here
@@ -49,6 +50,7 @@ pub async fn authorize(
     State(state): State<AppState>,
     Path(provider_name): Path<String>,
     Query(query): Query<AuthorizeQuery>,
+    request_headers: HeaderMap,
 ) -> AppResult<(StatusCode, HeaderMap, ())> {
     let provider = social_auth_service::SocialProvider::parse(&provider_name).ok_or_else(|| {
         AppError::SocialAuthFailed(format!("Unsupported provider: {provider_name}"))
@@ -68,7 +70,20 @@ pub async fn authorize(
 
     let is_mobile_client = query.client.as_deref() == Some(SOCIAL_CLIENT_MOBILE);
 
-    let csrf_token = generate_random_token();
+    let csrf_token = if let Some(id) = query.approval_id.as_deref() {
+        if is_mobile_client {
+            return Err(AppError::ValidationError(
+                "Approval verification is a browser flow".into(),
+            ));
+        }
+        let approval = super::login_approval::load(&state, &request_headers, id).await?;
+        crate::services::login_approval_service::attempt(&state.db, &approval).await?;
+        let token = format!("approval:{id}:{}", generate_random_token());
+        crate::services::login_approval_service::bind_social(&state.db, &approval, &token).await?;
+        token
+    } else {
+        generate_random_token()
+    };
     let state_hash = hash_token(&csrf_token);
     let nonce_token =
         (provider == social_auth_service::SocialProvider::Apple).then(generate_random_token);
@@ -516,6 +531,20 @@ pub async fn callback(
         }
     }
 
+    if super::login_approval::social_id(state_param).is_some() {
+        let (status, mut response_headers, body) =
+            super::login_approval::social_complete(&state, state_param, &user, &headers, peer)
+                .await
+                .map_err(|_| {
+                    redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+                })?;
+        append_social_cleanup_cookies(&mut response_headers, &redirect_target, secure, domain)
+            .map_err(|_| {
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            })?;
+        return Ok((status, response_headers, body));
+    }
+
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {
             let session =
@@ -928,6 +957,20 @@ pub async fn apple_callback(
         }
     }
 
+    if super::login_approval::social_id(state_param).is_some() {
+        let (status, mut response_headers, body) =
+            super::login_approval::social_complete(&state, state_param, &user, &headers, peer)
+                .await
+                .map_err(|_| {
+                    redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+                })?;
+        append_social_cleanup_cookies(&mut response_headers, &redirect_target, secure, domain)
+            .map_err(|_| {
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            })?;
+        return Ok((status, response_headers, body));
+    }
+
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {
             let session =
@@ -1197,6 +1240,27 @@ fn redirect_with_error(
     domain: Option<&str>,
 ) -> (StatusCode, HeaderMap, ()) {
     let mut headers = HeaderMap::new();
+    if let SocialRedirectTarget::Web {
+        frontend_url,
+        return_to: Some(target),
+    } = target
+        && let (Ok(mut request), Ok(frontend)) =
+            (url::Url::parse(target), url::Url::parse(frontend_url))
+        && request.origin() == frontend.origin()
+        && (matches!(request.path(), "/login/device" | "/login/agent-key")
+            || request.path().starts_with("/login/device/"))
+    {
+        request.set_fragment(Some("identity-error"));
+        if let Ok(location) = request.as_str().parse() {
+            headers.insert(header::LOCATION, location);
+        }
+        for cookie in social_clear_cookie_values(secure, domain) {
+            if let Ok(parsed) = cookie.parse() {
+                headers.append(header::SET_COOKIE, parsed);
+            }
+        }
+        return (StatusCode::FOUND, headers, ());
+    }
     let url = match target {
         SocialRedirectTarget::Web {
             frontend_url,

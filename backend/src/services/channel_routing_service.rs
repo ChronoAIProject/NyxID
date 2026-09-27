@@ -195,6 +195,7 @@ pub async fn create_conversation(
 
     let now = Utc::now();
     let conversation = ChannelConversation {
+        activity_callback: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         channel_bot_id: channel_bot_id.map(String::from),
@@ -328,6 +329,7 @@ pub async fn update_conversation(
 
     if let Some(key_id) = agent_api_key_id {
         set_doc.insert("agent_api_key_id", key_id);
+        set_doc.insert("activity_callback", bson::Bson::Null);
     }
 
     if let Some(active) = is_active {
