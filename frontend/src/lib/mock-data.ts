@@ -1449,6 +1449,184 @@ const MOCK_FULL_CATALOG = (() => {
     : MOCK_CATALOG;
 })();
 
+// ── Billing ──
+// One all-services grant plus free-usage rows in every meter state
+// (partially used multi-unit, unused, and a long service name) so the
+// benefits alignment and the usage service filter can be checked locally.
+const MOCK_BILLING_OWNER = MOCK_USER.id;
+const MOCK_BILLING_WALLET = {
+  owner_id: MOCK_BILLING_OWNER,
+  plan_kind: "prepaid",
+  collection_state: "good",
+  balance_credits: 12,
+  reserved_credits: 0,
+  pending_lago_debits: 0,
+  pending_topup_expiry_credits: 0,
+  available_credits: 12,
+  available_with_overdraft_credits: 12,
+  has_payment_instrument: true,
+  overdraft_cap_credits: 0,
+  suspended: false,
+  lago_customer_id: "mock-customer",
+  lago_wallet_id: "mock-wallet",
+  balance_synced_at: "2026-09-26T10:00:00Z",
+  created_at: "2026-08-01T00:00:00Z",
+  updated_at: "2026-09-26T10:00:00Z",
+  created: false,
+};
+const MOCK_BILLING_GRANTS = {
+  grants: [
+    {
+      id: "mock-grant-1",
+      batch_id: "mock-batch-1",
+      recipient_user_id: MOCK_BILLING_OWNER,
+      activation_state: "active",
+      target_kind: "all_users",
+      amount_credits: 5,
+      amount_micros: 5_000_000,
+      remaining_micros: 4_964_500,
+      reserved_micros: 0,
+      scope: { all_services: true, service_ids: [], service_slugs: [] },
+      expires_at: "2026-10-31T00:00:00Z",
+      reason: "Welcome credits",
+      granted_by: "admin",
+      status: "active",
+      created_at: "2026-09-01T00:00:00Z",
+      updated_at: "2026-09-26T10:00:00Z",
+    },
+  ],
+  page: 1,
+  per_page: 50,
+  total: 1,
+};
+function mockAllowance(
+  serviceSlug: string,
+  metric: string,
+  quantity: number,
+  consumed: number,
+  reserved = 0,
+) {
+  return {
+    allowance: {
+      id: `mock-allowance-${serviceSlug}-${metric}`,
+      service_id: `svc-${serviceSlug}`,
+      service_slug: serviceSlug,
+      metric,
+      quantity,
+      recurrence: "monthly",
+      target_kind: "all_users",
+      target_user_ids: [],
+      is_active: true,
+      created_by: "admin",
+      created_at: "2026-09-01T00:00:00Z",
+      updated_at: "2026-09-01T00:00:00Z",
+    },
+    period_start: "2026-09-01T00:00:00Z",
+    period_end: "2026-10-01T00:00:00Z",
+    consumed_quantity: consumed,
+    reserved_quantity: reserved,
+    remaining_quantity: quantity - consumed - reserved,
+  };
+}
+const MOCK_BILLING_ALLOWANCES = {
+  allowances: [
+    mockAllowance("openai", "input_tokens", 1_000_000, 412_000, 8_000),
+    mockAllowance("openai", "output_tokens", 250_000, 61_000),
+    mockAllowance("openai", "cache_read_tokens", 500_000, 0),
+    mockAllowance("openai", "requests", 1_000, 0),
+    mockAllowance("openai", "images", 50, 12),
+    mockAllowance("anthropic", "tokens", 2_000_000, 0),
+    mockAllowance("anthropic", "requests", 500, 0),
+    mockAllowance("enterprise-knowledge-graph-retrieval-gateway", "requests", 10_000, 9_990),
+  ],
+};
+function mockUsageRow(
+  serviceSlug: string,
+  metric: string,
+  quantity: number,
+  credits: number,
+  overrides: Record<string, unknown> = {},
+) {
+  const micros = Math.round(credits * 1_000_000);
+  return {
+    service_slug: serviceSlug,
+    service_id: `svc-${serviceSlug}`,
+    metric,
+    lago_metric_code: `platform_svc_${serviceSlug}_pk`,
+    layer: "platform",
+    model: null,
+    api_key_id: "k1-0001-0001-0001-000000000001",
+    api_key_name: "claude-code-agent",
+    quantity,
+    requests: Math.max(1, Math.round(quantity / 1_000)),
+    bytes: 0,
+    events: 1,
+    lago_acked: true,
+    billable: micros > 0,
+    estimated_credits_micros: micros,
+    wallet_credits_micros: 0,
+    grant_credits_micros: micros,
+    allowance_credits_micros: 0,
+    allowance_quantity: 0,
+    ...overrides,
+  };
+}
+function mockBillingUsage(period: string) {
+  const rows = [
+    mockUsageRow("openai", "input_tokens", 412_000, 0.0213, { model: "gpt-4o" }),
+    mockUsageRow("openai", "output_tokens", 61_000, 0.0142, { model: "gpt-4o" }),
+    mockUsageRow("anthropic", "tokens", 18_400, 0.0071, { model: "claude-sonnet-5" }),
+    mockUsageRow("github", "requests", 340, 0),
+    mockUsageRow("stripe", "requests", 42, 0),
+    mockUsageRow("enterprise-knowledge-graph-retrieval-gateway", "requests", 9_990, 0),
+  ];
+  const sum = (field: "quantity" | "requests" | "bytes" | "events" | "estimated_credits_micros" | "grant_credits_micros") =>
+    rows.reduce((total, row) => total + (row[field] as number), 0);
+  return {
+    owner_id: MOCK_BILLING_OWNER,
+    period,
+    rows,
+    totals: {
+      quantity: sum("quantity"),
+      requests: sum("requests"),
+      bytes: sum("bytes"),
+      events: sum("events"),
+      estimated_credits_micros: sum("estimated_credits_micros"),
+      wallet_credits_micros: 0,
+      grant_credits_micros: sum("grant_credits_micros"),
+      allowance_credits_micros: 0,
+      allowance_quantity: 0,
+    },
+    billing: {
+      charging_enabled: true,
+      lago_configured: true,
+      source: "usage_meter",
+      rates_are_approximate: true,
+    },
+  };
+}
+const MOCK_BILLING_TOPUPS = {
+  owner_id: MOCK_BILLING_OWNER,
+  topups: [
+    {
+      id: "mock-topup-1",
+      created_at: "2026-09-12T09:30:00Z",
+      amount_credits: 10,
+      status: "paid",
+      invoice_number: "NYX-0001",
+      lago_invoice_id: "mock-invoice-1",
+      checkout_url: null,
+      receipt_available: true,
+      paid_at: "2026-09-12T09:31:00Z",
+      credits_expire_at: "2027-09-12T09:31:00Z",
+      expired_credits_micros: 0,
+    },
+  ],
+  page: 1,
+  per_page: 10,
+  total: 1,
+};
+
 // ── Dynamic endpoint resolver ──
 // `path` is query-stripped so anchored endpoint patterns keep matching.
 type MockHandler = (
@@ -1460,6 +1638,13 @@ const MOCK_HANDLERS: MockHandler[] = [
   // User
   (p) => p === "/users/me" ? MOCK_USER : undefined,
   (p) => p === "/users/me/primary-org" ? MOCK_ORGS[0] : undefined,
+
+  // Billing
+  (p) => p === "/billing/wallet" ? MOCK_BILLING_WALLET : undefined,
+  (p, q) => p === "/billing/usage" ? mockBillingUsage(q.get("period") ?? "30d") : undefined,
+  (p) => p === "/billing/topups" ? MOCK_BILLING_TOPUPS : undefined,
+  (p) => p === "/billing/grants" ? MOCK_BILLING_GRANTS : undefined,
+  (p) => p === "/billing/allowances" ? MOCK_BILLING_ALLOWANCES : undefined,
 
   // API keys usage (must be before generic /api-keys patterns)
   (p) => p.match(/^\/api-keys\/usage/) ? { usage: MOCK_API_KEY_USAGE_LIST, since: "2026-05-01T00:00:00Z", days: 7 } : undefined,
