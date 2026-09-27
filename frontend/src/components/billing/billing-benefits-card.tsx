@@ -81,7 +81,7 @@ export function BillingBenefitsCard({
       <CardHeader>
         <CardTitle>Credit grants & free usage</CardTitle>
       </CardHeader>
-      <CardContent>
+      <CardContent className="benefits-container">
         <section className="benefit-section">
           {[...grantGroups].map(([key, grants]) => {
             const original = grants.reduce(

@@ -72,12 +72,11 @@ export function reportCreditsDenialHttp(
 
 /**
  * Payer for a resource owned by `ownerId` (a person or org user id, as on
- * channel bots). Anything other than the caller is an org wallet.
+ * channel bots). Anything other than the caller is an org wallet. Owner-billed
+ * operations must know their owner: an unknown payer would offer a personal
+ * purchase for an org wallet, so callers without one do not opt in.
  */
-export function ownerCreditsPayer(
-  ownerId: string | null | undefined,
-): CreditsPayer {
-  if (!ownerId) return "unknown";
+export function ownerCreditsPayer(ownerId: string): CreditsPayer {
   return ownerId === currentCreditsActor() ? "self" : { org: { id: ownerId } };
 }
 
@@ -85,7 +84,7 @@ export function ownerCreditsPayer(
 export function mutationCreditsDenial(
   name: string,
   resourceId: string,
-  ownerId: string | null | undefined,
+  ownerId: string,
   attemptNonce: string = creditsAttemptNonce(),
 ): CreditsDenialRequest {
   return {

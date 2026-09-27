@@ -341,15 +341,19 @@ export class NyxAgentTransport {
     // The server settles/persists before we remove the live state. No resend.
   }
 
-  /** The turn this page currently sees running, live or polled. */
+  /**
+   * The turn this page currently sees running, live or polled. Loaded
+   * history is authoritative, including its explicit idle state; the index is
+   * only a fallback before history loads, since a slower index page can land
+   * after a newer history snapshot.
+   */
   getActiveTurnId(id?: string): string | undefined {
     const key = id ?? "draft";
-    return (
-      this.live.get(key)?.conversation.active_turn?.turn_id ??
-      this.histories.get(key)?.conversation.active_turn?.turn_id ??
-      this.index.get(key)?.active_turn?.turn_id ??
-      undefined
-    );
+    const live = this.live.get(key)?.conversation.active_turn?.turn_id;
+    if (live) return live;
+    const history = this.histories.get(key);
+    if (history) return history.conversation.active_turn?.turn_id ?? undefined;
+    return this.index.get(key)?.active_turn?.turn_id ?? undefined;
   }
 
   session(id?: string): ChatSessionState {

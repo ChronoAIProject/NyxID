@@ -528,12 +528,6 @@
     margin: 12px 0;
   }
   @media (max-width: 1050px) {
-    & {
-      --benefit-meter-track: 150px;
-    }
-    .benefit-unit {
-      grid-template-columns: minmax(90px, 1fr) minmax(95px, 1fr) auto;
-    }
     .usage-filters {
       flex-wrap: wrap;
     }
@@ -554,29 +548,6 @@
     }
   }
   @media (max-width: 640px) {
-    & {
-      --benefit-meter-track: minmax(0, 1fr);
-    }
-    .benefit-meter {
-      width: 100%;
-    }
-    .benefit-unit-family {
-      display: block;
-    }
-    .benefit-unit-family > span {
-      display: block;
-      margin-bottom: 10px;
-    }
-    .benefit-unit {
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-    }
-    .benefit-unit .benefit-meter {
-      grid-column: 1 / -1;
-    }
-    .benefit-unit + .benefit-unit {
-      margin-top: 14px;
-    }
     .usage-filters {
       gap: 12px;
     }
@@ -731,7 +702,46 @@
     margin-top: 0;
     padding-bottom: 20px;
   }
-  @media (max-width: 640px) {
+  /* Meters size against the benefits card, not the viewport, so rows hold
+     with the sidebar expanded or collapsed. An expanded unit row needs the
+     80px family label + 20px gap + two unit columns + gaps + the meter:
+     604px with a 180px track, 539px with 150px. Below that, every row stacks
+     and every meter spans the full width, still sharing one right edge. */
+  .benefits-container {
+    container: benefits / inline-size;
+  }
+  @container benefits (max-width: 719px) {
+    .benefit-section {
+      --benefit-meter-track: 150px;
+    }
+    .benefit-unit {
+      grid-template-columns: minmax(90px, 1fr) minmax(95px, 1fr) auto;
+    }
+  }
+  @container benefits (max-width: 559px) {
+    .benefit-section {
+      --benefit-meter-track: minmax(0, 1fr);
+    }
+    .benefit-meter {
+      width: 100%;
+    }
+    .benefit-unit-family {
+      display: block;
+    }
+    .benefit-unit-family > span {
+      display: block;
+      margin-bottom: 10px;
+    }
+    .benefit-unit {
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+    .benefit-unit .benefit-meter {
+      grid-column: 1 / -1;
+    }
+    .benefit-unit + .benefit-unit {
+      margin-top: 14px;
+    }
     .compact-benefits .benefit-summary {
       gap: 10px 12px;
     }

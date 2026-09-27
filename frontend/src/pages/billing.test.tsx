@@ -1,5 +1,6 @@
 import { act, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useSyncExternalStore } from "react";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -296,6 +297,53 @@ describe("BillingPage", () => {
     await act(() => history.back());
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+  it.each([
+    "/billing?tab=billing&service=all&action=topup",
+    `/billing?tab=billing&services=${encodeURIComponent('["gone"]')}&action=topup`,
+  ])(
+    "keeps the top-up deep link through filter cleanup when usage settles before the wallet (%s)",
+    async (url) => {
+      let wallet: ReturnType<typeof query> = {
+        ...query(undefined),
+        isLoading: true,
+        isSuccess: false,
+      };
+      const listeners = new Set<() => void>();
+      mocks.wallet.mockImplementation(() =>
+        useSyncExternalStore(
+          (listener) => {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+          },
+          () => wallet,
+        ),
+      );
+      const { history } = await renderPage(url);
+      // Usage has settled, so legacy/stale filters are cleaned up first...
+      await waitFor(() =>
+        expect(history.location.search).not.toMatch(/service=|services=/),
+      );
+      expect(history.location.search).toContain("action=topup");
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      // ...and the wallet arrives later: Add credits opens exactly once.
+      act(() => {
+        wallet = query(billingWallet());
+        listeners.forEach((listener) => listener());
+      });
+      expect(
+        await screen.findByRole("dialog", { name: "Add credits" }),
+      ).toBeVisible();
+      await waitFor(() =>
+        expect(history.location.search).not.toContain("action"),
+      );
+      await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      await act(() => history.back());
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    },
+  );
   it("lands on the Billing tab without a dialog when top-up is impossible", async () => {
     mocks.usage.mockReturnValue(
       query({

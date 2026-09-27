@@ -158,11 +158,15 @@ export function useVerifyChannelBot({
     mutationFn: async (id: string): Promise<VerifyChannelBotResponse> => {
       return apiClient<VerifyChannelBotResponse>(`/channel-bots/${id}/verify`, {
         method: "POST",
-        creditsDenial: mutationCreditsDenial(
-          "channel-bot-verify",
-          id,
-          creditsOwnerId,
-        ),
+        ...(creditsOwnerId
+          ? {
+              creditsDenial: mutationCreditsDenial(
+                "channel-bot-verify",
+                id,
+                creditsOwnerId,
+              ),
+            }
+          : {}),
       });
     },
     onSettled: () => {

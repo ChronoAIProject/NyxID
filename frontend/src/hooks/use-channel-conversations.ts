@@ -157,14 +157,21 @@ export function useChannelConversation(id: string) {
   });
 }
 
-/** `creditsOwnerId` is the bot owner whose credits a send would spend. */
+/**
+ * `creditsOwnerId` is the bot owner whose credits a send spends. Sends are
+ * refused until it is known, so a denial is never attributed to the wrong
+ * wallet.
+ */
 export function useSendChannelMessage({
   creditsOwnerId,
-}: { readonly creditsOwnerId?: string } = {}) {
+}: { readonly creditsOwnerId: string | undefined }) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (data: SendChannelMessageRequest) =>
-      apiClient<SendChannelMessageResponse>("/channel-relay/send", {
+    mutationFn: async (data: SendChannelMessageRequest) => {
+      if (!creditsOwnerId) {
+        throw new Error("Bot details are still loading. Try again shortly.");
+      }
+      return apiClient<SendChannelMessageResponse>("/channel-relay/send", {
         method: "POST",
         body: data,
         creditsDenial: mutationCreditsDenial(
@@ -174,7 +181,8 @@ export function useSendChannelMessage({
           // A retry of the same message is the same operation.
           data.idempotency_key,
         ),
-      }),
+      });
+    },
     retry: false,
     onSuccess: (_response, variables) => {
       void queryClient.invalidateQueries({

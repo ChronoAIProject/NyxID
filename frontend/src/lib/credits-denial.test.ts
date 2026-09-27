@@ -81,10 +81,9 @@ describe("isInsufficientCreditsCode", () => {
 describe("owner payers", () => {
   beforeEach(() => transitionAssistantIdentity("person-1"));
 
-  it("maps the caller to self, anyone else to their org, and nothing to unknown", () => {
+  it("maps the caller to self and any other owner to their org wallet", () => {
     expect(ownerCreditsPayer("person-1")).toBe("self");
     expect(ownerCreditsPayer("org-9")).toEqual({ org: { id: "org-9" } });
-    expect(ownerCreditsPayer(undefined)).toBe("unknown");
   });
 
   it("keys one-shot mutations per attempt", () => {

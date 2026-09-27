@@ -425,3 +425,36 @@ it("never opens for failures already in the transcript or in older pages", async
   expect(useCreditsDenialStore.getState().current).toBeNull();
   unmount();
 });
+
+it("ignores a stale index that still shows an already-failed turn as running", async () => {
+  useCreditsDenialStore.getState().reset();
+  page.conversation.active_turn = null;
+  page.messages.push(failedReply("turn", "insufficient_credits"));
+  const stale = {
+    ...page.conversation,
+    active_turn: { turn_id: "turn", started_at: "2026-09-17T00:00:00Z", activities: [], attachments: [] },
+  };
+  let releaseIndex!: () => void;
+  const indexGate = new Promise<void>((resolve) => (releaseIndex = resolve));
+  let indexServed = false;
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = async (request) => {
+    if (request.endpoint.includes("/conversations?limit=")) {
+      await indexGate;
+      indexServed = true;
+      return json({ conversations: [stale], next_cursor: null });
+    }
+    return mock(request);
+  };
+  const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(),
+  }), { wrapper });
+  await waitFor(() => expect(result.current.session.messages.at(-1)?.status).toBe("error"));
+  // The slower index response lands after the idle history.
+  releaseIndex();
+  await waitFor(() => expect(indexServed).toBe(true));
+  await waitFor(() => expect(nyxAgentTransport.getConversations()[0]?.active_turn?.turn_id).toBe("turn"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(useCreditsDenialStore.getState().current).toBeNull();
+  unmount();
+});

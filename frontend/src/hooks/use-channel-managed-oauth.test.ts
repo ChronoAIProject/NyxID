@@ -34,6 +34,8 @@ describe("managed OAuth transport", () => {
       "x",
       { connection_id: connection, label: "Support" },
       signal,
+      undefined,
+      "org-1",
     );
     expect(apiClient).toHaveBeenLastCalledWith(
       "/channel-bots/managed-onboarding/x/complete",
@@ -43,7 +45,7 @@ describe("managed OAuth transport", () => {
         signal,
         creditsDenial: {
           key: expect.stringMatching(/^op:channel-managed-x-complete:/),
-          payer: "unknown",
+          payer: { org: { id: "org-1" } },
         },
       },
     );
@@ -52,6 +54,7 @@ describe("managed OAuth transport", () => {
       { connection_id: connection, label: "Support" },
       signal,
       "bot",
+      "org-1",
     );
     expect(apiClient).toHaveBeenLastCalledWith("/channel-bots/bot/reconnect", {
       method: "POST",
@@ -59,8 +62,21 @@ describe("managed OAuth transport", () => {
       signal,
       creditsDenial: {
         key: expect.stringMatching(/^op:channel-bot-reconnect:bot:/),
-        payer: "unknown",
+        payer: { org: { id: "org-1" } },
       },
+    });
+    // Without a known owner the call makes no credits opt-in at all.
+    await completeManagedOAuth(
+      "x",
+      { connection_id: connection, label: "Support" },
+      signal,
+      "bot",
+      null,
+    );
+    expect(apiClient).toHaveBeenLastCalledWith("/channel-bots/bot/reconnect", {
+      method: "POST",
+      body: { connection_id: connection },
+      signal,
     });
   });
   it("rejects malformed connection IDs before making a request", async () => {

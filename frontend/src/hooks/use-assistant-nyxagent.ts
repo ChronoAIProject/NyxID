@@ -207,9 +207,15 @@ export function useNyxAgentAssistantChat({
   useEffect(() => {
     const id = selectedConversationId;
     if (!id) return;
+    const messages = nyxAgentTransport.getHistory(id)?.messages ?? [];
     const activeTurnId = nyxAgentTransport.getActiveTurnId(id);
-    if (activeTurnId) observedTurns.current.add(`${id}:${activeTurnId}`);
-    for (const message of nyxAgentTransport.getHistory(id)?.messages ?? []) {
+    // A turn whose reply is already settled in history was never seen running
+    // here, whatever a stale snapshot claims.
+    const settled = messages.some(
+      (message) => message.turn_id === activeTurnId && message.role === "assistant",
+    );
+    if (activeTurnId && !settled) observedTurns.current.add(`${id}:${activeTurnId}`);
+    for (const message of messages) {
       if (
         message.status === "failed" &&
         observedTurns.current.has(`${id}:${message.turn_id}`)

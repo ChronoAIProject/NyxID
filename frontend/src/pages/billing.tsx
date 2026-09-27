@@ -71,10 +71,12 @@ export function BillingPage() {
     billingCapability?.charging_enabled && billingCapability?.lago_configured,
   );
 
+  // Preserves `action`: only the top-up consumer below clears it, so filter
+  // cleanup that settles before the wallet cannot swallow the deep link.
   function updateSearch(patch: Partial<BillingSearch>, replace = false) {
     void navigate({
       to: "/billing",
-      search: billingUrlSearch({ ...search, action: undefined, ...patch }),
+      search: billingUrlSearch({ ...search, ...patch }),
       replace,
     });
   }
@@ -103,7 +105,7 @@ export function BillingPage() {
     setTopUpHandled(false);
   }
   useEffect(() => {
-    if (wantsTopUp) updateSearch({ tab: "billing" }, true);
+    if (wantsTopUp) updateSearch({ tab: "billing", action: undefined }, true);
   });
   async function handleProvisionWallet() {
     try {

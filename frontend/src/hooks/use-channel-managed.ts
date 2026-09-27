@@ -101,10 +101,10 @@ export async function startManagedOAuth(platform: string, label: string, orgId: 
 export async function completeManagedOAuth(platform: string, input: z.infer<typeof oauthConnectionCompleteSchema>, signal: AbortSignal, botId?: string, ownerId?: string | null) {
   const body = oauthConnectionCompleteSchema.parse(input);
   if (botId) {
-    await apiClient(`/channel-bots/${encodeURIComponent(botId)}/reconnect`, { method: "POST", body: { connection_id: body.connection_id }, signal, creditsDenial: mutationCreditsDenial("channel-bot-reconnect", botId, ownerId) });
+    await apiClient(`/channel-bots/${encodeURIComponent(botId)}/reconnect`, { method: "POST", body: { connection_id: body.connection_id }, signal, ...(ownerId ? { creditsDenial: mutationCreditsDenial("channel-bot-reconnect", botId, ownerId) } : {}) });
     return { id: botId, platform } as CreateChannelBotResponse;
   }
-  return apiClient<CreateChannelBotResponse>(`/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`, { method: "POST", body, signal, creditsDenial: mutationCreditsDenial(`channel-managed-${platform}-complete`, body.connection_id, ownerId) });
+  return apiClient<CreateChannelBotResponse>(`/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`, { method: "POST", body, signal, ...(ownerId ? { creditsDenial: mutationCreditsDenial(`channel-managed-${platform}-complete`, body.connection_id, ownerId) } : {}) });
 }
 
 export function useReregisterChannelBot() {
