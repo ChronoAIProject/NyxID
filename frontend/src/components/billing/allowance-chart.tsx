@@ -42,58 +42,56 @@ export function AllowanceChart({
     (segment) => segment.usedPercent > 0,
   ).length;
   return (
-    <div className="allowance-chart">
-      <Tooltip delayDuration={150}>
-        <TooltipTrigger asChild>
-          <span
-            className="allowance-chart-trigger"
-            tabIndex={0}
-            role="img"
-            aria-label={`Allowance usage: ${segments.map((segment) => `${segment.label} ${segment.percentage}`).join(", ")}`}
-          >
-            <span className="allowance-chart-bar" aria-hidden="true">
-              {segments.map((segment) => (
-                <span className="allowance-chart-segment" key={segment.key}>
-                  <span className="allowance-chart-stack">
-                    <span
-                      className="allowance-used"
-                      style={{ width: `${segment.usedPercent}%` }}
-                    />
-                    <span
-                      className="allowance-reserved"
-                      style={{ width: `${segment.reservedPercent}%` }}
-                    />
-                    <span
-                      className="allowance-remaining"
-                      style={{ width: `${segment.remainingPercent}%` }}
-                    />
-                  </span>
-                </span>
-              ))}
-            </span>
-            <span className="allowance-chart-status">
-              {usedCount ? `${usedCount} of ${segments.length} used` : "Unused"}
-            </span>
-          </span>
-        </TooltipTrigger>
-        <TooltipContent
-          className="billing-allowance-chart-tooltip"
-          side="top"
-          collisionPadding={16}
+    <Tooltip delayDuration={150}>
+      <TooltipTrigger asChild>
+        <span
+          className="benefit-meter allowance-chart"
+          tabIndex={0}
+          role="img"
+          aria-label={`Allowance usage: ${segments.map((segment) => `${segment.label} ${segment.percentage}`).join(", ")}`}
         >
-          <p>
-            Percentage used of each allowance’s limit, excluding reservations.
-          </p>
-          <dl>
+          <span className="allowance-chart-bar" aria-hidden="true">
             {segments.map((segment) => (
-              <div key={segment.key}>
-                <dt className="capitalize">{segment.label}</dt>
-                <dd>{segment.percentage}</dd>
-              </div>
+              <span className="allowance-chart-segment" key={segment.key}>
+                <span className="allowance-chart-stack">
+                  <span
+                    className="allowance-used"
+                    style={{ width: `${segment.usedPercent}%` }}
+                  />
+                  <span
+                    className="allowance-reserved"
+                    style={{ width: `${segment.reservedPercent}%` }}
+                  />
+                  <span
+                    className="allowance-remaining"
+                    style={{ width: `${segment.remainingPercent}%` }}
+                  />
+                </span>
+              </span>
             ))}
-          </dl>
-        </TooltipContent>
-      </Tooltip>
-    </div>
+          </span>
+          <span className="benefit-meter-caption">
+            {usedCount ? `${usedCount} of ${segments.length} used` : "Unused"}
+          </span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent
+        className="billing-allowance-chart-tooltip"
+        side="top"
+        collisionPadding={16}
+      >
+        <p>
+          Percentage used of each allowance’s limit, excluding reservations.
+        </p>
+        <dl>
+          {segments.map((segment) => (
+            <div key={segment.key}>
+              <dt className="capitalize">{segment.label}</dt>
+              <dd>{segment.percentage}</dd>
+            </div>
+          ))}
+        </dl>
+      </TooltipContent>
+    </Tooltip>
   );
 }

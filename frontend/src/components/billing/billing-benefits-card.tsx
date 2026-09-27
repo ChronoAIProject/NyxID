@@ -38,7 +38,7 @@ function UsedGauge({
       ? "<0.01"
       : number(Math.round(percent * 100) / 100);
   return (
-    <span className="benefit-gauge">
+    <span className="benefit-meter">
       <span
         className="benefit-track"
         role="meter"
@@ -50,7 +50,7 @@ function UsedGauge({
       >
         <span style={{ width: `${percent}%` }} />
       </span>
-      <span>{formatted}% used</span>
+      <span className="benefit-meter-caption">{formatted}% used</span>
     </span>
   );
 }
@@ -104,7 +104,7 @@ export function BillingBenefitsCard({
                     .join(", ");
             return (
               <details className="benefit-disclosure" key={key}>
-                <summary>
+                <summary className="benefit-summary">
                   <div className="compact-benefit-label">
                     <strong className="benefit-label-with-help">
                       Credit grants
@@ -127,33 +127,33 @@ export function BillingBenefitsCard({
                       {grants.length === 1 ? "grant" : "grants"}
                     </span>
                   </div>
-                  <div className="compact-grant-balance">
-                    <Tooltip delayDuration={150}>
-                      <TooltipTrigger asChild>
-                        <strong tabIndex={0}>
-                          {new Intl.NumberFormat("en-US", {
-                            maximumFractionDigits: 2,
-                          }).format(
-                            Math.max(0, remaining - reserved) / 1_000_000,
-                          )}{" "}
-                          <small>credits</small>
-                        </strong>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        Available: {credits(Math.max(0, remaining - reserved))}{" "}
-                        credits
-                      </TooltipContent>
-                    </Tooltip>
+                  <DetailsAction />
+                  <div className="benefit-summary-metric">
+                    <div className="compact-coverage compact-grant-balance">
+                      <Tooltip delayDuration={150}>
+                        <TooltipTrigger asChild>
+                          <strong tabIndex={0}>
+                            {new Intl.NumberFormat("en-US", {
+                              maximumFractionDigits: 2,
+                            }).format(
+                              Math.max(0, remaining - reserved) / 1_000_000,
+                            )}{" "}
+                            credits
+                          </strong>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          Available:{" "}
+                          {credits(Math.max(0, remaining - reserved))} credits
+                        </TooltipContent>
+                      </Tooltip>
+                      <small>available</small>
+                    </div>
                     <UsedGauge
                       used={original - remaining}
                       limit={original}
                       label={`${label} grants`}
                     />
                   </div>
-                  <span className="compact-benefit-action">
-                    Details{" "}
-                    <ChevronDown size={13} className="disclosure-arrow" />
-                  </span>
                 </summary>
                 <div className="benefit-expanded">
                   {grants.map((grant) => (
@@ -245,45 +245,44 @@ export function BillingBenefitsCard({
               .filter((family) => family.units.length);
             return (
               <details className="benefit-disclosure" key={id}>
-                <summary>
+                <summary className="benefit-summary">
                   <div className="compact-benefit-label">
                     <strong>{serviceName(catalog, slug)}</strong>
                     <span className="benefit-label-with-help">
                       Free usage
                       <FreeUsageHelp balances={balances} />· {balances.length}{" "}
-                      allowances
+                      {balances.length === 1 ? "allowance" : "allowances"}
                     </span>
                   </div>
-                  <span className="compact-benefit-action">
-                    Details{" "}
-                    <ChevronDown size={13} className="disclosure-arrow" />
-                  </span>
-                  <div
-                    className="compact-coverage"
-                    aria-label="Remaining free usage"
-                  >
-                    {families.map((family) => (
-                      <span key={family.name}>
-                        <span>
-                          {family.name === "Other usage"
-                            ? "Other"
-                            : family.name}
+                  <DetailsAction />
+                  <div className="benefit-summary-metric">
+                    <div
+                      className="compact-coverage"
+                      aria-label="Remaining free usage"
+                    >
+                      {families.map((family) => (
+                        <span key={family.name}>
+                          <span>
+                            {family.name === "Other usage"
+                              ? "Other"
+                              : family.name}
+                          </span>
+                          <strong>
+                            {family.units
+                              .map(([, rows]) => {
+                                const remaining = rows.reduce(
+                                  (sum, row) => sum + row.remaining_quantity,
+                                  0,
+                                );
+                                const metric = rows[0]!.allowance.metric;
+                                return `${compact(remaining)} ${shortMetric(metric)}`;
+                              })
+                              .join(" · ")}
+                          </strong>
                         </span>
-                        <strong>
-                          {family.units
-                            .map(([, rows]) => {
-                              const remaining = rows.reduce(
-                                (sum, row) => sum + row.remaining_quantity,
-                                0,
-                              );
-                              const metric = rows[0]!.allowance.metric;
-                              return `${compact(remaining)} ${shortMetric(metric)}`;
-                            })
-                            .join(" · ")}
-                        </strong>
-                      </span>
-                    ))}
-                    <small>remaining</small>
+                      ))}
+                      <small>remaining</small>
+                    </div>
                     <AllowanceChart
                       units={families.flatMap((family) => family.units)}
                     />
@@ -389,6 +388,14 @@ export function BillingBenefitsCard({
         </section>
       </CardContent>
     </Card>
+  );
+}
+
+function DetailsAction() {
+  return (
+    <span className="compact-benefit-action">
+      Details <ChevronDown size={13} className="disclosure-arrow" />
+    </span>
   );
 }
 

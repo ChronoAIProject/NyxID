@@ -321,17 +321,23 @@
   .benefit-disclosure[open] > summary .disclosure-arrow {
     transform: rotate(180deg);
   }
-  .benefit-gauge {
-    display: flex;
+  /* Every usage meter (grant gauge, allowance chart, per-unit gauge) shares
+     one track width and one caption column, so tracks and captions end on
+     the same right edge in every benefit row. */
+  --benefit-meter-track: 180px;
+  --benefit-meter-caption: 68px;
+  .benefit-meter {
+    display: grid;
+    grid-template-columns: var(--benefit-meter-track) var(--benefit-meter-caption);
     align-items: center;
     gap: 12px;
-    width: 190px;
     flex-shrink: 0;
   }
-  .benefit-gauge > span:last-child {
-    min-width: 62px;
-    text-align: right;
+  .benefit-meter-caption {
     font-size: 10px;
+    line-height: 16px;
+    text-align: right;
+    white-space: nowrap;
     color: var(--color-muted-foreground);
     font-variant-numeric: tabular-nums;
   }
@@ -374,7 +380,7 @@
   }
   .benefit-unit {
     display: grid;
-    grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) 190px;
+    grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) auto;
     align-items: center;
     gap: 12px;
   }
@@ -518,11 +524,11 @@
     margin: 12px 0;
   }
   @media (max-width: 1050px) {
-    .benefit-unit {
-      grid-template-columns: minmax(90px, 1fr) minmax(95px, 1fr) 150px;
+    & {
+      --benefit-meter-track: 150px;
     }
-    .benefit-unit .benefit-gauge {
-      width: 150px;
+    .benefit-unit {
+      grid-template-columns: minmax(90px, 1fr) minmax(95px, 1fr) auto;
     }
     .usage-filters {
       flex-wrap: wrap;
@@ -544,7 +550,10 @@
     }
   }
   @media (max-width: 640px) {
-    .benefit-gauge {
+    & {
+      --benefit-meter-track: minmax(0, 1fr);
+    }
+    .benefit-meter {
       width: 100%;
     }
     .benefit-unit-family {
@@ -558,9 +567,8 @@
       grid-template-columns: 1fr auto;
       gap: 8px;
     }
-    .benefit-unit .benefit-gauge {
+    .benefit-unit .benefit-meter {
       grid-column: 1 / -1;
-      width: 100%;
     }
     .benefit-unit + .benefit-unit {
       margin-top: 14px;
@@ -622,11 +630,16 @@
     padding-top: 0;
     border-top: 0;
   }
-  .compact-benefits .benefit-disclosure > summary {
+  /* One summary grid for every benefit row: label | Details on the first
+     line, then the facts and the meter, right-aligned to the Details edge. */
+  .compact-benefits .benefit-summary {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    align-items: center;
-    gap: 12px 24px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "label action"
+      "metric metric";
+    align-items: start;
+    gap: 10px 24px;
     padding: 16px 0;
   }
   .compact-benefits
@@ -640,9 +653,14 @@
     > summary {
     padding-top: 0;
   }
+  .compact-benefit-label {
+    grid-area: label;
+    min-width: 0;
+  }
   .compact-benefit-label > strong {
     display: block;
     font-size: 12px;
+    line-height: 18px;
     font-weight: 500;
     overflow-wrap: anywhere;
   }
@@ -652,36 +670,32 @@
     color: var(--color-muted-foreground);
     margin-top: 4px;
   }
-  .compact-grant-balance > strong {
-    display: block;
-    font-size: 15px;
-    font-weight: 600;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-  .compact-grant-balance > strong > small {
-    font-size: 11px;
-    color: var(--color-muted-foreground);
-    font-weight: 400;
-  }
-  .compact-grant-balance .benefit-gauge {
-    margin: 6px 0 0 auto;
-  }
   .compact-benefit-action {
+    grid-area: action;
     display: flex;
     align-items: center;
     justify-content: end;
-    gap: 8px;
-    grid-column: 3;
+    gap: 6px;
+    height: 18px;
     font-size: 11px;
     color: var(--color-muted-foreground);
   }
+  .benefit-summary-metric {
+    grid-area: metric;
+    display: flex;
+    align-items: center;
+    gap: 8px 24px;
+    min-width: 0;
+  }
+  .benefit-summary-metric > .benefit-meter {
+    margin-left: auto;
+  }
   .compact-coverage {
-    grid-column: 1 / -1;
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
+    align-items: baseline;
     gap: 6px 24px;
+    min-width: 0;
   }
   .compact-coverage > span {
     display: flex;
@@ -698,45 +712,40 @@
     font-weight: 500;
     font-variant-numeric: tabular-nums;
   }
+  .compact-grant-balance {
+    gap: 6px;
+  }
+  .compact-grant-balance > strong {
+    border-radius: 3px;
+    outline-offset: 3px;
+  }
+  .compact-grant-balance > strong:focus-visible {
+    outline: 1px solid var(--color-foreground);
+  }
   .compact-benefits .benefit-expanded {
     margin-top: 0;
     padding-bottom: 20px;
   }
   @media (max-width: 640px) {
-    .compact-benefits .benefit-disclosure > summary {
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
+    .compact-benefits .benefit-summary {
+      gap: 10px 12px;
     }
-    .compact-benefit-action {
-      grid-column: 2;
-      grid-row: 1;
+    .benefit-summary-metric {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
     }
-    .compact-grant-balance {
-      grid-column: 1 / -1;
-      grid-row: 2;
-    }
-    .compact-grant-balance > strong {
-      text-align: left;
-    }
-    .compact-grant-balance .benefit-gauge {
-      width: 100%;
-      margin-top: 8px;
+    .benefit-summary-metric > .benefit-meter {
+      margin-left: 0;
     }
     .compact-coverage {
-      gap: 8px;
-    }
-    .compact-coverage > span {
-      width: 100%;
-    }
-    .compact-coverage > span > span {
-      min-width: 40px;
+      gap: 6px 16px;
     }
   }
 
   .allowance-chart {
-    flex: 0 0 190px;
-    margin-left: auto;
-    width: 190px;
+    border-radius: 3px;
+    outline-offset: 3px;
     --allowance-used: color-mix(
       in srgb,
       var(--color-foreground) 70%,
@@ -749,15 +758,7 @@
     );
     --allowance-remaining: var(--color-muted);
   }
-  .allowance-chart-trigger {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 0;
-    border-radius: 3px;
-    outline-offset: 3px;
-  }
-  .allowance-chart-trigger:focus-visible {
+  .allowance-chart:focus-visible {
     outline: 1px solid var(--color-foreground);
   }
   .allowance-chart-bar {
@@ -792,25 +793,12 @@
   .allowance-remaining {
     background: var(--allowance-remaining);
   }
-  .allowance-chart-status {
-    min-width: 62px;
-    font-size: 10px;
-    text-align: right;
-    color: var(--color-muted-foreground);
-  }
   .compact-benefits .benefit-track > span {
     background: color-mix(
       in srgb,
       var(--color-foreground) 70%,
       var(--color-card)
     );
-  }
-  @media (max-width: 640px) {
-    .allowance-chart {
-      flex-basis: 100%;
-      margin-left: 0;
-      width: 100%;
-    }
   }
 
   .compact-benefit-label .benefit-label-with-help {
