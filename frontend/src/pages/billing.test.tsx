@@ -74,12 +74,40 @@ async function renderPage(url = "/billing?tab=usage") {
     </TooltipProvider>,
   );
   await act(() => router.load());
-  await screen.findByRole("heading", { name: "Billing & Usage" });
+  await screen.findByRole("heading", {
+    name: "Billing & Usage",
+    hidden: true,
+  });
   return { history, router };
 }
 async function select(label: string, option: string) {
   await userEvent.click(screen.getByRole("combobox", { name: label }));
   await userEvent.click(screen.getByRole("option", { name: option }));
+}
+function serviceFilter() {
+  return screen.getByRole("button", { name: "Service filter" });
+}
+async function applyServices(names: string[]) {
+  for (const name of names)
+    await userEvent.click(screen.getByRole("button", { name }));
+  await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+}
+function servicesParam(history: { location: { search: string } }) {
+  const raw = new URLSearchParams(history.location.search).get("services");
+  return raw === null ? undefined : (JSON.parse(raw) as string[]);
+}
+function twoServiceRows() {
+  return [
+    row(),
+    row({
+      service_slug: "free-service",
+      quantity: 10,
+      metric: "requests",
+      estimated_credits_micros: 0,
+      grant_credits_micros: 0,
+      billable: false,
+    }),
+  ];
 }
 beforeEach(() => {
   vi.resetAllMocks();
@@ -140,37 +168,23 @@ describe("BillingPage", () => {
     expect(screen.getByText("platform_tokens")).toBeVisible();
   });
   it("offers only used services and filters every summary, detail, and funding value", async () => {
-    mocks.usage.mockReturnValue(
-      query(
-        usage([
-          row(),
-          row({
-            service_slug: "free-service",
-            quantity: 10,
-            metric: "requests",
-            estimated_credits_micros: 0,
-            grant_credits_micros: 0,
-            billable: false,
-          }),
-        ]),
-      ),
-    );
+    mocks.usage.mockReturnValue(query(usage(twoServiceRows())));
     const { history } = await renderPage();
     expect(
       screen.getByRole("combobox", { name: "Time filter" }),
     ).toHaveTextContent("Last 30 days");
-    await userEvent.click(
-      screen.getByRole("combobox", { name: "Service filter" }),
-    );
+    expect(serviceFilter()).toHaveTextContent("All active services");
+    await userEvent.click(serviceFilter());
     expect(
-      screen.queryByRole("option", { name: "Unused service" }),
+      screen.queryByRole("button", { name: "Unused service" }),
     ).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("option", { name: "Free service" }));
+    await applyServices(["Free service"]);
     expect(screen.queryByText("Example LLM")).not.toBeInTheDocument();
     expect(
       screen.getByText("Free", { exact: true, selector: ".usage-status" }),
     ).toBeVisible();
-    expect(history.location.search).toContain("service=free-service");
+    expect(serviceFilter()).toHaveTextContent("Free service");
+    expect(servicesParam(history)).toEqual(["free-service"]);
     await act(() => history.back());
     await waitFor(() =>
       expect(
@@ -180,22 +194,124 @@ describe("BillingPage", () => {
       ).toBeVisible(),
     );
   });
+  it("selects several services and withholds global totals for any selection", async () => {
+    mocks.usage.mockReturnValue(
+      query(usage([...twoServiceRows(), row({ service_slug: "third" })])),
+    );
+    const { history } = await renderPage();
+    const totals = () =>
+      document
+        .querySelector(".all-metrics")
+        ?.textContent?.includes("Reported requests");
+    expect(totals()).toBe(true);
+    await userEvent.click(serviceFilter());
+    await applyServices(["Free service", "Example LLM"]);
+    expect(serviceFilter()).toHaveTextContent("2 services");
+    expect(servicesParam(history)).toEqual(["free-service", "example-llm"]);
+    expect(screen.queryByText("third")).not.toBeInTheDocument();
+    expect(totals()).toBe(false);
+  });
+  it("discards a draft on Cancel and clears the selection on Clear + Apply", async () => {
+    mocks.usage.mockReturnValue(query(usage(twoServiceRows())));
+    const { history } = await renderPage(
+      `/billing?tab=usage&services=${encodeURIComponent('["free-service"]')}`,
+    );
+    await userEvent.click(serviceFilter());
+    await userEvent.click(screen.getByRole("button", { name: "Example LLM" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(servicesParam(history)).toEqual(["free-service"]);
+    await userEvent.click(serviceFilter());
+    expect(screen.getByRole("button", { name: "Example LLM" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(servicesParam(history)).toBeUndefined();
+    expect(serviceFilter()).toHaveTextContent("All active services");
+  });
+  it.each([
+    ["/billing?tab=usage&service=all", undefined],
+    ["/billing?tab=usage&service=free-service", ["free-service"]],
+    [
+      `/billing?tab=usage&service=free-service&services=${encodeURIComponent('["example-llm"]')}`,
+      ["example-llm"],
+    ],
+  ])("migrates the legacy service param from %s", async (url, expected) => {
+    mocks.usage.mockReturnValue(query(usage(twoServiceRows())));
+    const { history } = await renderPage(url);
+    await waitFor(() =>
+      expect(history.location.search).not.toContain("service="),
+    );
+    expect(servicesParam(history)).toEqual(expected);
+  });
+  it("prunes unknown services only after the usage query settles", async () => {
+    let state: ReturnType<typeof query> = {
+      ...query(undefined),
+      isLoading: true,
+      isSuccess: false,
+    };
+    mocks.usage.mockImplementation(() => state);
+    const url = `/billing?tab=usage&services=${encodeURIComponent('["example-llm","gone"]')}`;
+    const { history } = await renderPage(url);
+    const rerender = async () => {
+      await userEvent.click(screen.getByRole("tab", { name: "Billing" }));
+      await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
+    };
+    expect(servicesParam(history)).toEqual(["example-llm", "gone"]);
+    state = { ...query(usage([row()])), isFetching: true };
+    await rerender();
+    expect(servicesParam(history)).toEqual(["example-llm", "gone"]);
+    state = query(usage([row()]));
+    await rerender();
+    await waitFor(() =>
+      expect(servicesParam(history)).toEqual(["example-llm"]),
+    );
+  });
   it("resets an unavailable service after a time change while keeping history independent", async () => {
     mocks.usage.mockImplementation((period) =>
       query(usage(period === "24h" ? [] : [row()])),
     );
     const { history } = await renderPage(
-      "/billing?tab=usage&service=example-llm&period=7d",
+      `/billing?tab=usage&services=${encodeURIComponent('["example-llm"]')}&period=7d`,
     );
     await select("Time filter", "Last 24 hours");
-    await waitFor(() =>
-      expect(history.location.search).toContain("service=all"),
-    );
+    await waitFor(() => expect(servicesParam(history)).toBeUndefined());
     expect(screen.getByText("No usage in this period.")).toBeVisible();
     await userEvent.click(screen.getByRole("tab", { name: "Billing" }));
     expect(
       screen.getByRole("combobox", { name: "Top-up history period" }),
     ).toHaveTextContent("Last 30 days");
+  });
+  it("opens Add credits once from action=topup and clears the param", async () => {
+    const { history } = await renderPage("/billing?tab=billing&action=topup");
+    expect(await screen.findByRole("dialog")).toBeVisible();
+    await waitFor(() =>
+      expect(history.location.search).not.toContain("action"),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    await act(() => history.back());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+  it("lands on the Billing tab without a dialog when top-up is impossible", async () => {
+    mocks.usage.mockReturnValue(
+      query({
+        ...usage(),
+        billing: { ...usage().billing, charging_enabled: false },
+      }),
+    );
+    const { history } = await renderPage("/billing?tab=usage&action=topup");
+    await waitFor(() =>
+      expect(history.location.search).not.toContain("action"),
+    );
+    expect(screen.getByRole("tab", { name: "Billing" })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
   it("does not turn missing costs into zero or count free records as pending", async () => {
     mocks.usage.mockReturnValue(

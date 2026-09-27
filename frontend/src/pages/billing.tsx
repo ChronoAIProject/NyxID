@@ -1,4 +1,5 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
@@ -33,7 +34,9 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { periods } from "@/lib/billing-display";
 import { groupRows } from "@/lib/billing-usage";
+import { FilterPicker } from "@/components/billing-analytics/filter-picker";
 import {
+  BILLING_SERVICE_FILTER_LIMIT,
   normalizeBillingSearch,
   type BillingSearch,
   type BillingUsagePeriod,
@@ -41,9 +44,11 @@ import {
 import "@/components/billing/billing-page.css";
 
 export function BillingPage() {
-  const search = normalizeBillingSearch(useSearch({ strict: false }));
+  const rawSearch: Record<string, unknown> = useSearch({ strict: false });
+  const search = normalizeBillingSearch(rawSearch);
   const navigate = useNavigate();
   const { tab, period } = search;
+  const [topUpOpen, setTopUpOpen] = useState(false);
   const walletQuery = useBillingWallet();
   const usageQuery = useBillingUsage(period);
   const catalogQuery = useCatalog({ includeAll: true });
@@ -51,13 +56,14 @@ export function BillingPage() {
   const topUpBilling = useTopUpBilling();
   const catalog = catalogQuery.data ?? [];
   const services = groupRows(catalog, usageQuery.data?.rows ?? [], "service");
-  const service = services.some((group) => group.key === search.service)
-    ? search.service
-    : "all";
-  const rows =
-    service === "all"
-      ? (usageQuery.data?.rows ?? [])
-      : services.find((group) => group.key === service)!.rows;
+  const selected = search.services.filter((key) =>
+    services.some((group) => group.key === key),
+  );
+  const rows = selected.length
+    ? services
+        .filter((group) => selected.includes(group.key))
+        .flatMap((group) => group.rows)
+    : (usageQuery.data?.rows ?? []);
   const walletUnavailable = isBillingNotConfigured(walletQuery.error);
   const wallet = walletQuery.data;
   const billingCapability = usageQuery.data?.billing;
@@ -65,22 +71,40 @@ export function BillingPage() {
     billingCapability?.charging_enabled && billingCapability?.lago_configured,
   );
 
-  function updateSearch(patch: Partial<BillingSearch>) {
-    void navigate({ to: "/billing", search: { ...search, ...patch } });
+  function updateSearch(patch: Partial<BillingSearch>, replace = false) {
+    void navigate({
+      to: "/billing",
+      search: billingUrlSearch({ ...search, action: undefined, ...patch }),
+      replace,
+    });
+  }
+  // Prune selections without usage only once the authoritative usage query
+  // for this period has settled; this also migrates the legacy `service`.
+  const selectionStale =
+    selected.length !== search.services.length ||
+    rawSearch.service !== undefined;
+  useEffect(() => {
+    if (usageQuery.isSuccess && !usageQuery.isFetching && selectionStale) {
+      updateSearch({ services: selected }, true);
+    }
+  });
+  const topUpReady = Boolean(wallet) && billingReady;
+  const topUpSettled =
+    !walletQuery.isLoading && (!usageQuery.isLoading || !wallet);
+  // `action=topup` opens Add credits once the wallet can take a top-up (else
+  // it just lands on the Billing tab), then leaves the URL so refresh or Back
+  // never reopens it.
+  const wantsTopUp = search.action === "topup" && topUpSettled;
+  const [topUpHandled, setTopUpHandled] = useState(false);
+  if (wantsTopUp && !topUpHandled) {
+    setTopUpHandled(true);
+    if (topUpReady) setTopUpOpen(true);
+  } else if (!search.action && topUpHandled) {
+    setTopUpHandled(false);
   }
   useEffect(() => {
-    if (
-      usageQuery.isSuccess &&
-      !usageQuery.isFetching &&
-      service !== search.service
-    ) {
-      void navigate({
-        to: "/billing",
-        search: { ...search, service: "all" },
-        replace: true,
-      });
-    }
-  }, [usageQuery.isSuccess, usageQuery.isFetching, service, search, navigate]);
+    if (wantsTopUp) updateSearch({ tab: "billing" }, true);
+  });
   async function handleProvisionWallet() {
     try {
       await provisionWallet.mutateAsync({});
@@ -159,32 +183,23 @@ export function BillingPage() {
             billingReady={billingReady}
             onTopUp={handleTopUp}
             topUpPending={topUpBilling.isPending}
+            topUpOpen={topUpOpen}
+            onTopUpOpenChange={setTopUpOpen}
           />
           <BillingBenefits catalog={catalog} />
           <BillingTopUpHistory />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">
           <div className="usage-filters">
-            <label>
-              <span>Service</span>
-              <Select
-                value={service}
-                onValueChange={(value) => updateSearch({ service: value })}
+            <div className="usage-filter">
+              <span id="usage-service-filter-label">Service</span>
+              <ServiceFilter
+                services={services}
+                values={selected}
                 disabled={usageQuery.isLoading || usageQuery.isError}
-              >
-                <SelectTrigger aria-label="Service filter">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All active services</SelectItem>
-                  {services.map((group) => (
-                    <SelectItem key={group.key} value={group.key}>
-                      {group.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </label>
+                onChange={(values) => updateSearch({ services: values })}
+              />
+            </div>
             <label>
               <span>Time</span>
               <Select
@@ -231,7 +246,7 @@ export function BillingPage() {
                   <UsageMetricsDisclosure
                     rows={rows}
                     totals={
-                      service === "all" ? usageQuery.data?.totals : undefined
+                      selected.length ? undefined : usageQuery.data?.totals
                     }
                   />
                   <ServiceUsage catalog={catalog} rows={rows} />
@@ -242,6 +257,68 @@ export function BillingPage() {
         </TabsContent>
       </Tabs>
     </div>
+  );
+}
+
+function billingUrlSearch(search: BillingSearch) {
+  return {
+    tab: search.tab,
+    period: search.period,
+    services: search.services.length ? search.services : undefined,
+    action: search.action,
+  };
+}
+
+function ServiceFilter({
+  services,
+  values,
+  disabled,
+  onChange,
+}: {
+  services: { key: string; name: string }[];
+  values: string[];
+  disabled: boolean;
+  onChange: (values: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const options = services
+    .filter((group) => group.name.toLowerCase().includes(needle))
+    .map((group) => ({ id: group.key, label: group.name }));
+  const summary =
+    values.length === 0
+      ? "All active services"
+      : values.length === 1
+        ? (services.find((group) => group.key === values[0])?.name ??
+          "1 service")
+        : `${values.length} services`;
+  return (
+    <FilterPicker
+      key={`${open}:${values.join(",")}`}
+      label="Services"
+      trigger={
+        <button
+          type="button"
+          aria-label="Service filter"
+          aria-describedby="usage-service-filter-label"
+          disabled={disabled}
+          className="flex h-8 w-full items-center justify-between gap-2 rounded-lg border border-input bg-transparent px-3 py-1.5 text-left text-[12px] text-foreground transition-colors duration-200 focus-visible:outline-none focus-visible:border-white/[0.15] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <span className="min-w-0 truncate">{summary}</span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+        </button>
+      }
+      values={values}
+      onChange={onChange}
+      open={open}
+      onOpenChange={setOpen}
+      search={query}
+      onSearchChange={setQuery}
+      searchPlaceholder="Search services"
+      options={{ status: "success", options, total: options.length }}
+      limit={BILLING_SERVICE_FILTER_LIMIT}
+    />
   );
 }
 

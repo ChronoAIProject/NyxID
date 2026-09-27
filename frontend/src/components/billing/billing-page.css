@@ -328,7 +328,9 @@
   --benefit-meter-caption: 68px;
   .benefit-meter {
     display: grid;
-    grid-template-columns: var(--benefit-meter-track) var(--benefit-meter-caption);
+    grid-template-columns: var(--benefit-meter-track) var(
+        --benefit-meter-caption
+      );
     align-items: center;
     gap: 12px;
     flex-shrink: 0;
@@ -419,14 +421,16 @@
     gap: 16px;
     margin-bottom: 20px;
   }
-  .usage-filters > label {
+  .usage-filters > label,
+  .usage-filters > .usage-filter {
     display: block;
     width: 240px;
   }
   .usage-filters > label:nth-child(2) {
     width: 160px;
   }
-  .usage-filters > label > span {
+  .usage-filters > label > span,
+  .usage-filters > .usage-filter > span {
     display: block;
     color: var(--color-muted-foreground);
     font-size: 11px;
@@ -577,6 +581,7 @@
       gap: 12px;
     }
     .usage-filters > label,
+    .usage-filters > .usage-filter,
     .usage-filters > label:nth-child(2) {
       width: 100%;
     }

@@ -1,12 +1,7 @@
 import { useDeferredValue, useId, useState } from "react";
-import { Check, ChevronDown, Search } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -14,8 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ErrorBanner } from "@/components/shared/error-banner";
-import { Skeleton } from "@/components/ui/skeleton";
+import { FilterPicker } from "./filter-picker";
 import { cn } from "@/lib/utils";
 import {
   useAnalyticsOptions,
@@ -116,7 +110,7 @@ const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
     options: [],
   },
 ];
-function FilterPicker({
+function AnalyticsFilterPicker({
   kind,
   values,
   onChange,
@@ -132,26 +126,13 @@ function FilterPicker({
   onOpenChange: (open: boolean) => void;
 }) {
   const [search, setSearch] = useState("");
-  const [draft, setDraft] = useState(values);
   const deferred = useDeferredValue(search);
   const label = FILTER_FIELDS.find((field) => field.key === kind)!.label;
   const query = useAnalyticsOptions(kind, deferred, open, sample);
-  const matches = (value: string, option: { id: string; detail?: string }) =>
-    value === option.id || (kind === "services" && value === option.detail);
-  const selected = (option: { id: string; detail?: string }) =>
-    draft.some((value) => matches(value, option));
   return (
-    <Popover
-      open={open}
-      onOpenChange={(next) => {
-        if (next) {
-          setDraft(values);
-          setSearch("");
-        }
-        onOpenChange(next);
-      }}
-    >
-      <PopoverTrigger asChild>
+    <FilterPicker
+      label={label}
+      trigger={
         <Button
           variant="outline"
           aria-label={`Filter ${label.toLowerCase()}`}
@@ -160,109 +141,36 @@ function FilterPicker({
           {label}
           <ChevronDown className="size-3" />
         </Button>
-      </PopoverTrigger>
-      <PopoverContent align="start" className="w-80 space-y-3 p-3">
-        <div className="flex items-center justify-between">
-          <span className="text-[12px] font-medium">{label}</span>
-          <span className="text-[11px] text-muted-foreground">
-            {draft.length} selected
-          </span>
-        </div>
-        <div className="relative">
-          <Search className="absolute left-2.5 top-2 size-3.5 text-muted-foreground" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={
-              kind === "actors"
-                ? "Search by email"
-                : kind === "owners"
-                  ? "Organization name, slug, or email"
-                  : "Search services"
-            }
-            aria-label={`Search ${label.toLowerCase()}`}
-            className="pl-8"
-          />
-        </div>
-        {query.isPending ? (
-          <Skeleton className="h-24" />
-        ) : query.isError ? (
-          <ErrorBanner
-            message={`Could not load ${label.toLowerCase()}.`}
-            onRetry={() => void query.refetch()}
-          />
-        ) : (
-          <div className="max-h-64 space-y-1 overflow-auto">
-            {query.data.options.map((option) => (
-              <Button
-                key={option.id}
-                variant="ghost"
-                className="h-auto w-full justify-start py-2 text-left"
-                disabled={!selected(option) && draft.length >= 20}
-                aria-pressed={selected(option)}
-                onClick={() =>
-                  setDraft(
-                    selected(option)
-                      ? draft.filter((value) => !matches(value, option))
-                      : [...draft, option.id],
-                  )
-                }
-              >
-                <span className="w-3 shrink-0">
-                  {selected(option) && <Check className="size-3" />}
-                </span>
-                <span className="min-w-0">
-                  <span className="block truncate">{option.label}</span>
-                  {option.detail && (
-                    <span className="block truncate text-[10px] text-muted-foreground">
-                      {option.detail}
-                    </span>
-                  )}
-                </span>
-              </Button>
-            ))}
-            {query.data.options.length === 0 && (
-              <p className="p-2 text-[12px] text-muted-foreground">
-                No matches.
-              </p>
-            )}
-            {query.data.total > query.data.options.length && (
-              <p className="text-[10px] text-muted-foreground">
-                Search to narrow {query.data.total.toLocaleString()} matches.
-              </p>
-            )}
-          </div>
-        )}
-        <div className="flex items-center gap-2 border-t border-border/60 pt-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!draft.length}
-            onClick={() => setDraft([])}
-          >
-            Clear
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="ml-auto"
-            onClick={() => onOpenChange(false)}
-          >
-            Cancel
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => {
-              onChange(draft);
-              onOpenChange(false);
-            }}
-          >
-            Apply
-          </Button>
-        </div>
-      </PopoverContent>
-    </Popover>
+      }
+      values={values}
+      onChange={onChange}
+      open={open}
+      onOpenChange={onOpenChange}
+      search={search}
+      onSearchChange={setSearch}
+      searchPlaceholder={
+        kind === "actors"
+          ? "Search by email"
+          : kind === "owners"
+            ? "Organization name, slug, or email"
+            : "Search services"
+      }
+      options={
+        query.isPending
+          ? { status: "pending" }
+          : query.isError
+            ? { status: "error", onRetry: () => void query.refetch() }
+            : {
+                status: "success",
+                options: query.data.options,
+                total: query.data.total,
+              }
+      }
+      matches={(value, option) =>
+        value === option.id || (kind === "services" && value === option.detail)
+      }
+      limit={20}
+    />
   );
 }
 export function FilterBar({
@@ -290,7 +198,7 @@ export function FilterBar({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           {(["services", "owners", "actors"] as const).map((kind) => (
-            <FilterPicker
+            <AnalyticsFilterPicker
               kind={kind}
               key={`${kind}:${openKind === kind}:${filters[kind].join(",")}`}
               open={openKind === kind}
