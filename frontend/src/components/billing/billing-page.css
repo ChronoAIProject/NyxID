@@ -311,6 +311,85 @@
   .benefit-disclosure[open] > summary .disclosure-arrow {
     transform: rotate(180deg);
   }
+  /* Every usage meter (grant gauge, allowance chart, per-unit gauge) shares
+     one track width and one caption column, so tracks and captions end on
+     the same right edge in every benefit row. */
+  --benefit-meter-track: 180px;
+  --benefit-meter-caption: 68px;
+  .benefit-meter {
+    display: grid;
+    grid-template-columns: var(--benefit-meter-track) var(
+        --benefit-meter-caption
+      );
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .benefit-meter-caption {
+    font-size: 10px;
+    line-height: 16px;
+    text-align: right;
+    white-space: nowrap;
+    color: var(--color-muted-foreground);
+    font-variant-numeric: tabular-nums;
+  }
+  .benefit-track {
+    display: block;
+    flex: 1;
+    height: 5px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--color-muted);
+  }
+  .benefit-track > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--color-info);
+  }
+  .benefit-allowances {
+    margin-top: 12px;
+  }
+  .benefit-unit-family {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .benefit-unit-family:last-child {
+    border-bottom: 0;
+  }
+  .benefit-unit-family > span {
+    width: 80px;
+    flex-shrink: 0;
+    color: var(--color-muted-foreground);
+    font-size: 11px;
+  }
+  .benefit-unit-family > div {
+    flex: 1;
+    min-width: 0;
+  }
+  .benefit-unit {
+    display: grid;
+    grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+  }
+  .benefit-unit + .benefit-unit {
+    margin-top: 10px;
+  }
+  .benefit-unit > span {
+    font-size: 11px;
+  }
+  .benefit-unit > span:nth-child(2) {
+    font-variant-numeric: tabular-nums;
+    color: var(--color-muted-foreground);
+  }
+  .benefit-unit strong {
+    font-weight: 500;
+    color: var(--color-foreground);
+  }
   .benefit-expanded {
     border-top: 1px solid var(--color-border);
     margin-top: 16px;
@@ -521,104 +600,173 @@
     font-size: 11px;
     color: var(--color-muted-foreground);
   }
+  .benefit-summary-metric {
+    grid-area: metric;
+    display: flex;
+    align-items: center;
+    gap: 8px 24px;
+    min-width: 0;
+  }
+  .benefit-summary-metric > .benefit-meter {
+    margin-left: auto;
+  }
+  .compact-coverage {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 24px;
+    min-width: 0;
+  }
+  .compact-coverage > span {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .compact-coverage > span > span,
+  .compact-coverage > small {
+    font-size: 11px;
+    color: var(--color-muted-foreground);
+  }
+  .compact-coverage strong {
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .compact-grant-balance {
+    gap: 6px;
+  }
+  .compact-grant-balance > strong {
+    border-radius: 3px;
+    outline-offset: 3px;
+  }
+  .compact-grant-balance > strong:focus-visible {
+    outline: 1px solid var(--color-foreground);
+  }
   .compact-benefits .benefit-expanded {
     margin-top: 0;
     padding-bottom: 20px;
   }
-  /* One tile per allowance (or grant balance). Every section shares the card
-     width, so the auto-fill columns line up across sections at every size. */
-  .benefit-tiles {
-    grid-area: metric;
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-    gap: 8px;
+  /* Meters size against the benefits card, not the viewport, so rows hold
+     with the sidebar expanded or collapsed. An expanded unit row needs the
+     80px family label + 20px gap + two unit columns + gaps + the meter:
+     604px with a 180px track, 539px with 150px. Below that, every row stacks
+     and every meter spans the full width, still sharing one right edge. */
+  .benefits-container {
+    container: benefits / inline-size;
   }
-  .benefit-tile {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--color-border) 50%, transparent);
-    border-radius: 8px;
+  @container benefits (max-width: 719px) {
+    .benefit-section {
+      --benefit-meter-track: 150px;
+    }
+    .benefit-unit {
+      grid-template-columns: minmax(90px, 1fr) minmax(95px, 1fr) auto;
+    }
   }
-  .benefit-tile-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
-    font-size: 11px;
+  @container benefits (max-width: 559px) {
+    .benefit-section {
+      --benefit-meter-track: minmax(0, 1fr);
+    }
+    .benefit-meter {
+      width: 100%;
+    }
+    .benefit-unit-family {
+      display: block;
+    }
+    .benefit-unit-family > span {
+      display: block;
+      margin-bottom: 10px;
+    }
+    .benefit-unit {
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+    }
+    .benefit-unit .benefit-meter {
+      grid-column: 1 / -1;
+    }
+    .benefit-unit + .benefit-unit {
+      margin-top: 14px;
+    }
+    .compact-benefits .benefit-summary {
+      gap: 10px 12px;
+    }
+    .benefit-summary-metric {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+    }
+    .benefit-summary-metric > .benefit-meter {
+      margin-left: 0;
+    }
+    .compact-coverage {
+      gap: 6px 16px;
+    }
   }
-  .benefit-tile-label {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--color-muted-foreground);
-  }
-  .benefit-tile-percent {
-    flex-shrink: 0;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-    color: var(--color-foreground);
-  }
-  .benefit-tile-track {
-    display: block;
-    height: 4px;
-    overflow: hidden;
-    border-radius: 4px;
-    background: var(--color-muted);
-  }
-  .benefit-tile-track > span {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
+  .compact-benefits .benefit-track > span {
     background: color-mix(
       in srgb,
       var(--color-foreground) 70%,
       var(--color-card)
     );
   }
-  .benefit-tile.is-warning .benefit-tile-track > span {
-    background: var(--color-warning);
-  }
-  .benefit-tile.is-warning .benefit-tile-percent {
-    color: var(--color-warning);
-  }
-  .benefit-tile.is-exhausted .benefit-tile-track > span {
-    background: var(--color-destructive);
-  }
-  .benefit-tile.is-exhausted .benefit-tile-percent {
-    color: var(--color-destructive);
-  }
-  .benefit-tile-caption {
+
+  /* Stacked usage bars: contiguous segments from the left, each a step
+     lighter than the last, separated by a hairline of card background. */
+  .stack-track {
+    display: flex;
+    height: 6px;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 10px;
-    font-variant-numeric: tabular-nums;
-    color: var(--color-muted-foreground);
-  }
-  .benefit-tile-balance {
     border-radius: 3px;
-    outline-offset: 2px;
+    background: var(--color-muted);
+    outline-offset: 3px;
   }
-  .benefit-tile-balance:focus-visible {
+  .stack-track:focus-visible {
     outline: 1px solid var(--color-foreground);
   }
-  .benefit-tiles-more {
-    align-self: center;
-    padding: 0 4px;
+  .stack-seg {
+    flex: none;
+    height: 100%;
+  }
+  .stack-seg + .stack-seg {
+    box-shadow: inset 1px 0 0 var(--color-card);
+  }
+  .benefit-meter.is-warning .benefit-track > span {
+    background: var(--color-warning);
+  }
+  .benefit-meter.is-exhausted .benefit-track > span {
+    background: var(--color-destructive);
+  }
+  .stack-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 16px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .stack-legend > li {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     font-size: 11px;
+  }
+  .stack-legend > li > span {
     color: var(--color-muted-foreground);
-    text-decoration: underline;
-    text-underline-offset: 3px;
   }
-  .benefit-tiles-more:hover {
-    color: var(--color-foreground);
+  .stack-legend > li > strong {
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
   }
-  .benefit-disclosure[open] .benefit-tiles-more {
-    display: none;
+  .stack-legend > li.is-warning > strong {
+    color: var(--color-warning);
+  }
+  .stack-legend > li.is-exhausted > strong {
+    color: var(--color-destructive);
+  }
+  .stack-labelled {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .compact-benefit-label .benefit-label-with-help {
@@ -711,4 +859,68 @@
       padding: 12px;
     }
   }
+}
+
+/* Opacity steps and swatches are unscoped so tooltips (portaled out of the
+   page) render the same colors. */
+.stack-step-0 {
+  --stack-mix: 100%;
+}
+.stack-step-1 {
+  --stack-mix: 75%;
+}
+.stack-step-2 {
+  --stack-mix: 55%;
+}
+.stack-step-3 {
+  --stack-mix: 40%;
+}
+.stack-step-4 {
+  --stack-mix: 28%;
+}
+.stack-seg,
+.stack-swatch {
+  background: color-mix(
+    in srgb,
+    var(--stack-base) var(--stack-mix, 100%),
+    var(--stack-bg, var(--color-card))
+  );
+}
+.billing-page,
+.billing-stack-tooltip {
+  --stack-base: color-mix(
+    in srgb,
+    var(--color-foreground) 82%,
+    var(--color-card)
+  );
+}
+.billing-page .stack-warning,
+.billing-stack-tooltip.stack-warning {
+  --stack-base: var(--color-warning);
+}
+.billing-page .stack-exhausted,
+.billing-stack-tooltip.stack-exhausted {
+  --stack-base: var(--color-destructive);
+}
+.stack-swatch {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.billing-stack-tooltip {
+  --stack-bg: var(--color-popover);
+  max-width: min(300px, calc(100vw - 32px));
+  font-size: 11px;
+}
+.billing-stack-tooltip > p {
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+.billing-stack-tooltip li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0;
 }

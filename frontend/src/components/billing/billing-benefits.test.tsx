@@ -108,8 +108,13 @@ it.each(["org_members", "groups"] as const)(
       },
     });
     render(<BillingBenefits />);
-    expect(screen.getByText("2 of 10 credits left")).toBeInTheDocument();
-    expect(screen.getByText("80 of 1K left")).toBeInTheDocument();
+    expect(
+      screen.getByText("2", {
+        exact: false,
+        selector: ".compact-grant-balance > strong",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("80 left")).toBeInTheDocument();
   },
 );
 
@@ -136,22 +141,25 @@ it("groups allowances by display name, shows only consumed usage, and expands ex
   expect(
     screen.getAllByText("Resets / expires", { selector: "dt" })[0],
   ).not.toBeVisible();
-  // One meter per allowance, each with its own percentage.
-  const meters = screen.getAllByRole("meter", { name: /^Example LLM / });
-  expect(meters).toHaveLength(5);
+  const meter = screen.getByRole("meter", {
+    name: "Example LLM free usage used",
+  });
+  expect(meter).toHaveAttribute(
+    "aria-valuetext",
+    "10% used; Input tokens 10% used; Output tokens 10% used; Cache-read tokens 10% used; Cache-write tokens 10% used; Images 10% used",
+  );
   expect(
-    meters.every(
-      (meter) => meter.getAttribute("aria-valuetext") === "10% used",
-    ),
-  ).toBe(true);
-  expect(screen.getByText("Cache-read tokens")).toBeVisible();
+    screen.getByText("10% used", {
+      selector: ".stacked-meter > .benefit-meter-caption",
+    }),
+  ).toBeInTheDocument();
   await userEvent.click(screen.getByText("Example LLM"));
   expect(
     screen.getAllByText("800").some((el) => el.closest("details")?.open),
   ).toBe(true);
 });
 
-it("shows one meter tile per allowance with thresholds, an unused state and overflow", async () => {
+it("stacks allowances into one bar whose segments and legend swatches match", () => {
   const allowance = (
     metric: Parameters<typeof billingAllowance>[0],
     consumed: number,
@@ -161,54 +169,140 @@ it("shows one meter tile per allowance with thresholds, an unused state and over
       reserved_quantity: 0,
       remaining_quantity: 1000 - consumed,
     });
-  mocks.grants.mockReturnValue({ ...query(null), data: { grants: [] } });
+  mocks.grants.mockReturnValue({
+    ...query(null),
+    data: {
+      grants: [
+        billingGrant({
+          id: "a",
+          amount_micros: 10_000_000,
+          remaining_micros: 5_000_000,
+          reserved_micros: 0,
+        }),
+        billingGrant({
+          id: "b",
+          reason: "Promo",
+          amount_micros: 30_000_000,
+          remaining_micros: 27_000_000,
+          reserved_micros: 0,
+        }),
+      ],
+    },
+  });
   mocks.allowances.mockReturnValue({
     ...query(null),
     data: {
       allowances: [
         allowance("input_tokens", 412),
-        allowance("output_tokens", 800),
-        allowance("cache_read_tokens", 1000),
-        allowance("cache_write_tokens", 0),
-        allowance("images", 10),
-        allowance("requests", 20),
-        allowance("bytes", 30),
-        allowance("tokens", 40),
+        allowance("output_tokens", 244),
+        allowance("cache_read_tokens", 0),
+        allowance("images", 240),
+        allowance("requests", 1000),
       ],
     },
   });
   render(<BillingBenefits catalog={billingCatalog} />);
-  const tile = (label: string) =>
-    screen
-      .getByText(label, { selector: ".benefit-tile-label" })
-      .closest(".benefit-tile") as HTMLElement;
-  // metricRank order; the first six are visible, the rest behind Details.
-  expect(
-    [...document.querySelectorAll(".benefit-tile-label")].map(
-      (el) => el.textContent,
-    ),
-  ).toEqual([
-    "Tokens",
-    "Input tokens",
-    "Output tokens",
-    "Cache-read tokens",
-    "Cache-write tokens",
-    "Images",
+
+  // Free usage: equal shares, contiguous from the left, total = average.
+  const service = screen.getByText("Example LLM").closest("details")!;
+  const segments = [...service.querySelectorAll<HTMLElement>(".stack-seg")];
+  expect(segments.map((segment) => segment.style.width)).toEqual([
+    "8.24%",
+    "4.88%",
+    "4.8%",
+    "20%",
   ]);
-  expect(screen.getByText("+2 more")).toBeInTheDocument();
-  expect(within(tile("Input tokens")).getByText("41.2%")).toBeVisible();
-  expect(within(tile("Input tokens")).getByRole("meter")).toHaveAttribute(
-    "aria-valuetext",
-    "41.2% used",
+  expect(
+    segments.map((segment) =>
+      [...segment.classList].find((name) => name.startsWith("stack-step-")),
+    ),
+  ).toEqual(["stack-step-0", "stack-step-1", "stack-step-3", "stack-step-4"]);
+  expect(within(service).getByText("38% used")).toBeInTheDocument();
+  // Every legend item (unused ones included) carries its segment's swatch.
+  const legend = within(service).getByRole("list", {
+    name: "Remaining free usage",
+  });
+  const items = within(legend).getAllByRole("listitem");
+  expect(items.map((item) => item.textContent)).toEqual([
+    "Input588 left",
+    "Output756 left",
+    "Cache read1K left",
+    "Images760 left",
+    "Requests0 left(used up)",
+  ]);
+  items.forEach((item, step) =>
+    expect(item.querySelector(".stack-swatch")).toHaveClass(
+      `stack-step-${step}`,
+    ),
   );
-  expect(tile("Input tokens")).not.toHaveClass("is-warning");
-  expect(tile("Output tokens")).toHaveClass("is-warning");
-  expect(tile("Cache-read tokens")).toHaveClass("is-exhausted");
-  expect(tile("Cache-read tokens")).not.toHaveClass("is-warning");
+  // One spent allowance is flagged even though the average is low.
+  expect(service).not.toHaveClass("stack-warning");
+  expect(service).not.toHaveClass("stack-exhausted");
+  expect(items[4]).toHaveClass("is-exhausted");
+  // Details rows carry the same swatches.
+  const rows = [...service.querySelectorAll(".benefit-unit .stack-swatch")];
+  expect(rows.map((swatch) => swatch.className)).toEqual(
+    [0, 1, 2, 3, 4].map((step) => `stack-swatch stack-step-${step}`),
+  );
+
+  // Grants: proportional to consumed credits over all original credits.
+  const grants = screen.getByText("Credit grants").closest("details")!;
   expect(
-    within(tile("Cache-write tokens")).getByText("Unused · 1K left"),
-  ).toBeVisible();
+    [...grants.querySelectorAll<HTMLElement>(".stack-seg")].map(
+      (segment) => segment.style.width,
+    ),
+  ).toEqual(["12.5%", "7.5%"]);
+  expect(within(grants).getByText("20% used")).toBeInTheDocument();
   expect(
-    within(tile("Input tokens")).getByText("588 of 1K left"),
-  ).toBeVisible();
+    [...grants.querySelectorAll("h4 .stack-swatch")].map(
+      (swatch) => swatch.className,
+    ),
+  ).toEqual(["stack-swatch stack-step-0", "stack-swatch stack-step-1"]);
+});
+
+it("switches the stack to warning at an 80% average and destructive when spent", () => {
+  mocks.grants.mockReturnValue({ ...query(null), data: { grants: [] } });
+  mocks.allowances.mockReturnValue({
+    ...query(null),
+    data: {
+      allowances: [
+        billingAllowance("input_tokens", {
+          consumed_quantity: 900,
+          reserved_quantity: 0,
+          remaining_quantity: 100,
+        }),
+        billingAllowance("output_tokens", {
+          consumed_quantity: 800,
+          reserved_quantity: 0,
+          remaining_quantity: 200,
+        }),
+      ],
+    },
+  });
+  const view = render(<BillingBenefits catalog={billingCatalog} />);
+  expect(screen.getByText("Example LLM").closest("details")).toHaveClass(
+    "stack-warning",
+  );
+  view.unmount();
+  mocks.allowances.mockReturnValue({
+    ...query(null),
+    data: {
+      allowances: [
+        billingAllowance("requests", {
+          consumed_quantity: 1000,
+          reserved_quantity: 0,
+          remaining_quantity: 0,
+        }),
+      ],
+    },
+  });
+  render(<BillingBenefits catalog={billingCatalog} />);
+  expect(screen.getByText("Example LLM").closest("details")).toHaveClass(
+    "stack-exhausted",
+  );
+  expect(
+    screen.getByText("100% used", {
+      selector: ".stacked-meter > .benefit-meter-caption",
+    }),
+  ).toBeInTheDocument();
 });

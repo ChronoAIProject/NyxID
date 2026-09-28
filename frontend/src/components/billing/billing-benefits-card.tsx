@@ -2,7 +2,6 @@ import type {
   CreditGrant,
   UserAllowanceBalance,
 } from "@/schemas/billing-credits";
-import type { ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -11,7 +10,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { billingMetricLabel } from "@/lib/billing-units";
-import { cn } from "@/lib/utils";
 import {
   compact,
   credits,
@@ -20,62 +18,51 @@ import {
   timestamp,
   type BillingCatalog,
 } from "@/lib/billing-display";
+import { metricFamily } from "@/lib/billing-usage";
+import { StackedMeter, StackSwatch } from "./stacked-meter";
+import {
+  equalShareStack,
+  proportionalStack,
+  stackStatusClass,
+} from "@/lib/benefit-stack";
+import { cn } from "@/lib/utils";
 import { BenefitHelp, FreeUsageHelp } from "./benefit-help";
 
-/** Allowances shown in a collapsed section; the rest are behind Details. */
-const TILE_LIMIT = 6;
-
-function percentUsed(used: number, limit: number) {
+function UsedGauge({
+  used,
+  limit,
+  label,
+}: {
+  used: number;
+  limit: number;
+  label: string;
+}) {
   const percent =
     limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0;
-  const text =
+  const formatted =
     percent > 0 && percent < 0.01
       ? "<0.01"
       : number(Math.round(percent * 100) / 100);
-  return { percent, text };
-}
-
-/**
- * One allowance or grant balance: label, percentage used, a thin bar and a
- * remaining caption. The bar turns warning at 80% and destructive when spent.
- */
-function MeterTile({
-  label,
-  meterLabel,
-  used,
-  limit,
-  caption,
-}: {
-  label: string;
-  meterLabel: string;
-  used: number;
-  limit: number;
-  caption: ReactNode;
-}) {
-  const { percent, text } = percentUsed(used, limit);
-  const level =
-    percent >= 100 ? "is-exhausted" : percent >= 80 ? "is-warning" : undefined;
   return (
-    <div className={cn("benefit-tile", level)}>
-      <span className="benefit-tile-head">
-        <span className="benefit-tile-label" title={label}>
-          {label}
-        </span>
-        <span className="benefit-tile-percent">{text}%</span>
-      </span>
+    <span
+      className={cn(
+        "benefit-meter",
+        percent >= 100 ? "is-exhausted" : percent >= 80 ? "is-warning" : null,
+      )}
+    >
       <span
-        className="benefit-tile-track"
+        className="benefit-track"
         role="meter"
-        aria-label={`${meterLabel} used`}
+        aria-label={`${label} used`}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent}
-        aria-valuetext={`${text}% used`}
+        aria-valuetext={`${formatted}% used`}
       >
         <span style={{ width: `${percent}%` }} />
       </span>
-      <span className="benefit-tile-caption">{caption}</span>
-    </div>
+      <span className="benefit-meter-caption">{formatted}% used</span>
+    </span>
   );
 }
 
@@ -105,13 +92,9 @@ export function BillingBenefitsCard({
       <CardHeader>
         <CardTitle>Credit grants & free usage</CardTitle>
       </CardHeader>
-      <CardContent>
+      <CardContent className="benefits-container">
         <section className="benefit-section">
           {[...grantGroups].map(([key, grants]) => {
-            const original = grants.reduce(
-              (sum, grant) => sum + grant.amount_micros,
-              0,
-            );
             const remaining = grants.reduce(
               (sum, grant) => sum + grant.remaining_micros,
               0,
@@ -120,15 +103,34 @@ export function BillingBenefitsCard({
               (sum, grant) => sum + grant.reserved_micros,
               0,
             );
-            const available = Math.max(0, remaining - reserved);
             const label =
               key === "all"
                 ? "All services"
                 : grants[0]!.scope.service_slugs
                     .map((slug) => serviceName(catalog, slug))
                     .join(", ");
+            const stack = proportionalStack(
+              grants.map((grant) => ({
+                key: grant.id,
+                label: grant.reason || "Credit grant",
+                short: grant.reason || "Credit grant",
+                used: grant.amount_micros - grant.remaining_micros,
+                limit: grant.amount_micros,
+                legend: `${credits(grant.remaining_micros)} left`,
+                detail: `${credits(grant.remaining_micros)} of ${credits(grant.amount_micros)} credits left`,
+              })),
+            );
+            const grantSteps = new Map(
+              stack.items.map((item) => [item.key, item.step]),
+            );
             return (
-              <details className="benefit-disclosure" key={key}>
+              <details
+                className={cn(
+                  "benefit-disclosure",
+                  stackStatusClass(stack.status),
+                )}
+                key={key}
+              >
                 <summary className="benefit-summary">
                   <div className="compact-benefit-label">
                     <strong className="benefit-label-with-help">
@@ -153,38 +155,36 @@ export function BillingBenefitsCard({
                     </span>
                   </div>
                   <DetailsAction />
-                  <div className="benefit-tiles">
-                    <MeterTile
-                      label="Credits"
-                      meterLabel={`${label} grants`}
-                      used={original - remaining}
-                      limit={original}
-                      caption={
-                        <Tooltip delayDuration={150}>
-                          <TooltipTrigger asChild>
-                            <span className="benefit-tile-balance" tabIndex={0}>
-                              {new Intl.NumberFormat("en-US", {
-                                maximumFractionDigits: 2,
-                              }).format(available / 1_000_000)}{" "}
-                              of{" "}
-                              {new Intl.NumberFormat("en-US", {
-                                maximumFractionDigits: 2,
-                              }).format(original / 1_000_000)}{" "}
-                              credits left
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            Available: {credits(available)} credits
-                          </TooltipContent>
-                        </Tooltip>
-                      }
-                    />
+                  <div className="benefit-summary-metric">
+                    <div className="compact-coverage compact-grant-balance">
+                      <Tooltip delayDuration={150}>
+                        <TooltipTrigger asChild>
+                          <strong tabIndex={0}>
+                            {new Intl.NumberFormat("en-US", {
+                              maximumFractionDigits: 2,
+                            }).format(
+                              Math.max(0, remaining - reserved) / 1_000_000,
+                            )}{" "}
+                            credits
+                          </strong>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          Available:{" "}
+                          {credits(Math.max(0, remaining - reserved))} credits
+                        </TooltipContent>
+                      </Tooltip>
+                      <small>available</small>
+                    </div>
+                    <StackedMeter stack={stack} label={`${label} grants`} />
                   </div>
                 </summary>
                 <div className="benefit-expanded">
                   {grants.map((grant) => (
                     <section key={grant.id}>
-                      <h4>{grant.reason || "Credit grant"}</h4>
+                      <h4 className="stack-labelled">
+                        <StackSwatch step={grantSteps.get(grant.id) ?? 0} />
+                        {grant.reason || "Credit grant"}
+                      </h4>
                       <dl className="split-facts">
                         <div>
                           <dt>Original grant</dt>
@@ -253,41 +253,60 @@ export function BillingBenefitsCard({
               ].join("|");
               units.set(key, [...(units.get(key) ?? []), balance]);
             }
-            const tiles = [...units]
-              .sort(
-                ([, a], [, b]) =>
-                  metricRank(a[0]!.allowance.metric) -
-                  metricRank(b[0]!.allowance.metric),
-              )
-              .map(([key, rows]) => {
-                const { metric, recurrence } = rows[0]!.allowance;
-                const sameMetric = [...units.values()].filter(
-                  (other) => other[0]!.allowance.metric === metric,
-                ).length;
-                const name = sentence(billingMetricLabel(metric));
-                return {
-                  key,
-                  label:
-                    sameMetric > 1
-                      ? `${name} · ${recurrence.replaceAll("_", " ")}`
-                      : name,
-                  limit: rows.reduce(
+            const families = ["Tokens", "Cache", "Requests & other units"]
+              .map((family) => ({
+                name:
+                  family === "Requests & other units" ? "Other usage" : family,
+                units: [...units]
+                  .sort(
+                    ([, a], [, b]) =>
+                      metricRank(a[0]!.allowance.metric) -
+                      metricRank(b[0]!.allowance.metric),
+                  )
+                  .filter(
+                    ([, rows]) =>
+                      metricFamily(rows[0]!.allowance.metric) === family,
+                  ),
+              }))
+              .filter((family) => family.units.length);
+            const stack = equalShareStack(
+              families
+                .flatMap((family) => family.units)
+                .map(([key, rows]) => {
+                  const metric = rows[0]!.allowance.metric;
+                  const limit = rows.reduce(
                     (sum, row) => sum + row.allowance.quantity,
                     0,
-                  ),
-                  consumed: rows.reduce(
-                    (sum, row) => sum + row.consumed_quantity,
-                    0,
-                  ),
-                  remaining: rows.reduce(
+                  );
+                  const remaining = rows.reduce(
                     (sum, row) => sum + row.remaining_quantity,
                     0,
-                  ),
-                };
-              });
-            const hidden = tiles.length - TILE_LIMIT;
+                  );
+                  return {
+                    key,
+                    label: sentence(billingMetricLabel(metric)),
+                    short: shortMetric(metric),
+                    used: rows.reduce(
+                      (sum, row) => sum + row.consumed_quantity,
+                      0,
+                    ),
+                    limit,
+                    legend: `${compact(remaining)} left`,
+                    detail: `${compact(remaining)} of ${compact(limit)} left`,
+                  };
+                }),
+            );
+            const unitSteps = new Map(
+              stack.items.map((item) => [item.key, item.step]),
+            );
             return (
-              <details className="benefit-disclosure" key={id}>
+              <details
+                className={cn(
+                  "benefit-disclosure",
+                  stackStatusClass(stack.status),
+                )}
+                key={id}
+              >
                 <summary className="benefit-summary">
                   <div className="compact-benefit-label">
                     <strong>{serviceName(catalog, slug)}</strong>
@@ -298,28 +317,83 @@ export function BillingBenefitsCard({
                     </span>
                   </div>
                   <DetailsAction />
-                  <div className="benefit-tiles">
-                    {tiles.slice(0, TILE_LIMIT).map((tile) => (
-                      <MeterTile
-                        key={tile.key}
-                        label={tile.label}
-                        meterLabel={`${serviceName(catalog, slug)} ${tile.label}`}
-                        used={tile.consumed}
-                        limit={tile.limit}
-                        caption={
-                          tile.consumed > 0
-                            ? `${compact(tile.remaining)} of ${compact(tile.limit)} left`
-                            : `Unused · ${compact(tile.remaining)} left`
-                        }
-                      />
-                    ))}
-                    {hidden > 0 && (
-                      <span className="benefit-tiles-more">+{hidden} more</span>
-                    )}
+                  <div className="benefit-summary-metric">
+                    <ul
+                      className="compact-coverage stack-legend"
+                      aria-label="Remaining free usage"
+                    >
+                      {stack.entries.map((entry) => (
+                        <li
+                          key={entry.key}
+                          className={cn(
+                            entry.status !== "normal" && `is-${entry.status}`,
+                          )}
+                          title={entry.tooltip}
+                        >
+                          <StackSwatch step={entry.step} />
+                          <span>{entry.short}</span>
+                          {entry.legend && <strong>{entry.legend}</strong>}
+                          {entry.status !== "normal" && (
+                            <span className="sr-only">
+                              {entry.status === "exhausted"
+                                ? "(used up)"
+                                : "(nearly used up)"}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    <StackedMeter
+                      stack={stack}
+                      label={`${serviceName(catalog, slug)} free usage`}
+                    />
                   </div>
                 </summary>
                 <div className="benefit-expanded">
-                  <p className="fine-print mb-5">
+                  <div className="benefit-allowances">
+                    {families.map((family) => (
+                      <div className="benefit-unit-family" key={family.name}>
+                        <span>{family.name}</span>
+                        <div>
+                          {family.units.map(([key, rows]) => {
+                            const remaining = rows.reduce(
+                              (sum, row) => sum + row.remaining_quantity,
+                              0,
+                            );
+                            const limit = rows.reduce(
+                              (sum, row) => sum + row.allowance.quantity,
+                              0,
+                            );
+                            const consumed = rows.reduce(
+                              (sum, row) => sum + row.consumed_quantity,
+                              0,
+                            );
+                            const metric = rows[0]!.allowance.metric;
+                            return (
+                              <div className="benefit-unit" key={key}>
+                                <span className="capitalize stack-labelled">
+                                  <StackSwatch step={unitSteps.get(key) ?? 0} />
+                                  {billingMetricLabel(metric)}
+                                </span>
+                                <span
+                                  title={`${number(remaining)} of ${number(limit)} remaining`}
+                                >
+                                  <strong>{compact(remaining)}</strong> /{" "}
+                                  {compact(limit)} left
+                                </span>
+                                <UsedGauge
+                                  used={consumed}
+                                  limit={limit}
+                                  label={`${serviceName(catalog, slug)} ${billingMetricLabel(metric)}`}
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="fine-print mt-3 mb-5">
                     Each allowance has its own limit. Percentages show consumed
                     usage; reservations are listed separately.
                   </p>
@@ -403,4 +477,16 @@ function metricRank(metric: string) {
 }
 function sentence(text: string) {
   return text.charAt(0).toUpperCase() + text.slice(1);
+}
+function shortMetric(metric: string) {
+  return (
+    (
+      {
+        input_tokens: "Input",
+        output_tokens: "Output",
+        cache_read_tokens: "Cache read",
+        cache_write_tokens: "Cache write",
+      } as Record<string, string>
+    )[metric] ?? sentence(billingMetricLabel(metric))
+  );
 }
