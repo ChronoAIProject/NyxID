@@ -41,7 +41,7 @@ impl Fixture {
         }
     }
     pub async fn allow_account(&self) {
-        let refusal = acks::account_gate(&self.state.db, &self.chat)
+        let refusal = account_gate(&self.state.db, &self.chat)
             .await
             .unwrap()
             .unwrap();
@@ -57,7 +57,27 @@ impl Fixture {
     }
 }
 
-pub(crate) async fn fixture(name: &str) -> Fixture {
+/// Gate helpers returning only the model-visible refusal.
+pub(crate) async fn service_gate(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    id: &str,
+    slug: &str,
+    name: &str,
+    platform: bool,
+) -> crate::errors::AppResult<Option<Value>> {
+    Ok(acks::service_gate(db, chat, id, slug, name, platform)
+        .await?
+        .map(|(value, _)| value))
+}
+pub(crate) async fn account_gate(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+) -> crate::errors::AppResult<Option<Value>> {
+    Ok(acks::account_gate(db, chat).await?.map(|(value, _)| value))
+}
+
+async fn base(name: &str) -> (crate::AppState, String) {
     let db = connect_transaction_test_database(name).await;
     engine::ensure_indexes(&db).await.unwrap();
     let owner = Uuid::new_v4().to_string();
@@ -65,20 +85,10 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         .insert_one(test_user(&owner, UserType::Person))
         .await
         .unwrap();
-    let state = test_app_state(db);
-    let row = engine::begin_turn(
-        &state.db,
-        &owner,
-        &engine::TurnRequest {
-            conversation_id: None,
-            text: "Please manage my account".into(),
-            model: None,
-            access_mode: None,
-        },
-        &state.encryption_keys,
-    )
-    .await
-    .unwrap();
+    (test_app_state(db), owner)
+}
+
+async fn chat_fixture(state: crate::AppState, owner: String, row: AssistantConversation) -> Fixture {
     let chat = acks::for_key(&state.db, &owner, Some(&row.credential_api_key_id))
         .await
         .unwrap()
@@ -95,6 +105,81 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         row,
         chat,
         auth,
+    }
+}
+
+pub(crate) async fn new_orchestrator(
+    state: &crate::AppState,
+    owner: &str,
+    text: &str,
+) -> AssistantConversation {
+    engine::begin_turn(
+        &state.db,
+        owner,
+        &engine::TurnRequest {
+            conversation_id: None,
+            text: text.into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap()
+}
+
+/// An orchestrator chat: Full access, never gated by consent cards.
+pub(crate) async fn orchestrator_fixture(name: &str) -> Fixture {
+    let (state, owner) = base(name).await;
+    let row = new_orchestrator(&state, &owner, "Please manage my account").await;
+    chat_fixture(state, owner, row).await
+}
+
+/// A subagent with no grants, in a live user turn: every service and account
+/// tool is gated and requests go to its orchestrator.
+pub(crate) async fn fixture(name: &str) -> Fixture {
+    let (state, owner) = base(name).await;
+    let orchestrator = new_orchestrator(&state, &owner, "Coordinate my work").await;
+    let (subagent, _) = super::assistant_team_service::spawn(
+        &state.db,
+        &state.encryption_keys,
+        &owner,
+        &orchestrator,
+        super::assistant_team_service::SpawnRequest {
+            name: "worker".into(),
+            charter: "Help with the user's account".into(),
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let row = engine::begin_turn(
+        &state.db,
+        &owner,
+        &engine::TurnRequest {
+            conversation_id: Some(subagent.id.clone()),
+            text: "Please manage my account".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    chat_fixture(state, owner, row).await
+}
+
+fn orchestrator_chat() -> acks::ChatAuthority {
+    acks::ChatAuthority {
+        conversation_id: "nyxa-00000000000000000000000000000000".into(),
+        user_id: "owner".into(),
+        api_key_id: "key".into(),
+        role: crate::models::assistant_conversation::AgentRole::Orchestrator,
+        team_id: None,
+        agent_name: None,
     }
 }
 
@@ -137,16 +222,19 @@ async fn acknowledgement_service_allow_is_atomic_scoped_and_versions_the_key() {
     let db = &f.state.db;
     let service = connected(db, &f.owner, "github", "https://api.github.com").await;
     let (a, b) = tokio::join!(
-        acks::service_gate(db, &f.chat, &service, "github", "GitHub", false),
-        acks::service_gate(db, &f.chat, &service, "github", "GitHub", false),
+        service_gate(db, &f.chat, &service, "github", "GitHub", false),
+        service_gate(db, &f.chat, &service, "github", "GitHub", false),
     );
     let a = a.unwrap().unwrap();
     assert_eq!(a, b.unwrap().unwrap());
     assert_eq!(a["error"], "acknowledgement_required");
     assert_eq!(a["kind"], "service");
-    assert_eq!(
-        a["instructions"],
-        "Ask the user to approve access to GitHub for this chat (a card is shown in the chat), then retry."
+    assert_eq!(a["decider"], "orchestrator");
+    assert!(
+        a["instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with("NyxID asked your orchestrator for this permission.")
     );
     let id = a["acknowledgement_id"].as_str().unwrap();
     for (user, conversation) in [
@@ -172,7 +260,7 @@ async fn acknowledgement_service_allow_is_atomic_scoped_and_versions_the_key() {
     assert_eq!(key.allowed_service_ids, vec![service.clone()]);
     assert!(key.state_version > before.state_version);
     assert!(
-        acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
+        service_gate(db, &f.chat, &service, "github", "GitHub", false)
             .await
             .unwrap()
             .is_none()
@@ -250,7 +338,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     let f = fixture("ack_deny_expire").await;
     let db = &f.state.db;
     let service = connected(db, &f.owner, "github", "https://api.github.com").await;
-    let request = acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
+    let request = service_gate(db, &f.chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
         .unwrap();
@@ -266,7 +354,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         )
         .await
         .unwrap();
-    let denial = acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
+    let denial = service_gate(db, &f.chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
         .unwrap();
@@ -287,7 +375,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     .await
     .unwrap();
     assert_eq!(
-        acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
+        service_gate(db, &f.chat, &service, "github", "GitHub", false)
             .await
             .unwrap()
             .unwrap()["error"],
@@ -306,7 +394,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
     )
     .await
     .unwrap();
-    let again = acks::service_gate(db, &f.chat, &service, "github", "GitHub", false)
+    let again = service_gate(db, &f.chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
         .unwrap();
@@ -452,7 +540,7 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
 }
 
 #[tokio::test]
-async fn rotation_invalidates_account_and_action_acknowledgements() {
+async fn rotation_invalidates_acknowledgements_and_keeps_durable_subagent_grants() {
     let f = fixture("ack_rotate").await;
     let db = &f.state.db;
     f.allow_account().await;
@@ -488,14 +576,17 @@ async fn rotation_invalidates_account_and_action_acknowledgements() {
         .await
         .is_err()
     );
+    // The account grant is the subagent's durable authority, so the successor
+    // keeps it; pending and allowed cards of the old generation expire.
     let key = key_service::get_api_key(db, &f.owner, &rotated.id)
         .await
         .unwrap();
     assert!(
-        !key.scopes
+        key.scopes
             .split_whitespace()
             .any(|s| s == ASSISTANT_ACCOUNT_SCOPE)
     );
+    assert!(!key.allow_all_services);
     assert!(
         acks::history(db, &f.owner, &f.row.id)
             .await
@@ -507,10 +598,7 @@ async fn rotation_invalidates_account_and_action_acknowledgements() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        acks::account_gate(db, &chat).await.unwrap().unwrap()["error"],
-        "acknowledgement_required"
-    );
+    assert!(account_gate(db, &chat).await.unwrap().is_none());
     // Rotation does not rewrite the last turn's credential id. Deletion must
     // follow the live credential row and revoke its successor nonetheless.
     db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
@@ -559,7 +647,17 @@ fn minimal_args(name: &str, id: &str) -> Value {
 #[test]
 fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
     assert_eq!(tools::TOOL_NAMES.len(), 22);
-    let service = tools::virtual_service();
+    let service = tools::virtual_service(&orchestrator_chat());
+    // Orchestrators also get the team tools; subagents only read-only tools.
+    assert_eq!(
+        service.endpoints.len(),
+        tools::TOOL_NAMES.len() + super::assistant_team_tools::TOOL_NAMES.len()
+    );
+    let mut subagent = orchestrator_chat();
+    subagent.role = crate::models::assistant_conversation::AgentRole::Subagent;
+    let limited = tools::virtual_service(&subagent);
+    assert!(!limited.endpoints.is_empty());
+    assert!(limited.endpoints.iter().all(|e| tools::read_only(&e.name)));
     assert_eq!(service.service_slug, "nyxid");
     assert_eq!(service.service_name, "NyxID account");
     assert!(matches!(
@@ -667,7 +765,7 @@ async fn every_native_tool_requires_a_real_conversation_key_and_audits_refusals(
 }
 
 #[tokio::test]
-async fn every_native_tool_requests_account_acknowledgement_and_preserves_owner_scope() {
+async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_owner_scope() {
     let f = fixture("native_account_gate").await;
     let missing = Uuid::new_v4().to_string();
     for name in tools::TOOL_NAMES {
@@ -680,16 +778,31 @@ async fn every_native_tool_requests_account_acknowledgement_and_preserves_owner_
             )
             .await;
         assert!(result.is_error, "{name}");
-        assert_eq!(result.value["error"], "acknowledgement_required", "{name}");
-        assert_eq!(result.value["kind"], "account");
+        if tools::read_only(name) {
+            assert_eq!(result.value["error"], "acknowledgement_required", "{name}");
+            assert_eq!(result.value["kind"], "account");
+            assert_eq!(result.value["decider"], "orchestrator");
+        } else {
+            assert_eq!(result.value["error"], "orchestrator_only", "{name}");
+        }
     }
     let requests = acks::history(&f.state.db, &f.owner, &f.row.id)
         .await
         .unwrap();
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].decider, "orchestrator");
+    assert_eq!(requests[0].team_id, f.chat.team_id);
+    assert!(
+        requests[0]
+            .request_excerpt
+            .as_deref()
+            .is_some_and(|text| text.contains("Please manage my account"))
+    );
     acks::decide(&f.state.db, &f.owner, &f.row.id, &requests[0].id, true)
         .await
         .unwrap();
+    let saved = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    assert!(saved.grants.account_read);
     for name in tools::TOOL_NAMES {
         let result = f
             .tools()
@@ -699,7 +812,9 @@ async fn every_native_tool_requests_account_acknowledgement_and_preserves_owner_
                 &minimal_args(name, &missing),
             )
             .await;
-        if name.starts_with("list_") && *name != "list_agent_key_bindings" {
+        if !tools::read_only(name) {
+            assert_eq!(result.value["error"], "orchestrator_only", "{name}");
+        } else if name.starts_with("list_") && *name != "list_agent_key_bindings" {
             assert!(!result.is_error, "{name}: unexpected error result");
         } else {
             assert!(result.is_error, "{name}");
@@ -729,6 +844,7 @@ async fn every_native_tool_requests_account_acknowledgement_and_preserves_owner_
         assert_eq!(log.get_str("api_key_id").unwrap(), f.chat.api_key_id);
         let event = log.get_document("event_data").unwrap();
         assert_eq!(event.get_str("conversation_id").unwrap(), f.row.id);
+        assert_eq!(event.get_str("role").unwrap(), "subagent");
         assert!(event.contains_key("tool_name") && event.contains_key("outcome"));
         assert!(!event.contains_key("arguments") && !event.contains_key("result"));
     }
@@ -783,29 +899,34 @@ async fn call(f: &Fixture, name: &str, mut args: Value) -> Value {
 }
 
 #[tokio::test]
-async fn native_account_inventory_executes_existing_services_and_audits_every_tool() {
+async fn orchestrator_confirms_destructive_actions_by_default_and_audits_every_tool() {
     native_inventory(false).await;
 }
 
 #[tokio::test]
-async fn native_account_full_access_executes_every_tool_without_cards_and_audits_the_mode() {
+async fn orchestrator_runs_destructive_actions_without_cards_when_confirmation_is_off() {
     native_inventory(true).await;
 }
 
 async fn native_inventory(full: bool) {
-    let f = fixture("native_success_inventory").await;
+    let f = orchestrator_fixture("native_success_inventory").await;
+    assert!(
+        !super::assistant_settings_service::get(&f.state.db, &f.owner)
+            .await
+            .unwrap()
+            .skip_destructive_confirmation
+    );
     if full {
-        idle(&f).await;
-        super::assistant_access_mode_service::change(
+        super::assistant_settings_service::update(
             &f.state.db,
             &f.owner,
-            &f.row.id,
-            crate::models::assistant_conversation::AccessMode::Full,
+            super::assistant_settings_service::Update {
+                skip_destructive_confirmation: Some(true),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
-    } else {
-        f.allow_account().await;
     }
     let db = &f.state.db;
     let key = ordinary_key(&f).await;
@@ -942,6 +1063,15 @@ async fn native_inventory(full: bool) {
             assert_eq!(count, 1, "{name}");
         }
     }
+    // Orchestrators never see consent cards; only destructive confirmations,
+    // and none at all once the owner turns confirmations off.
+    assert_eq!(
+        db.collection::<bson::Document>(ACKS)
+            .count_documents(doc! {"kind": {"$ne": "action"}})
+            .await
+            .unwrap(),
+        0
+    );
     if full {
         assert_eq!(
             db.collection::<bson::Document>(ACKS)
@@ -950,32 +1080,20 @@ async fn native_inventory(full: bool) {
                 .unwrap(),
             0
         );
-        assert_eq!(
-            db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                .count_documents(doc! {"event_type": "assistant_account_tool_call",
-                "event_data.access_mode": {"$ne": "full"}})
-                .await
-                .unwrap(),
-            0
-        );
     }
+    assert_eq!(
+        db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(doc! {"event_type": "assistant_account_tool_call",
+            "event_data.role": {"$ne": "orchestrator"}})
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
 async fn assistant_keys_cannot_self_widen_bind_or_become_route_agents() {
-    let f = fixture("native_self_widen").await;
-    f.allow_account().await;
-    assert_assistant_key_boundaries(&f).await;
-}
-
-#[tokio::test]
-async fn full_access_cannot_modify_chat_keys_or_use_them_as_route_agents() {
-    use crate::models::assistant_conversation::AccessMode::Full;
-    let f = fixture("native_full_self_widen").await;
-    idle(&f).await;
-    super::assistant_access_mode_service::change(&f.state.db, &f.owner, &f.row.id, Full)
-        .await
-        .unwrap();
+    let f = orchestrator_fixture("native_self_widen").await;
     assert_assistant_key_boundaries(&f).await;
     assert_eq!(
         f.state
@@ -990,17 +1108,8 @@ async fn full_access_cannot_modify_chat_keys_or_use_them_as_route_agents() {
 
 #[tokio::test]
 async fn native_key_tools_hide_another_owners_existing_key_even_with_full_access() {
-    use crate::models::{api_key::COLLECTION_NAME as KEYS, assistant_conversation::AccessMode};
-    let f = fixture("native_other_owner").await;
-    idle(&f).await;
-    super::assistant_access_mode_service::change(
-        &f.state.db,
-        &f.owner,
-        &f.row.id,
-        AccessMode::Full,
-    )
-    .await
-    .unwrap();
+    use crate::models::api_key::COLLECTION_NAME as KEYS;
+    let f = orchestrator_fixture("native_other_owner").await;
     let mut other = key_service::get_api_key(&f.state.db, &f.owner, &f.chat.api_key_id)
         .await
         .unwrap();
@@ -1042,44 +1151,92 @@ async fn native_key_tools_hide_another_owners_existing_key_even_with_full_access
 }
 
 #[tokio::test]
-async fn legacy_conversation_defaults_to_ask_and_owner_unique_credentials_migrate() {
+async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentials_migrate() {
     use crate::models::{
         assistant_agent_credential::COLLECTION_NAME as CREDENTIALS,
-        assistant_conversation::{AccessMode, COLLECTION_NAME as CONVERSATIONS},
+        assistant_conversation::{AccessMode, AgentRole, COLLECTION_NAME as CONVERSATIONS},
     };
-    let f = fixture("native_legacy_migration").await;
+    let f = orchestrator_fixture("native_legacy_migration").await;
+    idle(&f).await;
+    // A pre-NyxBot Ask-mode row: no role/team fields, restricted key, a stale
+    // consent card.
     let mut legacy = bson::to_document(&f.row).unwrap();
-    legacy.remove("access_mode");
+    for field in [
+        "access_mode", "role", "team_id", "agent_name", "charter", "specialty", "grants",
+        "destroyed_at", "pending_events", "event_streak", "channel",
+    ] {
+        legacy.remove(field);
+    }
+    legacy.insert("active_turn", bson::Bson::Null);
     let row: AssistantConversation = bson::from_document(legacy.clone()).unwrap();
     assert_eq!(row.access_mode, AccessMode::Ask);
-    assert!(matches!(
-        legacy.get("created_at"),
-        Some(bson::Bson::DateTime(_))
-    ));
+    assert_eq!(row.role, AgentRole::Orchestrator);
     f.state
         .db
         .collection::<bson::Document>(CONVERSATIONS)
         .replace_one(doc! {"_id": &f.row.id}, legacy)
         .await
         .unwrap();
+    super::api_key_mutation_service::update_one(
+        &f.state.db,
+        doc! {"_id": &f.chat.api_key_id},
+        doc! {"$set": {"allow_all_services": false, "scopes": "proxy"}},
+        None,
+    )
+    .await
+    .unwrap();
+    let stale = acks::request(
+        &f.state.db,
+        &f.chat,
+        acks::Request {
+            kind: "service",
+            service: Some(("service", "example", "Example")),
+            tool: None,
+            arguments: None,
+            summary: "Allow Example?",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    engine::begin_turn(
+        &f.state.db,
+        &f.owner,
+        &engine::TurnRequest {
+            conversation_id: Some(f.row.id.clone()),
+            text: "Continue".into(),
+            model: None,
+            // Older clients may still send a mode; it is ignored.
+            access_mode: Some(AccessMode::Ask),
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let upgraded = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    assert_eq!(upgraded.access_mode, AccessMode::Full);
+    let key = key_service::get_api_key(&f.state.db, &f.owner, &f.chat.api_key_id)
+        .await
+        .unwrap();
+    assert!(key.allow_all_services && key.allow_all_nodes && key.allow_auto_connected_services);
+    assert!(key.scopes.contains(ASSISTANT_ACCOUNT_SCOPE));
+    assert_eq!(
+        acks::history(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .iter()
+            .find(|row| row.id == stale.id)
+            .unwrap()
+            .status,
+        "expired"
+    );
+    // Legacy owner-unique credentials still migrate at startup.
+    idle(&f).await;
     let credentials = f.state.db.collection::<bson::Document>(CREDENTIALS);
     credentials
         .update_one(
             doc! {"conversation_id": &f.row.id},
             doc! {"$unset": {"conversation_id": ""}},
-        )
-        .await
-        .unwrap();
-    credentials
-        .create_index(
-            mongodb::IndexModel::builder()
-                .keys(doc! {"user_id": 1})
-                .options(
-                    mongodb::options::IndexOptions::builder()
-                        .unique(true)
-                        .build(),
-                )
-                .build(),
         )
         .await
         .unwrap();
@@ -1092,19 +1249,7 @@ async fn legacy_conversation_defaults_to_ask_and_owner_unique_credentials_migrat
     );
     assert_eq!(credentials.count_documents(doc! {}).await.unwrap(), 0);
     for _ in 0..2 {
-        engine::begin_turn(
-            &f.state.db,
-            &f.owner,
-            &engine::TurnRequest {
-                conversation_id: None,
-                text: "New chat".into(),
-                model: None,
-                access_mode: None,
-            },
-            &f.state.encryption_keys,
-        )
-        .await
-        .unwrap();
+        new_orchestrator(&f.state, &f.owner, "New chat").await;
     }
     assert_eq!(
         credentials
@@ -1258,101 +1403,10 @@ async fn idle(f: &Fixture) {
 }
 
 #[tokio::test]
-async fn access_mode_switch_is_owner_scoped_fenced_and_preserves_acknowledged_services() {
-    use super::assistant_access_mode_service::change;
-    use crate::models::assistant_conversation::AccessMode::{Ask, Full};
-    let f = fixture("mode_switch").await;
-    let db = &f.state.db;
-    assert!(matches!(
-        change(db, &f.owner, &f.row.id, Full).await,
-        Err(crate::errors::AppError::AssistantTurnActive)
-    ));
-    assert!(matches!(
-        change(db, &Uuid::new_v4().to_string(), &f.row.id, Full).await,
-        Err(crate::errors::AppError::NotFound(_))
-    ));
-    let service = connected(db, &f.owner, "approved", "https://service.example.com").await;
-    let refusal = acks::service_gate(db, &f.chat, &service, "approved", "Approved", false)
-        .await
-        .unwrap()
-        .unwrap();
-    acks::decide(
-        db,
-        &f.owner,
-        &f.row.id,
-        refusal["acknowledgement_id"].as_str().unwrap(),
-        true,
-    )
-    .await
-    .unwrap();
-    f.allow_account().await;
-    acks::request(
-        db,
-        &f.chat,
-        acks::Request {
-            kind: "action",
-            tool: Some("nyxid__delete_node"),
-            service: None,
-            arguments: Some(&json!({"node_id": "example"})),
-            summary: "Delete node example",
-            platform: false,
-        },
-    )
-    .await
-    .unwrap();
-    idle(&f).await;
-    let before = key_service::get_api_key(db, &f.owner, &f.chat.api_key_id)
-        .await
-        .unwrap();
-    let (old, row) = change(db, &f.owner, &f.row.id, Full).await.unwrap();
-    assert_eq!(old, Ask);
-    assert_eq!(row.access_mode, Full);
-    let full = key_service::get_api_key(db, &f.owner, &f.chat.api_key_id)
-        .await
-        .unwrap();
-    assert!(full.allow_all_services && full.allow_all_nodes && full.allow_auto_connected_services);
-    assert!(full.scopes.contains(ASSISTANT_ACCOUNT_SCOPE));
-    assert!(full.state_version > before.state_version);
-    let (old, row) = change(db, &f.owner, &f.row.id, Ask).await.unwrap();
-    assert_eq!(old, Full);
-    assert_eq!(row.access_mode, Ask);
-    let ask = key_service::get_api_key(db, &f.owner, &f.chat.api_key_id)
-        .await
-        .unwrap();
-    assert!(!ask.allow_all_services && ask.allow_all_nodes);
-    assert!(ask.allow_auto_connected_services);
-    assert_eq!(ask.allowed_service_ids, vec![service]);
-    assert_eq!(ask.scopes, "proxy");
-    assert!(ask.state_version > full.state_version);
-    assert_eq!(
-        acks::history(db, &f.owner, &f.row.id)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|row| row.status == "pending")
-            .count(),
-        0
-    );
-}
-
-#[tokio::test]
-async fn full_draft_provisions_full_authority_and_rotation_and_replacement_preserve_mode() {
+async fn orchestrator_keys_are_full_and_rotation_and_replacement_preserve_role_authority() {
     use super::assistant_agent_credential_service as credentials;
-    use crate::models::assistant_conversation::AccessMode::Full;
-    let f = fixture("mode_full_draft").await;
-    let row = engine::begin_turn(
-        &f.state.db,
-        &f.owner,
-        &engine::TurnRequest {
-            conversation_id: None,
-            text: "Manage everything".into(),
-            model: None,
-            access_mode: Some(Full),
-        },
-        &f.state.encryption_keys,
-    )
-    .await
-    .unwrap();
+    let f = orchestrator_fixture("role_authority").await;
+    let row = &f.row;
     let mut key = key_service::get_api_key(&f.state.db, &f.owner, &row.credential_api_key_id)
         .await
         .unwrap();
@@ -1383,15 +1437,10 @@ async fn full_draft_provisions_full_authority_and_rotation_and_replacement_prese
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(chat.access_mode, Full);
+    assert!(chat.is_orchestrator());
+    assert!(account_gate(&f.state.db, &chat).await.unwrap().is_none());
     assert!(
-        acks::account_gate(&f.state.db, &chat)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        acks::service_gate(&f.state.db, &chat, "service", "example", "Example", false)
+        service_gate(&f.state.db, &chat, "service", "example", "Example", false)
             .await
             .unwrap()
             .is_none()
@@ -1405,23 +1454,36 @@ async fn full_draft_provisions_full_authority_and_rotation_and_replacement_prese
             .unwrap(),
         0
     );
-    let event = f
-        .state
-        .db
-        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-        .find_one(doc! {"event_type": "assistant_access_mode_changed",
-        "event_data.conversation_id": &row.id})
+    // A subagent's successor key carries exactly its durable grants.
+    let sub = fixture("role_authority_subagent").await;
+    let service = connected(&sub.state.db, &sub.owner, "github", "https://api.github.com").await;
+    let refusal = service_gate(&sub.state.db, &sub.chat, &service, "github", "GitHub", false)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        event
-            .get_document("event_data")
-            .unwrap()
-            .get_str("new_mode")
-            .unwrap(),
-        "full"
-    );
+    acks::decide(
+        &sub.state.db,
+        &sub.owner,
+        &sub.row.id,
+        refusal["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    let rotated = key_service::rotate_api_key(
+        &sub.state.db,
+        &sub.state.encryption_keys,
+        &sub.owner,
+        &sub.chat.api_key_id,
+    )
+    .await
+    .unwrap();
+    let key = key_service::get_api_key(&sub.state.db, &sub.owner, &rotated.id)
+        .await
+        .unwrap();
+    assert!(!key.allow_all_services && !key.allow_auto_connected_services);
+    assert_eq!(key.allowed_service_ids, vec![service]);
+    assert_eq!(key.scopes, "proxy");
 }
 
 #[tokio::test]
@@ -1469,7 +1531,7 @@ async fn acknowledgement_history_keeps_pending_and_only_twenty_decided_without_a
 
 #[tokio::test]
 async fn conversation_provisioning_rolls_back_its_key_when_the_first_message_cannot_commit() {
-    let f = fixture("chat_provision_rollback").await;
+    let f = orchestrator_fixture("chat_provision_rollback").await;
     let db = &f.state.db;
     let keys = db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME);
     let before = keys.count_documents(doc! {}).await.unwrap();
@@ -1514,7 +1576,7 @@ async fn conversation_provisioning_rolls_back_its_key_when_the_first_message_can
 #[tokio::test]
 async fn deleting_a_conversation_revokes_children_clears_bindings_and_audits_after_commit() {
     use crate::models::api_key_credential::{ApiKeyCredential, COLLECTION_NAME as CHILDREN};
-    let f = fixture("chat_delete_children").await;
+    let f = orchestrator_fixture("chat_delete_children").await;
     let child = Uuid::new_v4().to_string();
     let key = &f.chat.api_key_id;
     let db = &f.state.db;

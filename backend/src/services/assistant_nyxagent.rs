@@ -169,6 +169,11 @@ impl std::fmt::Debug for TurnStart {
             .finish_non_exhaustive()
     }
 }
+impl From<&TurnStart> for TurnStart {
+    fn from(start: &TurnStart) -> Self {
+        start.clone()
+    }
+}
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
@@ -585,9 +590,10 @@ pub async fn history_page(
 pub async fn begin_turn(
     db: &Database,
     user_id: &str,
-    start: &TurnStart,
+    start: impl Into<TurnStart>,
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
-) -> AppResult<(AssistantConversation, String)> {
+) -> AppResult<AssistantConversation> {
+    let start: TurnStart = start.into();
     let id = start
         .conversation_id
         .clone()
@@ -602,7 +608,7 @@ pub async fn begin_turn(
     let start = start.clone();
     let audit_db = db.clone();
     let audit_user = user_id.clone();
-    let (row, credential, input) = session
+    let (row, credential) = session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &db;
@@ -688,11 +694,7 @@ pub async fn begin_turn(
                         ("user", start.text.clone())
                     }
                 };
-                let events = if start.origin == TurnOrigin::Event {
-                    Vec::new()
-                } else {
-                    events
-                };
+
                 let credential =
                     super::assistant_agent_credential_service::load_or_provision_in_session(
                         db,
@@ -779,7 +781,7 @@ pub async fn begin_turn(
                     .insert_one(message)
                     .session(&mut *session)
                     .await?;
-                Ok((row, credential, text))
+                Ok((row, credential))
             }
             .await;
             transactions::transaction_result(operation)
@@ -794,7 +796,16 @@ pub async fn begin_turn(
         replaced,
     )
     .await;
-    Ok((row, input))
+    Ok(row)
+}
+
+/// The input NyxAgent receives for a claimed turn: the message text, or the
+/// rendered events an event turn drained.
+pub fn turn_input(row: &AssistantConversation, start: &TurnStart) -> String {
+    match row.active_turn.as_ref() {
+        Some(turn) if turn.origin == TurnOrigin::Event => events_text(&turn.events),
+        _ => start.text.clone(),
+    }
 }
 
 /// Append wake-up events, bounded; the oldest are dropped first. Returns the

@@ -1035,3 +1035,7 @@ pub fn spawn_sweeps(state: AppState) {
         }
     });
 }
+
+#[cfg(test)]
+#[path = "assistant_team_tests.rs"]
+mod tests;

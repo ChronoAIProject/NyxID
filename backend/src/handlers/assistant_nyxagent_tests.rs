@@ -778,7 +778,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
 async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() {
     use crate::services::assistant_authority_tests::fixture;
     let f = fixture("ack_route").await;
-    let refusal = acknowledgements::account_gate(&f.state.db, &f.chat)
+    let (refusal, _) = acknowledgements::account_gate(&f.state.db, &f.chat)
         .await
         .unwrap()
         .unwrap();
@@ -817,7 +817,11 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
     .await
     .unwrap()
     .0;
-    assert_eq!(index.conversations[0].pending_acknowledgements, 1);
+    // The index lists the orchestrator; the subagent's pending card is
+    // counted on its nested member entry.
+    assert_eq!(index.conversations[0].pending_acknowledgements, 0);
+    assert_eq!(index.conversations[0].members.len(), 1);
+    assert_eq!(index.conversations[0].members[0].pending_acknowledgements, 1);
     let other = Uuid::new_v4().to_string();
     let result = decide_acknowledgement(
         State(f.state.clone()),
@@ -880,44 +884,34 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
 }
 
 #[tokio::test]
-async fn mode_switch_response_and_audit_expose_only_owner_metadata() {
-    use crate::models::assistant_conversation::AccessMode::{Ask, Full};
-    let f = crate::services::assistant_authority_tests::fixture("mode_route").await;
-    f.state
-        .db
-        .collection::<mongodb::bson::Document>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        )
-        .update_one(
-            doc! {"_id": &f.row.id},
-            doc! {"$set": {"active_turn": mongodb::bson::Bson::Null}},
-        )
+async fn retired_access_mode_route_answers_gone_and_every_chat_reports_full() {
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture("mode_route").await;
+    let response = change_access_mode(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+        Path(f.row.id.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::GONE);
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
-    for mode in [Full, Ask] {
-        let response = change_access_mode(
-            State(f.state.clone()),
-            test_auth_user(&f.owner),
-            Path(f.row.id.clone()),
-            Json(AccessModeRequest { access_mode: mode }),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(response.access_mode, mode);
-        let value = serde_json::to_value(response).unwrap();
-        assert!(value.get("credential_api_key_id").is_none());
-        assert!(value.get("key_ciphertext").is_none());
-    }
-    let count = f
-        .state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-        .count_documents(doc! {"event_type": "assistant_access_mode_changed",
-        "event_data.conversation_id": &f.row.id})
-        .await
-        .unwrap();
-    assert_eq!(count, 2);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "access_mode_retired");
+    let history = history(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+        Path(f.row.id.clone()),
+        Query(HistoryQuery::default()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let dto = serde_json::to_value(history).unwrap();
+    assert_eq!(dto["conversation"]["access_mode"], "full");
+    assert_eq!(dto["conversation"]["role"], "orchestrator");
+    assert!(dto["conversation"].get("credential_api_key_id").is_none());
 }
 
 #[tokio::test]
@@ -1049,6 +1043,11 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         created_at: Utc::now(),
         decided_at: decided,
         expires_at: Utc::now() + chrono::Duration::minutes(10),
+        decider: "user".into(),
+        team_id: None,
+        request_excerpt: None,
+        decided_by: None,
+        reason: None,
     };
     // Decided before the turn that is about to settle: already reported to it.
     let stale = ack(

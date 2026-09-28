@@ -1762,3 +1762,7 @@ pub async fn relay_callback(
     });
     StatusCode::ACCEPTED.into_response()
 }
+
+#[cfg(test)]
+#[path = "nyxbot_tests.rs"]
+mod tests;

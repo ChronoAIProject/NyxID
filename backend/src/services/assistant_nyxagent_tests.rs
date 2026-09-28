@@ -38,11 +38,6 @@ fn closed_request_grammar_and_unicode_limit() {
         json!({"text":"hello","conversation_id":"chatc-123"}),
         json!({"text":"hello","model":"gpt-5"}),
         json!({"text":"hello","access_mode":"unrestricted"}),
-        json!({
-            "text": "hello",
-            "conversation_id": "nyxa-1234567890abcdef1234567890abcdef",
-            "access_mode": "full",
-        }),
         json!({"text":"hello","conversation_id":"nyxa-ABCDEF1234567890abcdef1234567890"}),
     ] {
         assert!(
@@ -277,7 +272,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             attachments: Vec::new(),
         })
         .collect();
-    let prompt = instructions(&messages);
+    let prompt = instructions(&stale_test_row(Utc::now()), &messages);
     assert!(prompt.starts_with(SYSTEM_PROMPT));
     assert!(prompt.contains("Prior conversation history"));
     assert!(prompt.contains("marker29"));
@@ -329,7 +324,9 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
     for result in [
         get(&db, "other", &first.id).await,
         rename(&db, "other", &first.id, "No").await,
-        delete(&db, "other", &first.id).await,
+        delete(&db, "other", &first.id)
+            .await
+            .map(|mut rows| rows.remove(0)),
     ] {
         assert!(matches!(result, Err(AppError::NotFound(_))));
     }
@@ -492,13 +489,26 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             activities: Vec::new(),
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
+            origin: Default::default(),
             started_at: now - chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS),
             stop_requested: false,
+            events: Vec::new(),
+            note: None,
         }),
         context_reset_at: None,
         context_reset_reason: None,
         created_at: now,
         updated_at: now,
+        role: Default::default(),
+        team_id: None,
+        agent_name: None,
+        charter: None,
+        specialty: None,
+        grants: Default::default(),
+        destroyed_at: None,
+        pending_events: Vec::new(),
+        event_streak: 0,
+        channel: None,
     }
 }
 

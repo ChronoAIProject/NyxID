@@ -633,12 +633,13 @@ mod tests {
         assert_eq!(key.key_hash, hash_token(&a.raw_key));
         assert_eq!(key.platform.as_deref(), Some(ASSISTANT_PLATFORM));
         assert_eq!(key.name, format!("NyxID Assistant chat {}", &row.id[5..13]));
+        // New chats are NyxBot orchestrators: Full access.
         assert!(
-            !key.allow_all_services && key.allow_all_nodes && key.allow_auto_connected_services
+            key.allow_all_services && key.allow_all_nodes && key.allow_auto_connected_services
         );
         assert!(key.allowed_service_ids.is_empty() && key.allowed_node_ids.is_empty());
         assert!(key.expires_at.is_none());
-        assert_eq!(key.scopes, "proxy");
+        assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
         assert!(crate::mw::auth::scope_allows_rest_proxy(&key.scopes));
         assert!(crate::mw::auth::scope_allows_llm_proxy(&key.scopes));
         let second = new_chat(&state, &owner).await;
@@ -666,13 +667,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_conversation_key_restores_node_access_without_widening_services() {
+    async fn existing_conversation_keys_converge_to_their_role_authority() {
         let (state, owner, row) = fixture("nyxa_restore_nodes").await;
         let db = &state.db;
         db.collection::<ApiKey>(KEYS)
             .update_one(
                 doc! {"_id": &row.credential_api_key_id},
-                doc! {"$set": {"allow_all_nodes": false}},
+                doc! {"$set": {"allow_all_nodes": false, "allow_all_services": false,
+                    "scopes": "proxy"}},
             )
             .await
             .unwrap();
@@ -684,8 +686,41 @@ mod tests {
         let key = key_service::get_api_key(db, &owner, &credential.api_key_id)
             .await
             .unwrap();
-        assert!(key.allow_all_nodes && !key.allow_all_services);
-        assert!(key.allowed_service_ids.is_empty());
+        assert!(key.allow_all_nodes && key.allow_all_services);
+        assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
+        // A subagent's key never widens beyond its recorded grants.
+        let (subagent, _) = crate::services::assistant_team_service::spawn(
+            db,
+            &state.encryption_keys,
+            &owner,
+            &row,
+            crate::services::assistant_team_service::SpawnRequest {
+                name: "reader".into(),
+                charter: "Read things".into(),
+                targets: Default::default(),
+                account_read: false,
+                specialty: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        mutations::update_one(
+            db,
+            doc! {"_id": &subagent.credential_api_key_id},
+            doc! {"$set": {"allow_all_services": true, "scopes": "proxy assistant:account"}},
+            None,
+        )
+        .await
+        .unwrap();
+        let credential = load_or_provision(db, &state.encryption_keys, &owner, &subagent.id)
+            .await
+            .unwrap();
+        let key = key_service::get_api_key(db, &owner, &credential.api_key_id)
+            .await
+            .unwrap();
+        assert!(!key.allow_all_services && !key.allow_auto_connected_services);
+        assert!(key.allow_all_nodes && key.allowed_service_ids.is_empty());
         assert_eq!(key.scopes, "proxy");
     }
 
@@ -744,8 +779,8 @@ mod tests {
                 .await
                 .unwrap();
             assert!(key.allowed_service_ids.is_empty());
-            assert!(key.allow_all_nodes && !key.allow_all_services);
-            assert_eq!(key.scopes, "proxy");
+            assert!(key.allow_all_nodes && key.allow_all_services);
+            assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
             assert_eq!(
                 load_for_conversation(db, &state.encryption_keys, &owner, &other.id)
                     .await
@@ -840,8 +875,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(key.key_hash, hash_token(&current.raw_key));
-        assert_eq!(key.scopes, "proxy");
-        assert!(key.allow_all_nodes && !key.allow_all_services);
+        assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
+        assert!(key.allow_all_nodes && key.allow_all_services);
         assert!(key.allowed_service_ids.is_empty());
         assert_eq!(
             db.collection::<ApiKey>(KEYS)
