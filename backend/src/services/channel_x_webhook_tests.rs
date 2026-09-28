@@ -391,6 +391,53 @@ async fn registered_x_chat_survives_transient_oauth_refresh_failure() {
 }
 
 #[tokio::test]
+async fn pending_x_setup_preserves_specific_credential_failure_and_one_audit() {
+    let (state, adapter, server, owner, connection) = fixture().await;
+    credentials(&state, &adapter, &owner).await;
+    let mut bot = insert_bot(&state, &owner, &connection).await;
+    bot.webhook_registered = true;
+    bot.status = "failed".into();
+    bot.error = Some(webhooks::SETUP_PENDING_ERROR.into());
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id": &bot.id}, &bot)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<UserApiKey>(KEYS)
+        .delete_one(doc! {"_id": &connection})
+        .await
+        .unwrap();
+
+    let result = webhooks::configure(
+        &state.db,
+        &state.billing,
+        &state.encryption_keys,
+        &state.http_client,
+        &adapter,
+        &bot,
+        "https://nyx.example",
+    )
+    .await;
+    assert!(matches!(result, Err(AppError::ValidationError(_))));
+    let current = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(current.status, "failed");
+    assert!(
+        current
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Reconnect the channel account")
+    );
+    assert_eq!(failure_audit_count(&state, &bot.id).await, 1);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn x_event_downgrade_retains_cleanup_state_after_read_only_setup_failure() {
     use crate::models::channel_bot::XChannelEvent;
     let (state, adapter, server, owner, connection) = fixture().await;
