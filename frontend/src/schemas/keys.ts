@@ -50,6 +50,7 @@ export const userServiceResponseSchema = z.object({
   auth_method: z.string(),
   auth_key_name: z.string(),
   catalog_service_id: z.string().nullable().optional(),
+  icon_url: z.string().url().nullable().optional(),
   node_id: z.string().nullable().optional(),
   node_priority: z.number().int(),
   is_active: z.boolean(),

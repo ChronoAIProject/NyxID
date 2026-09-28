@@ -1127,6 +1127,7 @@ pub async fn create_user_service_with_id(
         auth_method: auth_method.to_string(),
         auth_key_name: auth_key_name.to_string(),
         catalog_service_id: catalog_service_id.map(|s| s.to_string()),
+        icon_url: None,
         node_id: node_id.map(|s| s.to_string()),
         node_priority,
         service_type: service_type.to_string(),
@@ -1552,6 +1553,83 @@ pub async fn update_user_service(
     }
 
     Ok(())
+}
+
+pub fn validate_service_icon_url(raw_url: &str) -> AppResult<()> {
+    if raw_url.len() > 2048 {
+        return Err(AppError::ValidationError(
+            "Icon URL must be at most 2048 characters".to_string(),
+        ));
+    }
+    let parsed = url::Url::parse(raw_url).map_err(|_| {
+        AppError::ValidationError("Icon URL must be a valid HTTP(S) URL".to_string())
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(AppError::ValidationError(
+            "Icon URL must be an HTTP(S) URL without credentials or a fragment".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Update display metadata without changing an auto-connected service's route.
+pub async fn update_service_icon(
+    db: &mongodb::Database,
+    owner_id: &str,
+    service_id: &str,
+    raw_url: &str,
+) -> AppResult<()> {
+    let trimmed = raw_url.trim();
+    let value = if trimmed.is_empty() {
+        bson::Bson::Null
+    } else {
+        validate_service_icon_url(trimmed)?;
+        bson::Bson::String(trimmed.to_string())
+    };
+    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": service_id, "user_id": owner_id },
+            doc! {
+                "$set": {
+                    "icon_url": value,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                },
+                "$inc": { "state_version": 1_i64 },
+            },
+        )
+        .await?;
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("User service not found".to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod service_icon_url_tests {
+    use super::validate_service_icon_url;
+
+    #[test]
+    fn accepts_http_images_and_rejects_unsafe_urls() {
+        assert!(validate_service_icon_url("https://example.com/icon.svg?version=2").is_ok());
+        assert!(validate_service_icon_url("http://localhost:5173/icon.png").is_ok());
+        for url in [
+            "data:image/svg+xml,<svg/>",
+            "javascript:alert(1)",
+            "https://user:secret@example.com/icon.svg",
+            "https://example.com/icon.svg#private",
+        ] {
+            assert!(validate_service_icon_url(url).is_err(), "{url}");
+        }
+        assert!(
+            validate_service_icon_url(&format!("https://example.com/{}", "x".repeat(2048)))
+                .is_err()
+        );
+    }
 }
 
 /// Pre-validate the field combination a `PUT /keys` request intends to

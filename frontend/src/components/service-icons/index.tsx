@@ -64,6 +64,16 @@ import ApiIftttIcon from "./api-ifttt";
 import ApiIftttMcpIcon from "./api-ifttt-mcp";
 
 import AwsCostExplorerIcon from "./aws-cost-explorer";
+import AevatarIcon from "./aevatar";
+import CmaIcon from "./cma";
+import AgentEventGatewayIcon from "./cmaeg";
+import CmaTriggerGithubObserverStagingIcon from "./cma-trigger-github-observer-staging";
+import ChronoLlmPublicIcon from "./chrono-llm-public";
+import ChronoSandboxIcon from "./chrono-sandbox";
+import ChronoStorageServiceIcon from "./chrono-storage-service";
+import LlmNyxIcon from "./llm-nyx";
+import OrnnApiIcon from "./ornn-api";
+import TalosIcon from "./talos";
 
 export type ServiceIconProps = { className?: string };
 
@@ -123,6 +133,17 @@ export const SPEC_CATALOG_SLUGS = [
 ] as const;
 
 type Slug = (typeof SPEC_CATALOG_SLUGS)[number];
+type CustomSlug =
+  | "aevatar"
+  | "cma"
+  | "cmaeg"
+  | "cma-trigger-github-observer-staging"
+  | "chrono-llm-public"
+  | "chrono-sandbox"
+  | "chrono-storage-service"
+  | "llm-nyx"
+  | "ornn-api"
+  | "talos";
 
 export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "llm-openai": LlmOpenaiIcon,
@@ -176,7 +197,22 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-ifttt-mcp": ApiIftttMcpIcon,
 
   "aws-cost-explorer": AwsCostExplorerIcon,
-} satisfies Readonly<Record<Slug | "telnyx" | "platform-telnyx" | "aurinko", IconComponent>>;
+  aevatar: AevatarIcon,
+  cma: CmaIcon,
+  cmaeg: AgentEventGatewayIcon,
+  "cma-trigger-github-observer-staging": CmaTriggerGithubObserverStagingIcon,
+  "chrono-llm-public": ChronoLlmPublicIcon,
+  "chrono-sandbox": ChronoSandboxIcon,
+  "chrono-storage-service": ChronoStorageServiceIcon,
+  "llm-nyx": LlmNyxIcon,
+  "ornn-api": OrnnApiIcon,
+  talos: TalosIcon,
+} satisfies Readonly<
+  Record<
+    Slug | CustomSlug | "telnyx" | "platform-telnyx" | "aurinko",
+    IconComponent
+  >
+>;
 
 // `data-fallback="true"` lets the test hook recognize fallbacks when an
 // unknown slug is rendered.
