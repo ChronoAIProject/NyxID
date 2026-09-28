@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { api, apiClient, apiFetch, ApiError } from "@/lib/api-client";
 import { SsePayloadDecoder } from "@/lib/assistant/sse-frame-normalizer";
+import { mutationCreditsDenial } from "@/lib/credits-denial";
 import {
   managedBootstrapSchema,
   managedCompleteSchema,
@@ -96,13 +97,14 @@ export async function startManagedOAuth(platform: string, label: string, orgId: 
   ));
 }
 
-export async function completeManagedOAuth(platform: string, input: z.infer<typeof oauthConnectionCompleteSchema>, signal: AbortSignal, botId?: string) {
+/** `ownerId` is the bot owner (the target org, or the caller when personal). */
+export async function completeManagedOAuth(platform: string, input: z.infer<typeof oauthConnectionCompleteSchema>, signal: AbortSignal, botId?: string, ownerId?: string | null) {
   const body = oauthConnectionCompleteSchema.parse(input);
   if (botId) {
-    await apiClient(`/channel-bots/${encodeURIComponent(botId)}/reconnect`, { method: "POST", body: { connection_id: body.connection_id }, signal });
+    await apiClient(`/channel-bots/${encodeURIComponent(botId)}/reconnect`, { method: "POST", body: { connection_id: body.connection_id }, signal, ...(ownerId ? { creditsDenial: mutationCreditsDenial("channel-bot-reconnect", botId, ownerId) } : {}) });
     return { id: botId, platform } as CreateChannelBotResponse;
   }
-  return apiClient<CreateChannelBotResponse>(`/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`, { method: "POST", body, signal });
+  return apiClient<CreateChannelBotResponse>(`/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`, { method: "POST", body, signal, ...(ownerId ? { creditsDenial: mutationCreditsDenial(`channel-managed-${platform}-complete`, body.connection_id, ownerId) } : {}) });
 }
 
 export function useReregisterChannelBot() {

@@ -11,10 +11,30 @@ export const BILLING_USAGE_PERIODS = [
 
 export type BillingUsagePeriod = (typeof BILLING_USAGE_PERIODS)[number];
 
+export const BILLING_SERVICE_FILTER_LIMIT = 50;
+const billingServiceKeySchema = z.string().trim().min(1).max(200);
+
 export const billingSearchSchema = z.object({
   tab: z.enum(["billing", "usage"]).optional().catch(undefined),
   period: z.enum(BILLING_USAGE_PERIODS).optional().catch(undefined),
-  service: z.string().trim().min(1).max(200).optional().catch(undefined),
+  /** Legacy single-service filter; `services` wins when both are present. */
+  service: billingServiceKeySchema.optional().catch(undefined),
+  services: z
+    .array(z.unknown())
+    .transform((values) =>
+      [
+        ...new Set(
+          values.flatMap((value) => {
+            const parsed = billingServiceKeySchema.safeParse(value);
+            return parsed.success ? [parsed.data] : [];
+          }),
+        ),
+      ].slice(0, BILLING_SERVICE_FILTER_LIMIT),
+    )
+    .optional()
+    .catch(undefined),
+  /** One-shot deep link: open the Add credits dialog on arrival. */
+  action: z.enum(["topup"]).optional().catch(undefined),
 });
 
 export function normalizeBillingSearch(search: Record<string, unknown>) {
@@ -22,7 +42,10 @@ export function normalizeBillingSearch(search: Record<string, unknown>) {
   return {
     tab: parsed.tab ?? "billing",
     period: parsed.period ?? "30d",
-    service: parsed.service ?? "all",
+    services:
+      parsed.services ??
+      (parsed.service && parsed.service !== "all" ? [parsed.service] : []),
+    action: parsed.action,
   };
 }
 export type BillingSearch = ReturnType<typeof normalizeBillingSearch>;

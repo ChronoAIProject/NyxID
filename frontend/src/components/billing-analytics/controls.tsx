@@ -1,22 +1,8 @@
-import { useDeferredValue, useId, useState } from "react";
-import { Check, ChevronDown, Search } from "lucide-react";
+import { useDeferredValue, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { ErrorBanner } from "@/components/shared/error-banner";
-import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
+import { AnalyticsSelect, FilterCard, FilterPicker } from "./filter-picker";
+export { AnalyticsSelect } from "./filter-picker";
 import {
   useAnalyticsOptions,
   useAnalyticsLabels,
@@ -42,53 +28,6 @@ import {
   filterError,
 } from "@/lib/usage-analytics";
 
-export function AnalyticsSelect({
-  label,
-  value,
-  options,
-  onChange,
-  inline = false,
-}: {
-  label: string;
-  value: string;
-  options: { value: string; label: string }[];
-  onChange: (value: string) => void;
-  inline?: boolean;
-}) {
-  const id = useId();
-  return (
-    <div
-      className={cn(
-        "min-w-0",
-        inline ? "flex items-center gap-2" : "space-y-1.5",
-      )}
-    >
-      <label
-        htmlFor={id}
-        className="whitespace-nowrap text-[10px] font-medium text-muted-foreground"
-      >
-        {label}
-      </label>
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger
-          id={id}
-          aria-label={label}
-          className={inline ? "w-40" : "w-full"}
-          style={inline ? { marginTop: 0 } : undefined}
-        >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((option) => (
-            <SelectItem key={option.value} value={option.value}>
-              {option.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
 type FilterKind = keyof SampleOptions;
 const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
   {
@@ -116,7 +55,7 @@ const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
     options: [],
   },
 ];
-function FilterPicker({
+function AnalyticsFilterPicker({
   kind,
   values,
   onChange,
@@ -132,137 +71,41 @@ function FilterPicker({
   onOpenChange: (open: boolean) => void;
 }) {
   const [search, setSearch] = useState("");
-  const [draft, setDraft] = useState(values);
   const deferred = useDeferredValue(search);
   const label = FILTER_FIELDS.find((field) => field.key === kind)!.label;
   const query = useAnalyticsOptions(kind, deferred, open, sample);
-  const matches = (value: string, option: { id: string; detail?: string }) =>
-    value === option.id || (kind === "services" && value === option.detail);
-  const selected = (option: { id: string; detail?: string }) =>
-    draft.some((value) => matches(value, option));
   return (
-    <Popover
+    <FilterPicker
+      label={label}
+      values={values}
+      onChange={onChange}
       open={open}
-      onOpenChange={(next) => {
-        if (next) {
-          setDraft(values);
-          setSearch("");
-        }
-        onOpenChange(next);
-      }}
-    >
-      <PopoverTrigger asChild>
-        <Button
-          variant="outline"
-          aria-label={`Filter ${label.toLowerCase()}`}
-          className="justify-between"
-        >
-          {label}
-          <ChevronDown className="size-3" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="start" className="w-80 space-y-3 p-3">
-        <div className="flex items-center justify-between">
-          <span className="text-[12px] font-medium">{label}</span>
-          <span className="text-[11px] text-muted-foreground">
-            {draft.length} selected
-          </span>
-        </div>
-        <div className="relative">
-          <Search className="absolute left-2.5 top-2 size-3.5 text-muted-foreground" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={
-              kind === "actors"
-                ? "Search by email"
-                : kind === "owners"
-                  ? "Organization name, slug, or email"
-                  : "Search services"
-            }
-            aria-label={`Search ${label.toLowerCase()}`}
-            className="pl-8"
-          />
-        </div>
-        {query.isPending ? (
-          <Skeleton className="h-24" />
-        ) : query.isError ? (
-          <ErrorBanner
-            message={`Could not load ${label.toLowerCase()}.`}
-            onRetry={() => void query.refetch()}
-          />
-        ) : (
-          <div className="max-h-64 space-y-1 overflow-auto">
-            {query.data.options.map((option) => (
-              <Button
-                key={option.id}
-                variant="ghost"
-                className="h-auto w-full justify-start py-2 text-left"
-                disabled={!selected(option) && draft.length >= 20}
-                aria-pressed={selected(option)}
-                onClick={() =>
-                  setDraft(
-                    selected(option)
-                      ? draft.filter((value) => !matches(value, option))
-                      : [...draft, option.id],
-                  )
-                }
-              >
-                <span className="w-3 shrink-0">
-                  {selected(option) && <Check className="size-3" />}
-                </span>
-                <span className="min-w-0">
-                  <span className="block truncate">{option.label}</span>
-                  {option.detail && (
-                    <span className="block truncate text-[10px] text-muted-foreground">
-                      {option.detail}
-                    </span>
-                  )}
-                </span>
-              </Button>
-            ))}
-            {query.data.options.length === 0 && (
-              <p className="p-2 text-[12px] text-muted-foreground">
-                No matches.
-              </p>
-            )}
-            {query.data.total > query.data.options.length && (
-              <p className="text-[10px] text-muted-foreground">
-                Search to narrow {query.data.total.toLocaleString()} matches.
-              </p>
-            )}
-          </div>
-        )}
-        <div className="flex items-center gap-2 border-t border-border/60 pt-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={!draft.length}
-            onClick={() => setDraft([])}
-          >
-            Clear
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="ml-auto"
-            onClick={() => onOpenChange(false)}
-          >
-            Cancel
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => {
-              onChange(draft);
-              onOpenChange(false);
-            }}
-          >
-            Apply
-          </Button>
-        </div>
-      </PopoverContent>
-    </Popover>
+      onOpenChange={onOpenChange}
+      search={search}
+      onSearchChange={setSearch}
+      searchPlaceholder={
+        kind === "actors"
+          ? "Search by email"
+          : kind === "owners"
+            ? "Organization name, slug, or email"
+            : "Search services"
+      }
+      options={
+        query.isPending
+          ? { status: "pending" }
+          : query.isError
+            ? { status: "error", onRetry: () => void query.refetch() }
+            : {
+                status: "success",
+                options: query.data.options,
+                total: query.data.total,
+              }
+      }
+      matches={(value, option) =>
+        value === option.id || (kind === "services" && value === option.detail)
+      }
+      limit={20}
+    />
   );
 }
 export function FilterBar({
@@ -286,52 +129,49 @@ export function FilterBar({
       ? new Date(`${value}Z`).toISOString()
       : null;
   return (
-    <div className="space-y-3 rounded-xl border border-border/50 bg-card px-4 py-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          {(["services", "owners", "actors"] as const).map((kind) => (
-            <FilterPicker
-              kind={kind}
-              key={`${kind}:${openKind === kind}:${filters[kind].join(",")}`}
-              open={openKind === kind}
-              onOpenChange={(open) => setOpenKind(open ? kind : null)}
-              values={filters[kind]}
-              onChange={(values) => onChange({ ...filters, [kind]: values })}
-              sample={sample}
-            />
-          ))}
-        </div>
-        <div className="min-w-40">
-          <AnalyticsSelect
-            label="Time range"
-            inline
-            value={filters.period}
-            onChange={(value) =>
-              onChange({
-                ...filters,
-                period: value as AnalyticsFilters["period"],
-                from:
-                  value === "custom"
-                    ? new Date(
-                        Date.now() -
-                          { "24h": 1, "7d": 7, "30d": 30, custom: 7 }[
-                            filters.period
-                          ] *
-                            86_400_000,
-                      ).toISOString()
-                    : null,
-                to: value === "custom" ? new Date().toISOString() : null,
-              })
-            }
-            options={[
-              { value: "24h", label: "Last 24 hours" },
-              { value: "7d", label: "Last 7 days" },
-              { value: "30d", label: "Last 30 days" },
-              { value: "custom", label: "Custom range" },
-            ]}
-          />
-        </div>
-      </div>
+    <FilterCard
+      pickers={(["services", "owners", "actors"] as const).map((kind) => (
+        <AnalyticsFilterPicker
+          kind={kind}
+          key={`${kind}:${openKind === kind}:${filters[kind].join(",")}`}
+          open={openKind === kind}
+          onOpenChange={(open) => setOpenKind(open ? kind : null)}
+          values={filters[kind]}
+          onChange={(values) => onChange({ ...filters, [kind]: values })}
+          sample={sample}
+        />
+      ))}
+      aside={
+        <AnalyticsSelect
+          label="Time range"
+          inline
+          value={filters.period}
+          onChange={(value) =>
+            onChange({
+              ...filters,
+              period: value as AnalyticsFilters["period"],
+              from:
+                value === "custom"
+                  ? new Date(
+                      Date.now() -
+                        { "24h": 1, "7d": 7, "30d": 30, custom: 7 }[
+                          filters.period
+                        ] *
+                          86_400_000,
+                    ).toISOString()
+                  : null,
+              to: value === "custom" ? new Date().toISOString() : null,
+            })
+          }
+          options={[
+            { value: "24h", label: "Last 24 hours" },
+            { value: "7d", label: "Last 7 days" },
+            { value: "30d", label: "Last 30 days" },
+            { value: "custom", label: "Custom range" },
+          ]}
+        />
+      }
+    >
       <DataTableFilterChips
         search=""
         searchFields={[]}
@@ -396,7 +236,7 @@ export function FilterBar({
           {error}
         </p>
       )}
-    </div>
+    </FilterCard>
   );
 }
 export function PanelControls({

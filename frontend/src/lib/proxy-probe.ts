@@ -1,3 +1,5 @@
+import { isInsufficientCreditsHttp } from "@/lib/credits-denial";
+
 /**
  * Shared "verify AI service" probe used by the aha ConnectVerifyStep
  * dialog and the standalone VerifyKeyCard on api-key detail.
@@ -236,7 +238,13 @@ export type DownstreamStatus =
   | "auth_rejected"
   | "not_found"
   | "server_error"
-  | "unexpected";
+  | "unexpected"
+  /**
+   * NyxID's own billing gate refused the request (HTTP 402
+   * `insufficient_credits` envelope). Deliberately inline only: the key may
+   * be pasted from another account, so this never opens the purchase dialog.
+   */
+  | "credits_exhausted";
 
 export interface ProbeOutcome {
   /** Raw HTTP status the fetch resolved to. `null` on network / timeout. */
@@ -293,6 +301,7 @@ export async function probeAgentKey(
 
   let response: Response | null = null;
   let httpStatus: number | null = null;
+  let body: unknown = null;
   try {
     response = await doFetch(url, {
       method: "GET",
@@ -304,13 +313,30 @@ export async function probeAgentKey(
       signal: controller.signal,
     });
     httpStatus = response.status;
+    if (httpStatus === 402) {
+      body = await response
+        .clone()
+        .json()
+        .catch(() => null);
+    }
   } catch {
     // Network error / abort / CORS — response stays null.
   } finally {
     window.clearTimeout(timer);
   }
 
-  return classifyProbe(slug, response, httpStatus);
+  return classifyProbe(slug, response, httpStatus, body);
+}
+
+/**
+ * NyxID's error envelope, not a downstream's own `insufficient_credits`:
+ * the platform always pairs the symbol with its numeric code.
+ */
+function isNyxidCreditsEnvelope(httpStatus: number, body: unknown): boolean {
+  return (
+    isInsufficientCreditsHttp(httpStatus, body) &&
+    (body as { error_code?: unknown }).error_code === 11300
+  );
 }
 
 /**
@@ -321,6 +347,7 @@ export function classifyProbe(
   slug: string,
   response: Response | null,
   httpStatus: number | null,
+  body: unknown = null,
 ): ProbeOutcome {
   if (!response || httpStatus === null) {
     return {
@@ -338,6 +365,19 @@ export function classifyProbe(
   // no value; `Headers.has()` returns true for that. We want the
   // truth signal to be the actual agent id string, so require length.
   // Header lookup is case-insensitive per WHATWG fetch spec.
+  if (isNyxidCreditsEnvelope(httpStatus, body)) {
+    // The gate may refuse before scope checks, so this proves nothing about
+    // the key's reach; report it as not verified rather than as valid.
+    return {
+      httpStatus,
+      reachedNyxid: true,
+      agentKeyValid: false,
+      downstreamStatus: "credits_exhausted",
+      diagnostic:
+        "The account this key bills to is out of credits, so NyxID didn't run the test request. Test again once credits are added.",
+    };
+  }
+
   const agentIdHeader = response.headers.get("x-nyxid-agent-id");
   const agentKeyValid =
     typeof agentIdHeader === "string" && agentIdHeader.length > 0;
@@ -398,6 +438,7 @@ function diagnoseDownstream(
     case "server_error":
       return `Your Agent Key works (proxied through NyxID). The downstream is having issues (HTTP ${String(httpStatus)}). Retry in a minute.`;
     case "unexpected":
+    case "credits_exhausted":
       return `Your Agent Key works (proxied through NyxID). The downstream returned HTTP ${String(httpStatus)} — inspect the request in your AI tool to confirm the intended call succeeds.`;
   }
 }

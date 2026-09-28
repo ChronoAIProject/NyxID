@@ -1250,6 +1250,10 @@ impl TurnError {
                 "The assistant turn was interrupted. Check any actions before continuing.",
             ),
             "invalid_stream" => ("invalid_stream", "The assistant stream ended unexpectedly."),
+            "insufficient_credits" => (
+                "insufficient_credits",
+                "There aren't enough credits to run this turn.",
+            ),
             _ => (
                 "assistant_unavailable",
                 "The assistant could not complete this turn. Try again.",
@@ -1273,6 +1277,10 @@ pub enum RecoveryAction {
 }
 impl Recovery {
     pub fn decide(&mut self, status: u16, code: &str, bound: bool) -> RecoveryAction {
+        // A billing refusal is terminal: no new key, session or delay can fund the turn.
+        if code == "insufficient_credits" {
+            return RecoveryAction::Fail;
+        }
         if (status == 401 || status == 403 || code == "agent_key_required") && !self.replaced {
             self.replaced = true;
             return RecoveryAction::ReplaceCredential;

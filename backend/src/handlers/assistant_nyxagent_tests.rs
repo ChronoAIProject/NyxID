@@ -1125,3 +1125,35 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
     assert!(!second.contains("Chat card decisions"), "{second}");
     server.abort();
 }
+
+#[test]
+fn proxy_errors_keep_only_the_insufficient_credits_code() {
+    assert_eq!(
+        proxy_turn_error(AppError::InsufficientCredits).code,
+        "insufficient_credits"
+    );
+    for error in [
+        AppError::WalletSuspended,
+        AppError::BillingNotConfigured("detail".into()),
+        AppError::Internal("detail".into()),
+    ] {
+        assert_eq!(proxy_turn_error(error).code, "assistant_unavailable");
+    }
+}
+
+#[test]
+fn upstream_error_code_reads_nested_and_flat_insufficient_credits_envelopes() {
+    let flat = json!({"error":"insufficient_credits","error_code":11300,"message":"x"});
+    assert_eq!(upstream_error_code(402, &flat), "insufficient_credits");
+    assert_eq!(upstream_error_code(400, &flat), "");
+    assert_eq!(upstream_error_code(500, &flat), "");
+    let other_flat = json!({"error":"wallet_suspended","message":"x"});
+    assert_eq!(upstream_error_code(402, &other_flat), "");
+    let nested = json!({"error":{"code":"session_busy","message":"x"}});
+    assert_eq!(upstream_error_code(409, &nested), "session_busy");
+    let nested = json!({"error":{"code":"insufficient_credits"}});
+    assert_eq!(upstream_error_code(402, &nested), "insufficient_credits");
+    let unknown = json!({"error":{"code":"brand_new_code"}});
+    assert_eq!(upstream_error_code(402, &unknown), "brand_new_code");
+    assert_eq!(upstream_error_code(402, &Value::Null), "");
+}

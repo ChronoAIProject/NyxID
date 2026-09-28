@@ -207,11 +207,19 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
 
 export function InitiatedMessageSettings({
   conversation,
+  botOwnerId,
+  botOwnerError = false,
+  onRetryBotOwner,
 }: {
   readonly conversation: ChannelConversationItem;
+  /** Owner of the backing bot, whose credits a send spends; required to send. */
+  readonly botOwnerId: string | undefined;
+  /** The bot could not be loaded, so its owner is unknown until a retry. */
+  readonly botOwnerError?: boolean;
+  readonly onRetryBotOwner?: () => void;
 }) {
   const update = useUpdateChannelConversation();
-  const send = useSendChannelMessage();
+  const send = useSendChannelMessage({ creditsOwnerId: botOwnerId });
   const attempt = useRef<{ text: string; key: string } | null>(null);
   const settings = useAppForm<ChannelInitiatedSettingsFormData>({
     resolver: zodResolver(channelInitiatedSettingsSchema),
@@ -299,6 +307,8 @@ export function InitiatedMessageSettings({
           className="space-y-3 p-5"
           onSubmit={(event) => {
             void message.handleSubmit(async ({ text }) => {
+              // Enter submits even while the button is disabled.
+              if (!botOwnerId) return;
               if (attempt.current?.text !== text)
                 attempt.current = { text, key: crypto.randomUUID() };
               try {
@@ -323,14 +333,26 @@ export function InitiatedMessageSettings({
             disabled={
               !conversation.allow_agent_initiated ||
               send.isPending ||
-              !conversation.is_active
+              !conversation.is_active ||
+              !botOwnerId
             }
             placeholder="Your test message"
           />
-          {!conversation.allow_agent_initiated && (
+          {!botOwnerId && botOwnerError ? (
+            <ErrorBanner
+              message="This bot's details could not be loaded, so test messages can't be sent."
+              onRetry={onRetryBotOwner}
+            />
+          ) : !conversation.allow_agent_initiated ? (
             <p className="text-[12px] text-muted-foreground">
               Save the setting above before sending a test message.
             </p>
+          ) : (
+            !botOwnerId && (
+              <p className="text-[12px] text-muted-foreground">
+                Sending is available once this bot&apos;s details load.
+              </p>
+            )
           )}
           {message.formState.errors.text && (
             <p role="alert" className="text-[12px] text-destructive">
@@ -345,6 +367,7 @@ export function InitiatedMessageSettings({
               disabled={
                 !conversation.allow_agent_initiated ||
                 !conversation.is_active ||
+                !botOwnerId ||
                 !message.formState.isValid
               }
             >
@@ -369,7 +392,11 @@ export function ChannelConversationDetailPage() {
   const [page, setPage] = useState(1);
   const perPage = 50;
 
-  const { data: bot } = useChannelBot(botId);
+  const {
+    data: bot,
+    isError: botError,
+    refetch: refetchBot,
+  } = useChannelBot(botId);
   const { getPlatform } = useChannelPlatformViews();
   const activities = getPlatform(bot?.platform ?? "").activities;
   const { data: conversation, error: conversationError } =
@@ -442,7 +469,13 @@ export function ChannelConversationDetailPage() {
         </>
       )}
       {conversation && (
-        <InitiatedMessageSettings key={conversation.id} conversation={conversation} />
+        <InitiatedMessageSettings
+          key={conversation.id}
+          conversation={conversation}
+          botOwnerId={bot?.user_id}
+          botOwnerError={botError && !bot}
+          onRetryBotOwner={() => void refetchBot()}
+        />
       )}
       {activities.length > 0 && <h2 className="text-lg font-medium">Message history</h2>}
       {/* Message list */}
