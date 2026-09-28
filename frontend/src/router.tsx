@@ -86,7 +86,6 @@ import {
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
   AdminCreditsPage,
-  AdminInviteCodesPage,
   CliAuthPage,
   CliPairPage,
   LoginDevicePage,
@@ -156,14 +155,9 @@ const loginRoute = createRoute({
   getParentRoute: () => authLayout,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { return_to?: string; code?: string } => ({
+  ): { return_to?: string } => ({
     ...(typeof search.return_to === "string"
       ? { return_to: search.return_to }
-      : {}),
-    ...(typeof search.code === "string" &&
-    search.code.length > 0 &&
-    search.code.length <= 64
-      ? { code: search.code }
       : {}),
   }),
   component: LoginPage,
@@ -182,14 +176,9 @@ const registerRoute = createRoute({
   getParentRoute: () => authLayout,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { return_to?: string; code?: string } => ({
+  ): { return_to?: string } => ({
     ...(typeof search.return_to === "string"
       ? { return_to: search.return_to }
-      : {}),
-    ...(typeof search.code === "string" &&
-    search.code.length > 0 &&
-    search.code.length <= 64
-      ? { code: search.code }
       : {}),
   }),
   component: RegisterPage,
@@ -980,15 +969,6 @@ const adminCreditsRoute = createRoute({
   component: AdminCreditsPage,
 });
 
-const adminInviteCodesRoute = createRoute({
-  path: "invite-codes",
-  getParentRoute: () => adminLayout,
-  validateSearch: (search: Record<string, unknown>): { view?: string } => ({
-    ...(typeof search.view === "string" ? { view: search.view } : {}),
-  }),
-  component: AdminInviteCodesPage,
-});
-
 const adminPlatformCredentialsRoute = createRoute({
   path: "platform-credentials",
   getParentRoute: () => adminLayout,
@@ -1098,7 +1078,6 @@ const routeTree = rootRoute.addChildren([
       adminAnalyticsRoute,
       adminIntegrityRoute,
       adminCreditsRoute,
-      adminInviteCodesRoute,
       adminFeatureFlagsRoute,
       adminPlatformCredentialsRoute,
     ]),

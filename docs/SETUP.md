@@ -90,7 +90,6 @@ FRONTEND_URL=http://localhost:3000
 ENVIRONMENT=development
 JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
 JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
-INVITE_CODE_REQUIRED=false
 AUTO_VERIFY_EMAIL=true
 EMAIL_AUTH_ENABLED=true
 RUST_LOG=nyxid=info,tower_http=info

@@ -1,17 +1,16 @@
 ---
 title: Sign up & sign in
-description: Create a NyxID account with an invite code, sign in via SSO or email, and orient yourself in the dashboard.
+description: Create a NyxID account, sign in via SSO or email, and orient yourself in the dashboard.
 ---
 
 NyxID is available as a hosted service at `https://nyx.chrono-ai.fun` (no setup required) or self-hosted via Docker. This page covers the hosted path. For self-host, bring up the stack first — see the self-host setup guide — then come back here; the sign-in and dashboard sections apply identically.
 
 ## Create an account
 
-Early access to the hosted instance requires an invite code.
+Registration is open. Choose any configured social provider, or use email/password when enabled by the instance.
 
 1. Open **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)** in a new tab.
-2. Enter invite code: `NYX-FGNY85AF`
-3. Sign in with **Google**, **GitHub**, or **Apple** — or create an account with an email address and password.
+2. Sign up with **Google**, **GitHub**, or **Apple**, or choose email/password if available.
 
 :::note
 Social sign-in (Google / GitHub / Apple) is the fastest path. Password-based registration requires email verification before you can proceed.

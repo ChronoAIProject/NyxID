@@ -577,7 +577,6 @@ mod tests {
             "wallet-auto@example.com",
             "password123",
             Some("Wallet Auto"),
-            None,
             true,
         )
         .await
@@ -799,7 +798,6 @@ mod tests {
             "wallet-optout@example.com",
             &format!("test-{}", Uuid::new_v4()),
             Some("Wallet Opt Out"),
-            None,
             true,
         )
         .await
@@ -859,7 +857,6 @@ mod tests {
             "wallet-rollout@example.com",
             &format!("test-{}", Uuid::new_v4()),
             Some("Wallet Rollout"),
-            None,
             true,
         )
         .await

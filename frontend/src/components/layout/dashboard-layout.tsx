@@ -202,7 +202,6 @@ const SIDEBAR_ITEMS: Record<string, string> = {
   "/admin/oauth-clients": "OAuth Clients",
   "/admin/roles": "Roles",
   "/admin/groups": "Groups",
-  "/admin/invite-codes": "Invite Codes",
   "/admin/feature-flags": "Feature Flags",
   "/admin/platform-credentials": "Platform Credentials",
   "/admin/nodes": "Nodes",

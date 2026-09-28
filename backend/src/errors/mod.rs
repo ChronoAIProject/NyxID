@@ -174,9 +174,6 @@ pub enum AppError {
     #[error("Social auth: account is deactivated")]
     SocialAuthDeactivated,
 
-    #[error("Social auth: registration closed — invite code required")]
-    SocialAuthRegistrationClosed,
-
     #[error("Email signup is disabled on this instance")]
     EmailSignupDisabled,
 
@@ -512,18 +509,6 @@ pub enum AppError {
     #[error("Organization approval policy has no admins to decide: {0}")]
     OrgApprovalNoAdmin(String),
 
-    #[error("Invalid invite code")]
-    InviteCodeInvalid,
-
-    #[error("Invite code has been used up")]
-    InviteCodeExhausted,
-
-    #[error("Invite code has been deactivated")]
-    InviteCodeDeactivated,
-
-    #[error("Invite code has already been redeemed")]
-    InviteCodeAlreadyRedeemed,
-
     #[error("Anonymous endpoint incompatible with service identity exposure: {0}")]
     AnonymousIncompatibleService(String),
     #[error("Oracle pool not found: {0}")]
@@ -640,7 +625,6 @@ impl AppError {
             Self::SocialAuthFailed(_) | Self::SocialAuthNoEmail => StatusCode::BAD_REQUEST,
             Self::SocialAuthConflict => StatusCode::CONFLICT,
             Self::SocialAuthDeactivated => StatusCode::FORBIDDEN,
-            Self::SocialAuthRegistrationClosed => StatusCode::FORBIDDEN,
             Self::EmailSignupDisabled => StatusCode::FORBIDDEN,
             Self::SshNodeKeyMissing(_) => StatusCode::NOT_FOUND,
             Self::SshHostKeyMismatch(_) => StatusCode::BAD_GATEWAY,
@@ -755,10 +739,6 @@ impl AppError {
             Self::OrgInviteInvalid(_) => StatusCode::BAD_REQUEST,
             Self::OrgInviteExpired => StatusCode::GONE,
             Self::OrgApprovalNoAdmin(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::InviteCodeInvalid
-            | Self::InviteCodeExhausted
-            | Self::InviteCodeDeactivated
-            | Self::InviteCodeAlreadyRedeemed => StatusCode::BAD_REQUEST,
             Self::AnonymousIncompatibleService(_) => StatusCode::BAD_REQUEST,
             Self::OraclePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::OraclePoolSlugTaken(_) => StatusCode::CONFLICT,
@@ -833,7 +813,6 @@ impl AppError {
             Self::SocialAuthConflict => 6001,
             Self::SocialAuthNoEmail => 6002,
             Self::SocialAuthDeactivated => 6003,
-            Self::SocialAuthRegistrationClosed => 6006,
             Self::ConsentRequired { .. } => 3003,
             Self::UnsupportedGrantType(_) => 3004,
             Self::ApprovalRequired { .. } => 7000,
@@ -946,10 +925,6 @@ impl AppError {
             Self::OrgInviteInvalid(_) => 8104,
             Self::OrgInviteExpired => 8105,
             Self::OrgApprovalNoAdmin(_) => 8106,
-            Self::InviteCodeInvalid => 8200,
-            Self::InviteCodeExhausted => 8201,
-            Self::InviteCodeDeactivated => 8202,
-            Self::InviteCodeAlreadyRedeemed => 8203,
             Self::AnonymousIncompatibleService(_) => 11100,
             Self::OraclePoolNotFound(_) => 11000,
             Self::OraclePoolSlugTaken(_) => 11001,
@@ -1060,7 +1035,6 @@ impl AppError {
             Self::SocialAuthConflict => "social_auth_conflict",
             Self::SocialAuthNoEmail => "social_auth_no_email",
             Self::SocialAuthDeactivated => "social_auth_deactivated",
-            Self::SocialAuthRegistrationClosed => "social_auth_registration_closed",
             Self::ConsentRequired { .. } => "consent_required",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::ApprovalRequired { .. } => "approval_required",
@@ -1173,10 +1147,6 @@ impl AppError {
             Self::OrgInviteInvalid(_) => "org_invite_invalid",
             Self::OrgInviteExpired => "org_invite_expired",
             Self::OrgApprovalNoAdmin(_) => "org_approval_no_admin",
-            Self::InviteCodeInvalid => "invite_code_invalid",
-            Self::InviteCodeExhausted => "invite_code_exhausted",
-            Self::InviteCodeDeactivated => "invite_code_deactivated",
-            Self::InviteCodeAlreadyRedeemed => "invite_code_already_redeemed",
             Self::AnonymousIncompatibleService(_) => "anonymous_incompatible_service",
             Self::OraclePoolNotFound(_) => "oracle_pool_not_found",
             Self::OraclePoolSlugTaken(_) => "oracle_pool_slug_taken",
@@ -1428,10 +1398,6 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            AppError::SocialAuthRegistrationClosed.status_code(),
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
             AppError::UnsupportedGrantType("x".into()).status_code(),
             StatusCode::BAD_REQUEST
         );
@@ -1552,22 +1518,6 @@ mod tests {
             AppError::ChannelPlatformError("x".into()).status_code(),
             StatusCode::BAD_GATEWAY
         );
-        assert_eq!(
-            AppError::InviteCodeInvalid.status_code(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            AppError::InviteCodeExhausted.status_code(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            AppError::InviteCodeDeactivated.status_code(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            AppError::InviteCodeAlreadyRedeemed.status_code(),
-            StatusCode::BAD_REQUEST
-        );
     }
 
     /// A client hanging up mid-request is not a server fault. If this ever
@@ -1632,7 +1582,6 @@ mod tests {
             AppError::SocialAuthConflict.error_code(),
             AppError::SocialAuthNoEmail.error_code(),
             AppError::SocialAuthDeactivated.error_code(),
-            AppError::SocialAuthRegistrationClosed.error_code(),
             AppError::UnsupportedGrantType("".into()).error_code(),
             AppError::ApprovalRequired {
                 request_id: "".into(),
@@ -1702,10 +1651,6 @@ mod tests {
             AppError::ChannelWebhookVerificationFailed("".into()).error_code(),
             AppError::ChannelRelayFailed("".into()).error_code(),
             AppError::ChannelPlatformError("".into()).error_code(),
-            AppError::InviteCodeInvalid.error_code(),
-            AppError::InviteCodeExhausted.error_code(),
-            AppError::InviteCodeDeactivated.error_code(),
-            AppError::InviteCodeAlreadyRedeemed.error_code(),
             AppError::OraclePoolNotFound("".into()).error_code(),
             AppError::OraclePoolSlugTaken("".into()).error_code(),
             AppError::OraclePoolInactive("".into()).error_code(),
@@ -1848,10 +1793,6 @@ mod tests {
             "social_auth_deactivated"
         );
         assert_eq!(
-            AppError::SocialAuthRegistrationClosed.error_key(),
-            "social_auth_registration_closed"
-        );
-        assert_eq!(
             AppError::UnsupportedGrantType("".into()).error_key(),
             "unsupported_grant_type"
         );
@@ -1985,42 +1926,6 @@ mod tests {
         assert_eq!(
             AppError::ChannelPlatformError("".into()).error_key(),
             "channel_platform_error"
-        );
-        assert_eq!(
-            AppError::InviteCodeInvalid.error_key(),
-            "invite_code_invalid"
-        );
-        assert_eq!(AppError::InviteCodeInvalid.error_code(), 8200);
-        assert_eq!(
-            AppError::InviteCodeExhausted.error_key(),
-            "invite_code_exhausted"
-        );
-        assert_eq!(AppError::InviteCodeExhausted.error_code(), 8201);
-        assert_eq!(
-            AppError::InviteCodeDeactivated.error_key(),
-            "invite_code_deactivated"
-        );
-        assert_eq!(AppError::InviteCodeDeactivated.error_code(), 8202);
-        assert_eq!(
-            format!("{}", AppError::InviteCodeInvalid),
-            "Invalid invite code"
-        );
-        assert_eq!(
-            format!("{}", AppError::InviteCodeExhausted),
-            "Invite code has been used up"
-        );
-        assert_eq!(
-            format!("{}", AppError::InviteCodeDeactivated),
-            "Invite code has been deactivated"
-        );
-        assert_eq!(
-            AppError::InviteCodeAlreadyRedeemed.error_key(),
-            "invite_code_already_redeemed"
-        );
-        assert_eq!(AppError::InviteCodeAlreadyRedeemed.error_code(), 8203);
-        assert_eq!(
-            format!("{}", AppError::InviteCodeAlreadyRedeemed),
-            "Invite code has already been redeemed"
         );
     }
 

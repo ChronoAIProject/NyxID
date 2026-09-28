@@ -151,7 +151,7 @@ New `backend/src/telemetry/mod.rs` (TelemetryClient, reqwest fire-and-forget, 2s
 /// + a branch in `name()` and `properties()`. Unknown event names become
 /// a compile error, not a runtime surprise.
 pub enum TelemetryEvent {
-    UserSignedUp { method: SignupMethod, invite_code_used: bool },
+    UserSignedUp { method: String, source: String, email_domain: Option<String>, referrer_domain: Option<String> },
     UserDeleted { reason: Option<DeleteReason> },
     AuthLoggedIn { method: AuthMethod, mfa_required: bool },
     AuthLoggedOut,
@@ -270,7 +270,7 @@ impl TelemetryErasureService {
 
 | Handler file | Events |
 |---|---|
-| `handlers/auth.rs` | `auth.logged_in`, `auth.logged_out`, `auth.token_refreshed`, `auth.password_reset_requested`, `auth.password_reset_completed`, `user.signed_up`, `invite.code_redeemed` |
+| `handlers/auth.rs` | `auth.logged_in`, `auth.logged_out`, `auth.token_refreshed`, `auth.password_reset_requested`, `auth.password_reset_completed`, `user.signed_up` |
 | `handlers/users.rs` | `user.deleted` (emit, then enqueue erasure, then delete user) |
 | `handlers/mfa.rs` | `mfa.enrollment_completed`, `mfa.challenge_succeeded`, `mfa.challenge_failed` |
 | `handlers/keys.rs` | `key.created`, `key.deleted` |

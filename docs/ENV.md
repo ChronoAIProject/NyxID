@@ -509,11 +509,10 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 | `SSH_CONNECT_TIMEOUT_SECS` | `10` | Timeout for connecting to the downstream SSH target |
 | `SSH_MAX_TUNNEL_DURATION_SECS` | `3600` | Maximum duration for a single SSH tunnel before forced close |
 
-## Registration Gate
+## Email Authentication
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INVITE_CODE_REQUIRED` | `true` | Gate new-user registration behind invite codes. Set to `false` for public registration. Accepts: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false** (SSO-only). The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated — existing users can always authenticate via direct API call even when the UI is hidden. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
 
 ## Channel Bot Relay

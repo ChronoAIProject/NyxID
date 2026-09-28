@@ -216,7 +216,7 @@ pub struct OrgInvite {
 }
 ```
 
-`COLLECTION_NAME = "org_invites"`. Distinct from the existing `InviteCode` model (which is for new-user registration); the two have different shapes and lifecycles and never share storage. Pre-feature invites get the same serde default + backfill treatment as memberships so in-flight invites don't silently flip semantics.
+`COLLECTION_NAME = "org_invites"`. Invitations grant membership to an existing account; they do not control registration. Pre-feature invites get the same serde default + backfill treatment as memberships so in-flight invites don't silently flip semantics.
 
 ### `OrgRoleScope`
 

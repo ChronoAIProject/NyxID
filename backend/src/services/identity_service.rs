@@ -236,7 +236,6 @@ mod tests {
             is_operator: false,
             role_ids: vec![],
             group_ids: vec![],
-            invite_code_id: None,
             mfa_enabled: false,
             social_provider: None,
             social_provider_id: None,

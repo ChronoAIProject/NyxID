@@ -196,7 +196,7 @@ updated approval frontend; this branch specification is not a deployment guarant
 
 Before authentication, call `GET /api/v1/public/config` without an `Authorization`
 header; an Agent Key on this human-only route is rejected. It advertises configured social
-providers, email/password availability and the invite-code registration gate.
+providers and email/password availability.
 `POST /public/mcp` with JSON-RPC `tools/list` discovers only operations covered by
 enabled anonymous endpoint rules; it is not the full service catalog and cannot
 execute tools. `GET /api/v1/catalog-specs/{spec_key_or_catalog_slug}/openapi.json`

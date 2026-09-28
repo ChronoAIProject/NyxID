@@ -41,7 +41,6 @@ pub struct PublicConfigResponse {
     pub node_ws_url: String,
     pub version: String,
     pub social_providers: Vec<String>,
-    pub invite_code_required: bool,
     pub email_auth_enabled: bool,
     /// Public PostHog ingest key for the frontend. Non-secret by design
     /// (PostHog ingest keys are write-only and project-scoped). Empty
@@ -121,7 +120,6 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         node_ws_url: format!("{ws_base}/api/v1/nodes/ws"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         social_providers,
-        invite_code_required: state.config.invite_code_required,
         email_auth_enabled: state.config.email_auth_enabled,
         telemetry_dsn,
         telemetry_host,
@@ -198,7 +196,6 @@ mod tests {
             node_ws_url: "wss://auth.nyxid.dev/api/v1/nodes/ws".to_string(),
             version: "1.0.0".to_string(),
             social_providers: vec!["github".to_string()],
-            invite_code_required: true,
             email_auth_enabled: true,
             telemetry_dsn: None,
             telemetry_host: None,
@@ -209,7 +206,6 @@ mod tests {
         assert_eq!(json["mcp_url"], "https://auth.nyxid.dev/mcp");
         assert_eq!(json["node_ws_url"], "wss://auth.nyxid.dev/api/v1/nodes/ws");
         assert_eq!(json["social_providers"], serde_json::json!(["github"]));
-        assert_eq!(json["invite_code_required"], true);
         assert_eq!(json["email_auth_enabled"], true);
     }
 
@@ -221,7 +217,6 @@ mod tests {
             node_ws_url: "wss://auth.nyxid.dev/api/v1/nodes/ws".to_string(),
             version: "1.0.0".to_string(),
             social_providers: vec![],
-            invite_code_required: false,
             email_auth_enabled: false,
             telemetry_dsn: None,
             telemetry_host: None,
@@ -243,7 +238,6 @@ mod tests {
             node_ws_url: "wss://auth.nyxid.dev/api/v1/nodes/ws".to_string(),
             version: "1.0.0".to_string(),
             social_providers: vec![],
-            invite_code_required: false,
             email_auth_enabled: false,
             telemetry_dsn: Some("phc_test123".to_string()),
             telemetry_host: Some("https://us.i.posthog.com".to_string()),

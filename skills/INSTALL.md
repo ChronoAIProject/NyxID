@@ -13,7 +13,7 @@ Before running anything, observe these constraints:
 - **Default to the `nyxid` CLI installer.** "Install NyxID" means install the CLI client unless the user explicitly asks to run their own backend/server.
 - **Do not run Docker, `docker compose`, or backend setup from `docs/SETUP.md`** unless the user explicitly asks to self-host.
 - **Installation alone does not authorize login or credential access.** After successful installation, offer the optional connection in Step 3. If the user chooses it, resolve their selected NyxID instance through the normal human-approved login flow.
-- **Do not ask the user for NyxID credentials, API keys, tokens, or invite codes.** The CLI handles credential entry interactively when the user runs it.
+- **Do not ask the user for NyxID credentials, API keys, or tokens.** The CLI handles credential entry interactively when the user runs it.
 - **Do not print secrets, environment variables, or credential files** at any point during install.
 - **Do not use `sudo`** unless the user explicitly asks for a system-wide install. The default install is fully user-scoped under `~/.local/`.
 - In security-sensitive environments, show the user the install command before executing it, or pin to a release tag instead of `main`.

@@ -49,8 +49,6 @@ function getPasswordStrength(password: string): {
   return { score, label: "Strong", color: "bg-success" };
 }
 
-const INVITE_PATTERN = /^NYX-[A-Z0-9]{8,}$/;
-
 /** Map backend social-auth error keys to user-friendly messages. */
 const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
   social_auth_conflict:
@@ -59,13 +57,9 @@ const SOCIAL_ERROR_MESSAGES: Record<string, string> = {
     "We couldn't retrieve an email address from your social account. Please ensure your email is public or use email/password sign-in.",
   social_auth_deactivated:
     "Your account has been deactivated. Please contact support for assistance.",
-  social_auth_registration_closed:
-    "No NyxID account found for this social login. Registration requires an invite code — please register with email and your invite code first, then sign in with your social account using the same email address to link it.",
   social_auth_failed: "Social sign-in failed. Please try again.",
   social_auth_exchange:
     "Social sign-in failed due to a temporary error. Please try again.",
-  invite_code_already_redeemed:
-    "This invite code has already been redeemed with this account.",
 };
 
 // Social provider buttons for the register methods panel (full-width list style)
@@ -97,25 +91,19 @@ interface AuthFlowProps {
   readonly initialPanel?: AuthPanel;
   readonly returnTo?: string;
   readonly socialError?: string;
-  readonly initialInviteCode?: string;
 }
 
 export function AuthFlow({
   initialPanel = 0,
   returnTo,
   socialError,
-  initialInviteCode,
 }: AuthFlowProps) {
-  const normalizedInitialInviteCode =
-    initialInviteCode?.trim().toUpperCase() ?? "";
   const { data: publicConfig } = usePublicConfig();
-  const inviteRequired = publicConfig?.invite_code_required ?? true;
   const emailAuthEnabled = publicConfig?.email_auth_enabled ?? false;
 
   const [panel, setPanel] = useState<AuthPanel>(
     initialPanel === 2 && !emailAuthEnabled ? 1 : initialPanel,
   );
-  const [inviteError, setInviteError] = useState(false);
   const [fadeOpacity, setFadeOpacity] = useState(1);
   const fadingRef = useRef(false);
   const navigate = useNavigate();
@@ -123,7 +111,6 @@ export function AuthFlow({
   const showEmailForm = panel === 2;
   // Refs for focus after slide
   const loginEmailRef = useRef<HTMLInputElement>(null);
-  const inviteInputRef = useRef<HTMLInputElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   // -- Forms --
@@ -135,7 +122,6 @@ export function AuthFlow({
   const registerForm = useAppForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
     defaultValues: {
-      inviteCode: normalizedInitialInviteCode,
       name: "",
       email: "",
       password: "",
@@ -148,10 +134,8 @@ export function AuthFlow({
   const registerMutation = useRegister();
 
   // -- Watched values --
-  const inviteCode = registerForm.watch("inviteCode");
   const regPassword = registerForm.watch("password");
   const strength = getPasswordStrength(regPassword);
-  const isInviteValid = INVITE_PATTERN.test(inviteCode.trim().toUpperCase());
 
   // Hide social providers whose backend credentials are not configured.
   // While publicConfig is loading, render none rather than flashing buttons
@@ -177,7 +161,6 @@ export function AuthFlow({
         const path = target === 0 ? "/login" : "/register";
         const nextParams = new URLSearchParams();
         if (returnTo) nextParams.set("return_to", returnTo);
-        if (initialInviteCode) nextParams.set("code", initialInviteCode);
         const qs = nextParams.toString();
         window.history.replaceState(
           null,
@@ -197,8 +180,7 @@ export function AuthFlow({
 
     setTimeout(() => {
       if (target === 0) loginEmailRef.current?.focus();
-      else if (target === 1) inviteInputRef.current?.focus();
-      else nameInputRef.current?.focus();
+      else if (target === 2) nameInputRef.current?.focus();
     }, crossingLoginRegister ? FADE_MS * 2 + 50 : 350);
   }
 
@@ -232,7 +214,6 @@ export function AuthFlow({
         display_name: data.name,
         email: data.email,
         password: data.password,
-        invite_code: data.inviteCode,
       });
       toast.info(result.message || "Check your email to complete registration.");
       slideToPanel(0);
@@ -247,26 +228,9 @@ export function AuthFlow({
     }
   }
 
-  // -- Invite code gate for Step 2 --
-  function requireInviteCode(): boolean {
-    if (!inviteRequired) return true;
-    const code = inviteCode.trim();
-    if (!code) {
-      setInviteError(true);
-      inviteInputRef.current?.focus();
-      return false;
-    }
-    setInviteError(false);
-    return true;
-  }
-
-  // -- Register social login (passes invite code) --
   function handleRegisterSocialLogin(providerId: string) {
-    if (!requireInviteCode()) return;
     const params = new URLSearchParams();
     if (returnTo) params.set("return_to", returnTo);
-    const code = inviteCode.trim().toUpperCase();
-    if (code) params.set("invite_code", code);
     const qs = params.toString();
     const url = `${window.location.origin}/api/v1/auth/social/${encodeURIComponent(providerId)}${qs ? `?${qs}` : ""}`;
     void openExternal(url);
@@ -412,100 +376,7 @@ export function AuthFlow({
             </p>
           </div>
 
-          {/* Step 1: Invite Code (only when invite gate is enabled) */}
-          {inviteRequired && (
-          <Form {...registerForm}>
-            <div className="relative mb-6 pl-9">
-              <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-nyx-500/10 to-transparent" />
-              <div
-                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold transition-colors duration-300 ${
-                  isInviteValid
-                    ? "border-transparent nyx-gradient-vivid text-white"
-                    : "border-nyx-500/15 bg-nyx-500/10 text-nyx-secondary-400"
-                }`}
-              >
-                {isInviteValid ? (
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 16 16"
-                    fill="none"
-                  >
-                    <path
-                      d="M3 8.5L6.5 12L13 4"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : (
-                  "1"
-                )}
-              </div>
-              <p className="mb-3 text-[13px] font-medium leading-6 text-muted-foreground">
-                Enter your invite code
-              </p>
-              <FormField
-                control={registerForm.control}
-                name="inviteCode"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormControl>
-                      <Input
-                        placeholder="NYX-XXXXXXXX"
-                        autoComplete="off"
-                        spellCheck={false}
-                        className={`h-12 font-mono text-base tracking-wider ${
-                          isInviteValid
-                            ? "border-success/40 shadow-[0_0_0_3px_rgba(52,211,153,0.08)]"
-                            : ""
-                        }`}
-                        {...field}
-                        ref={(el) => {
-                          field.ref(el);
-                          (
-                            inviteInputRef as React.MutableRefObject<HTMLInputElement | null>
-                          ).current = el;
-                        }}
-                        onChange={(e) => {
-                          field.onChange(e.target.value.toUpperCase());
-                          if (inviteError) setInviteError(false);
-                        }}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              {inviteError && (
-                <p className="mt-2 text-[12px] font-medium text-destructive">
-                  An invite code is required to use NyxID at this time.
-                </p>
-              )}
-              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-                NyxID is in closed beta.{" "}
-                <a
-                  href="https://discord.gg/QMvcs8UQBW"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="cursor-pointer font-medium text-nyx-secondary-400 hover:text-nyx-300"
-                >
-                  Join our Discord
-                </a>{" "}
-                to request an invite code.
-              </p>
-            </div>
-          </Form>
-          )}
-
-          {/* Step 2: Choose Method (becomes Step 1 when invite not required) */}
-          <div className={`relative ${inviteRequired ? "pl-9" : ""}`}>
-            {inviteRequired && (
-            <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 text-[11px] font-semibold text-nyx-secondary-400">
-              2
-            </div>
-            )}
+          <div>
             <p className="mb-3 text-[13px] font-medium leading-6 text-muted-foreground">
               Choose how to sign up
             </p>
@@ -526,7 +397,7 @@ export function AuthFlow({
               {emailAuthEnabled && (
                 <button
                   type="button"
-                  onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
+                  onClick={() => slideToPanel(2)}
                   className="flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-[13px] font-medium text-foreground transition-colors duration-200 hover:border-hairline-strong hover:bg-overlay active:scale-[0.99]"
                 >
                   <svg
@@ -596,34 +467,6 @@ export function AuthFlow({
               </p>
             </div>
           </div>
-
-          {/* Invite code mirror (only when invite gate is enabled) */}
-          {inviteRequired && (
-          <div className="mb-5 flex items-center gap-2.5 rounded-lg border border-nyx-500/10 bg-nyx-500/10 px-3.5 py-2.5">
-            <svg
-              className="h-3.5 w-3.5 shrink-0 text-nyx-secondary-400"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <rect x="3" y="7" width="10" height="7" rx="1.5" />
-              <path d="M5 7V5a3 3 0 016 0v2" />
-            </svg>
-            <span className="font-mono text-[13px] font-medium tracking-wider text-nyx-secondary-400">
-              {inviteCode.trim().toUpperCase() || "NYX-XXXXXXXX"}
-            </span>
-            <button
-              type="button"
-              onClick={() => slideToPanel(1)}
-              className="ml-auto border-0 bg-transparent text-[11px] font-medium text-muted-foreground transition-colors duration-300 hover:text-foreground"
-            >
-              Edit
-            </button>
-          </div>
-          )}
 
           {/* Email registration form */}
           <Form {...registerForm}>

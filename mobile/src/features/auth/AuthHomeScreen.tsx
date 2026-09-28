@@ -51,8 +51,6 @@ function resolveSocialAuthError(error: string | undefined): string {
     case "social_auth_exchange":
     case "social_auth_profile":
       return "Unable to complete social sign-in.";
-    case "social_auth_registration_closed":
-      return "WAITLIST";
     default:
       return error || "Social sign-in failed. Please try again.";
   }
@@ -292,7 +290,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     // Reset the dedup ref so a fresh attempt can re-process a callback URL
     // that matches a previous attempt's URL. The backend's mobile error
     // redirect is deterministic (status=error&error=<code>) so two retries
-    // against the same invite-only gate produce identical URLs; without
+    // with the same error produce identical URLs; without
     // this reset the second attempt is silently swallowed and the user
     // sees no error yet no login. The within-attempt race between
     // WebBrowser.openAuthSessionAsync and Linking's "url" listener is
@@ -481,22 +479,7 @@ export function AuthHomeScreen({ navigation }: Props) {
 
         {loginError && (
           <View style={styles.errorBanner}>
-            {loginError === "WAITLIST" ? (
-              <>
-                <Text style={styles.errorText}>
-                  Registration is invite-only.{" "}
-                  <Text
-                    style={styles.errorLink}
-                    onPress={() => void Linking.openURL("https://nyx.chrono-ai.fun")}
-                  >
-                    Join the waitlist
-                  </Text>
-                  {" "}to get access.
-                </Text>
-              </>
-            ) : (
-              <Text style={styles.errorText}>{loginError}</Text>
-            )}
+            <Text style={styles.errorText}>{loginError}</Text>
           </View>
         )}
       </ScrollView>
@@ -574,10 +557,6 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     color: c.danger,
     ...typeScale.caption,
     lineHeight: 18,
-  },
-  errorLink: {
-    color: c.primary,
-    textDecorationLine: "underline" as const,
   },
   dividerRow: {
     flexDirection: "row",

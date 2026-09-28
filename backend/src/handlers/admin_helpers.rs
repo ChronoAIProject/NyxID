@@ -38,7 +38,7 @@ pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<
 /// [`require_admin`].
 ///
 /// `endpoint_marker` is a short, stable identifier for the calling handler
-/// (e.g. `"admin.users.list"`, `"admin.invite_codes.list"`). It is written
+/// (e.g. `"admin.users.list"`, `"admin.audit_log.list"`). It is written
 /// to the audit entry's `event_data` so the audit trail can answer
 /// "operator X read endpoint Y at time T" — necessary because issue #715
 /// requires that operator reads are auditable, and HTTP access logs are

@@ -32,8 +32,7 @@ pub struct RegisterResult {
     pub email_verification_token: String,
     /// `true` when a new user was actually inserted; `false` when the email
     /// already existed and a fake success was returned for email-enumeration
-    /// protection. Callers that hold a reserved invite code must use this to
-    /// know whether to record or release the reservation.
+    /// protection. Only newly created users trigger billing and telemetry.
     pub actually_created: bool,
 }
 
@@ -50,7 +49,6 @@ pub async fn register_user(
     email: &str,
     password_raw: &str,
     display_name: Option<&str>,
-    invite_code_id: Option<&str>,
     auto_verify_email: bool,
 ) -> AppResult<RegisterResult> {
     // Validate password length
@@ -120,7 +118,6 @@ pub async fn register_user(
         is_operator: false,
         role_ids: default_role_ids,
         group_ids: vec![],
-        invite_code_id: invite_code_id.map(String::from),
         mfa_enabled: false,
         social_provider: None,
         social_provider_id: None,
@@ -412,7 +409,6 @@ mod tests {
             is_operator: false,
             role_ids: vec![],
             group_ids: vec![],
-            invite_code_id: None,
             mfa_enabled: false,
             social_provider: None,
             social_provider_id: None,
@@ -507,16 +503,9 @@ mod tests {
             .await
             .unwrap();
 
-        let result = register_user(
-            &db,
-            "new@example.com",
-            "password123",
-            Some("New"),
-            None,
-            false,
-        )
-        .await
-        .expect("register");
+        let result = register_user(&db, "new@example.com", "password123", Some("New"), false)
+            .await
+            .expect("register");
 
         assert!(result.actually_created);
         assert!(!result.user_id.is_empty());
@@ -541,7 +530,7 @@ mod tests {
             return;
         };
 
-        match register_user(&db, "short@example.com", "1234567", None, None, false).await {
+        match register_user(&db, "short@example.com", "1234567", None, false).await {
             Err(AppError::ValidationError(_)) => {}
             Err(other) => panic!("expected ValidationError, got: {other:?}"),
             Ok(_) => panic!("expected error for short password"),
@@ -556,7 +545,7 @@ mod tests {
         };
 
         let long_pw = "a".repeat(129);
-        match register_user(&db, "long@example.com", &long_pw, None, None, false).await {
+        match register_user(&db, "long@example.com", &long_pw, None, false).await {
             Err(AppError::ValidationError(_)) => {}
             Err(other) => panic!("expected ValidationError, got: {other:?}"),
             Ok(_) => panic!("expected error for long password"),
@@ -573,11 +562,11 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "dup@example.com", "password123", None, None, false)
+        register_user(&db, "dup@example.com", "password123", None, false)
             .await
             .expect("first register");
 
-        let result = register_user(&db, "dup@example.com", "password456", None, None, false)
+        let result = register_user(&db, "dup@example.com", "password456", None, false)
             .await
             .expect("duplicate should return fake success");
 
@@ -594,7 +583,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = register_user(&db, "auto@example.com", "password123", None, None, true)
+        let result = register_user(&db, "auto@example.com", "password123", None, true)
             .await
             .expect("register with auto-verify");
 
@@ -618,7 +607,7 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "user@example.com", "correct-pw-1", None, None, true)
+        register_user(&db, "user@example.com", "correct-pw-1", None, true)
             .await
             .expect("register");
 
@@ -638,7 +627,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = register_user(&db, "inactive@example.com", "password123", None, None, true)
+        let result = register_user(&db, "inactive@example.com", "password123", None, true)
             .await
             .expect("register");
 
@@ -688,7 +677,7 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "good@example.com", "password123", None, None, true)
+        register_user(&db, "good@example.com", "password123", None, true)
             .await
             .expect("register");
 
@@ -748,7 +737,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reg = register_user(&db, "verify@example.com", "password123", None, None, false)
+        let reg = register_user(&db, "verify@example.com", "password123", None, false)
             .await
             .expect("register");
 
@@ -772,7 +761,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reg = register_user(&db, "hvp@example.com", "password123", None, None, false)
+        let reg = register_user(&db, "hvp@example.com", "password123", None, false)
             .await
             .expect("register");
         assert!(reg.actually_created);
@@ -815,7 +804,7 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "reset@example.com", "password123", None, None, true)
+        register_user(&db, "reset@example.com", "password123", None, true)
             .await
             .expect("register");
 
@@ -876,7 +865,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reg = register_user(&db, "expired@example.com", "password123", None, None, true)
+        let reg = register_user(&db, "expired@example.com", "password123", None, true)
             .await
             .expect("register");
 
@@ -912,7 +901,7 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "rp-ok@example.com", "oldpassword1", None, None, true)
+        register_user(&db, "rp-ok@example.com", "oldpassword1", None, true)
             .await
             .expect("register");
 

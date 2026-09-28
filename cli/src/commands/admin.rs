@@ -3,121 +3,14 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::{Value, json};
 
 use crate::api::ApiClient;
-use crate::cli::{AdminCommands, AdminUserCommands, InviteCodeCommands, OutputFormat};
+use crate::cli::{AdminCommands, AdminUserCommands, OutputFormat};
 
 pub async fn run(command: AdminCommands) -> Result<()> {
     match command {
         AdminCommands::PlatformCredentials { command } => {
             super::admin_platform_credentials::run(command).await
         }
-        AdminCommands::InviteCode { command } => run_invite_code(command).await,
         AdminCommands::User { command } => run_user(command).await,
-    }
-}
-
-async fn run_invite_code(command: InviteCodeCommands) -> Result<()> {
-    match command {
-        InviteCodeCommands::Create {
-            max_uses,
-            note,
-            auth,
-        } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
-
-            let mut body = json!({});
-            if let Some(n) = max_uses {
-                body["max_uses"] = json!(n);
-            }
-            if let Some(ref n) = note {
-                body["note"] = json!(n);
-            }
-
-            let result: Value = api.post("/admin/invite-codes", &body).await?;
-
-            match auth.output {
-                OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&result)?);
-                }
-                OutputFormat::Table => {
-                    let code = result["code"].as_str().unwrap_or("-");
-                    let id = result["id"].as_str().unwrap_or("-");
-                    let max = result["max_uses"].as_i64().unwrap_or(0);
-                    let used = result["used_count"].as_i64().unwrap_or(0);
-                    let note_display = result["note"].as_str().unwrap_or("-");
-
-                    eprintln!("Invite code created.");
-                    eprintln!();
-                    eprintln!("Code:     {code}");
-                    eprintln!("ID:       {id}");
-                    eprintln!("Uses:     {used}/{max}");
-                    eprintln!("Note:     {note_display}");
-                    eprintln!();
-                    eprintln!("Share the code with the user who should register.");
-                }
-            }
-            Ok(())
-        }
-
-        InviteCodeCommands::List { auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let result: Value = api.get("/admin/invite-codes").await?;
-
-            match auth.output {
-                OutputFormat::Json => {
-                    println!("{}", serde_json::to_string_pretty(&result)?);
-                }
-                OutputFormat::Table => {
-                    let items = result
-                        .get("invite_codes")
-                        .and_then(|v| v.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-
-                    if items.is_empty() {
-                        eprintln!("No invite codes.");
-                        return Ok(());
-                    }
-
-                    let mut table = Table::new();
-                    table.load_preset(UTF8_FULL_CONDENSED);
-                    table.set_header(["ID", "Code", "Uses", "Active", "Note", "Created"]);
-
-                    for ic in items {
-                        let id = ic["id"].as_str().unwrap_or("-");
-                        let short_id = crate::commands::short_id(id);
-                        let code = ic["code"].as_str().unwrap_or("-");
-                        let used = ic["used_count"].as_i64().unwrap_or(0);
-                        let max = ic["max_uses"].as_i64().unwrap_or(0);
-                        let uses = format!("{used}/{max}");
-                        let active = if ic["is_active"].as_bool().unwrap_or(false) {
-                            "yes"
-                        } else {
-                            "no"
-                        };
-                        let note = ic["note"].as_str().unwrap_or("-");
-                        let created = ic["created_at"].as_str().unwrap_or("-");
-                        let short_created = created.get(..10).unwrap_or(created);
-                        table.add_row([short_id, code, uses.as_str(), active, note, short_created]);
-                    }
-                    eprintln!("{table}");
-                }
-            }
-            Ok(())
-        }
-
-        InviteCodeCommands::Deactivate { id, auth } => {
-            let mut api = ApiClient::from_auth_checked(&auth).await?;
-            api.delete_empty(&format!("/admin/invite-codes/{id}"))
-                .await?;
-            match auth.output {
-                OutputFormat::Json => println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
-                ),
-                OutputFormat::Table => eprintln!("Invite code {id} deactivated."),
-            }
-            Ok(())
-        }
     }
 }
 
@@ -312,126 +205,10 @@ async fn run_user(command: AdminUserCommands) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{AdminCommands, AdminUserCommands, InviteCodeCommands};
+    use crate::cli::{AdminCommands, AdminUserCommands};
     use crate::test_support::mock_auth;
     use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    // --- InviteCode subcommands ---
-
-    #[tokio::test]
-    async fn invite_code_create_posts_max_uses_and_note() {
-        let server = MockServer::start().await;
-        // Body must include both optional fields exactly as supplied.
-        Mock::given(method("POST"))
-            .and(path("/api/v1/admin/invite-codes"))
-            .and(body_json(serde_json::json!({
-                "max_uses": 5,
-                "note": "for the design team"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "ic-1", "code": "ABCD-EFGH", "max_uses": 5, "used_count": 0
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        run(AdminCommands::InviteCode {
-            command: InviteCodeCommands::Create {
-                max_uses: Some(5),
-                note: Some("for the design team".to_string()),
-                auth: mock_auth(server.uri()),
-            },
-        })
-        .await
-        .expect("create should succeed");
-    }
-
-    #[tokio::test]
-    async fn invite_code_create_sends_empty_body_when_no_options() {
-        let server = MockServer::start().await;
-        // No max_uses / note → server defaults apply; body is exactly `{}`.
-        Mock::given(method("POST"))
-            .and(path("/api/v1/admin/invite-codes"))
-            .and(body_json(serde_json::json!({})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "ic-2", "code": "WXYZ-1234"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        run(AdminCommands::InviteCode {
-            command: InviteCodeCommands::Create {
-                max_uses: None,
-                note: None,
-                auth: mock_auth(server.uri()),
-            },
-        })
-        .await
-        .expect("create should succeed");
-    }
-
-    #[tokio::test]
-    async fn invite_code_list_fetches_codes() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/admin/invite-codes"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "invite_codes": [
-                    {"id": "ic-1", "code": "ABCD", "used_count": 1, "max_uses": 10, "is_active": true}
-                ]
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        run(AdminCommands::InviteCode {
-            command: InviteCodeCommands::List {
-                auth: mock_auth(server.uri()),
-            },
-        })
-        .await
-        .expect("list should succeed");
-    }
-
-    #[tokio::test]
-    async fn invite_code_list_surfaces_server_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/admin/invite-codes"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
-            .mount(&server)
-            .await;
-
-        let result = run(AdminCommands::InviteCode {
-            command: InviteCodeCommands::List {
-                auth: mock_auth(server.uri()),
-            },
-        })
-        .await;
-        assert!(result.is_err(), "403 should surface as an error");
-    }
-
-    #[tokio::test]
-    async fn invite_code_deactivate_issues_delete() {
-        let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/api/v1/admin/invite-codes/ic-9"))
-            .respond_with(ResponseTemplate::new(204))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        run(AdminCommands::InviteCode {
-            command: InviteCodeCommands::Deactivate {
-                id: "ic-9".to_string(),
-                auth: mock_auth(server.uri()),
-            },
-        })
-        .await
-        .expect("deactivate should succeed");
-    }
 
     // --- User subcommands ---
 

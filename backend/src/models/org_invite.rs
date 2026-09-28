@@ -8,8 +8,7 @@ pub const COLLECTION_NAME: &str = "org_invites";
 
 /// One-time invite token used to bring a person user into an org.
 ///
-/// Distinct from [`crate::models::invite_code::InviteCode`] which gates
-/// new-user signup. Org invites are scoped to an existing org, single-use,
+/// Org invites are scoped to an existing org, single-use,
 /// and have a TTL enforced via a MongoDB TTL index on `expires_at`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrgInvite {

@@ -11,11 +11,11 @@ This is the web console flow. If you want the CLI instead, see [CLI: first conne
 
 Console URL: **https://nyx.chrono-ai.fun**
 
-If you don't have an account yet, see [Sign up & sign in](/docs/web/getting-started/sign-up) — you need an invite code.
+If you don't have an account yet, see [Sign up & sign in](/docs/web/getting-started/sign-up).
 
 ### 1. Sign in
 
-Register at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register) with invite code `NYX-FGNY85AF` if you haven't already, then sign in.
+Register at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register) if you haven't already, then sign in.
 
 ### 2. Add an AI Service
 

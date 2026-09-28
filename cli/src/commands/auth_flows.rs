@@ -24,9 +24,6 @@ pub async fn run_register(args: RegisterArgs) -> Result<()> {
     let mut body = serde_json::json!({
         "email": args.email,
         "password": password,
-        // Normalize to the backend's canonical form so users don't get a
-        // confusing "invalid code" when they type the code in lowercase.
-        "invite_code": args.invite_code.trim().to_uppercase(),
     });
     if let Some(name) = &args.name {
         body["display_name"] = serde_json::Value::String(name.clone());
@@ -137,7 +134,7 @@ mod tests {
     // HOME-mutating tests in api.rs).
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn register_uppercases_invite_code_and_posts() {
+    async fn register_posts_without_invitation_code() {
         let _guard = crate::test_support::env_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
@@ -146,8 +143,7 @@ mod tests {
             .and(path("/api/v1/auth/register"))
             .and(body_json(serde_json::json!({
                 "email": "new@user.com",
-                "password": "s3cret-pw",
-                "invite_code": "WELCOME"
+                "password": "s3cret-pw"
             })))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({ "message": "ok" })),
@@ -165,7 +161,6 @@ mod tests {
             email: "new@user.com".to_string(),
             name: None,
             password_env: Some("NYXID_TEST_REGISTER_PW".to_string()),
-            invite_code: "welcome".to_string(),
         })
         .await;
         unsafe {

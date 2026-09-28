@@ -155,10 +155,8 @@ async fn exchange_social_token_inner(
         SocialProvider::Apple => verify_apple_token(jwks_cache, config, subject_token).await?,
     };
 
-    // Step 4: Find or create user. First-time social sign-ups are blocked
-    // when the invite-code gate is enabled.
-    let allow_new_users = !config.invite_code_required;
-    let user = social_auth_service::find_or_create_user(db, &profile, allow_new_users)
+    // Step 4: Find or create user.
+    let user = social_auth_service::find_or_create_user(db, &profile)
         .await?
         .user;
 
