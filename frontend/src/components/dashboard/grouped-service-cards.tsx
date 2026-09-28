@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, CreditCard, UsersRound } from "lucide-react";
 import { useServiceView } from "@/hooks/use-service-view";
 import { useServiceCardTransition } from "@/hooks/use-service-card-transition";
 import { ServiceViewToolbar } from "./service-view-toolbar";
@@ -26,22 +26,34 @@ import {
   groupServiceConnections,
   type ServiceConnectionGroup,
 } from "@/lib/service-groups";
+import {
+  useServiceInsights,
+  type ServiceInsightsState,
+} from "@/hooks/use-service-insights";
+import {
+  callerLabel,
+  summarizeBilling,
+  insightStatusLabel,
+} from "@/lib/service-insights";
+import { formatRelativeTime } from "@/lib/utils";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 
 function GroupCard({
   group,
   expanded,
   onToggle,
-  search,
+  insights,
   connections,
+  search,
   renderConnectionActions,
   filtersRef,
 }: {
   readonly group: ServiceConnectionGroup;
   readonly expanded: boolean;
   readonly onToggle: (card: HTMLElement | null) => void;
-  readonly search: string;
+  readonly insights: ServiceInsightsState;
   readonly connections: readonly KeyInfo[];
+  readonly search: string;
   readonly renderConnectionActions?: (key: KeyInfo) => ReactNode;
   readonly filtersRef: RefObject<HTMLDivElement | null>;
 }) {
@@ -112,13 +124,31 @@ function GroupCard({
     ).values(),
   ];
   const disabled = connections.filter((key) => !key.is_active).length;
-  const matches = search
-    ? connections.filter((key) =>
-        [key.label, key.slug, sourceLabel(key)].some((value) =>
-          value.toLowerCase().includes(search),
-        ),
-      )
-    : [];
+  const connectionInsights = connections.map((key) =>
+    insights.connections.get(key.id),
+  );
+  const recent = connectionInsights
+    .flatMap((item) => item?.usage?.activity.requests ?? [])
+    .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))[0];
+  const billingSummary =
+    insights.status !== "ready"
+      ? insightStatusLabel(insights.status, "Billing")
+      : summarizeBilling(
+          connections
+            .filter((key) => key.is_active)
+            .map((key) => insights.connections.get(key.id)),
+        );
+  const ownRequests = connectionInsights.every(
+    (item) => item?.usage?.activity.visibility === "own_requests",
+  );
+  const callerSummary =
+    insights.status !== "ready"
+      ? insightStatusLabel(insights.status, "Activity")
+      : recent
+        ? `${callerLabel(recent.caller)} · ${formatRelativeTime(recent.occurred_at)}`
+        : connectionInsights.every((item) => item?.usage)
+          ? "No recorded requests · 30d"
+          : "Activity not reported";
 
   return (
     <section
@@ -194,7 +224,7 @@ function GroupCard({
                   className="flex min-w-0 items-center gap-2 overflow-hidden text-muted-foreground"
                   title={sources.map((source) => source.name).join(" · ")}
                 >
-                  <span className="mr-2">Sources</span>
+                  <span className="w-24 shrink-0">Sources</span>
                   {sources.map((source, index) => (
                     <span
                       key={index}
@@ -205,12 +235,49 @@ function GroupCard({
                     </span>
                   ))}
                 </p>
-                {matches.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onToggle(cardRef.current)}
+                  aria-expanded={expanded}
+                  aria-controls={contentId}
+                  aria-label={`Expand ${group.name} to compare caller activity`}
+                  className="grid w-full grid-cols-[6rem_1fr] items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
+                >
+                  <span className="text-muted-foreground">
+                    {ownRequests ? "Your latest" : "Latest request"}
+                  </span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <UsersRound className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span
+                      className="truncate"
+                      title={`Latest recorded caller: ${callerSummary}`}
+                    >
+                      {callerSummary}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onToggle(cardRef.current)}
+                  aria-expanded={expanded}
+                  aria-controls={contentId}
+                  aria-label={`Expand ${group.name} to compare billing`}
+                  className="grid w-full grid-cols-[6rem_1fr] items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
+                >
+                  <span className="text-muted-foreground">Billing</span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <CreditCard className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="truncate" title={billingSummary}>
+                      {billingSummary}
+                    </span>
+                  </span>
+                </button>
+                {search.trim() && (
                   <p
-                    className="truncate text-muted-foreground"
-                    title={matches.map((key) => key.label).join(", ")}
+                    className="truncate text-[11px] text-muted-foreground"
+                    title={connections.map((key) => key.label).join(" · ")}
                   >
-                    Matches: {matches.map((key) => key.label).join(", ")}
+                    Matches: {connections.map((key) => key.label).join(" · ")}
                   </p>
                 )}
               </div>
@@ -262,6 +329,7 @@ function GroupCard({
           <div className="border-t border-border bg-background/30">
             <ServiceConnectionTable
               connections={connections}
+              insights={insights}
               serviceName={group.name}
               renderActions={renderConnectionActions}
             />
@@ -330,12 +398,12 @@ export function GroupedServiceCards({
     };
   }, [view.accountId]);
   const { filters, expanded } = view;
-  const needle = filters.search.trim().toLowerCase();
   const groups = groupServiceConnections(keys, catalog);
   const visible = groups
     .map((group) => ({ group, matches: matchingConnections(group, filters) }))
     .filter(({ matches }) => matches.length > 0);
   const matchingKeys = visible.flatMap(({ matches }) => matches);
+  const insights = useServiceInsights(renderTable ? [] : keys);
 
   return (
     <div ref={containerRef} className="space-y-6 [overflow-anchor:none]">
@@ -373,8 +441,9 @@ export function GroupedServiceCards({
                 key={group.id}
                 group={group}
                 expanded={expanded.includes(group.id)}
-                search={needle}
+                insights={insights}
                 connections={matches}
+                search={filters.search}
                 onToggle={(card) =>
                   animateCards(
                     () =>

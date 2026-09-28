@@ -192,6 +192,8 @@ pub mod channel_retry_ingress;
 pub mod provider_link_service;
 pub mod retired_service_service;
 pub mod service_history;
+pub mod service_insights_activity;
+pub mod service_insights_billing;
 
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;

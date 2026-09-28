@@ -446,6 +446,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     audit
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "event_type": 1, "event_data.user_service_id": 1, "created_at": -1, "_id": -1 })
+                .options(IndexOptions::builder().name("audit_service_requests".to_string()).build())
+                .build(),
+        )
+        .await?;
+    audit
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "user_id": 1, "created_at": -1 })
                 .build(),
         )

@@ -700,3 +700,52 @@ including archived history, under the active-owner and current-membership checks
 in [SERVICE_HISTORY.md](SERVICE_HISTORY.md). This is independent of proxy-use
 permission. Last editor and credential-preparation time are never labeled last
 caller or successful upstream execution.
+
+### Billing and caller information inside service cards
+
+Collapsed cards show credential sources, the latest recorded request, and a billing
+summary for their active connections. The expanded comparison table exposes
+**Owner / credential**, **Access & requests**, and **Billing** alongside identity,
+state, and configuration. Each connection can open one inline panel: permitted
+agent keys and credential overrides, its latest three recorded requests, or payer
+and rates. Users do not need to open an individual connection page to inspect
+these fields. Billing's **For** selector previews the viewer or a managed agent
+key, including an applicable credential override.
+
+`GET /api/v1/service-insights?ids=<comma-separated-UUIDs>` returns up to 100 exact
+connection projections; optional `api_key_id` selects a managed agent's billing
+context. It deliberately lives outside `/keys/{id_or_slug}` so no user slug is
+reserved. Sessions, access tokens, and delegated account reads use existing live
+owner/membership/resource checks. API keys, service accounts, and relay tokens
+cannot enumerate the management projection. Responses are private and not cached
+by HTTP intermediaries; a failed frontend refresh drops privileged summaries.
+
+Billing is a read-only explanation built from the execution owner resolver,
+credential class, rollout flags, and pricing configuration. A NyxID credential
+does not imply NyxID pays: the resolved account is displayed separately. Synced
+rates retain exact decimal values. Unknown legacy prices remain conditional;
+missing data is never represented as free. Provider charges may be separate, and
+the preview is not a settled debit or proof that a provider credential works.
+Inspecting the page does not decrypt credentials, reserve credits, or call providers.
+
+Agent access describes current scope grants, not use. Members see their own key
+inventory and requests; scoped organization admins can also inspect organization
+keys and permitted connection activity. Other members' private keys are excluded.
+Request counts and the latest three events cover 30 days, with the privacy filter
+applied before aggregation. Requests use verified auth identities; an agent's
+platform label or the service's provisioning application cannot establish which
+application executed a request.
+
+The `service_request` event is appended through the existing audit hash chain for
+resolved HTTP proxy, node, streaming, WebSocket, LLM, and MCP requests. It records
+the exact `user_service_id` and a server-generated execution ID shared with the
+billing request, plus verified caller and application identities when available.
+Response received and connection opened are distinct from completed streams;
+explicit admission denials are recorded as denied, and unclassified early exits
+remain unknown. Historical and uninstrumented events keep coverage partial.
+Catalog IDs and timestamps are never used to allocate old activity to duplicates.
+
+Raw usage meters also retain the exact connection ID. Charged hourly and daily
+rollups retain it in existing cost-partition metadata, preserving established
+bucket/replay identities during mixed-version deployment. These metadata additions
+do not change pricing, settlement, or the routing policy.

@@ -115,6 +115,13 @@ import ServiceRoutingPreview from "./service-routing-preview";
 import { useServiceCardView } from "@/stores/service-card-view-store";
 import ServicePoolRoutingPreview from "./service-pool-routing-preview";
 
+vi.mock("@/hooks/use-service-insights", () => ({
+  useServiceInsights: () => ({
+    connections: new Map(),
+    status: "unavailable",
+    refresh: vi.fn(),
+  }),
+}));
 vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: [] }) }));
 function renderConnection(candidate: RoutingCandidate) {
   return <span>{candidate.key.label}</span>;
@@ -436,9 +443,9 @@ describe("live grouped services", () => {
       inline: "nearest",
     });
     for (const name of [
-      "Classification",
-      "Status",
-      "Activity",
+      "Owner / Credential",
+      "Access & requests",
+      "Billing",
       "Connection / Slug",
       "Configuration",
     ]) {
@@ -533,7 +540,7 @@ describe("live grouped services", () => {
       screen.getByRole("textbox", { name: "Search services and connections" }),
       "Team account{Enter}",
     );
-    expect(screen.getByText("Matches: Team account")).toBeVisible();
+    expect(screen.getByText("1 of 2 match")).toBeVisible();
     expect(screen.getByText("1 of 2 connections")).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),

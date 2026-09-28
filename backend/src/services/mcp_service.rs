@@ -165,6 +165,7 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    pub attribution: Option<super::service_insights_activity::RequestAttribution>,
     /// API key ID that is acting on behalf of the user. Enables per-agent
     /// credential override via [`proxy_service::resolve_agent_credential_override`].
     pub api_key_id: Option<&'a str>,
@@ -4441,6 +4442,7 @@ pub async fn execute_tool_resolved(
     } else {
         build_downstream_request_headers(endpoint, body.is_some())?
     };
+    let resource_owner_id = billing_context_builder.effective_owner_id.clone();
     let billing_ctx = billing_context_builder
         .build(
             billing.as_ref(),
@@ -4453,7 +4455,39 @@ pub async fn execute_tool_resolved(
         )
         .await?;
     let billing_ctx = billing_ctx.with_request_body(body.as_deref());
-    let metered = billing.open(&billing_ctx).await?;
+    let attribution = exec_ctx.attribution.clone().unwrap_or_else(|| {
+        super::service_insights_activity::RequestAttribution {
+            actor: super::audit_service::AuditActor {
+                user_id: user_id.into(),
+                api_key_id: exec_ctx.api_key_id.map(str::to_owned),
+                api_key_name: None,
+                ip_address: None,
+                user_agent: None,
+            },
+            auth_kind: if exec_ctx.api_key_id.is_some() {
+                "api_key"
+            } else {
+                "unknown"
+            }
+            .into(),
+            oauth_client_id: None,
+            acting_client_id: None,
+            api_key_credential_id: None,
+        }
+    });
+    let mut request_audit = super::service_insights_activity::RequestAudit::from_attribution(
+        db,
+        attribution,
+        billing_ctx.user_service_id.as_deref(),
+        &target.service.id,
+        &resource_owner_id,
+        &billing_ctx.billing_request_id,
+        billing_ctx.credential_class,
+    );
+    let metered = billing
+        .open(&billing_ctx)
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     let request_len = body.as_ref().map(|body| body.len() as i64).unwrap_or(0);
 
     // -------------------------------------------------------------------
@@ -4571,6 +4605,7 @@ pub async fn execute_tool_resolved(
                         )
                         .await?;
                     destination_audit.complete(resp.status);
+                    request_audit.response(resp.status);
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
                         resp.status,
                         header_value(&resp.headers, "content-type"),
@@ -4599,6 +4634,7 @@ pub async fn execute_tool_resolved(
                         )
                         .await?;
                     destination_audit.complete(status);
+                    request_audit.response(status);
                     return Ok(McpToolExecutionOutcome::Response(tool_response(
                         status,
                         header_value(&headers, "content-type"),
@@ -4737,6 +4773,7 @@ pub async fn execute_tool_resolved(
         .await?;
 
     destination_audit.complete(status);
+    request_audit.response(status);
     Ok(McpToolExecutionOutcome::Response(ToolResponse {
         status,
         text: body_text,
@@ -5571,6 +5608,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        attribution: None,
                         api_key_id: None,
                         allow_all_nodes: true,
                         allowed_node_ids: &[],

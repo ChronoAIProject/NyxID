@@ -6,6 +6,7 @@ import type { Plugin } from "vite";
 const READ_PATHS = new Set([
   "/api/v1/users/me",
   "/api/v1/keys",
+  "/api/v1/service-insights",
   "/api/v1/api-keys",
   "/api/v1/user-services",
   "/api/v1/service-pools",
@@ -21,10 +22,11 @@ const READ_PATHS = new Set([
 
 const UUID_SEGMENT = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 const DETAIL_PATH = new RegExp(`^/api/v1/(?:keys|nodes)/${UUID_SEGMENT}$`);
+const AGENT_METADATA_PATH = new RegExp(`^/api/v1/api-keys/${UUID_SEGMENT}(?:/(?:bindings|usage))?$`);
 const HISTORY_PATH = new RegExp(`^/api/v1/keys/${UUID_SEGMENT}/history$`);
 
 function isMetadataPath(path: string) {
-  return READ_PATHS.has(path) || DETAIL_PATH.test(path) || HISTORY_PATH.test(path) || /^\/api\/v1\/catalog\/[a-z0-9][a-z0-9-]*$/.test(path);
+  return READ_PATHS.has(path) || AGENT_METADATA_PATH.test(path) || DETAIL_PATH.test(path) || HISTORY_PATH.test(path) || /^\/api\/v1\/catalog\/[a-z0-9][a-z0-9-]*$/.test(path);
 }
 
 function cookie(req: IncomingMessage, name: string): string | undefined {

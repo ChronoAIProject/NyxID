@@ -515,6 +515,7 @@ async fn insert_reserved_row(
         wallet_id,
         actor_user_id: ctx.actor_user_id.clone(),
         api_key_id: ctx.api_key_id.clone(),
+        user_service_id: ctx.user_service_id.clone(),
         service_id: ctx
             .catalog_service_id
             .clone()
@@ -958,6 +959,10 @@ mod tests {
             .expect("collect rows");
 
         assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(
+            |row| row.user_service_id.as_deref() == Some("user-service-1")
+                && row.service_id.as_deref() == Some("catalog-1")
+        ));
         assert!(rows.iter().any(|row| {
             row.layer == BillingLayer::Platform
                 && row.transaction_id == "billing-request-1:platform"

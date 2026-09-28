@@ -53,6 +53,13 @@ vi.mock("@/hooks/use-user-services", () => ({
   useUserServices: () => ({ data: [] }),
 }));
 vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: [] }) }));
+vi.mock("@/hooks/use-service-insights", () => ({
+  useServiceInsights: () => ({
+    connections: new Map(),
+    status: "unavailable",
+    refresh: vi.fn(),
+  }),
+}));
 vi.mock("@/components/dashboard/service-history", () => ({
   ServiceHistory: ({ serviceId }: { serviceId: string }) => (
     <div data-testid="service-history">{serviceId}</div>
@@ -148,7 +155,11 @@ describe("full service page", () => {
       ];
       render(<ServiceOverviewPage />);
       expect(screen.getByText("Editors only")).toBeVisible();
-      expect(screen.getByRole("link", { name: "View Shared connection details (ChronoAI)" })).toHaveAttribute("href", "/keys/Shared");
+      expect(
+        screen.getByRole("link", {
+          name: "View Shared connection details (ChronoAI)",
+        }),
+      ).toHaveAttribute("href", "/keys/Shared");
       expect(
         screen.queryByRole("link", { name: /Configure/ }),
       ).not.toBeInTheDocument();

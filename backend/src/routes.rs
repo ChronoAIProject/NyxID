@@ -1836,6 +1836,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Shared management routes; individual groups retain service-account gates.
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
+        .route(
+            "/service-insights",
+            get(handlers::service_insights::get_insights),
+        )
         .route("/keys", get(handlers::service_account_key_reads::list_keys))
         .route(
             "/keys/{key_id}",

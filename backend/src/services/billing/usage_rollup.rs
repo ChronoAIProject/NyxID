@@ -416,6 +416,10 @@ async fn raw_increments(
         doc! { "$dateTrunc": { "date": "$created_at", "unit": "hour", "timezone": "UTC" } },
     );
     key.insert("exact", "$exact");
+    key.insert(
+        "user_service_id",
+        doc! { "$ifNull": ["$user_service_id", null] },
+    );
     group.insert("rows_folded", doc! { "$sum": 1_i64 });
     let mut groups: Vec<Document> = db
         .collection::<Document>(METERS)
@@ -433,8 +437,12 @@ async fn raw_increments(
             return Err(AppError::Internal("Missing usage group key".into()));
         };
         let mut partition_key = Document::new();
-        for field in ["api_key", "acked"] {
-            if let Some(value) = key.remove(field) {
+        // Keep replay identities stable across replicas. Exact connection is
+        // additive partition metadata, like the API key, not a new bucket key.
+        for field in ["api_key", "acked", "user_service_id"] {
+            if let Some(value) = key.remove(field)
+                && (field != "user_service_id" || !matches!(value, Bson::Null))
+            {
                 partition_key.insert(field, value);
             }
         }

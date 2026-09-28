@@ -249,3 +249,31 @@ hiding/restoring Saved views and footer, and selecting organization pills while
 stuck. Shared data-table controls retain their normal wrapping layout. Production
 build, TypeScript, targeted ESLint and whitespace checks passed. The preview is
 serving the changes; no browser is connected for visual verification.
+
+## Inline billing and caller insights — 29 September 2026
+
+Cards now show Sources, Latest request (or Your latest), and Billing. Expanding a
+card shows a connection table with separate Access & requests and Billing columns.
+The inline panels list permitted agent keys and overrides, the latest three exact
+requests in 30 days, and the billing account with applicable rates. Billing's For
+selector compares the viewer's default with a managed agent key. Configuration
+and permitted change history retain their existing access boundaries.
+
+The implementation includes `GET /api/v1/service-insights` and exact request
+attribution in the HTTP proxy, both LLM routes, and MCP. The endpoint is allowed
+through the local preview's read-only gateway. Its production backend must deploy
+this endpoint before these fields populate: an older server shows Not reported,
+with an explanatory inline message. It never fabricates payer or caller data.
+Older request history remains partial after deployment. Rates are current billing
+previews; settled transaction history is not added by this revision.
+
+Open `http://127.0.0.1:4317/keys?view=routing` to review the running frontend, or
+`http://127.0.0.1:4317/__routing-preview/login` for a fresh preview login. Browser
+automation was unavailable in this session, so signed-in visual review remains
+outstanding.
+
+Validation: 103 focused frontend tests and 30 backend tests passed, including
+real MongoDB privacy, payer/override, exact request capture, metering, and rollup
+checks. TypeScript, the production frontend build, Rust formatting, targeted ESLint,
+and diff whitespace checks passed. Full ESLint has zero errors and 27 existing
+warnings. The committed CLI wizard source-closure hash remains current.

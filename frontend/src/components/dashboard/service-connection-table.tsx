@@ -6,6 +6,8 @@ import {
   History,
   LockKeyhole,
   Settings2,
+  UsersRound,
+  CreditCard,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ServiceIcon } from "@/components/service-icon";
@@ -24,6 +26,25 @@ import { canEditConnection } from "@/lib/connection-access";
 import { classifyConnection } from "@/lib/service-routing-preview";
 import { cn, formatDate, formatDateTime } from "@/lib/utils";
 import type { KeyInfo } from "@/types/keys";
+import type { ServiceInsight } from "@/schemas/service-insights";
+import {
+  useServiceInsights,
+  type ServiceInsightsState,
+} from "@/hooks/use-service-insights";
+import {
+  ConnectionInsightPanel,
+  type InsightPanel,
+} from "./service-insight-panels";
+import {
+  billingAccountLabel,
+  credentialLabel,
+  rateLabel,
+  callerLabel,
+  callerKindLabel,
+  outcomeLabel,
+  insightStatusLabel,
+} from "@/lib/service-insights";
+import { formatRelativeTime } from "@/lib/utils";
 
 const authNames: Record<string, string> = {
   bearer: "Bearer",
@@ -45,14 +66,19 @@ function target(key: KeyInfo): string {
 
 function ConnectionMetadata({
   connection: key,
+  insight,
 }: {
   readonly connection: KeyInfo;
+  readonly insight?: ServiceInsight;
 }) {
   const editable = canEditConnection(key);
   const rows = [
     ["Created", formatDateTime(key.created_at)],
     ["Added via", key.source_app_name || "Not recorded"],
-    ["Last caller", "Not reported"],
+    [
+      "Last caller",
+      insight?.usage?.activity.requests[0]?.caller.name || "Not recorded",
+    ],
     [
       "Credential prepared",
       key.last_used_at ? formatDateTime(key.last_used_at) : "Not reported",
@@ -99,18 +125,21 @@ export function ServiceConnectionTable({
   serviceName,
   renderActions,
   onViewHistory,
+  insights: suppliedInsights,
 }: {
   readonly connections: readonly KeyInfo[];
   readonly serviceName: string;
   readonly renderActions?: (connection: KeyInfo) => ReactNode;
   readonly onViewHistory?: (connection: KeyInfo) => void;
+  readonly insights?: ServiceInsightsState;
 }) {
   const [open, setOpen] = useState<{
     id: string;
-    view: "details" | "history";
+    view: "details" | "history" | InsightPanel;
   } | null>(null);
   const [observedAt] = useState(Date.now);
-  const toggle = (id: string, view: "details" | "history") =>
+  const insights = useServiceInsights(connections, suppliedInsights);
+  const toggle = (id: string, view: "details" | "history" | InsightPanel) =>
     setOpen((current) =>
       current?.id === id && current.view === view ? null : { id, view },
     );
@@ -123,25 +152,29 @@ export function ServiceConnectionTable({
     >
       <TableHeader>
         <TableRow>
-          <TableHead scope="col" className="w-[21%]">
+          <TableHead scope="col" className="w-[22%]">
             Connection / Slug
           </TableHead>
           <TableHead scope="col" className="w-[17%]">
-            Classification
+            Owner / Credential
           </TableHead>
-          <TableHead scope="col" className="w-[16%]">
-            Status
+          <TableHead scope="col" className="w-[22%]">
+            Access &amp; requests
           </TableHead>
-          <TableHead scope="col" className="w-[25%]">
+          <TableHead scope="col" className="w-[19%]">
+            Billing
+          </TableHead>
+          <TableHead scope="col" className="w-[20%]">
             Configuration
-          </TableHead>
-          <TableHead scope="col" className="w-[21%]">
-            Activity
           </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {connections.map((key) => {
+          const insight = insights.connections.get(key.id);
+          const billing = insight?.billing;
+          const usage = insight?.usage;
+          const latest = usage?.activity.requests[0];
           const source = connectionSource(key);
           const org =
             key.credential_source?.type === "org"
@@ -234,6 +267,30 @@ export function ServiceConnectionTable({
                     {key.streaming_supported ? " · Streaming" : ""}
                     {key.websocket_supported ? " · WebSocket" : ""}
                   </span>
+                  <div className="mt-2 space-y-1">
+                    <Badge
+                      variant={
+                        readiness.state === "unavailable" && key.is_active
+                          ? "warning"
+                          : "secondary"
+                      }
+                    >
+                      {readiness.reason}
+                    </Badge>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {key.is_active ? "Enabled" : "Disabled"} ·{" "}
+                      {key.status.replaceAll("_", " ")}
+                    </p>
+                    {key.expires_at && (
+                      <p
+                        className="mt-1 text-[11px] text-muted-foreground"
+                        title={formatDateTime(key.expires_at)}
+                      >
+                        Expires {formatDate(key.expires_at)}
+                      </p>
+                    )}
+                    {editable && renderActions?.(key)}
+                  </div>
                 </TableCell>
                 <TableCell>
                   <div className="flex items-center gap-1.5">
@@ -253,35 +310,107 @@ export function ServiceConnectionTable({
                         ? "Platform managed"
                         : "Personal owner"}
                   </p>
-                  {org && source === "platform" && (
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      Platform credential
-                    </p>
-                  )}
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {credentialLabel(key, billing)}
+                  </p>
                 </TableCell>
                 <TableCell>
-                  <Badge
-                    variant={
-                      readiness.state === "unavailable" && key.is_active
-                        ? "warning"
-                        : "secondary"
-                    }
+                  <button
+                    type="button"
+                    onClick={() => toggle(key.id, "access")}
+                    aria-expanded={expanded && open.view === "access"}
+                    aria-controls={panelId}
+                    aria-label={`Agent key access for ${key.label}`}
+                    className="inline-flex items-center gap-1.5 rounded-sm text-xs font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                   >
-                    {readiness.reason}
-                  </Badge>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {key.is_active ? "Enabled" : "Disabled"} ·{" "}
-                    {key.status.replaceAll("_", " ")}
-                  </p>
-                  {key.expires_at && (
-                    <p
-                      className="mt-1 text-[11px] text-muted-foreground"
-                      title={formatDateTime(key.expires_at)}
-                    >
-                      Expires {formatDate(key.expires_at)}
+                    <UsersRound className="size-3.5 shrink-0" />
+                    {usage
+                      ? `${usage.access.keys.length}${usage.access.truncated ? "+" : ""} agent ${usage.access.keys.length === 1 ? "key" : "keys"}`
+                      : insightStatusLabel(insights.status, "Access")}
+                  </button>
+                  {usage && (
+                    <p className="mt-1 text-[10px] text-muted-foreground">
+                      {usage.access.visibility === "own_keys"
+                        ? "Your keys with access"
+                        : "Managed keys with access"}
+                      {usage.access.keys.some(
+                        (agent) => agent.credential_override,
+                      ) &&
+                        ` · ${usage.access.keys.filter((agent) => agent.credential_override).length} overrides`}
                     </p>
                   )}
-                  {editable && renderActions?.(key)}
+                  <button
+                    type="button"
+                    onClick={() => toggle(key.id, "requests")}
+                    aria-expanded={expanded && open.view === "requests"}
+                    aria-controls={panelId}
+                    aria-label={`Recent requests for ${key.label}`}
+                    className="mt-2 block max-w-full rounded-sm text-left text-[11px] hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
+                  >
+                    <span
+                      className="block truncate font-medium"
+                      title={
+                        usage?.activity.visibility === "own_requests"
+                          ? "Your latest recorded request"
+                          : "Latest recorded request"
+                      }
+                    >
+                      {latest && (
+                        <span className="font-normal text-muted-foreground">
+                          Latest:{" "}
+                        </span>
+                      )}
+                      {latest
+                        ? callerLabel(latest.caller)
+                        : usage
+                          ? "No recorded requests · 30d"
+                          : insightStatusLabel(insights.status, "Activity")}
+                      {latest && (
+                        <span className="ml-1 font-normal text-muted-foreground">
+                          · {formatRelativeTime(latest.occurred_at)}
+                        </span>
+                      )}
+                    </span>
+                    {latest && (
+                      <span className="mt-0.5 block text-muted-foreground">
+                        {callerKindLabel(latest.caller.kind)} ·{" "}
+                        {outcomeLabel(latest.outcome)}
+                      </span>
+                    )}
+                  </button>
+                </TableCell>
+                <TableCell>
+                  <button
+                    type="button"
+                    onClick={() => toggle(key.id, "billing")}
+                    aria-expanded={expanded && open.view === "billing"}
+                    aria-controls={panelId}
+                    aria-label={`Billing for ${key.label}`}
+                    className="block w-full rounded-sm text-left text-xs hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
+                  >
+                    <span className="mb-1 block text-[10px] text-muted-foreground">
+                      {billing?.status === "unavailable" ||
+                      billing?.status === "restricted"
+                        ? "Billing preview"
+                        : "For your requests"}
+                    </span>
+                    <span className="flex items-start gap-1.5 font-medium">
+                      <CreditCard className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                      {billing
+                        ? billingAccountLabel(billing)
+                        : insightStatusLabel(insights.status, "Billing")}
+                    </span>
+                    <span className="mt-1 block text-[11px] text-muted-foreground">
+                      {billing?.status === "unavailable"
+                        ? billing.notes[0]
+                        : billing
+                          ? rateLabel(billing)
+                          : "Rate not reported"}
+                    </span>
+                    <span className="mt-1.5 block text-[11px] text-primary">
+                      View billing
+                    </span>
+                  </button>
                 </TableCell>
                 <TableCell>
                   {editable ? (
@@ -323,10 +452,8 @@ export function ServiceConnectionTable({
                       {key.auto_connected ? "Platform managed" : "Editors only"}
                     </p>
                   )}
-                </TableCell>
-                <TableCell>
                   <p
-                    className="truncate text-[11px]"
+                    className="mt-2 truncate text-[11px]"
                     title={
                       change ? `${activity} by ${change.actor.name}` : undefined
                     }
@@ -364,8 +491,16 @@ export function ServiceConnectionTable({
                   <TableCell colSpan={5} className="whitespace-normal">
                     {open.view === "history" ? (
                       <ServiceHistory serviceId={key.id} />
+                    ) : open.view === "details" ? (
+                      <ConnectionMetadata connection={key} insight={insight} />
                     ) : (
-                      <ConnectionMetadata connection={key} />
+                      <ConnectionInsightPanel
+                        key={`${key.id}:${open.view}`}
+                        connection={key}
+                        insight={insight}
+                        view={open.view}
+                        state={insights}
+                      />
                     )}
                   </TableCell>
                 </TableRow>
