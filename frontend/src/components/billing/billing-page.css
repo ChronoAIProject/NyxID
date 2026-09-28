@@ -46,16 +46,6 @@
   .usage-status.text-success {
     color: var(--color-success);
   }
-  .metric-family + .metric-family,
-  .allowance-funding {
-    margin-top: 20px;
-  }
-  .metric-family h4,
-  .allowance-funding h4 {
-    font-size: 11px;
-    font-weight: 500;
-    margin-bottom: 4px;
-  }
   .payments-controls {
     display: flex;
     align-items: center;
@@ -321,85 +311,6 @@
   .benefit-disclosure[open] > summary .disclosure-arrow {
     transform: rotate(180deg);
   }
-  /* Every usage meter (grant gauge, allowance chart, per-unit gauge) shares
-     one track width and one caption column, so tracks and captions end on
-     the same right edge in every benefit row. */
-  --benefit-meter-track: 180px;
-  --benefit-meter-caption: 68px;
-  .benefit-meter {
-    display: grid;
-    grid-template-columns: var(--benefit-meter-track) var(
-        --benefit-meter-caption
-      );
-    align-items: center;
-    gap: 12px;
-    flex-shrink: 0;
-  }
-  .benefit-meter-caption {
-    font-size: 10px;
-    line-height: 16px;
-    text-align: right;
-    white-space: nowrap;
-    color: var(--color-muted-foreground);
-    font-variant-numeric: tabular-nums;
-  }
-  .benefit-track {
-    display: block;
-    flex: 1;
-    height: 5px;
-    border-radius: 4px;
-    overflow: hidden;
-    background: var(--color-muted);
-  }
-  .benefit-track > span {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: var(--color-info);
-  }
-  .benefit-allowances {
-    margin-top: 12px;
-  }
-  .benefit-unit-family {
-    display: flex;
-    align-items: baseline;
-    gap: 20px;
-    padding: 9px 0;
-    border-bottom: 1px solid var(--color-border);
-  }
-  .benefit-unit-family:last-child {
-    border-bottom: 0;
-  }
-  .benefit-unit-family > span {
-    width: 80px;
-    flex-shrink: 0;
-    color: var(--color-muted-foreground);
-    font-size: 11px;
-  }
-  .benefit-unit-family > div {
-    flex: 1;
-    min-width: 0;
-  }
-  .benefit-unit {
-    display: grid;
-    grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) auto;
-    align-items: center;
-    gap: 12px;
-  }
-  .benefit-unit + .benefit-unit {
-    margin-top: 10px;
-  }
-  .benefit-unit > span {
-    font-size: 11px;
-  }
-  .benefit-unit > span:nth-child(2) {
-    font-variant-numeric: tabular-nums;
-    color: var(--color-muted-foreground);
-  }
-  .benefit-unit strong {
-    font-weight: 500;
-    color: var(--color-foreground);
-  }
   .benefit-expanded {
     border-top: 1px solid var(--color-border);
     margin-top: 16px;
@@ -414,36 +325,6 @@
   }
   .benefit-expanded .split-facts {
     max-width: 720px;
-  }
-  .usage-filters {
-    display: flex;
-    align-items: end;
-    gap: 16px;
-    margin-bottom: 20px;
-  }
-  .usage-filters > label,
-  .usage-filters > .usage-filter {
-    display: block;
-    width: 240px;
-  }
-  .usage-filters > label:nth-child(2) {
-    width: 160px;
-  }
-  .usage-filters > label > span,
-  .usage-filters > .usage-filter > span {
-    display: block;
-    color: var(--color-muted-foreground);
-    font-size: 11px;
-    margin-bottom: 8px;
-  }
-  .usage-filters button {
-    width: 100%;
-  }
-  .usage-filters p {
-    margin-left: auto;
-    font-size: 11px;
-    color: var(--color-muted-foreground);
-    padding-bottom: 8px;
   }
   .tab-usage-summary {
     display: flex;
@@ -528,14 +409,6 @@
     margin: 12px 0;
   }
   @media (max-width: 1050px) {
-    .usage-filters {
-      flex-wrap: wrap;
-    }
-    .usage-filters > p {
-      width: 100%;
-      margin-left: 0;
-      padding: 0;
-    }
     .summary-family {
       padding: 16px;
     }
@@ -548,14 +421,6 @@
     }
   }
   @media (max-width: 640px) {
-    .usage-filters {
-      gap: 12px;
-    }
-    .usage-filters > label,
-    .usage-filters > .usage-filter,
-    .usage-filters > label:nth-child(2) {
-      width: 100%;
-    }
     .tab-usage-summary {
       flex-direction: column;
     }
@@ -656,164 +521,104 @@
     font-size: 11px;
     color: var(--color-muted-foreground);
   }
-  .benefit-summary-metric {
-    grid-area: metric;
-    display: flex;
-    align-items: center;
-    gap: 8px 24px;
-    min-width: 0;
-  }
-  .benefit-summary-metric > .benefit-meter {
-    margin-left: auto;
-  }
-  .compact-coverage {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 6px 24px;
-    min-width: 0;
-  }
-  .compact-coverage > span {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .compact-coverage > span > span,
-  .compact-coverage > small {
-    font-size: 11px;
-    color: var(--color-muted-foreground);
-  }
-  .compact-coverage strong {
-    font-size: 11px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-  }
-  .compact-grant-balance {
-    gap: 6px;
-  }
-  .compact-grant-balance > strong {
-    border-radius: 3px;
-    outline-offset: 3px;
-  }
-  .compact-grant-balance > strong:focus-visible {
-    outline: 1px solid var(--color-foreground);
-  }
   .compact-benefits .benefit-expanded {
     margin-top: 0;
     padding-bottom: 20px;
   }
-  /* Meters size against the benefits card, not the viewport, so rows hold
-     with the sidebar expanded or collapsed. An expanded unit row needs the
-     80px family label + 20px gap + two unit columns + gaps + the meter:
-     604px with a 180px track, 539px with 150px. Below that, every row stacks
-     and every meter spans the full width, still sharing one right edge. */
-  .benefits-container {
-    container: benefits / inline-size;
+  /* One tile per allowance (or grant balance). Every section shares the card
+     width, so the auto-fill columns line up across sections at every size. */
+  .benefit-tiles {
+    grid-area: metric;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+    gap: 8px;
   }
-  @container benefits (max-width: 719px) {
-    .benefit-section {
-      --benefit-meter-track: 150px;
-    }
-    .benefit-unit {
-      grid-template-columns: minmax(90px, 1fr) minmax(95px, 1fr) auto;
-    }
-  }
-  @container benefits (max-width: 559px) {
-    .benefit-section {
-      --benefit-meter-track: minmax(0, 1fr);
-    }
-    .benefit-meter {
-      width: 100%;
-    }
-    .benefit-unit-family {
-      display: block;
-    }
-    .benefit-unit-family > span {
-      display: block;
-      margin-bottom: 10px;
-    }
-    .benefit-unit {
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-    }
-    .benefit-unit .benefit-meter {
-      grid-column: 1 / -1;
-    }
-    .benefit-unit + .benefit-unit {
-      margin-top: 14px;
-    }
-    .compact-benefits .benefit-summary {
-      gap: 10px 12px;
-    }
-    .benefit-summary-metric {
-      flex-direction: column;
-      align-items: stretch;
-      gap: 10px;
-    }
-    .benefit-summary-metric > .benefit-meter {
-      margin-left: 0;
-    }
-    .compact-coverage {
-      gap: 6px 16px;
-    }
-  }
-
-  .allowance-chart {
-    border-radius: 3px;
-    outline-offset: 3px;
-    --allowance-used: color-mix(
-      in srgb,
-      var(--color-foreground) 70%,
-      var(--color-card)
-    );
-    --allowance-reserved: color-mix(
-      in srgb,
-      var(--color-foreground) 40%,
-      var(--color-card)
-    );
-    --allowance-remaining: var(--color-muted);
-  }
-  .allowance-chart:focus-visible {
-    outline: 1px solid var(--color-foreground);
-  }
-  .allowance-chart-bar {
+  .benefit-tile {
     display: flex;
-    flex: 1;
-    gap: 2px;
+    flex-direction: column;
+    gap: 6px;
     min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--color-border) 50%, transparent);
+    border-radius: 8px;
   }
-  .allowance-chart-segment {
-    flex: 1 1 0;
-    min-width: 0;
-    border-radius: 3px;
-  }
-  .allowance-chart-stack {
+  .benefit-tile-head {
     display: flex;
-    height: 5px;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+  }
+  .benefit-tile-label {
+    min-width: 0;
     overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-muted-foreground);
+  }
+  .benefit-tile-percent {
+    flex-shrink: 0;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-foreground);
+  }
+  .benefit-tile-track {
+    display: block;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 4px;
     background: var(--color-muted);
   }
-  .allowance-chart-segment:first-child .allowance-chart-stack {
-    border-radius: 3px 0 0 3px;
-  }
-  .allowance-chart-segment:last-child .allowance-chart-stack {
-    border-radius: 0 3px 3px 0;
-  }
-  .allowance-used {
-    background: var(--allowance-used);
-  }
-  .allowance-reserved {
-    background: var(--allowance-reserved);
-  }
-  .allowance-remaining {
-    background: var(--allowance-remaining);
-  }
-  .compact-benefits .benefit-track > span {
+  .benefit-tile-track > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
     background: color-mix(
       in srgb,
       var(--color-foreground) 70%,
       var(--color-card)
     );
+  }
+  .benefit-tile.is-warning .benefit-tile-track > span {
+    background: var(--color-warning);
+  }
+  .benefit-tile.is-warning .benefit-tile-percent {
+    color: var(--color-warning);
+  }
+  .benefit-tile.is-exhausted .benefit-tile-track > span {
+    background: var(--color-destructive);
+  }
+  .benefit-tile.is-exhausted .benefit-tile-percent {
+    color: var(--color-destructive);
+  }
+  .benefit-tile-caption {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-muted-foreground);
+  }
+  .benefit-tile-balance {
+    border-radius: 3px;
+    outline-offset: 2px;
+  }
+  .benefit-tile-balance:focus-visible {
+    outline: 1px solid var(--color-foreground);
+  }
+  .benefit-tiles-more {
+    align-self: center;
+    padding: 0 4px;
+    font-size: 11px;
+    color: var(--color-muted-foreground);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  .benefit-tiles-more:hover {
+    color: var(--color-foreground);
+  }
+  .benefit-disclosure[open] .benefit-tiles-more {
+    display: none;
   }
 
   .compact-benefit-label .benefit-label-with-help {
@@ -841,29 +646,6 @@
     outline: 1px solid var(--color-foreground);
     outline-offset: 2px;
   }
-}
-.billing-allowance-chart-tooltip {
-  min-width: 200px;
-  max-width: min(260px, calc(100vw - 32px));
-  font-size: 11px;
-}
-.billing-allowance-chart-tooltip > p {
-  margin-bottom: 8px;
-  line-height: 1.6;
-}
-.billing-allowance-chart-tooltip strong {
-  display: block;
-  font-weight: 500;
-  margin-bottom: 8px;
-}
-.billing-allowance-chart-tooltip dl > div {
-  display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  margin: 4px 0;
-}
-.billing-allowance-chart-tooltip dd {
-  font-variant-numeric: tabular-nums;
 }
 .billing-benefit-help-content {
   max-width: min(330px, calc(100vw - 32px));

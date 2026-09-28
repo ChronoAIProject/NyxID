@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
@@ -24,22 +23,22 @@ import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { periods } from "@/lib/billing-display";
 import { groupRows } from "@/lib/billing-usage";
-import { FilterPicker } from "@/components/billing-analytics/filter-picker";
+import {
+  AnalyticsSelect,
+  FilterCard,
+  FilterPicker,
+} from "@/components/billing-analytics/filter-picker";
+import { DataTableFilterChips } from "@/components/data-table/data-table-controls";
+import type { DataTableFilterField } from "@/types/data-table";
 import {
   BILLING_SERVICE_FILTER_LIMIT,
   normalizeBillingSearch,
   type BillingSearch,
   type BillingUsagePeriod,
+  type BillingUsageRow,
 } from "@/schemas/billing";
 import "@/components/billing/billing-page.css";
 
@@ -205,38 +204,14 @@ export function BillingPage() {
           <BillingTopUpHistory />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">
-          <div className="usage-filters">
-            <div className="usage-filter">
-              <span id="usage-service-filter-label">Service</span>
-              <ServiceFilter
-                services={services}
-                values={selected}
-                disabled={usageQuery.isLoading || usageQuery.isError}
-                onChange={(values) => updateSearch({ services: values })}
-              />
-            </div>
-            <label>
-              <span>Time</span>
-              <Select
-                value={period}
-                onValueChange={(value) =>
-                  updateSearch({ period: value as BillingUsagePeriod })
-                }
-              >
-                <SelectTrigger aria-label="Time filter">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {Object.entries(periods).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </label>
-            <p>Services with recorded usage in this period.</p>
-          </div>
+          <UsageFilters
+            services={services}
+            values={selected}
+            disabled={usageQuery.isLoading || usageQuery.isError}
+            onServicesChange={(values) => updateSearch({ services: values })}
+            period={period}
+            onPeriodChange={(value) => updateSearch({ period: value })}
+          />
           {usageQuery.isError ? (
             <ErrorBanner
               message={errorMessage(
@@ -284,56 +259,102 @@ function billingUrlSearch(search: BillingSearch) {
   };
 }
 
-function ServiceFilter({
+const SERVICE_FILTER_FIELD: DataTableFilterField<"services"> = {
+  key: "services",
+  label: "Services",
+  value_type: "enum",
+  operator: "includes",
+  multiple: true,
+  options: [],
+};
+
+/** The admin usage filter card, with the personal usage options and periods. */
+function UsageFilters({
   services,
   values,
   disabled,
-  onChange,
+  onServicesChange,
+  period,
+  onPeriodChange,
 }: {
-  services: { key: string; name: string }[];
+  services: { key: string; name: string; rows: BillingUsageRow[] }[];
   values: string[];
   disabled: boolean;
-  onChange: (values: string[]) => void;
+  onServicesChange: (values: string[]) => void;
+  period: BillingUsagePeriod;
+  onPeriodChange: (period: BillingUsagePeriod) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
-  const options = services
-    .filter((group) => group.name.toLowerCase().includes(needle))
-    .map((group) => ({ id: group.key, label: group.name }));
-  const summary =
-    values.length === 0
-      ? "All active services"
-      : values.length === 1
-        ? (services.find((group) => group.key === values[0])?.name ??
-          "1 service")
-        : `${values.length} services`;
+  const all = services.map((group) => ({
+    id: group.key,
+    label: group.name,
+    detail: group.rows[0]?.service_slug ?? undefined,
+  }));
+  const options = all.filter((option) =>
+    `${option.label} ${option.detail ?? ""}`.toLowerCase().includes(needle),
+  );
+  const nameOf = (key: string) =>
+    all.find((option) => option.id === key)?.label ?? key;
   return (
-    <FilterPicker
-      key={`${open}:${values.join(",")}`}
-      label="Services"
-      trigger={
-        <button
-          type="button"
-          aria-label="Service filter"
-          aria-describedby="usage-service-filter-label"
+    <FilterCard
+      pickers={
+        <FilterPicker
+          label="Services"
+          description="Services with recorded usage in this period."
           disabled={disabled}
-          className="flex h-8 w-full items-center justify-between gap-2 rounded-lg border border-input bg-transparent px-3 py-1.5 text-left text-[12px] text-foreground transition-colors duration-200 focus-visible:outline-none focus-visible:border-white/[0.15] disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <span className="min-w-0 truncate">{summary}</span>
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-        </button>
+          values={values}
+          onChange={onServicesChange}
+          open={open}
+          onOpenChange={setOpen}
+          search={query}
+          onSearchChange={setQuery}
+          searchPlaceholder="Search services"
+          options={{ status: "success", options, total: options.length }}
+          limit={BILLING_SERVICE_FILTER_LIMIT}
+        />
       }
-      values={values}
-      onChange={onChange}
-      open={open}
-      onOpenChange={setOpen}
-      search={query}
-      onSearchChange={setQuery}
-      searchPlaceholder="Search services"
-      options={{ status: "success", options, total: options.length }}
-      limit={BILLING_SERVICE_FILTER_LIMIT}
-    />
+      aside={
+        <AnalyticsSelect
+          label="Time range"
+          inline
+          value={period}
+          onChange={(value) => onPeriodChange(value as BillingUsagePeriod)}
+          options={Object.entries(periods).map(([value, label]) => ({
+            value,
+            label,
+          }))}
+        />
+      }
+    >
+      <DataTableFilterChips
+        search=""
+        searchFields={[]}
+        searchFilters={[]}
+        filters={
+          values.length
+            ? [
+                {
+                  field: SERVICE_FILTER_FIELD,
+                  values,
+                  valueLabels: values.map(nameOf),
+                },
+              ]
+            : []
+        }
+        onEditSearch={() => undefined}
+        onRemoveSearch={() => undefined}
+        onEditSearchValue={() => undefined}
+        onRemoveSearchValue={() => undefined}
+        onEdit={() => {
+          setQuery("");
+          setOpen(true);
+        }}
+        onRemove={() => onServicesChange([])}
+        onClear={() => onServicesChange([])}
+      />
+    </FilterCard>
   );
 }
 

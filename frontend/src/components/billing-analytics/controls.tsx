@@ -1,16 +1,8 @@
-import { useDeferredValue, useId, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { useDeferredValue, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { FilterPicker } from "./filter-picker";
-import { cn } from "@/lib/utils";
+import { AnalyticsSelect, FilterCard, FilterPicker } from "./filter-picker";
+export { AnalyticsSelect } from "./filter-picker";
 import {
   useAnalyticsOptions,
   useAnalyticsLabels,
@@ -36,53 +28,6 @@ import {
   filterError,
 } from "@/lib/usage-analytics";
 
-export function AnalyticsSelect({
-  label,
-  value,
-  options,
-  onChange,
-  inline = false,
-}: {
-  label: string;
-  value: string;
-  options: { value: string; label: string }[];
-  onChange: (value: string) => void;
-  inline?: boolean;
-}) {
-  const id = useId();
-  return (
-    <div
-      className={cn(
-        "min-w-0",
-        inline ? "flex items-center gap-2" : "space-y-1.5",
-      )}
-    >
-      <label
-        htmlFor={id}
-        className="whitespace-nowrap text-[10px] font-medium text-muted-foreground"
-      >
-        {label}
-      </label>
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger
-          id={id}
-          aria-label={label}
-          className={inline ? "w-40" : "w-full"}
-          style={inline ? { marginTop: 0 } : undefined}
-        >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((option) => (
-            <SelectItem key={option.value} value={option.value}>
-              {option.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
 type FilterKind = keyof SampleOptions;
 const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
   {
@@ -132,16 +77,6 @@ function AnalyticsFilterPicker({
   return (
     <FilterPicker
       label={label}
-      trigger={
-        <Button
-          variant="outline"
-          aria-label={`Filter ${label.toLowerCase()}`}
-          className="justify-between"
-        >
-          {label}
-          <ChevronDown className="size-3" />
-        </Button>
-      }
       values={values}
       onChange={onChange}
       open={open}
@@ -194,52 +129,49 @@ export function FilterBar({
       ? new Date(`${value}Z`).toISOString()
       : null;
   return (
-    <div className="space-y-3 rounded-xl border border-border/50 bg-card px-4 py-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          {(["services", "owners", "actors"] as const).map((kind) => (
-            <AnalyticsFilterPicker
-              kind={kind}
-              key={`${kind}:${openKind === kind}:${filters[kind].join(",")}`}
-              open={openKind === kind}
-              onOpenChange={(open) => setOpenKind(open ? kind : null)}
-              values={filters[kind]}
-              onChange={(values) => onChange({ ...filters, [kind]: values })}
-              sample={sample}
-            />
-          ))}
-        </div>
-        <div className="min-w-40">
-          <AnalyticsSelect
-            label="Time range"
-            inline
-            value={filters.period}
-            onChange={(value) =>
-              onChange({
-                ...filters,
-                period: value as AnalyticsFilters["period"],
-                from:
-                  value === "custom"
-                    ? new Date(
-                        Date.now() -
-                          { "24h": 1, "7d": 7, "30d": 30, custom: 7 }[
-                            filters.period
-                          ] *
-                            86_400_000,
-                      ).toISOString()
-                    : null,
-                to: value === "custom" ? new Date().toISOString() : null,
-              })
-            }
-            options={[
-              { value: "24h", label: "Last 24 hours" },
-              { value: "7d", label: "Last 7 days" },
-              { value: "30d", label: "Last 30 days" },
-              { value: "custom", label: "Custom range" },
-            ]}
-          />
-        </div>
-      </div>
+    <FilterCard
+      pickers={(["services", "owners", "actors"] as const).map((kind) => (
+        <AnalyticsFilterPicker
+          kind={kind}
+          key={`${kind}:${openKind === kind}:${filters[kind].join(",")}`}
+          open={openKind === kind}
+          onOpenChange={(open) => setOpenKind(open ? kind : null)}
+          values={filters[kind]}
+          onChange={(values) => onChange({ ...filters, [kind]: values })}
+          sample={sample}
+        />
+      ))}
+      aside={
+        <AnalyticsSelect
+          label="Time range"
+          inline
+          value={filters.period}
+          onChange={(value) =>
+            onChange({
+              ...filters,
+              period: value as AnalyticsFilters["period"],
+              from:
+                value === "custom"
+                  ? new Date(
+                      Date.now() -
+                        { "24h": 1, "7d": 7, "30d": 30, custom: 7 }[
+                          filters.period
+                        ] *
+                          86_400_000,
+                    ).toISOString()
+                  : null,
+              to: value === "custom" ? new Date().toISOString() : null,
+            })
+          }
+          options={[
+            { value: "24h", label: "Last 24 hours" },
+            { value: "7d", label: "Last 7 days" },
+            { value: "30d", label: "Last 30 days" },
+            { value: "custom", label: "Custom range" },
+          ]}
+        />
+      }
+    >
       <DataTableFilterChips
         search=""
         searchFields={[]}
@@ -304,7 +236,7 @@ export function FilterBar({
           {error}
         </p>
       )}
-    </div>
+    </FilterCard>
   );
 }
 export function PanelControls({

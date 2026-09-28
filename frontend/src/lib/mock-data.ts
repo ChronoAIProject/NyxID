@@ -1535,8 +1535,10 @@ const MOCK_BILLING_ALLOWANCES = {
     mockAllowance("openai", "cache_read_tokens", 500_000, 0),
     mockAllowance("openai", "requests", 1_000, 0),
     mockAllowance("openai", "images", 50, 12),
+    mockAllowance("openai", "cache_write_tokens", 200_000, 0),
+    mockAllowance("openai", "bytes", 1_000_000_000, 150_000_000),
     mockAllowance("anthropic", "tokens", 2_000_000, 0),
-    mockAllowance("anthropic", "requests", 500, 0),
+    mockAllowance("anthropic", "requests", 500, 500),
     mockAllowance("enterprise-knowledge-graph-retrieval-gateway", "requests", 10_000, 9_990),
   ],
 };

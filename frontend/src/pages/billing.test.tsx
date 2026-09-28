@@ -86,12 +86,18 @@ async function select(label: string, option: string) {
   await userEvent.click(screen.getByRole("option", { name: option }));
 }
 function serviceFilter() {
-  return screen.getByRole("button", { name: "Service filter" });
+  return screen.getByRole("button", { name: "Filter services" });
 }
+const picker = () => within(screen.getByRole("dialog"));
+/** An option row; its name is the service followed by its slug line. */
+const option = (name: string) =>
+  picker().getByRole("button", { name: new RegExp(`^${name}`) });
+/** The applied-filter chip, as rendered by the shared DataTableFilterChips. */
+const servicesChip = () =>
+  screen.queryByRole("button", { name: /^Edit Services filter:/ });
 async function applyServices(names: string[]) {
-  for (const name of names)
-    await userEvent.click(screen.getByRole("button", { name }));
-  await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+  for (const name of names) await userEvent.click(option(name));
+  await userEvent.click(picker().getByRole("button", { name: "Apply" }));
 }
 function servicesParam(history: { location: { search: string } }) {
   const raw = new URLSearchParams(history.location.search).get("services");
@@ -172,19 +178,23 @@ describe("BillingPage", () => {
     mocks.usage.mockReturnValue(query(usage(twoServiceRows())));
     const { history } = await renderPage();
     expect(
-      screen.getByRole("combobox", { name: "Time filter" }),
+      screen.getByRole("combobox", { name: "Time range" }),
     ).toHaveTextContent("Last 30 days");
-    expect(serviceFilter()).toHaveTextContent("All active services");
+    expect(servicesChip()).toBeNull();
     await userEvent.click(serviceFilter());
     expect(
-      screen.queryByRole("button", { name: "Unused service" }),
+      picker().getByText("Services with recorded usage in this period."),
+    ).toBeVisible();
+    expect(option("Free service")).toHaveTextContent("free-service");
+    expect(
+      picker().queryByRole("button", { name: /^Unused service/ }),
     ).not.toBeInTheDocument();
     await applyServices(["Free service"]);
     expect(screen.queryByText("Example LLM")).not.toBeInTheDocument();
     expect(
       screen.getByText("Free", { exact: true, selector: ".usage-status" }),
     ).toBeVisible();
-    expect(serviceFilter()).toHaveTextContent("Free service");
+    expect(servicesChip()).toHaveTextContent("Services includes Free service");
     expect(servicesParam(history)).toEqual(["free-service"]);
     await act(() => history.back());
     await waitFor(() =>
@@ -207,7 +217,9 @@ describe("BillingPage", () => {
     expect(totals()).toBe(true);
     await userEvent.click(serviceFilter());
     await applyServices(["Free service", "Example LLM"]);
-    expect(serviceFilter()).toHaveTextContent("2 services");
+    expect(servicesChip()).toHaveTextContent(
+      "Services includes any of Free service, Example LLM",
+    );
     expect(servicesParam(history)).toEqual(["free-service", "example-llm"]);
     expect(screen.queryByText("third")).not.toBeInTheDocument();
     expect(totals()).toBe(false);
@@ -218,18 +230,47 @@ describe("BillingPage", () => {
       `/billing?tab=usage&services=${encodeURIComponent('["free-service"]')}`,
     );
     await userEvent.click(serviceFilter());
-    await userEvent.click(screen.getByRole("button", { name: "Example LLM" }));
-    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await userEvent.click(option("Example LLM"));
+    await userEvent.click(picker().getByRole("button", { name: "Cancel" }));
     expect(servicesParam(history)).toEqual(["free-service"]);
     await userEvent.click(serviceFilter());
-    expect(screen.getByRole("button", { name: "Example LLM" })).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Clear" }));
-    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(option("Example LLM")).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(picker().getByRole("button", { name: "Clear" }));
+    await userEvent.click(picker().getByRole("button", { name: "Apply" }));
     expect(servicesParam(history)).toBeUndefined();
-    expect(serviceFilter()).toHaveTextContent("All active services");
+    expect(servicesChip()).toBeNull();
+  });
+  it("reopens the picker from the applied selection, via the trigger or the chip", async () => {
+    mocks.usage.mockReturnValue(
+      query(usage([...twoServiceRows(), row({ service_slug: "third" })])),
+    );
+    const { history } = await renderPage();
+    await userEvent.click(serviceFilter());
+    await applyServices(["Free service", "Example LLM"]);
+    await waitFor(() =>
+      expect(servicesParam(history)).toEqual(["free-service", "example-llm"]),
+    );
+    // Reopen: both applied services are checked and counted.
+    await userEvent.click(serviceFilter());
+    expect(picker().getByText("2 selected")).toBeVisible();
+    expect(option("Free service")).toHaveAttribute("aria-pressed", "true");
+    expect(option("Example LLM")).toHaveAttribute("aria-pressed", "true");
+    expect(option("third")).toHaveAttribute("aria-pressed", "false");
+    // A discarded edit keeps the applied selection.
+    await userEvent.click(option("third"));
+    expect(picker().getByText("3 selected")).toBeVisible();
+    await userEvent.click(picker().getByRole("button", { name: "Cancel" }));
+    expect(servicesParam(history)).toEqual(["free-service", "example-llm"]);
+    // The chip reopens the picker from the applied selection too.
+    await userEvent.click(servicesChip()!);
+    expect(picker().getByText("2 selected")).toBeVisible();
+    expect(option("third")).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(picker().getByRole("button", { name: "Cancel" }));
+    // Removing the chip clears the filter.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove Services filter" }),
+    );
+    await waitFor(() => expect(servicesParam(history)).toBeUndefined());
   });
   it.each([
     ["/billing?tab=usage&service=all", undefined],
@@ -276,7 +317,7 @@ describe("BillingPage", () => {
     const { history } = await renderPage(
       `/billing?tab=usage&services=${encodeURIComponent('["example-llm"]')}&period=7d`,
     );
-    await select("Time filter", "Last 24 hours");
+    await select("Time range", "Last 24 hours");
     await waitFor(() => expect(servicesParam(history)).toBeUndefined());
     expect(screen.getByText("No usage in this period.")).toBeVisible();
     await userEvent.click(screen.getByRole("tab", { name: "Billing" }));
