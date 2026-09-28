@@ -178,7 +178,8 @@ function KeyCardContent({
       <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
         <div className="flex items-start gap-3 min-w-0">
           <ServiceIcon
-            slug={keyInfo.catalog_service_slug}
+            slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
+            iconUrl={keyInfo.icon_url}
             size="md"
             className="mt-0.5"
           />
@@ -382,7 +383,11 @@ function ServiceTableRow({
     >
       <TableCell className="h-[60px]">
         <div className="flex items-center gap-2.5 min-w-0">
-          <ServiceIcon slug={keyInfo.catalog_service_slug} size="sm" />
+          <ServiceIcon
+            slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
+            iconUrl={keyInfo.icon_url}
+            size="sm"
+          />
           <div className="min-w-0 flex-1">
         <p className="truncate font-medium text-foreground">{keyInfo.label}</p>
         <p className="truncate text-[11px] text-text-tertiary mt-0.5">

@@ -37,6 +37,8 @@ export interface KeyInfo {
    * when joining against `CatalogEntry` rows.
    */
   readonly catalog_service_slug: string | null;
+  /** User-selected image URL; takes precedence over the built-in glyph. */
+  readonly icon_url?: string | null;
   readonly catalog_service_name: string | null;
   readonly revocation?: RevocationCapability | null;
   readonly node_id: string | null;
@@ -269,6 +271,7 @@ export interface UserServiceInfo {
   readonly auth_method: string;
   readonly auth_key_name: string;
   readonly catalog_service_id: string | null;
+  readonly icon_url?: string | null;
   readonly node_id: string | null;
   readonly node_priority: number;
   readonly is_active: boolean;

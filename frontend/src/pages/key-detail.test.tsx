@@ -840,10 +840,26 @@ describe("KeyDetailPage — org read-only branch", () => {
     // Label heading still shown but with no inline edit pencil.
     const heading = screen.getByText("My OpenAI");
     expect(heading.parentElement?.querySelector("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Change service icon" })).not.toBeInTheDocument();
   });
 });
 
 describe("KeyDetailPage — auto-connected branch", () => {
+  it("lets the owner set an icon for an auto-connected service", async () => {
+    const user = userEvent.setup();
+    hooks.key.data = makeKey({ auto_connected: true, icon_url: null });
+    render(<KeyDetailPage />);
+
+    await user.click(screen.getByRole("button", { name: "Change service icon" }));
+    await user.type(screen.getByLabelText("Image URL"), "https://example.com/service.svg");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(hooks.updateKey).toHaveBeenCalledWith(
+      { keyId: "key-1", icon_url: "https://example.com/service.svg" },
+      expect.any(Object),
+    );
+  });
+
   it("renders the platform-managed service details card instead of editors", () => {
     hooks.key.data = makeKey({
       endpoint_url: "https://platform.internal.example/v1",

@@ -110,6 +110,8 @@ pub struct UserServiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub node_priority: i32,
     pub ssh_auth_mode: SshAuthMode,
@@ -591,6 +593,7 @@ fn user_service_with_source_response(
         auth_method: svc.auth_method,
         auth_key_name: svc.auth_key_name,
         catalog_service_id: svc.catalog_service_id,
+        icon_url: svc.icon_url,
         node_id: svc.node_id,
         node_priority: svc.node_priority,
         ssh_auth_mode: svc.ssh_auth_mode,
