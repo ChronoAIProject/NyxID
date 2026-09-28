@@ -4,18 +4,56 @@ Use an existing scoped credential when available. When the user requests new
 access, discover the service, start a human-approved login, share the CLI's complete
 approval link, and resume after the human approves. Never self-approve.
 
-## Discover, request and resume
+## Discovery endpoint map
 
-Before login, discover public catalog metadata without sending saved credentials:
+Use the target deployment's base URL. These views answer different questions:
+
+| Question | Endpoint | Authentication and result |
+|---|---|---|
+| Which sign-in methods are configured? | `GET /api/v1/public/config` | Public when called without an `Authorization` header; an Agent Key on this human-only route is rejected. `social_providers` lists configured social methods; `email_auth_enabled` gates email/password; `invite_code_required` describes registration. The shared login also offers the NyxID app. |
+| Which operations are published for anonymous discovery? | `POST /public/mcp` with `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` | Public. Returns only operations covered by enabled anonymous endpoint rules, possibly none. It is not the full service catalog; `tools/call` is unsupported here. |
+| What does a known hosted provider API support? | `GET /api/v1/catalog-specs/{spec_key_or_catalog_slug}/openapi.json` | Public static overlay for registered keys/slugs. It does not prove the deployment enabled that service or a user connected it. Unknown mappings return 404. |
+| Which service templates and provider scopes are visible to this caller? | `GET /api/v1/catalog?include_all=true`, `GET /api/v1/catalog/{slug}`, `GET /api/v1/catalog/{slug}/endpoints` | Authenticated. Catalog metadata and `scope_catalog[].scope`; visibility and live grants apply. Templates are not connected accounts or execution grants. |
+| Which connections does this credential expose? | `GET /api/v1/keys` | Authenticated, filtered by caller authority. Actual UserService IDs, owners, credential health and routing. Includes disabled connections: require `is_active=true`, then inspect credential health. |
+| What can the signed-in human select for device or Agent Key login? | `POST /api/v1/auth/device/options` or `POST /api/v1/auth/agent-key/options`, each with `{"user_code":"<server-issued user_code>"}` | First-party human authentication required. Returns eligible keys, effective connections, services, nodes, orgs and `personal_owner_id` for that request. |
+| What can the human select when minting a one-time login code? | `POST /api/v1/auth/login-code/options` (no body) | First-party human authentication required. Returns the human's eligible key and resource choices without a device request. |
+| What can a human verified only for this browser request select? | `GET /api/v1/auth/approval/{id}/inventory` | Requires the verified, browser-owned approval cookie. Returns `options` plus the human's `catalog`; a request ID or public user code alone is insufficient. |
+| Which operations can the granted agent profile discover now? | `GET /api/v1/mcp/config` | Authenticated, requires proxy scope. Returns services and operations filtered by the credential's effective service/node scope, with schemas, recommended skills and diagnostics. |
+
+Without an authenticated profile, use public metadata and mint a login request.
+Let the human's approval UI resolve account-specific choices. An agent credential
+cannot call the human-only options endpoints or approve another login; never ask
+for the browser's approval cookie. Public metadata cannot reveal the human's
+connections, owner IDs or key IDs. URL preferences remain editable suggestions.
+
+For an existing authorized profile, discover before requesting more access:
 
 ```sh
-nyxid catalog list --public --all --base-url https://nyx-api.chrono-ai.fun --output json
-nyxid catalog show api-google-gmail --public --base-url https://nyx-api.chrono-ai.fun --output json
-nyxid catalog endpoints api-google-gmail --public --base-url https://nyx-api.chrono-ai.fun --output json
+nyxid catalog list --all --profile my-agent --output json
+nyxid catalog show <catalog-slug> --profile my-agent --output json
+nyxid catalog endpoints <catalog-slug> --profile my-agent --output json
+nyxid service list --profile my-agent --output json
+nyxid mcp discover --profile my-agent --output json
 ```
 
-Use actual catalog slugs and `scope_catalog[].scope` values. This public menu does
-not prove a human has a usable connection or the agent is authorized to call it.
+`catalog --public` only suppresses saved credentials; the current catalog routes
+require authentication and return 401 to anonymous callers. Use the public
+endpoints above before login. Use actual catalog slugs and `scope_catalog[].scope`
+values when available, not labels or guessed provider permissions. `/keys` is the
+connection inventory; `/user-services` alone cannot prove readiness or authority.
+
+## Mint, share and resume
+
+To mint a login URL for an agent with no access preferences:
+
+```sh
+nyxid login --agent-key --no-wait --output json --profile my-agent
+```
+
+Send the returned `verification_uri_complete` to the user, then run
+`nyxid login resume <request_id> --once --output json` after approval. These
+commands work before sign-in. The first only starts a request; it never creates
+an approved key or returns credentials. `nyxid login --help` includes this recipe.
 
 Request restricted access, including the preferences in the CLI command:
 
@@ -66,14 +104,16 @@ grant. A denied/expired request needs a new request and human approval.
 returns services and operations filtered by the key's service/node scope, with input
 schemas, recommended skills and diagnostics. Follow that response to choose calls;
 execution still checks live permissions and availability. Do not treat public
-catalog entries as authorized calls or switch to full credentials after a refusal.
+metadata as authorized calls or switch to full credentials after a refusal.
 `mcp config` generates client configuration and is a different command.
 
 ## Signed-out approvers
 
 Public preview grants nothing. The signed-out human stays on the request page and
 chooses **Only for this request** (default) or **Keep me signed in** before password,
-MFA or configured social verification. The first creates a request-bound proof,
+configured social verification, or the NyxID app. Password sign-in retains the
+account's configured NyxID MFA; social providers handle their own challenges, and
+the app uses its existing human session. The first choice creates a request-bound proof,
 accepted only by the dedicated approval endpoints, with no general browser session.
 The second also signs the browser in. Both require explicit final approval and
 leave the requester pending until then. Browser persistence is independent of the
@@ -105,7 +145,7 @@ allow-all grants, credentials or approval authority.
 The canonical [device login protocol](https://github.com/ChronoAIProject/NyxID/blob/main/docs/DEVICE_LOGIN_PROTOCOL.md)
 contains exact parameters/limits, direct API URL examples, identity return rules
 and source pointers. This implementation requires an updated CLI and frontend.
-Eight-character v2 issuance separately requires the staged server gate in
+Eight-character v2 issuance is the default; older backend replicas require the staged rollout in
 [ADR-015](https://github.com/ChronoAIProject/NyxID/blob/main/docs/ADR-015-auth-device-login.md).
 Normal `/login` remains account-only. This flow is separate from `/devices/code/*`
 hardware provisioning.

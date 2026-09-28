@@ -18,7 +18,8 @@ import { formatAuthDeviceUserCodeInput } from "@/schemas/auth-device";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { copyToClipboard } from "@/lib/utils";
 import { formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
-import { useWebAuthDeviceLogin } from "@/hooks/use-auth-device";
+import { useWebAuthDeviceLogin, type WebAuthDeviceTransport } from "@/hooks/use-auth-device";
+import { LOGIN_PROVIDER_ROW_CLASS } from "./login-provider-row";
 
 interface WebDeviceLoginProps {
   readonly returnTo?: string;
@@ -26,10 +27,10 @@ interface WebDeviceLoginProps {
   readonly onOpenChange?: (open: boolean) => void;
   readonly triggerLabel?: string;
   readonly triggerIcon?: ReactNode;
+  readonly disabled?: boolean;
+  readonly transport?: WebAuthDeviceTransport;
+  readonly onVerified?: () => void;
 }
-
-export const LOGIN_PROVIDER_ROW_CLASS =
-  "flex h-[46px] w-full cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors duration-300 hover:border-border/80 hover:bg-overlay active:scale-[0.99]";
 
 export function WebDeviceLogin({
   returnTo,
@@ -37,6 +38,9 @@ export function WebDeviceLogin({
   onOpenChange,
   triggerLabel = "Continue with the NyxID app",
   triggerIcon,
+  disabled = false,
+  transport,
+  onVerified,
 }: WebDeviceLoginProps) {
   const navigate = useNavigate();
   const [internalOpen, setInternalOpen] = useState(false);
@@ -44,7 +48,9 @@ export function WebDeviceLogin({
   const [copied, setCopied] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const deviceLogin = useWebAuthDeviceLogin();
+  const deviceLogin = useWebAuthDeviceLogin(transport);
+  const verifiedRef = useRef(onVerified);
+  useEffect(() => { verifiedRef.current = onVerified; }, [onVerified]);
   const isOpen = controlledOpen ?? internalOpen;
 
   useEffect(() => {
@@ -78,6 +84,10 @@ export function WebDeviceLogin({
 
   useEffect(() => {
     if (deviceLogin.phase !== "success") return;
+    if (verifiedRef.current) {
+      verifiedRef.current();
+      return;
+    }
     const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
     if (trustedReturnTo) {
       window.location.assign(trustedReturnTo);
@@ -126,6 +136,7 @@ export function WebDeviceLogin({
         ref={triggerRef}
         type="button"
         onClick={openPanel}
+        disabled={disabled}
         className={LOGIN_PROVIDER_ROW_CLASS}
         aria-label={triggerLabel}
       >
@@ -293,7 +304,7 @@ export function WebDeviceLogin({
           role="status"
         >
           <CheckCircle2 className="size-4" />
-          Signed in. Redirecting...
+          {onVerified ? "Identity verified" : "Signed in. Redirecting..."}
         </div>
       )}
     </section>

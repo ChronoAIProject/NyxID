@@ -1672,6 +1672,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/{id}/password", post(handlers::login_approval::password))
         .route("/{id}/mfa", post(handlers::login_approval::mfa))
+        .route("/{id}/app", post(handlers::login_approval::app_request))
+        .route("/{id}/app/poll", post(handlers::login_approval::app_poll))
         .route("/{id}/inventory", get(handlers::login_approval::inventory))
         .route("/{id}/approve", post(handlers::login_approval::approve))
         .route("/{id}/deny", post(handlers::login_approval::deny));
