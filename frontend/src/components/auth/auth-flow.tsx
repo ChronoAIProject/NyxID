@@ -1,7 +1,6 @@
 import { useState, useRef } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, Link } from "@tanstack/react-router";
-import { ChevronRight } from "lucide-react";
 import {
   loginSchema,
   type LoginFormData,
@@ -26,10 +25,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { AUTH_PROVIDER_ICONS } from "@/components/auth/provider-icons";
-import {
-  LOGIN_PROVIDER_ROW_CLASS,
-  WebDeviceLogin,
-} from "@/components/auth/web-device-login";
+import { LoginMethods } from "@/components/auth/login-methods";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -120,7 +116,6 @@ export function AuthFlow({
     initialPanel === 2 && !emailAuthEnabled ? 1 : initialPanel,
   );
   const [inviteError, setInviteError] = useState(false);
-  const [deviceLoginOpen, setDeviceLoginOpen] = useState(false);
   const [fadeOpacity, setFadeOpacity] = useState(1);
   const fadingRef = useRef(false);
   const navigate = useNavigate();
@@ -310,45 +305,16 @@ export function AuthFlow({
             </div>
           )}
 
-          <div className={deviceLoginOpen ? undefined : "flex flex-col gap-2.5"}>
-            {!deviceLoginOpen &&
-              enabledProviders.map((provider) => (
-                <button
-                  key={provider.id}
-                  type="button"
-                  onClick={() => {
-                    const params = new URLSearchParams();
-                    if (returnTo) params.set("return_to", returnTo);
-                    const qs = params.toString();
-                    const url = `${window.location.origin}/api/v1/auth/social/${encodeURIComponent(provider.id)}${qs ? `?${qs}` : ""}`;
-                    void openExternal(url);
-                  }}
-                  className={LOGIN_PROVIDER_ROW_CLASS}
-                >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-overlay-strong">
-                    {provider.icon}
-                  </span>
-                  {provider.label}
-                  <ChevronRight className="ml-auto size-4 text-muted-foreground" />
-                </button>
-              ))}
-            <WebDeviceLogin
-              returnTo={returnTo}
-              isOpen={deviceLoginOpen}
-              onOpenChange={setDeviceLoginOpen}
-            />
-          </div>
-
-          {/* Divider */}
-          {!deviceLoginOpen && emailAuthEnabled && (
-            <div className="my-6 flex items-center gap-4">
-              <div className="h-px flex-1 bg-border" />
-              <span className="text-xs text-text-tertiary">or</span>
-              <div className="h-px flex-1 bg-border" />
-            </div>
-          )}
-
-          {!deviceLoginOpen && emailAuthEnabled && (
+          <LoginMethods
+            returnTo={returnTo}
+            onSignUp={() => slideToPanel(1)}
+            onSocial={(provider) => {
+              const params = new URLSearchParams();
+              if (returnTo) params.set("return_to", returnTo);
+              const qs = params.toString();
+              void openExternal(`${window.location.origin}/api/v1/auth/social/${provider}${qs ? `?${qs}` : ""}`);
+            }}
+          >
             <Form {...loginForm}>
               <form
                 onSubmit={loginForm.handleSubmit(onLoginSubmit)}
@@ -424,19 +390,7 @@ export function AuthFlow({
                 </Button>
               </form>
             </Form>
-          )}
-          {!deviceLoginOpen && (
-            <div className="mt-8 text-center text-[13px] text-muted-foreground">
-              Don&apos;t have an account?{" "}
-              <button
-                type="button"
-                onClick={() => slideToPanel(1)}
-                className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
-              >
-                Sign up
-              </button>
-            </div>
-          )}
+          </LoginMethods>
         </div>
       ) : (
         /* ================================================================

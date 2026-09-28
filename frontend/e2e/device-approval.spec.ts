@@ -89,6 +89,20 @@ async function fixture(
       body = identity;
     } else if (path === approvalPath) {
       body = identity;
+    } else if (path === `${approvalPath}/app`) {
+      body = {
+        device_code: "nyx_adc_app_fixture",
+        user_code: "JKLM-NPQR",
+        verification_uri: `${new URL(page.url()).origin}/login/device`,
+        verification_uri_complete: `${new URL(page.url()).origin}/login/device?user_code=JKLM-NPQR`,
+        expires_in: 600,
+        interval: 5,
+      };
+    } else if (path === `${approvalPath}/app/poll`) {
+      identity.verified = true;
+      identity.mfa_required = false;
+      authenticated = identity.keep_signed_in;
+      body = identity;
     } else if (
       path === `${approvalPath}/password` ||
       path === `${approvalPath}/mfa`
@@ -149,6 +163,65 @@ async function restricted(page: Page) {
 }
 const hints =
   "user_code=abcd%20efgh&login_type=agent&permissions=read,proxy&service_permissions=github::repo:read";
+
+test("normal and approval login share production provider rows at desktop and phone widths", async ({ page }, info) => {
+  await fixture(page, false);
+  await page.route("**/api/v1/public/config", (route) => route.fulfill({ json: {
+    telemetry_dsn: null, telemetry_share_analytics: false,
+    email_auth_enabled: false, social_providers: ["github", "google", "apple"],
+  } }));
+  const labels = ["Continue with Google", "Continue with GitHub", "Continue with Apple", "Continue with the NyxID app"];
+  for (const path of ["/login", `/login/device?${hints}`]) {
+    await page.goto(path);
+    for (const label of labels) await expect(page.getByRole("button", { name: label, exact: true })).toBeVisible();
+    expect(await page.getByRole("button").filter({ hasText: /^Continue with/ }).allTextContents()).toEqual(labels);
+    await expect(page.getByLabel("Authenticator code")).toHaveCount(0);
+    for (const width of [1280, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      const rows = page.getByRole("button").filter({ hasText: /^Continue with/ });
+      for (const row of await rows.all()) {
+        expect(await row.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      }
+      await page.screenshot({ path: info.outputPath(`${path.startsWith("/login/device") ? "approval" : "login"}-${width}.png`), fullPage: true });
+    }
+  }
+});
+
+for (const keep of [false, true]) {
+  test(`app identity verification keeps request hints and requires final consent with keep_signed_in=${keep}`, async ({ page }) => {
+    const requests = await fixture(page, false, true);
+    await page.goto(`/login/device?${hints}`);
+    if (keep) await page.getByRole("button", { name: /Keep me signed in/ }).click();
+    await page.getByRole("button", { name: "Continue with the NyxID app" }).click();
+    await expect(page.getByText("JKLM-NPQR", { exact: true })).toBeVisible();
+    await expect(page.getByAltText("QR code to continue with the NyxID app")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Continue to approval" })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByLabel("Authenticator code")).toHaveCount(0);
+    expect(new URL(page.url()).searchParams.get("permissions")).toBe("read,proxy");
+    expect(requests.find((request) => request.path === "/api/v1/auth/approval")?.body).toMatchObject({ keep_signed_in: keep });
+    expect(requests.filter((request) => /\/(approve|approve-agent-key)$/.test(request.path))).toEqual([]);
+    expect(requests.filter((request) => request.path === "/api/v1/auth/device/poll-web")).toEqual([]);
+    await page.getByRole("button", { name: "Continue to approval" }).click();
+    await page.getByRole("button", { name: "Reader", exact: true }).click();
+    await page.getByRole("button", { name: "Approve access with this key" }).click();
+    await expect(page.getByText("Approved — return to the requesting device")).toBeVisible();
+  });
+}
+
+test("back from app verification cancels the proof and stops polling", async ({ page }) => {
+  const requests = await fixture(page, false);
+  await page.goto(`/login/device?${hints}`);
+  await page.getByRole("button", { name: "Continue with the NyxID app" }).click();
+  await expect(page.getByText("JKLM-NPQR", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to all sign-in options" }).click();
+  await expect(page.getByRole("button", { name: "Continue with Google" })).toBeEnabled();
+  expect(requests.filter((request) => request.path === "/api/v1/auth/approval/11111111-1111-4111-8111-111111111111")).toHaveLength(1);
+  await page.waitForTimeout(5500);
+  expect(requests.filter((request) => request.path.endsWith("/app/poll"))).toEqual([]);
+  await expect(page.getByText("ABCD-EFGH", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue to approval" })).toHaveCount(0);
+});
 
 test("one dropdown chooses permissions and an explicit connection when accounts are ambiguous", async ({
   page,
@@ -430,7 +503,6 @@ test("public preview preserves hints and identity login requires fresh explicit 
       session: sessionStorage.length,
     })),
   ).toEqual({ local: 0, session: 0 });
-  await page.getByRole("button", { name: "Continue with email" }).click();
   await page.getByLabel("Email", { exact: true }).fill("human@example.com");
   await page.getByLabel("Password", { exact: true }).fill("fixture-password");
   await page.getByRole("button", { name: "Verify & continue" }).click();

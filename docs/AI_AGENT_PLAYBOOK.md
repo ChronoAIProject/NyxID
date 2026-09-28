@@ -139,17 +139,36 @@ export NYXID_API_KEY=nyxid_ag_...
 
 ### Human-approved agent login links
 
-First discover the deployment's public services and provider permission menu:
+Before login, call the public discovery endpoints without an `Authorization`
+header. They describe deployment metadata, anonymous operations or static APIs:
+
+| Endpoint | What it provides |
+|---|---|
+| `GET /api/v1/public/config` | Configured social providers, email/password availability and registration gates. |
+| `POST /public/mcp` with `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` | Only operations covered by enabled anonymous endpoint rules; possibly none. This surface does not execute tools. |
+| `GET /api/v1/catalog-specs/{spec_key_or_catalog_slug}/openapi.json` | A registered static provider overlay, without proving deployment enablement or user access. |
+
+With an existing authorized profile, discover visible service templates and
+provider permission metadata:
 
 ```bash
-nyxid catalog list --public --all --base-url http://localhost:3001 --output json
-nyxid catalog show api-google-gmail --public --base-url http://localhost:3001 --output json
-nyxid catalog endpoints api-google-gmail --public --base-url http://localhost:3001 --output json
+nyxid catalog list --all --profile mail-agent --output json
+nyxid catalog show api-google-gmail --profile mail-agent --output json
+nyxid catalog endpoints api-google-gmail --profile mail-agent --output json
 ```
 
-These commands send no credentials. Use actual catalog slugs and
-`scope_catalog[].scope` values. The catalog describes supported services; it does
-not reveal a human's connected accounts or establish the agent's access.
+The catalog requires authentication. `catalog --public` only suppresses saved
+credentials and returns 401 on current servers. Use actual catalog slugs and
+`scope_catalog[].scope` values when available. Templates do not prove that a
+human connected an account or that an agent can execute it. `GET /api/v1/keys`
+lists connections visible to the current credential, including disabled rows;
+require `is_active=true` before checking credential health.
+
+For an agent without a profile or access preferences, mint a login URL directly:
+
+```bash
+nyxid login --base-url http://localhost:3001 --agent-key --no-wait --output json --profile mail-agent
+```
 
 Request a human-approved Agent Key with preferences directly in the CLI command:
 
@@ -177,15 +196,26 @@ acceptable result. `--login-type agent` is a suggestion on a selectable request;
 type to `agent`, cannot limit a `full` grant, and cannot accompany `--password`,
 `--callback`, `--code` or `login resume`.
 
-A signed-out human signs into NyxID and returns to the original request with hints
-preserved. Sign-in creates a normal session in that browser, and **does not approve
-the requester**. They must explicitly review and approve afterward. An expired
-browser session or changed approving identity clears the earlier selection and
-returns to verification. There is no special approval-only browser session or
-automatic logout. A human who cannot sign in cannot approve; an Agent Key or
-third-party OAuth credential cannot approve or elevate another login either.
+A signed-out human verifies identity on the original request with hints preserved.
+**Only for this request** creates a browser proof accepted exclusively by the
+dedicated approval endpoints, without an account session. **Keep me signed in**
+also creates a normal browser session. Both offer configured social providers,
+the NyxID app and enabled email/password. Password sign-in retains configured
+NyxID MFA; social providers handle their own challenges and the app uses its
+existing human session. Identity verification **does not approve the requester**.
+The human must explicitly review and approve afterward. An expired proof or
+changed approving identity clears the earlier selection and returns to verification.
+An Agent Key or third-party OAuth credential cannot approve or elevate another login.
 Missing connection or organization rights require an eligible alternative or help
 from the owner, never a silent switch to full access.
+
+The verified human's available choices come from
+`POST /api/v1/auth/device/options` or `/api/v1/auth/agent-key/options`, with
+`{"user_code":"<server-issued user_code>"}` and first-party human authentication.
+`POST /api/v1/auth/login-code/options` takes no body and lists choices for minting
+one-time codes. A request-only browser proof uses
+`GET /api/v1/auth/approval/{id}/inventory`, which returns `options` and `catalog`.
+Agents cannot call these human-only endpoints with their keys or self-approve.
 
 After explicit human approval, resume using the local `request_id`, not `user_code`:
 
@@ -209,8 +239,10 @@ still applies provider permissions, approval policy and availability checks.
 For parameter bounds, direct API construction and consent semantics, see the
 [device login protocol](https://github.com/ChronoAIProject/NyxID/blob/main/docs/DEVICE_LOGIN_PROTOCOL.md)
 and the NyxID skill's `references/device-login.md`. These commands require the
-updated CLI and approval frontend. Eight-character v2 issuance separately requires
-the staged server gate in ADR-015. Normal `/login` remains account-only. The
+updated CLI and approval frontend. Eight-character v2 issuance is the default;
+older backend replicas require the staged rollout in ADR-015. Upgrade every
+backend replica before exposing request-bound app verification in the frontend.
+Normal `/login` remains account-only. The
 `/devices/code/*` hardware-provisioning protocol is separate.
 
 **Updating the CLI:**
