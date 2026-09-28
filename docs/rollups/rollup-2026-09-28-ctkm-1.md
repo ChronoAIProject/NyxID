@@ -27,7 +27,12 @@ receive the immediate HTTP acknowledgment without being admitted or counted.
   active channels after read-only provider failures once credentials and billing
   admission have passed. Missing credentials, failed billing admission and
   uncertain subscription mutations still stop delivery. Persist incomplete event-selection changes so cleanup also
-  covers interrupted removal of Chat or other events.
+  covers interrupted removal of Chat or other events. The update handler
+  reconciles immediately; delivery pauses until reconciliation succeeds.
+- Persist cleanup state before first-time subscription effects, including
+  unmetered DM setup. Only completed read-only setup failures retain polling
+  fallback. Preserve existing active channels during temporary OAuth refresh
+  failures while rejecting revoked credentials.
 
 The setup progress tracking and its regression cases originate in the X portion
 of [PR #1644](https://github.com/ChronoAIProject/NyxID/pull/1644), adapted to the

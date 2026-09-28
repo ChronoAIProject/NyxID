@@ -1066,7 +1066,10 @@ async fn update_bot_inner(
                 .map_err(|_| AppError::Internal("Unable to encode X events".into()))?,
         );
         let previous = super::channel_adapters::x::selected_events(&bot);
-        if previous.len() != events.len() || events.iter().any(|event| !previous.contains(event)) {
+        if bot.webhook_registered
+            && (previous.len() != events.len()
+                || events.iter().any(|event| !previous.contains(event)))
+        {
             // Selection is durable before remote reconciliation. Keep interrupted
             // changes eligible for subscription cleanup, including chat -> DM.
             set_doc.insert("status", "failed");

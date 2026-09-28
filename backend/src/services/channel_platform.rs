@@ -6,7 +6,7 @@ use crate::errors::AppResult;
 /// Retains subscription-mutation evidence when setup times out or loses its lease.
 #[derive(Default)]
 pub struct WebhookSetupProgress {
-    provider_started: std::sync::atomic::AtomicBool,
+    read_only_safe: std::sync::atomic::AtomicBool,
     mutation_started: std::sync::atomic::AtomicBool,
 }
 
@@ -21,13 +21,13 @@ impl WebhookSetupProgress {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub fn mark_provider_started(&self) {
-        self.provider_started
+    pub fn mark_read_only_safe(&self) {
+        self.read_only_safe
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn provider_started(&self) -> bool {
-        self.provider_started
+    pub fn read_only_safe(&self) -> bool {
+        self.read_only_safe
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 }

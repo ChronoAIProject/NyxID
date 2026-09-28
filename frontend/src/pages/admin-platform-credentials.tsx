@@ -66,7 +66,7 @@ function sharedClearImpact(
   }
   const webhookImpact = [
     fields.client_secret === null
-      ? "Clearing the X Client Secret stops OAuth 2.0 webhook signature verification and changes CRC verification to the legacy API key secret, if configured."
+      ? "Clearing the X Client Secret stops OAuth 2.0 webhook signature verification: deliveries with the OAuth 2.0 header are rejected without legacy fallback. CRC challenges use the legacy API key secret if configured."
       : "",
     fields.consumer_secret === null
       ? `Clearing the X API key secret stops legacy webhook signature verification.${fields.client_secret === null || fields.app_bearer_token === null ? "" : " OAuth 2.0 webhook verification and setup remain available with the Client Secret and app bearer token."}`

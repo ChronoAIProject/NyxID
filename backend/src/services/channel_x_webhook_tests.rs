@@ -331,6 +331,64 @@ async fn x_notification_events_require_webhooks_without_public_reply_scopes() {
 }
 
 #[tokio::test]
+async fn registered_x_chat_survives_transient_oauth_refresh_failure() {
+    let (state, adapter, server, owner, connection) = fixture().await;
+    credentials(&state, &adapter, &owner).await;
+    let bot = insert_bot(&state, &owner, &connection).await;
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! {"_id": &bot.id},
+            doc! {"$set": {"webhook_registered": true, "x_events": ["dm", "chat"]}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<UserApiKey>(KEYS)
+        .update_one(
+            doc! {"_id": &connection},
+            doc! {"$set": {"expires_at": bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let bot = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert!(matches!(
+        webhooks::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &bot,
+            "https://nyx.example"
+        )
+        .await,
+        Err(AppError::ChannelPlatformError(_))
+    ));
+    let current = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(current.status, "active");
+    assert!(current.webhook_registered);
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests.is_empty());
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.url.path() == "/token")
+    );
+}
+
+#[tokio::test]
 async fn x_event_downgrade_retains_cleanup_state_after_read_only_setup_failure() {
     use crate::models::channel_bot::XChannelEvent;
     let (state, adapter, server, owner, connection) = fixture().await;
@@ -394,8 +452,9 @@ async fn x_event_downgrade_retains_cleanup_state_after_read_only_setup_failure()
 }
 
 #[tokio::test]
-async fn x_webhook_onboarding_avoids_polling_and_failed_setup_can_initialize_fallback() {
-    for setup_ok in [true, false] {
+async fn x_webhook_onboarding_preserves_safe_fallback_and_cleans_uncertain_subscriptions() {
+    for outcome in ["ok", "read_failure", "mutation_failure"] {
+        let setup_ok = outcome == "ok";
         let (mut state, adapter, server, owner, connection) = fixture().await;
         state.config.base_url = "https://nyx.example".into();
         credentials(&state, &adapter, &owner).await;
@@ -406,7 +465,11 @@ async fn x_webhook_onboarding_avoids_polling_and_failed_setup_can_initialize_fal
             }]}))).mount(&server).await;
         Mock::given(method("GET"))
             .and(path("/2/activity/subscriptions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .respond_with(if outcome == "read_failure" {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"data": []}))
+            })
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -418,12 +481,19 @@ async fn x_webhook_onboarding_avoids_polling_and_failed_setup_can_initialize_fal
                 ResponseTemplate::new(403)
                     .set_body_json(json!({"detail": "private upstream error"}))
             })
-            .expect(1)
+            .expect(if outcome == "read_failure" { 0 } else { 1 })
             .mount(&server)
             .await;
         let bot = create(&state, &adapter, &owner, &connection).await.unwrap();
-        assert_eq!(bot.status, "active");
-        assert_eq!(bot.webhook_registered, setup_ok);
+        assert_eq!(
+            bot.status,
+            if outcome == "mutation_failure" {
+                "failed"
+            } else {
+                "active"
+            }
+        );
+        assert_eq!(bot.webhook_registered, outcome != "read_failure");
         assert!(bot.poll_cursor.is_none());
         assert!(bot.last_polled_at.is_none());
         assert!(
@@ -436,6 +506,31 @@ async fn x_webhook_onboarding_avoids_polling_and_failed_setup_can_initialize_fal
         );
         if setup_ok {
             assert!(bot.error.is_none());
+        } else if outcome == "mutation_failure" {
+            assert!(bot.error.as_deref().unwrap().contains("Verify"));
+            server.reset().await;
+            provider_setup(&server, &bot).await;
+            Mock::given(method("DELETE"))
+                .and(path("/2/activity/subscriptions/200"))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+            webhooks::remove_stopped(
+                &state.db,
+                &state.encryption_keys,
+                &state.http_client,
+                &adapter,
+                &bot,
+            )
+            .await
+            .unwrap();
+            assert!(
+                !channel_bot_service::get_bot(&state.db, &bot.id)
+                    .await
+                    .unwrap()
+                    .webhook_registered
+            );
         } else {
             assert!(bot.error.as_deref().unwrap().contains("Verify"));
             Mock::given(method("GET"))
