@@ -22,4 +22,16 @@ describe("ServiceIcon", () => {
       "https://example.com/custom.png",
     );
   });
+
+  it.each([
+    "javascript:alert(1)",
+    "data:image/svg+xml,<svg onload=alert(1) />",
+    "https://user:secret@example.com/icon.svg",
+    "https://example.com/icon.svg#fragment",
+    "not a URL",
+  ])("falls back to the glyph for an unsafe icon URL: %s", (iconUrl) => {
+    const { container } = render(<ServiceIcon slug="cma" iconUrl={iconUrl} />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector('[data-slug="cma"]')).toBeInTheDocument();
+  });
 });

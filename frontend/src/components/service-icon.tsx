@@ -25,6 +25,24 @@ const SIZE_CLASS: Readonly<Record<ServiceIconSize, string>> = {
   xl: "!h-9 !w-9", // 36px — connection identity circles
 };
 
+function safeIconUrl(value: string): string | null {
+  if (value.length > 2048 || value.includes("#")) return null;
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      !url.hostname ||
+      url.username ||
+      url.password
+    ) {
+      return null;
+    }
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The app-facing brand icon for an AI service / proxy target. Config-driven
  * over the design-owned glyph registry (`@/components/service-icons`):
@@ -48,19 +66,20 @@ export function ServiceIcon({
   readonly size?: ServiceIconSize;
   readonly className?: string;
 }) {
-  if (iconUrl) {
+  const imageUrl = iconUrl ? safeIconUrl(iconUrl) : null;
+  if (imageUrl) {
     return (
       <ServiceIconImage
-        key={iconUrl}
+        key={imageUrl}
         slug={slug}
-        iconUrl={iconUrl}
+        iconUrl={imageUrl}
         size={size}
         className={className}
       />
     );
   }
-  if (!slug) return null;
-  const Glyph = SERVICE_ICONS[slug] ?? FallbackIcon;
+  if (!slug && !iconUrl) return null;
+  const Glyph = SERVICE_ICONS[slug ?? "custom"] ?? FallbackIcon;
   return (
     <Glyph
       className={cn(
