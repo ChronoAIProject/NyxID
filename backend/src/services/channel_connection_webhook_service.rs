@@ -8,6 +8,9 @@ use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::{COLLECTION_NAME, ChannelBot};
 
+pub(crate) const SETUP_PENDING_ERROR: &str =
+    "Webhook setup has not completed; select Verify to retry.";
+
 pub fn supports(adapter: &dyn PlatformAdapter) -> bool {
     adapter.platform_webhook()
         && matches!(
@@ -82,7 +85,7 @@ pub async fn configure(
         let result = configure_inner(db, billing, keys, http, adapter, &current, base_url, &progress).await;
         if result.is_err()
             && setup_failure_requires_stop(&current, billing.billing_enabled(), &progress) {
-            super::channel_credentials::fail_bot(db, &current,
+            fail_setup(db, &current,
                 "Webhook or billing setup needs attention. Restore credits and configuration, then select Verify.").await?;
         }
         result
@@ -91,10 +94,25 @@ pub async fn configure(
         && started.load(std::sync::atomic::Ordering::Relaxed)
         && setup_failure_requires_stop(bot, billing.billing_enabled(), &progress)
     {
-        super::channel_credentials::fail_bot(db, bot,
+        fail_setup(db, bot,
             "Webhook setup did not complete. Check credits and webhook configuration, then select Verify.").await?;
     }
     result
+}
+
+async fn fail_setup(db: &mongodb::Database, bot: &ChannelBot, cause: &str) -> AppResult<()> {
+    // Claim either an ordinary failure transition or our incomplete setup marker.
+    // Replacing the marker makes inner/outer error handling audit exactly once.
+    let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+        doc! {"_id": &bot.id, "is_active": true, "connection_id": &bot.connection_id,
+            "updated_at": bson::DateTime::from_chrono(bot.updated_at),
+            "$or": [{"status": {"$ne": "failed"}}, {"status": "failed", "error": SETUP_PENDING_ERROR}]},
+        doc! {"$set": {"status": "failed", "error": cause, "updated_at": bson::DateTime::now()}},
+    ).await?;
+    if result.modified_count > 0 {
+        super::channel_credentials::audit_failure(db, bot, cause).await?;
+    }
+    Ok(())
 }
 
 fn setup_failure_requires_stop(
@@ -178,7 +196,7 @@ async fn configure_inner(
         let mut setup_state = doc! {"webhook_registered": true};
         if !current.webhook_registered {
             setup_state.insert("status", "failed");
-            setup_state.insert("error", "Webhook setup has not completed; select Verify to retry.");
+            setup_state.insert("error", SETUP_PENDING_ERROR);
         }
         let marked = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
             doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},

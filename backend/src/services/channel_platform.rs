@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub use super::channel_registration::{BotCredentials, RegistrationDescriptor, RegistrationValues};
 use crate::errors::AppResult;
 
-/// Retains subscription-mutation evidence when setup times out or loses its lease.
+/// Tracks safe read-only failures and subscription effects across interrupted setup.
 #[derive(Default)]
 pub struct WebhookSetupProgress {
     read_only_safe: std::sync::atomic::AtomicBool,

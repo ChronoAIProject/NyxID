@@ -33,6 +33,8 @@ receive the immediate HTTP acknowledgment without being admitted or counted.
   unmetered DM setup. Only completed read-only setup failures retain polling
   fallback. Preserve existing active channels during temporary OAuth refresh
   failures while rejecting revoked credentials.
+- Finalize incomplete setup markers with a locally authored failure cause and
+  one failure audit, including first-time setup and event-selection changes.
 
 The setup progress tracking and its regression cases originate in the X portion
 of [PR #1644](https://github.com/ChronoAIProject/NyxID/pull/1644), adapted to the

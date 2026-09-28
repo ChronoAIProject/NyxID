@@ -296,6 +296,8 @@ async fn x_notification_events_require_webhooks_without_public_reply_scopes() {
                 .unwrap();
             assert_eq!(failed.status, "failed");
             assert_eq!(failed.webhook_registered, configured);
+            assert_eq!(failure_audit_count(&state, &bot.id).await, 1);
+            assert_ne!(failed.error.as_deref(), Some(webhooks::SETUP_PENDING_ERROR));
             channel_poll_service::poll_bot(&state, &adapter, &bot.id, 60)
                 .await
                 .unwrap();
@@ -449,6 +451,20 @@ async fn x_event_downgrade_retains_cleanup_state_after_read_only_setup_failure()
         current.webhook_registered,
         "interrupted selection remains eligible for remote cleanup"
     );
+    assert_eq!(failure_audit_count(&state, &bot.id).await, 1);
+    assert_ne!(
+        current.error.as_deref(),
+        Some(webhooks::SETUP_PENDING_ERROR)
+    );
+}
+
+async fn failure_audit_count(state: &AppState, bot_id: &str) -> u64 {
+    state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .count_documents(doc! {"event_type": "channel_bot_failed", "event_data.bot_id": bot_id})
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -494,6 +510,10 @@ async fn x_webhook_onboarding_preserves_safe_fallback_and_cleans_uncertain_subsc
             }
         );
         assert_eq!(bot.webhook_registered, outcome != "read_failure");
+        assert_eq!(
+            failure_audit_count(&state, &bot.id).await,
+            u64::from(outcome == "mutation_failure"),
+        );
         assert!(bot.poll_cursor.is_none());
         assert!(bot.last_polled_at.is_none());
         assert!(
@@ -508,6 +528,7 @@ async fn x_webhook_onboarding_preserves_safe_fallback_and_cleans_uncertain_subsc
             assert!(bot.error.is_none());
         } else if outcome == "mutation_failure" {
             assert!(bot.error.as_deref().unwrap().contains("Verify"));
+            assert_ne!(bot.error.as_deref(), Some(webhooks::SETUP_PENDING_ERROR));
             server.reset().await;
             provider_setup(&server, &bot).await;
             Mock::given(method("DELETE"))

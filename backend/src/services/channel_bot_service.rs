@@ -1075,7 +1075,7 @@ async fn update_bot_inner(
             set_doc.insert("status", "failed");
             set_doc.insert(
                 "error",
-                "Event subscriptions changed; select Verify to finish webhook setup.",
+                super::channel_connection_webhook_service::SETUP_PENDING_ERROR,
             );
         }
     }
