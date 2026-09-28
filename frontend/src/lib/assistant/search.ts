@@ -7,6 +7,8 @@
  * - `draft` is the pre-provision "New chat" state. The button paints an
  *   empty thread under `?draft` immediately, then swaps in `?c=<id>` once
  *   the actor lands (see AssistantPage.createNewChat).
+ * - `agent` selects a NyxBot agent: with `draft` it is the agent a new
+ *   thread starts with; alone it lands on that agent's latest thread.
  * - `mock` preserves the dev-only HTTP fixture boundary across router writes.
  *
  * `draft` is accepted as a boolean and as the string "true": the router's
@@ -16,6 +18,7 @@
 export interface AssistantSearch {
   readonly c?: string;
   readonly draft?: boolean;
+  readonly agent?: string;
   readonly mock?: 1;
 }
 
@@ -26,6 +29,9 @@ export function parseAssistantSearch(
     ...(typeof search.c === "string" ? { c: search.c } : {}),
     ...(search.draft === true || search.draft === "true"
       ? { draft: true }
+      : {}),
+    ...(typeof search.agent === "string" && search.agent
+      ? { agent: search.agent }
       : {}),
     ...(search.mock === 1 || search.mock === "1"
       ? { mock: 1 as const }

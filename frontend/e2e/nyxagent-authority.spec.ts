@@ -7,26 +7,47 @@ async function settled(page: import("@playwright/test").Page) {
   await expect(composerInput(page)).toBeEnabled();
 }
 
-test("service card Allow is durable and resumes the assistant with a visible turn", async ({
+const CONFIRMED =
+  /^Confirmed: Delete agent key 'ci-bot' \(nyxid_ag_12345678\) \(acknowledgement_id [0-9a-f-]{36}\)\. Retry it now\.$/;
+
+test("every chat runs with Full access: services and account tools need no cards", async ({
+  page,
+}) => {
+  const modeWrites: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/access-mode")) modeWrites.push(request.url());
+  });
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await expect(page.getByRole("combobox", { name: "Mode" })).toHaveCount(0);
+  await sendMessage(page, "Use GitHub");
+  await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
+  await settled(page);
+  await sendMessage(page, "Manage my account");
+  await expect(page.getByText("Your agent keys are ready to manage.")).toBeVisible();
+  await settled(page);
+  await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
+  await expect(page.locator("header").getByText("Full access", { exact: true })).toHaveCount(0);
+  expect(modeWrites).toEqual([]);
+});
+
+test("a destructive action asks once, and Allow retries it with its acknowledgement", async ({
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await sendMessage(page, "Use GitHub");
-  const card = page.getByRole("region", { name: "Allow this chat to use GitHub?" });
-  await expect(card).toBeVisible();
+  await sendMessage(page, "Delete agent key ci-bot");
+  const action = page.getByRole("region", { name: /Confirm: Delete agent key 'ci-bot'/ });
+  await expect(action).toBeVisible();
   await settled(page);
-  await card.getByRole("button", { name: "Allow", exact: true }).click();
-  await expect(card).toHaveCount(0);
-  // The decision itself sends the continuation; no typing is needed.
-  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toBeVisible();
-  await expect(page.getByText("GitHub access granted. Repository lookup succeeded.")).toBeVisible();
+  await action.getByRole("button", { name: "Allow", exact: true }).click();
+  await expect(action).toHaveCount(0);
+  // The single-use confirmation is retried with its acknowledgement ID.
+  await expect(page.getByText(CONFIRMED)).toBeVisible();
+  await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: /Used · Confirm:/ })).toBeVisible();
   await settled(page);
   await page.reload();
-  await expect(
-    page.getByRole("status").filter({ hasText: "Allowed · Allow this chat to use GitHub?" }),
-  ).toBeVisible();
-  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toBeVisible();
-  await expect(page.getByText("GitHub access granted. Repository lookup succeeded.")).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: /Used · Confirm:/ })).toBeVisible();
+  await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
 });
 
@@ -34,29 +55,25 @@ test("Allow clicked while the reply is still streaming resumes once the reply fi
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true, progressStallMs: 6000 } });
-  await sendMessage(page, "Use GitHub");
-  const card = page.getByRole("region", { name: "Allow this chat to use GitHub?" });
+  await sendMessage(page, "Delete agent key ci-bot");
+  const card = page.getByRole("region", { name: /Confirm: Delete agent key 'ci-bot'/ });
   await expect(card).toBeVisible();
   // The card arrives before the assistant has finished its reply.
   await expect(stopButton(page)).toBeVisible();
   await card.getByRole("button", { name: "Allow", exact: true }).click();
   await expect(card).toHaveCount(0);
-  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toHaveCount(0);
-  // After the running reply settles, the approval is delivered as one continuation.
-  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toBeVisible({
-    timeout: 10_000,
-  });
-  await expect(page.getByText("GitHub access granted. Repository lookup succeeded.")).toBeVisible({
-    timeout: 10_000,
-  });
+  await expect(page.getByText(CONFIRMED)).toHaveCount(0);
+  // After the running reply settles, the confirmation is delivered as one continuation.
+  await expect(page.getByText(CONFIRMED)).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible({ timeout: 10_000 });
   await settled(page);
-  await expect(page.getByText("Approved: this chat may use GitHub. Continue.")).toHaveCount(1);
+  await expect(page.getByText(CONFIRMED)).toHaveCount(1);
 });
 
 test("Deny produces a refusal on retry without opening another card", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await sendMessage(page, "Use GitHub");
-  const card = page.getByRole("region", { name: "Allow this chat to use GitHub?" });
+  await sendMessage(page, "Delete agent key ci-bot");
+  const card = page.getByRole("region", { name: /Confirm: Delete agent key 'ci-bot'/ });
   await expect(card).toBeVisible();
   await settled(page);
   await card.getByRole("button", { name: "Deny", exact: true }).click();
@@ -66,33 +83,230 @@ test("Deny produces a refusal on retry without opening another card", async ({ p
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
 });
 
-test("account permission and single action confirmation are separate cards", async ({ page }) => {
+test("NyxBot settings confirm destructive actions by default; turning that off deletes without a card", async ({
+  page,
+}) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await sendMessage(page, "Manage my account");
-  const account = page.getByRole("region", {
-    name: /Allow this chat to manage your NyxID account/,
-  });
-  await expect(account).toBeVisible();
-  await settled(page);
-  await account.getByRole("button", { name: "Allow", exact: true }).click();
+  await page.getByRole("button", { name: "NyxBot settings" }).click();
+  const dialog = page.getByRole("dialog", { name: "NyxBot settings" });
+  const toggle = dialog.getByRole("switch", { name: "Confirm destructive actions" });
+  await expect(toggle).toBeChecked();
+  const save = dialog.getByRole("button", { name: "Save settings" });
+  await expect(save).toBeDisabled();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(dialog.getByRole("alert")).toContainText("without asking you first");
+  await save.click();
+  await expect(save).toBeDisabled();
+
+  // Channel bots: connect one (to NyxBot by default) and get a one-time owner link.
+  await dialog.getByRole("button", { name: "Connect NyxID Approvals" }).click();
+  const link = dialog.getByRole("region", { name: "Owner link" });
+  await expect(link.getByRole("link", { name: "Open link" })).toHaveAttribute(
+    "href",
+    /^https:\/\/t\.me\/nyxid_approvals_bot\?start=nyxlink_[a-f0-9]{12}$/,
+  );
+  await expect(link).toContainText("press Start");
   await expect(
-    page.getByText("Approved: account management for this chat. Continue."),
-  ).toBeVisible();
-  await expect(
-    page.getByText("Account access granted. Your agent keys are ready to manage."),
-  ).toBeVisible();
-  await settled(page);
+    dialog.getByRole("list", { name: "Connected channel bots" }),
+  ).toContainText("NyxID Approvals");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { includeHidden: true })).toHaveCount(0);
+
   await sendMessage(page, "Delete agent key ci-bot");
-  const action = page.getByRole("region", { name: /Confirm: Delete agent key 'ci-bot'/ });
-  await expect(action).toBeVisible();
-  await settled(page);
-  await action.getByRole("button", { name: "Allow", exact: true }).click();
-  // The single-use confirmation is retried with its acknowledgement ID.
-  await expect(
-    page.getByText(/^Confirmed: Delete agent key 'ci-bot' \(nyxid_ag_12345678\) \(acknowledgement_id [0-9a-f-]{36}\)\. Retry it now\.$/),
-  ).toBeVisible();
   await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible();
-  await expect(page.getByRole("status").filter({ hasText: /Used · Confirm:/ })).toBeVisible();
+  await settled(page);
+  await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
+  await page.reload();
+  await page.getByRole("button", { name: "NyxBot settings" }).click();
+  await expect(
+    page.getByRole("dialog").getByRole("switch", { name: "Confirm destructive actions" }),
+  ).not.toBeChecked();
+});
+
+function agentsNav(page: import("@playwright/test").Page) {
+  return page.getByRole("navigation");
+}
+
+test("the Agents list pins NyxBot, opens a specialist's thread, and forgets a memory", async ({
+  page,
+}) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  const nav = agentsNav(page);
+  const nyxbot = nav.getByRole("button", { name: "NyxBot — your personal agent" });
+  await expect(nyxbot).toHaveAttribute("aria-expanded", "true");
+  const researcher = nav.getByRole("button", { name: /^researcher, specialist/ });
+  await expect(researcher).toBeVisible();
+  // A new NyxBot thread starts the default landing.
+  await expect(page.getByRole("heading", { name: "NyxBot" })).toBeVisible();
+
+  await researcher.click();
+  await expect(researcher).toHaveAttribute("aria-expanded", "true");
+  // Selecting an agent lands on its latest thread.
+  await expect(page).toHaveURL(/c=nyxa-[a-f0-9]{32}/);
+  await expect(page.getByRole("heading", { name: "researcher" })).toBeVisible();
+  await expect(page.getByText("Specialist", { exact: true })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Message from NyxBot" })).toContainText(
+    "Find the three most urgent open GitHub issues.",
+  );
+  await expect(page.getByText("Found 3 urgent issues: #12, #15 and #18.")).toBeVisible();
+  await expect(
+    nav.getByRole("group", { name: "Threads with researcher" }).getByRole("button", {
+      name: "researcher",
+      exact: true,
+    }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Agent details" }).click();
+  const details = page.getByRole("dialog", { name: "Agent details" });
+  const memory = details.getByRole("list", { name: "researcher memory" });
+  await expect(memory).toContainText("The user wants weekly issue digests on Mondays.");
+  await memory
+    .getByRole("button", { name: "Forget: The user wants weekly issue digests on Mondays." })
+    .click();
+  await expect(memory).not.toContainText("weekly issue digests");
+  await expect(memory).toContainText("Label urgent issues with the p0 tag.");
+  await page.keyboard.press("Escape");
+  await page.reload();
+  await page.getByRole("button", { name: "Agent details" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Agent details" }).getByRole("list", {
+      name: "researcher memory",
+    }),
+  ).not.toContainText("weekly issue digests");
+});
+
+test("creating an agent opens its home thread, and each agent keeps its own threads", async ({
+  page,
+}) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  const nav = agentsNav(page);
+  await nav.getByRole("button", { name: "New agent" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await dialog.getByRole("textbox", { name: "Name" }).fill("writer");
+  await dialog.getByRole("textbox", { name: "Role" }).fill("Drafts release notes.");
+  await dialog.getByRole("checkbox", { name: /GitHub/ }).click();
+  await dialog.getByRole("button", { name: "Create agent" }).click();
+  await expect(page.getByRole("dialog", { includeHidden: true })).toHaveCount(0);
+  await expect(page).toHaveURL(/c=nyxa-[a-f0-9]{32}/);
+  await expect(page.getByRole("heading", { name: "writer" })).toBeVisible();
+  const writer = nav.getByRole("button", { name: /^writer, specialist/ });
+  await expect(writer).toHaveAttribute("aria-expanded", "true");
+
+  await sendMessage(page, "Use GitHub");
+  await expect(page.getByText("GitHub lookup succeeded.")).toBeVisible();
+  await settled(page);
+  // A second thread with the same agent.
+  await nav.getByRole("button", { name: "New chat with writer" }).click();
+  await expect(page.getByRole("heading", { name: "writer" })).toBeVisible();
+  await sendMessage(page, "Summarize the changelog");
+  await expect(page.getByText("Working on it: Summarize the changelog")).toBeVisible();
+  await settled(page);
+  const threads = nav.getByRole("group", { name: "Threads with writer" });
+  await expect(threads.getByRole("button", { name: "Summarize the changelog", exact: true })).toBeVisible();
+  await expect(threads.getByRole("button", { name: "writer", exact: true })).toBeVisible();
+
+  // NyxBot's threads are separate.
+  await nav.getByRole("button", { name: "NyxBot — your personal agent" }).click();
+  await expect(page.getByRole("heading", { name: "NyxBot" })).toBeVisible();
+  await expect(nav.getByRole("group", { name: "Threads with NyxBot" })).not.toContainText(
+    "Summarize the changelog",
+  );
+});
+
+test("a specialist's permission request is routed to NyxBot and the user can still decide it", async ({
+  page,
+}) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await agentsNav(page).getByRole("button", { name: /^researcher, specialist/ }).click();
+  await expect(page.getByText("Found 3 urgent issues: #12, #15 and #18.")).toBeVisible();
+  await sendMessage(page, "Use Slack");
+  const card = page.getByRole("region", { name: "Allow this agent to use Slack?" });
+  await expect(card).toContainText("Requested from NyxBot");
+  await settled(page);
+  await card.getByRole("button", { name: "Allow", exact: true }).click();
+  await expect(card).toHaveCount(0);
+  await expect(
+    page
+      .getByRole("status")
+      .filter({ hasText: "Allowed by you · Allow this agent to use Slack?" }),
+  ).toBeVisible();
+  // NyxID resumes the specialist itself; no continuation is typed for the user.
+  await expect(page.getByRole("note", { name: "NyxID event" })).toContainText(
+    "The user allowed Slack for this agent.",
+  );
+  await expect(page.getByText("Slack access granted. Lookup succeeded.")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByText(/^Approved: /)).toHaveCount(0);
+});
+
+test("NyxBot delegates to a specialist, shows it working in the Team strip, and is woken by its reply", async ({
+  page,
+}) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await sendMessage(page, "Ask the researcher for urgent issues");
+  await expect(page.getByText("I asked the researcher to find the urgent issues.")).toBeVisible();
+  const team = page.getByRole("region", { name: "Team" });
+  await expect(team).toContainText("researcher");
+  await expect(page.getByRole("note", { name: "NyxID event" })).toContainText(
+    "researcher replied: Found 3 urgent issues",
+    { timeout: 15_000 },
+  );
+  await expect(page.getByText("The researcher reported back: Found 3 urgent issues: #12, #15 and #18.")).toBeVisible();
+  await expect(team).toContainText("Idle", { timeout: 10_000 });
+});
+
+test("channel bots can be relinked to a specialist", async ({ page }) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await page.getByRole("button", { name: "NyxBot settings" }).click();
+  const dialog = page.getByRole("dialog", { name: "NyxBot settings" });
+  await dialog.getByRole("button", { name: "Connect NyxID Approvals" }).click();
+  const connected = dialog.getByRole("list", { name: "Connected channel bots" });
+  const agentFor = connected.getByRole("combobox", { name: "Agent for NyxID Approvals" });
+  await expect(agentFor).toContainText("NyxBot");
+  await agentFor.click();
+  await page.getByRole("option", { name: "researcher" }).click();
+  await expect(agentFor).toContainText("researcher");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { includeHidden: true })).toHaveCount(0);
+  const researcher = agentsNav(page).getByRole("button", { name: /^researcher, specialist/ });
+  await expect(researcher).toContainText("Telegram");
+  await researcher.click();
+  await page.getByRole("button", { name: "Agent details" }).click();
+  const details = page.getByRole("dialog", { name: "Agent details" });
+  await expect(
+    details.getByRole("list", { name: "Connected channel bots" }),
+  ).toContainText("NyxID Approvals");
+});
+
+test("destroying a specialist makes its threads read-only; it can then be deleted", async ({
+  page,
+}) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  const nav = agentsNav(page);
+  await nav.getByRole("button", { name: /^researcher, specialist/ }).click();
+  await expect(page.getByRole("heading", { name: "researcher" })).toBeVisible();
+  await page.getByRole("button", { name: "Agent details" }).click();
+  const details = page.getByRole("dialog", { name: "Agent details" });
+  await details.getByRole("region", { name: "Danger zone" }).getByRole("button", { name: "Destroy" }).click();
+  await page.getByRole("dialog", { name: "Destroy researcher?" }).getByRole("button", { name: "Destroy" }).click();
+  await expect(details.getByRole("button", { name: "Delete permanently" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("status").filter({ hasText: "this thread is read-only" })).toBeVisible();
+  await expect(composerInput(page)).toBeDisabled();
+  await expect(nav.getByRole("button", { name: /^researcher, specialist/ })).toHaveCount(0);
+  await nav.getByRole("button", { name: "Show destroyed (1)" }).click();
+  await expect(nav.getByRole("button", { name: "researcher, specialist, Destroyed" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Agent details" }).click();
+  await page.getByRole("dialog", { name: "Agent details" }).getByRole("button", { name: "Delete permanently" }).click();
+  await page
+    .getByRole("dialog", { name: "Delete researcher permanently?" })
+    .getByRole("button", { name: "Delete permanently" })
+    .click();
+  await expect(page.getByRole("heading", { name: "NyxBot" })).toBeVisible();
+  await expect(nav.getByRole("button", { name: /^researcher/ })).toHaveCount(0);
 });
 
 test("assistant chat keys are hidden until requested and detail links back to the chat", async ({
@@ -168,32 +382,4 @@ test("assistant chat keys are hidden until requested and detail links back to th
   );
   await expect(page.getByText("Daily Activity", { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
-});
-
-test("switching an existing chat to Full access executes deletion without a card", async ({
-  page,
-}) => {
-  await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await sendMessage(page, "List connected services");
-  await settled(page);
-  await page.getByRole("combobox", { name: "Mode" }).click();
-  await page.getByRole("option", { name: /Full access/ }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("all your connected services and nodes");
-  await expect(dialog).toContainText("delete resources");
-  await dialog.getByRole("button", { name: "Enable full access" }).click();
-  await expect(page.getByRole("dialog", { includeHidden: true })).toHaveCount(0);
-  await expect(page.locator("header").getByText("Full access", { exact: true })).toBeVisible();
-  await sendMessage(page, "Delete agent key ci-bot");
-  await expect(page.getByRole("combobox", { name: "Mode" })).toBeDisabled();
-  await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
-  await settled(page);
-  await page.reload();
-  await expect(page.locator("header").getByText("Full access", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "New chat", exact: true }).first().click();
-  await expect(page.getByRole("combobox", { name: "Mode" })).toContainText("Full access");
-  await sendMessage(page, "Delete agent key ci-bot");
-  await expect(page.getByText("Deleted agent key ci-bot.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
 });
